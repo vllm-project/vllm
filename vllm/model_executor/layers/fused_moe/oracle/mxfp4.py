@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -101,7 +102,7 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == Mxfp4MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
             OAITritonExperts,
             OAITritonMxfp4ExpertsMonolithic,
         )
@@ -110,7 +111,7 @@ def backend_to_kernel_cls(
         return [OAITritonMxfp4ExpertsMonolithic, OAITritonExperts]
 
     elif backend == Mxfp4MoeBackend.TRITON_UNFUSED:
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
             UnfusedOAITritonExperts,
         )
 
@@ -146,7 +147,7 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
 
-def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
+def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
     """Map user's moe_backend string to Mxfp4MoeBackend."""
     mapping: dict[str, Mxfp4MoeBackend] = {
         "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -194,17 +195,19 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None
 
 
-def select_mxfp4_moe_backend(
+def select_gpt_oss_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary MXFP4 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    triton_kernels_supported = has_triton_kernels() and (
-        9,
-        0,
-    ) <= current_platform.get_device_capability() < (11, 0)
+    device_capability = current_platform.get_device_capability()
+    triton_kernels_supported = (
+        has_triton_kernels()
+        and device_capability is not None
+        and (9, 0) <= device_capability < (11, 0)
+    )
 
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
@@ -400,7 +403,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     return hidden_size, intermediate_size
 
 
-def convert_to_mxfp4_moe_kernel_format(
+def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
     w13_weight: torch.Tensor,
@@ -426,7 +429,10 @@ def convert_to_mxfp4_moe_kernel_format(
 
     sf_block_size = 32  # mxfp4 block size
 
-    if mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
+    if mxfp4_backend in (
+        Mxfp4MoeBackend.MARLIN,
+        Mxfp4MoeBackend.BATCHED_MARLIN,
+    ):
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
             prepare_moe_mxfp4_layer_for_marlin,
         )
