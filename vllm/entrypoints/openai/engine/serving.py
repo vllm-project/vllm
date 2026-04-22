@@ -668,12 +668,12 @@ class OpenAIServing:
             use_mistral_tool_parser
             or (
                 enable_auto_tools
+                and request.tools
                 and (
                     request.tool_choice == "auto"
                     or request.tool_choice is None
                     or (
                         not tool_parser_cls.supports_required_and_named
-                        and request.tools
                         and (
                             request.tool_choice == "required"
                             or isinstance(

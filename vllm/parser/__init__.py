@@ -20,6 +20,10 @@ _PARSERS_TO_REGISTER = {
         "minimax_m2_parser",  # filename
         "MiniMaxM2Parser",  # class_name
     ),
+    "mistral": (
+        "mistral_parser",
+        "MistralParser",
+    ),
 }
 
 

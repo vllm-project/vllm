@@ -674,5 +674,5 @@ class _WrappedParser(DelegatingParser):
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
                 tokenizer, **kwargs
             )
-        if self.__class__.tool_parser_cls is not None:
+        if self.__class__.tool_parser_cls is not None and tools:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)

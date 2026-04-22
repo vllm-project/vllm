@@ -279,25 +279,50 @@ class ParserManager:
             except KeyError:
                 pass  # No unified parser with this name
 
-        # Strategy 2: Check for parser with either name
-        for name in [tool_parser_name, reasoning_parser_name]:
-            if name:
-                try:
-                    parser = cls.get_parser_internal(name)
-                    logger.info(
-                        "Using unified parser '%s' for reasoning and tool parsing.",
-                        name,
-                    )
-                    return parser
-                except KeyError:
-                    pass
-
-        # Strategy 3: Create a DelegatingParser with the individual parser classes
         reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
         tool_parser_cls = cls.get_tool_parser(
             tool_parser_name, enable_auto_tools, model_name
         )
 
+        # Strategy 2: Check if an unified parser matches either name
+        # If it does, try to specialize it with the specific reasoning and tool parsers.
+        for name in [tool_parser_name, reasoning_parser_name]:
+            if name:
+                try:
+                    parser = cls.get_parser_internal(name)
+                except KeyError:
+                    continue
+
+                if parser.reasoning_parser_cls is None:
+                    parser.reasoning_parser_cls = reasoning_parser_cls
+                elif parser.reasoning_parser_cls != reasoning_parser_cls:
+                    logger.warning(
+                        "Unified parser '%s' isn't used due to unsupported "
+                        "reasoning parser: expected %s but got %s",
+                        name,
+                        parser.reasoning_parser_cls,
+                        reasoning_parser_cls,
+                    )
+                    continue
+
+                if parser.tool_parser_cls is None:
+                    parser.tool_parser_cls = tool_parser_cls
+                elif parser.tool_parser_cls != tool_parser_cls:
+                    logger.warning(
+                        "Unified parser '%s' isn't used due to unsupported "
+                        "tool parser: expected %s but got %s",
+                        name,
+                        parser.tool_parser_cls,
+                        tool_parser_cls,
+                    )
+                    continue
+
+                logger.info(
+                    "Using unified parser '%s' for reasoning and tool parsing.",
+                    name,
+                )
+                return parser
+        # Strategy 3: Create a DelegatingParser with the individual parser classes
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 

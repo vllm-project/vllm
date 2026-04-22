@@ -54,7 +54,8 @@ class MiniMaxM2Parser(DelegatingParser):
 
         # Initialize the underlying parsers
         self._reasoning_parser = MiniMaxM2ReasoningParser(tokenizer, *args, **kwargs)
-        self._tool_parser = MinimaxM2ToolParser(tokenizer, tools)
+        if tools:
+            self._tool_parser = MinimaxM2ToolParser(tokenizer, tools)
 
         logger.debug(
             "vLLM Successfully initialized parser %s!", self.__class__.__name__

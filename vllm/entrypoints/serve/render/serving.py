@@ -569,22 +569,24 @@ class OpenAIServingRender:
                 tokenizer, model_config=self.model_config
             ).adjust_request(request=request)
 
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        # tool parsing is done only if a tool_parser has been set, tools are
+        # provided, and tool_choice is not "none" (if tool_choice is "none"
+        # but tools are provided and a tool_parser is set, we want to prevent
+        # parsing a tool_call hallucinated by the LLM).
         #
         # Exception: Mistral grammar-capable tokenizers always call
         # adjust_request — even for tool_choice="none" — so that the grammar
         # factory can prevent special-token leakage.
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
+            tools = getattr(request, "tools", None)
             tokenizer = renderer.get_tokenizer()
             is_mistral_grammar_eligible = (
                 issubclass(tool_parser, MistralToolParser)
                 and is_mistral_tokenizer(tokenizer)
                 and tokenizer.supports_grammar
             )
-            if tool_choice != "none" or is_mistral_grammar_eligible:
+            if (tool_choice != "none" and tools) or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -592,8 +594,6 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = tool_parser(tokenizer, request.tools).adjust_request(
-                    request=request
-                )
+                request = tool_parser(tokenizer, tools).adjust_request(request=request)
 
         return conversation, [engine_input]
