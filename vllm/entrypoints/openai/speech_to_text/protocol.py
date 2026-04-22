@@ -78,6 +78,12 @@ class TranscriptionRequest(OpenAIBaseModel):
     will improve accuracy and latency.
     """
 
+    hotwords: str | None = None
+    """
+    hotwords refers to a list of important words or phrases that the model
+    should pay extra attention to during transcription.
+    """
+
     prompt: str = Field(default="")
     """An optional text to guide the model's style or continue a previous audio
     segment.
@@ -205,6 +211,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             task_type=task_type,
             request_prompt=self.prompt,
             to_language=self.to_language,
+            hotwords=self.hotwords,
         )
 
     def to_beam_search_params(
@@ -481,6 +488,12 @@ class TranslationRequest(OpenAIBaseModel):
     will improve accuracy.
     """
 
+    hotwords: str | None = None
+    """
+    hotwords refers to a list of important words or phrases that the model
+    should pay extra attention to during transcription.
+    """
+
     to_language: str | None = None
     """The language of the input audio we translate to.
 
@@ -522,6 +535,7 @@ class TranslationRequest(OpenAIBaseModel):
             task_type=task_type,
             request_prompt=self.prompt,
             to_language=self.to_language,
+            hotwords=self.hotwords,
         )
 
     def to_beam_search_params(
