@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class Step3ReasoningParser(ReasoningParser):
+class Step3ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Step3 model.
 

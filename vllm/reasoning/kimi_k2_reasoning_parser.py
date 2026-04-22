@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-class KimiK2ReasoningParser(ReasoningParser):
+class KimiK2ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Kimi K2 model.
 
