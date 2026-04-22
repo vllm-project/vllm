@@ -356,6 +356,12 @@ def get_and_maybe_dequant_weights(
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
+    # LoRA linear wrappers store quantization metadata on `base_layer`.
+    # Unwrap here so callers can pass either a raw linear layer or its LoRA
+    # wrapper without special-casing.
+    while hasattr(layer, "base_layer") and hasattr(layer.base_layer, "quant_method"):
+        layer = layer.base_layer
+
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
     # Unquantized layer: just return base weights
@@ -818,7 +824,7 @@ def convert_bf16_scales_to_fp8(
 
     # restore original shape
     fp8_scales = fp8_scales.view(orig_shape)
-    chan_scales = chan_scales.view(orig_shape[:-1], -1)
+    chan_scales = chan_scales.view(*orig_shape[:-1], -1)
 
     return fp8_scales, chan_scales
 
