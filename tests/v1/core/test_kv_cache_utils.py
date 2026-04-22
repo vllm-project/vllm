@@ -1742,36 +1742,16 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size that cannot be aligned by block_size alone;
-    # LCM-pad the max page size up via page_size_padded on the layer that
-    # originally held the max.
+    # different hidden size that cannot be aligned by using different block size
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=64),
         "layer_2": new_sliding_window_spec(head_size=96),
     }
-    kv_cache_config_hybrid = get_kv_cache_configs(
-        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
-    )[0]
-    assert kv_cache_config_hybrid == KVCacheConfig(
-        num_blocks=32,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=mem_per_block_per_layer * 2 * 32,
-                shared_by=["layer_1", "layer_2"],
-            ),
-        ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer_1"], new_kv_cache_spec(head_size=64, block_size=32)
-            ),
-            KVCacheGroupSpec(
-                ["layer_2"],
-                new_sliding_window_spec(
-                    head_size=96, page_size_padded=mem_per_block_per_layer * 2
-                ),
-            ),
-        ],
-    )
+
+    with pytest.raises(NotImplementedError):
+        get_kv_cache_configs(
+            vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
+        )[0]
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16

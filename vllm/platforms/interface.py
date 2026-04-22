@@ -572,7 +572,10 @@ class Platform:
                     head_size=model_config.get_head_size(),
                     dtype=model_config.dtype,
                 ).page_size_bytes
-                attn_page_size_1_token = max(tq_page, skip_page)
+                # lcm, not max: skip_page is often not a multiple of
+                # tq_page, so max would leave per-layer page sizes
+                # un-unifiable downstream.
+                attn_page_size_1_token = lcm(tq_page, skip_page)
             else:
                 attn_page_size_1_token = tq_page
         else:
