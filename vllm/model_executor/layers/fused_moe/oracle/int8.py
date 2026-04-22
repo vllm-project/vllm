@@ -154,7 +154,6 @@ def select_int8_moe_backend(
 
 
 def make_int8_moe_quant_config(
-    int8_backend: Int8MoeBackend,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
