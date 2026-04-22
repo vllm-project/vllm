@@ -179,7 +179,7 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
         payload = VllmSerializableFunction.serialize_graph_module(gm)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
         loaded_gm = VllmSerializableFunction.deserialize_graph_module(
-            payload, fake_mode
+            payload, fake_mode, envs.VLLM_USE_MEGA_AOT_ARTIFACT
         )
 
     assert gm.code == loaded_gm.code
