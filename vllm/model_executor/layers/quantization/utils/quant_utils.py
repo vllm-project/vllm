@@ -818,7 +818,7 @@ def convert_bf16_scales_to_fp8(
 
     # restore original shape
     fp8_scales = fp8_scales.view(orig_shape)
-    chan_scales = chan_scales.view(orig_shape[:-1], -1)
+    chan_scales = chan_scales.view(*orig_shape[:-1], -1)
 
     return fp8_scales, chan_scales
 
