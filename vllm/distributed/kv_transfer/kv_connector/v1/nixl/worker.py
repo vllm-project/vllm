@@ -639,6 +639,7 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
+            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
             if not self._has_mamba
@@ -957,14 +958,11 @@ class NixlConnectorWorker:
             else 1
         )
         transfer_info = self.transfer_policy.build_engine_transfer_info(
-            # Local facts (from TransferTopology).
-            tp_rank=transfer_topo.tp_rank,
-            tp_size=transfer_topo.tp_size,
-            is_mla=transfer_topo.is_mla,
-            total_num_kv_heads=transfer_topo.total_num_kv_heads,
-            is_kv_layout_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+            # Local topology
+            transfer_topo=transfer_topo,
+            # Block geometry
             local_block_len=self.block_len_per_layer[0],
-            # Remote facts (from NixlAgentMetadata handshake).
+            # Remote facts (from NixlAgentMetadata handshake)
             remote_tp_size=remote_tp_size,
             remote_block_size=nixl_agent_meta.block_size,
             remote_block_len=nixl_agent_meta.block_lens[0],
