@@ -49,6 +49,8 @@ if current_platform.is_cuda_alike():
         (filename, lineno), so different `with gpu_sync_allowed(count=N):` lines
         track independent counters automatically.
         """
+        if torch.compiler.is_compiling():
+            return _noop_cm()
         prev_mode = torch.cuda.get_sync_debug_mode()
         if not prev_mode:
             return _noop_cm()
