@@ -4,7 +4,6 @@
 import functools
 import gc
 import itertools
-import os
 import threading
 import time
 from collections import defaultdict
@@ -179,7 +178,10 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_scheduler_for_invalid_drafts,
 )
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
-from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm.v1.spec_decode.utils import (
+    get_speculative_disable_above_seq_len,
+    update_num_computed_tokens_for_batch_change,
+)
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -589,8 +591,8 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = draft_config.max_model_len
             else:
                 self.effective_drafter_max_model_len = self.max_model_len
-            draft_disable_above_seq_len = int(
-                os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN", "0")
+            draft_disable_above_seq_len = (
+                get_speculative_disable_above_seq_len() or 0
             )
             if draft_disable_above_seq_len > 0:
                 self.effective_drafter_max_model_len = min(
@@ -876,8 +878,8 @@ class GPUModelRunner(
             draft_config = self.speculative_config.draft_model_config
             if draft_config is None or draft_config.max_model_len is None:
                 self.effective_drafter_max_model_len = self.max_model_len
-            draft_disable_above_seq_len = int(
-                os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN", "0")
+            draft_disable_above_seq_len = (
+                get_speculative_disable_above_seq_len() or 0
             )
             if draft_disable_above_seq_len > 0:
                 self.effective_drafter_max_model_len = min(

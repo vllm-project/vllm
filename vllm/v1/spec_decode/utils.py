@@ -1,14 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 
+logger = init_logger(__name__)
+
 PADDING_SLOT_ID = -1
+
+
+def get_speculative_disable_above_seq_len() -> int | None:
+    env_val = os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN")
+    if not env_val:
+        return None
+    try:
+        value = int(env_val)
+    except ValueError:
+        logger.warning(
+            "Invalid value for VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN: '%s'. "
+            "Must be an integer. Speculative decoding seq-length gate is "
+            "disabled.",
+            env_val,
+        )
+        return None
+    return value if value > 0 else None
 
 
 def next_power_of_2(n: int) -> int:

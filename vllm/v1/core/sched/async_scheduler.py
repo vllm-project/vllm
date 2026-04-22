@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.spec_decode.utils import get_speculative_disable_above_seq_len
 
 logger = init_logger(__name__)
 
@@ -16,10 +15,7 @@ class AsyncScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         # reusable read-only placeholder list for speculative decoding.
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
-        disable_above = os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN")
-        self._disable_spec_above_seq_len = (
-            int(disable_above) if disable_above else None
-        )
+        self._disable_spec_above_seq_len = get_speculative_disable_above_seq_len()
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
