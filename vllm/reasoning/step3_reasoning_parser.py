@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
