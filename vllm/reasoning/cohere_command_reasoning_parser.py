@@ -392,6 +392,14 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         self.melody_unary = PyFilter(unary_opts)
         self.melody_streaming = PyFilter(streaming_opts)
 
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return "<|START_THINKING|>"
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return "<|END_THINKING|>"
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
