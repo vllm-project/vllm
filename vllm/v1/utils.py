@@ -160,6 +160,9 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
     )
 
 
+_ZMQ_ADDR_REPORT_TIMEOUT_S = 30
+
+
 class APIServerProcessManager:
     """Manages a group of API server processes.
 
@@ -200,10 +203,18 @@ class APIServerProcessManager:
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
 
+        # TCP placeholders -> children bind wildcard and pipe-back real
+        # endpoints (#40443, mirrors DPCoordinator).
+        defer_bind = any(
+            addr.startswith("tcp://")
+            for addr in (*input_addresses, *output_addresses)
+        )
+        parent_conns: list[connection.Connection] = []
+
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
-            client_config = {
+            client_config: dict[str, Any] = {
                 "input_address": in_addr,
                 "output_address": out_addr,
                 "client_count": num_servers,
@@ -214,6 +225,12 @@ class APIServerProcessManager:
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
 
+            child_conn: connection.Connection | None = None
+            if defer_bind:
+                parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
+                parent_conns.append(parent_conn)
+                client_config["zmq_addr_pipe"] = child_conn
+
             proc = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
@@ -221,8 +238,32 @@ class APIServerProcessManager:
             )
             self.processes.append(proc)
             proc.start()
+            if child_conn is not None:
+                child_conn.close()
 
         logger.info("Started %d API server processes", len(self.processes))
+
+        if defer_bind:
+            for i, (parent_conn, proc) in enumerate(
+                zip(parent_conns, self.processes)
+            ):
+                ready = connection.wait(
+                    [parent_conn, proc.sentinel],
+                    timeout=_ZMQ_ADDR_REPORT_TIMEOUT_S,
+                )
+                if not ready or proc.sentinel in ready:
+                    raise RuntimeError(
+                        f"API server {proc.name} failed to report ZMQ "
+                        f"addresses during startup (exitcode={proc.exitcode})"
+                    )
+                try:
+                    input_addresses[i], output_addresses[i] = parent_conn.recv()
+                finally:
+                    parent_conn.close()
+            logger.info(
+                "Collected bound ZMQ endpoints from %d API servers",
+                num_servers,
+            )
 
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners

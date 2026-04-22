@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -956,7 +956,14 @@ def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
 ) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication."""
+    """Allocate ZMQ addresses for engine-client communication.
+
+    TCP path returns ``tcp://host:0`` placeholders so each owning process
+    atomically binds its port (kernel-assigned), eliminating the bind(0)/
+    close/rebind race (vllm-project/vllm#40443). Ray keeps the legacy
+    pre-allocate path since actors are spawned before real endpoints can
+    be collected.
+    """
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -977,6 +984,13 @@ def get_engine_zmq_addresses(
     # NOTE(yongji): handling scaling from intra-node to inter-node
     if parallel_config.enable_elastic_ep:
         client_local_only = False
+
+    if not client_local_only and parallel_config.data_parallel_backend != "ray":
+        placeholder = get_tcp_uri(host, 0)
+        return EngineZmqAddresses(
+            inputs=[placeholder] * num_api_servers,
+            outputs=[placeholder] * num_api_servers,
+        )
 
     return EngineZmqAddresses(
         inputs=[

@@ -518,6 +518,22 @@ class MPClient(EngineCoreClient):
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
                 )
+                # Publish kernel-assigned endpoints back to the launcher.
+                zmq_addr_pipe = client_addresses.get("zmq_addr_pipe")
+                if zmq_addr_pipe is not None:
+                    try:
+                        zmq_addr_pipe.send(
+                            (
+                                self.input_socket.getsockopt(
+                                    zmq.LAST_ENDPOINT
+                                ).decode(),
+                                self.resources.output_socket.getsockopt(
+                                    zmq.LAST_ENDPOINT
+                                ).decode(),
+                            )
+                        )
+                    finally:
+                        zmq_addr_pipe.close()
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
@@ -531,6 +547,15 @@ class MPClient(EngineCoreClient):
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
                 )
+                # If we bound a tcp://host:0 placeholder, read back the real
+                # ports so engines handshake with the actual endpoints.
+                if addresses.inputs[0].startswith("tcp://"):
+                    addresses.inputs[0] = self.input_socket.getsockopt(
+                        zmq.LAST_ENDPOINT
+                    ).decode()
+                    addresses.outputs[0] = self.resources.output_socket.getsockopt(
+                        zmq.LAST_ENDPOINT
+                    ).decode()
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
