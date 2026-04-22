@@ -759,9 +759,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         """Build the FusedMoEKernel for this layer."""
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is None:
-            return
-
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
@@ -814,7 +811,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        # Use modular kernel
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
