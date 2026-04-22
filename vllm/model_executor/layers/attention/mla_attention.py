@@ -389,7 +389,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             cache_config.enable_prefix_caching = False
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -485,16 +485,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
-            attn_metadata = forward_context.attn_metadata
-            if isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata[self.layer_name]
+            attn_metadata_raw = forward_context.attn_metadata
+            attn_metadata: MLACommonMetadata
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
+            elif isinstance(attn_metadata_raw, list):
+                # list[dict[str, AttentionMetadata]]: used in speculative decoding
+                # where [0] is the base-model (non-speculative) metadata dict.
+                attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+            else:
+                attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            self.impl.do_kv_cache_update(
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
                 self_kv_cache,
@@ -612,7 +619,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
-            self.impl.forward_mha(
+            self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
                 k_pe[num_mqa_tokens:],
@@ -695,7 +702,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -1053,9 +1060,9 @@ except ImportError:
                 "AITER_MLA backends use aiter kernels instead."
             )
     elif current_platform.is_xpu():
-        from vllm._xpu_ops import xpu_ops as ops
+        from vllm._xpu_ops import xpu_ops
 
-        flash_attn_varlen_func = ops.flash_attn_varlen_func  # type: ignore[no-redef]
+        flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[no-redef,attr-defined,assignment]
 
 
 def dynamic_per_batched_tensor_quant(
@@ -1988,7 +1995,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             assert isinstance(attn_metadata.prefill, FlashInferPrefillMetadata)
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
-        return attn_metadata
+        return attn_metadata  # type: ignore[return-value]
 
 
 def reorg_kvcache(
