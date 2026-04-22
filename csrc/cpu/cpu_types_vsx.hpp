@@ -89,6 +89,39 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
   }
 };
 
+// Forward declaration
+struct FP32Vec16;
+
+struct FP16Vec16 : public Vec<FP16Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  ss16x8x2_t reg;
+
+  explicit FP16Vec16(const void* ptr) {
+    reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)ptr);
+    reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
+  }
+
+  // Non-temporal load constructor (stub → regular load)
+  explicit FP16Vec16(bool, const void* ptr) : FP16Vec16(ptr) {}
+
+  explicit FP16Vec16(const FP32Vec16&);
+
+  void save(void* ptr) const {
+    vec_xst(reg.val[0], 0, (signed short*)ptr);
+    vec_xst(reg.val[1], 16, (signed short*)ptr);
+  }
+
+  void save(void* ptr, int elem_num) const {
+    int num = std::min(elem_num, VEC_ELEM_NUM);
+    if (num <= 8) {
+      vec_xst_len(reg.val[0], (signed short*)ptr, num * 2);
+    } else {
+      vec_xst(reg.val[0], 0, (signed short*)ptr);
+      vec_xst_len(reg.val[1], (signed short*)ptr + 8, (num - 8) * 2);
+    }
+  }
+};
+
 struct BF16Vec16 : public Vec<BF16Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
 
@@ -744,6 +777,50 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
   reg = (__vector signed short)vec_perm(inp0, inp1, omask);
 #endif
 }
+
+// FP16Vec16 <-> FP32Vec16 conversions
+inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
+  // Convert FP32 to FP16 using c10::Half
+  alignas(16) float temp_fp32[16];
+  alignas(16) c10::Half temp_fp16[16];
+  
+  // Store FP32 values
+  vec_xst(v.reg.val[0], 0, temp_fp32);
+  vec_xst(v.reg.val[1], 16, temp_fp32);
+  vec_xst(v.reg.val[2], 32, temp_fp32);
+  vec_xst(v.reg.val[3], 48, temp_fp32);
+  
+  // Convert using c10::Half
+  for (int i = 0; i < 16; i++) {
+    temp_fp16[i] = c10::Half(temp_fp32[i]);
+  }
+  
+  // Load as FP16
+  reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)temp_fp16);
+  reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)temp_fp16);
+}
+
+inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
+  // Convert FP16 to FP32 using c10::Half
+  alignas(16) c10::Half temp_fp16[16];
+  alignas(16) float temp_fp32[16];
+  
+  // Store FP16 values
+  vec_xst(v.reg.val[0], 0, (signed short*)temp_fp16);
+  vec_xst(v.reg.val[1], 16, (signed short*)temp_fp16);
+  
+  // Convert using c10::Half
+  for (int i = 0; i < 16; i++) {
+    temp_fp32[i] = float(temp_fp16[i]);
+  }
+  
+  // Load as FP32
+  reg.val[0] = vec_xl(0, temp_fp32);
+  reg.val[1] = vec_xl(16, temp_fp32);
+  reg.val[2] = vec_xl(32, temp_fp32);
+  reg.val[3] = vec_xl(48, temp_fp32);
+}
+
 
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 #ifdef _ARCH_PWR10
