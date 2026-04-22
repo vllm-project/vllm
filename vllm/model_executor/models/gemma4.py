@@ -157,7 +157,7 @@ def gemma4_fused_routing_kernel_triton(
     per_expert_scale = per_expert_scale.contiguous()
     T, E = gating_output.shape
     weights = torch.empty(T, topk, dtype=torch.float32, device=gating_output.device)
-    ids = torch.empty(T, topk, dtype=torch.int32, device=gating_output.device)
+    ids = torch.empty(T, topk, dtype=torch.int64, device=gating_output.device)
     BLOCK_E = triton.next_power_of_2(E)
     _gemma4_routing_kernel[(T,)](
         gating_output,
