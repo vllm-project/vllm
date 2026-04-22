@@ -47,12 +47,16 @@ create_block_mask_compiled = torch.compile(
 flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
 
-def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
-    device = offsets.device
-    counts = offsets[1:] - offsets[:-1]
-    return torch.repeat_interleave(
-        torch.arange(len(counts), device=device, dtype=torch.int32), counts
+def _offsets_to_doc_ids_tensor(
+    offsets_cpu: torch.Tensor, device: torch.device
+) -> torch.Tensor:
+    # Build on CPU (so `repeat_interleave` doesn't force a GPU->CPU sync to
+    # learn the data-dependent output length) and upload non-blocking.
+    counts = offsets_cpu[1:] - offsets_cpu[:-1]
+    doc_ids = torch.repeat_interleave(
+        torch.arange(len(counts), dtype=torch.int32), counts
     )
+    return doc_ids.to(device, non_blocking=True)
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
@@ -341,6 +345,9 @@ class FlexAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
+    # CPU-resident copy of query_start_loc used to derive doc_ids without a
+    # GPU->CPU sync from repeat_interleave's data-dependent output size.
+    query_start_loc_cpu: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
@@ -464,7 +471,9 @@ class FlexAttentionMetadata:
         packed query sequences.
         """
         # Create a lookup mapping from query indices -> request number
-        request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        request_lookup = _offsets_to_doc_ids_tensor(
+            self.query_start_loc_cpu, self.query_start_loc.device
+        )
 
         def final_mask_mod(
             b: torch.Tensor,
@@ -576,7 +585,9 @@ class FlexAttentionMetadata:
             return None
 
         # Create a lookup mapping from query indices -> request number
-        request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        request_lookup = _offsets_to_doc_ids_tensor(
+            self.query_start_loc_cpu, self.query_start_loc.device
+        )
         user_score_mod = self.score_mod
 
         def transformed_score_mod(
@@ -721,7 +732,9 @@ class FlexAttentionMetadata:
         assert self.prefix_kv_lens is None, "Not implemented yet."
         assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
-        self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        self.doc_ids = _offsets_to_doc_ids_tensor(
+            self.query_start_loc_cpu, self.query_start_loc.device
+        )
         self.doc_ids = copy_to_persistent(self.persistent_doc_ids, self.doc_ids)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
@@ -802,6 +815,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
@@ -866,6 +880,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=block_table_tensor,
