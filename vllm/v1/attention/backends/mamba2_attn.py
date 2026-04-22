@@ -149,7 +149,7 @@ class Mamba2AttentionMetadataBuilder(
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
             prep_initial_states = False
-            if common.has_initial_states_p:
+            if common.has_initial_states_p is not None:
                 # TODO: avoid this sync by either always running the torch.where
                 # in mamba_mixer2.py (dropping the prep_initial_states gate), or
                 # plumbing a CPU-side num_computed_tokens once the deprecated
