@@ -660,19 +660,10 @@ class FlashAttentionImpl(AttentionImpl):
         self.supports_quant_query_input = flash_attn_supports_quant_query_input()
 
         vllm_config = get_current_vllm_config_or_none()
-        if (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size <= 1
-            and self.dcp_world_size > 1
-        ):
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
-            self.total_cp_world_size = self.pcp_world_size
-            self.total_cp_rank = self.pcp_rank
-            self.need_to_return_lse_for_decode = False
+        self.maybe_override_cp_for_vllm_config(vllm_config)
         dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            self.dcp_world_size > 1
+            and vllm_config is not None
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
