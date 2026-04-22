@@ -74,7 +74,7 @@ def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
     weight_bits: int,
-) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
     Args:
