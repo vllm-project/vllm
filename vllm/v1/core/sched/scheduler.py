@@ -694,9 +694,12 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     if num_new_tokens <= 0:
-                        # Request has reached max_model_len; skip it so
-                        # check_stop can finish it on the next output step.
-                        break
+                        # Finish length-capped waiting requests immediately so
+                        # they do not block later requests in the queue.
+                        self.finish_requests(
+                            request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        continue
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:

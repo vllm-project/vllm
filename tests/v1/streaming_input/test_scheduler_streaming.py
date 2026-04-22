@@ -54,6 +54,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
@@ -655,3 +656,33 @@ class TestStreamingScheduler(unittest.TestCase):
         # Session should be finished and removed.
         assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
         assert "audio_session" not in scheduler.requests
+
+    def test_streaming_session_length_capped_waiting_request_does_not_block_queue(
+        self,
+    ):
+        scheduler = create_scheduler()
+        max_model_len = scheduler.max_model_len
+
+        capped = DummyRequest(
+            request_id="audio_session",
+            prompt_token_ids=list(range(max_model_len)),
+            max_tokens=max_model_len,
+        )
+        capped.num_computed_tokens = max_model_len - 1
+        tail = DummyRequest(
+            request_id="tail",
+            prompt_token_ids=[1],
+            max_tokens=max_model_len,
+        )
+
+        scheduler.add_request(capped)
+        scheduler.add_request(tail)
+
+        output = scheduler.schedule()
+
+        assert output.finished_req_ids == {capped.request_id}
+        assert capped.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert capped.request_id not in scheduler.requests
+        assert [req.req_id for req in output.scheduled_new_reqs] == [tail.request_id]
+        assert [req.request_id for req in scheduler.running] == [tail.request_id]
+        assert not scheduler.waiting
