@@ -130,9 +130,7 @@ def maybe_flashinfer_bf16_unquantized_gemm(
     flashinfer_backend = backend or "auto"
     if not current_platform.is_cuda():
         if backend is not None:
-            raise ValueError(
-                f"VLLM_BF16_GEMM_BACKEND={backend!r} requires CUDA."
-            )
+            raise ValueError(f"VLLM_BF16_GEMM_BACKEND={backend!r} requires CUDA.")
         return None
 
     if not has_flashinfer_bf16_gemm():
