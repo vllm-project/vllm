@@ -119,6 +119,9 @@ class RobertaClassificationHead(nn.Module):
 class RobertaEmbeddingModel(BertEmbeddingModel, SupportsLoRA):
     """A model that uses Roberta to provide embedding functionalities."""
 
+    packed_modules_mapping = {
+        "qkv_proj": ["query", "key", "value"],
+    }
     embedding_modules = {}
     embedding_padding_modules: list[str] = []
 
