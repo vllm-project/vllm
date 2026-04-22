@@ -13,7 +13,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 --8<-- [end:installation]
 --8<-- [start:requirements]
 
-- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201), Ryzen AI MAX / AI 300 Series (gfx1151/1150)
+- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201), Ryzen AI MAX / AI 300 Series (gfx1153/gfx1152/gfx1151/1150)
 - ROCm 6.3 or above
     - MI350 requires ROCm 7.0 or above
     - Ryzen AI MAX / AI 300 Series requires ROCm 7.0.2 or above

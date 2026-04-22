@@ -28,7 +28,8 @@
 
 #if defined(__HIPCC__) &&                                                    \
     (defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1150__) || \
-     defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__))
+     defined(__gfx1151__) || defined(__gfx1152__) || defined(__gfx1153__) || \
+     defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__GFX1X__
 #endif
 
