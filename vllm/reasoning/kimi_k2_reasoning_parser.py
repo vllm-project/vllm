@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-class KimiK2ReasoningParser(BaseThinkingReasoningParser):
+class KimiK2ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Kimi K2 model.
 
@@ -64,6 +64,14 @@ class KimiK2ReasoningParser(BaseThinkingReasoningParser):
                 "KimiK2ReasoningParser could not locate think start/end "
                 "tokens in the tokenizer!"
             )
+
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return self._start_token
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return self._end_token
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """

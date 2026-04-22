@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class Step3ReasoningParser(BaseThinkingReasoningParser):
+class Step3ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Step3 model.
 
@@ -29,6 +29,7 @@ class Step3ReasoningParser(BaseThinkingReasoningParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
+        self.think_start_token = "<think>"
         self.think_end_token = "</think>"
 
         self.reasoning_regex = re.compile(rf"(.*?){self.think_end_token}", re.DOTALL)
@@ -46,6 +47,14 @@ class Step3ReasoningParser(BaseThinkingReasoningParser):
                 "token in the tokenizer!"
             )
         self.think_end_token_id: int = think_end_token_id
+
+    @property
+    def reasoning_start_str(self) -> str:
+        return self.think_start_token
+
+    @property
+    def reasoning_end_str(self) -> str:
+        return self.think_end_token
 
     def extract_reasoning_streaming(
         self,
