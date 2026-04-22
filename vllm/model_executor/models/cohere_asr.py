@@ -2030,7 +2030,7 @@ class CohereAsrForConditionalGeneration(
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
-        request_prompt = stt_params.request_prompt
+        model_config = stt_params.model_config
 
         if language is None:
             raise ValueError(
