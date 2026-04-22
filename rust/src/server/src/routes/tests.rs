@@ -2883,6 +2883,93 @@ async fn reset_encoder_cache_route_sends_expected_utility_call() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_i64().expect("call id");
+
+            assert_eq!(array[2], Value::from("collective_rpc"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![
+                    Value::from("echo_args_kwargs"),
+                    Value::from(1.5_f64),
+                    Value::Array(vec![Value::from("arg1"), Value::from("arg2")]),
+                    Value::Map(vec![
+                        (Value::from("key1"), Value::from("value1")),
+                        (Value::from("key2"), Value::from("value2")),
+                    ]),
+                ])
+            );
+
+            send_outputs(
+                push,
+                utility_outputs(
+                    call_id,
+                    UtilityResultEnvelope::without_type_info(Value::Array(vec![Value::Map(vec![
+                        (
+                            Value::from("args"),
+                            Value::Array(vec![Value::from("arg1"), Value::from("arg2")]),
+                        ),
+                        (
+                            Value::from("kwargs"),
+                            Value::Map(vec![
+                                (Value::from("key1"), Value::from("value1")),
+                                (Value::from("key2"), Value::from("value2")),
+                            ]),
+                        ),
+                        (Value::from("total_items"), Value::from(4_u64)),
+                    ])])),
+                ),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/collective_rpc")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"method":"echo_args_kwargs","args":["arg1","arg2"],"kwargs":{"key1":"value1","key2":"value2"},"timeout":1.5}"#,
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({
+            "results": [{
+                "args": ["arg1", "arg2"],
+                "kwargs": {
+                    "key1": "value1",
+                    "key2": "value2"
+                },
+                "total_items": 4
+            }]
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn sleep_route_uses_python_compatible_default_query_values() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
@@ -3023,6 +3110,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("GET", "/is_sleeping"),
         ("POST", "/sleep"),
         ("POST", "/wake_up"),
+        ("POST", "/collective_rpc"),
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),

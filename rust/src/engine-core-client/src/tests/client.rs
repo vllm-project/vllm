@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -2091,6 +2091,111 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
         .unwrap();
     assert_eq!(final_2.engine_index, 1);
     assert_eq!(final_2.finish_reason, Some(EngineCoreFinishReason::Abort));
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collective_rpc_flattens_results_from_all_engines() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]);
+                let array = match payload {
+                    Value::Array(array) => array,
+                    other => panic!("expected utility payload array, got {other:?}"),
+                };
+                let call_id = array[1].as_i64().expect("call_id");
+                assert_eq!(array[2], Value::from("collective_rpc"));
+
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id,
+                            failure_message: None,
+                            result: Some(utility_result_value(vec!["engine-0-worker"])),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]);
+                let array = match payload {
+                    Value::Array(array) => array,
+                    other => panic!("expected utility payload array, got {other:?}"),
+                };
+                let call_id = array[1].as_i64().expect("call_id");
+                assert_eq!(array[2], Value::from("collective_rpc"));
+
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id,
+                            failure_message: None,
+                            result: Some(utility_result_value(vec!["engine-1-worker"])),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let results = client
+        .collective_rpc(
+            "get_model_name",
+            Option::<f64>::None,
+            Vec::<String>::new(),
+            BTreeMap::<String, String>::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results,
+        vec![
+            Value::from("engine-0-worker"),
+            Value::from("engine-1-worker")
+        ]
+    );
 
     let _ = shutdown_tx_0.send(());
     let _ = shutdown_tx_1.send(());

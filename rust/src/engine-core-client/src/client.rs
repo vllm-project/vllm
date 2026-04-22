@@ -485,13 +485,13 @@ impl EngineCoreClient {
         Ok(())
     }
 
-    /// Call a typed utility method on all connected engines, returning the first result if all
-    /// calls succeed or an error if any call fails.
+    /// Call a typed utility method on all connected engines, returning one decoded result per
+    /// connected engine if all calls succeed or an error if any call fails.
     ///
     /// Callers should pass utility arguments using Rust tuple semantics so the encoded payload
     /// matches Python's `(client_index, call_id, method_name, args)` contract:
     /// `()`, `(arg,)`, `(arg1, arg2)`, etc.
-    pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<T>
+    pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
         A: serde::Serialize,
@@ -518,8 +518,7 @@ impl EngineCoreClient {
             pending_calls.push((call_id, rx));
         }
 
-        // Wait for all engines to respond and return the first successful result.
-        // TODO: shall we check if all results match?
+        // Wait for all engines to respond and preserve the per-engine result list.
         let futures = pending_calls.into_iter().map(|(call_id, rx)| async move {
             rx.await
                 .map_err(|_| Error::UtilityCallClosed {
@@ -528,27 +527,52 @@ impl EngineCoreClient {
                 })??
                 .into_typed_result(method)
         });
-        let results = try_join_all(futures).await?;
+        try_join_all(futures).await
+    }
+
+    /// Execute `collective_rpc` on all engines and flatten all engine results into one list.
+    pub async fn collective_rpc<A, K>(
+        &self,
+        method: &str,
+        timeout: Option<f64>,
+        args: A,
+        kwargs: K,
+    ) -> Result<Vec<rmpv::Value>>
+    where
+        A: serde::Serialize,
+        K: serde::Serialize,
+    {
+        let results = self
+            .call_utility::<rmpv::Value, _>("collective_rpc", (method, timeout, args, kwargs))
+            .await?;
 
         Ok(results
             .into_iter()
-            .next()
-            .expect("utility fanout must include at least one engine"))
+            .flat_map(|result| match result {
+                // Each engine's `collective_rpc` result is itself the worker-level result list.
+                rmpv::Value::Array(results) => results,
+                other => vec![other],
+            })
+            .collect())
     }
 
     /// Return whether the engine is currently sleeping at any level.
     pub async fn is_sleeping(&self) -> Result<bool> {
-        self.call_utility("is_sleeping", ()).await
+        // TODO: we only return the result of the first engine here.
+        Ok(self.call_utility("is_sleeping", ()).await?[0])
     }
 
     /// Reset the multi-modal cache.
     pub async fn reset_mm_cache(&self) -> Result<()> {
-        self.call_utility("reset_mm_cache", ()).await
+        self.call_utility::<(), _>("reset_mm_cache", ()).await?;
+        Ok(())
     }
 
     /// Reset the encoder cache.
     pub async fn reset_encoder_cache(&self) -> Result<()> {
-        self.call_utility("reset_encoder_cache", ()).await
+        self.call_utility::<(), _>("reset_encoder_cache", ())
+            .await?;
+        Ok(())
     }
 
     /// Reset the prefix cache and optionally the external connector cache.
@@ -557,21 +581,25 @@ impl EngineCoreClient {
         reset_running_requests: bool,
         reset_connector: bool,
     ) -> Result<bool> {
-        self.call_utility(
-            "reset_prefix_cache",
-            (reset_running_requests, reset_connector),
-        )
-        .await
+        // TODO: we only return the result of the first engine here.
+        Ok(self
+            .call_utility(
+                "reset_prefix_cache",
+                (reset_running_requests, reset_connector),
+            )
+            .await?[0])
     }
 
     /// Put the engine to sleep.
     pub async fn sleep(&self, level: u32, mode: &str) -> Result<()> {
-        self.call_utility("sleep", (level, mode)).await
+        self.call_utility::<(), _>("sleep", (level, mode)).await?;
+        Ok(())
     }
 
     /// Wake the engine from sleep, optionally limiting the wake-up to specific tags.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
-        self.call_utility("wake_up", (tags,)).await
+        self.call_utility::<(), _>("wake_up", (tags,)).await?;
+        Ok(())
     }
 
     /// Shut down local client tasks and close transport state.

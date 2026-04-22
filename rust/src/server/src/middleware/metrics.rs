@@ -20,6 +20,7 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/reset_prefix_cache",
     "/reset_mm_cache",
     "/reset_encoder_cache",
+    "/collective_rpc",
     "/sleep",
     "/wake_up",
     "/is_sleeping",

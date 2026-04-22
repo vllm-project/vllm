@@ -10,6 +10,7 @@ futures.workspace = true
 futures-async-stream.workspace = true
 http-body.workspace = true
 libc.workspace = true
+rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
@@ -36,7 +37,6 @@ bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
 rmp-serde.workspace = true
-rmpv.workspace = true
 serial_test.workspace = true
 tower.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
