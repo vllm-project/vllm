@@ -32,21 +32,21 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
     # use pip
     pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cpu
     ```
-!!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
-    ```bash
-    # install TCMalloc, Intel OpenMP is installed with vLLM CPU
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+#### Runtime Performance Optimization
 
-    # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
-    sudo find / -iname *libiomp5.so
-    TC_PATH=...
-    IOMP_PATH=...
+Manual configuration of `LD_PRELOAD` is no longer required for standard installations.
 
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
-    ```
+##### What vLLM Configures Automatically
+
+- **Memory Allocation (TCMalloc)**  
+  vLLM attempts to locate and preload `libtcmalloc` to reduce memory allocation overhead and fragmentation.  
+  If available in the Python environment or system paths, it is applied automatically.
+- **Parallelism (OpenMP)**  
+  vLLM detects the appropriate OpenMP runtime:
+  - `libiomp5` for x86 (Intel/AMD)
+  - `libgomp` for ARM and PowerPC  
+- **Thread Binding**  
+  CPU thread affinity is configured automatically to reduce context switching and improve cache locality.
 
 #### Install the latest code
 
@@ -130,21 +130,21 @@ uv pip install dist/*.whl
     pip install dist/*.whl
     ```
 
-!!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
-    ```bash
-    # install TCMalloc, Intel OpenMP is installed with vLLM CPU
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+#### Runtime Performance Optimization
 
-    # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
-    sudo find / -iname *libiomp5.so
-    TC_PATH=...
-    IOMP_PATH=...
+Manual configuration of `LD_PRELOAD` is no longer required for standard installations.
 
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
-    ```
+##### What vLLM Configures Automatically
+
+- **Memory Allocation (TCMalloc)**  
+  vLLM attempts to locate and preload `libtcmalloc` to reduce memory allocation overhead and fragmentation.  
+  If available in the Python environment or system paths, it is applied automatically.
+- **Parallelism (OpenMP)**  
+  vLLM detects the appropriate OpenMP runtime:
+  - `libiomp5` for x86 (Intel/AMD)
+  - `libgomp` for ARM and PowerPC  
+- **Thread Binding**  
+  CPU thread affinity is configured automatically to reduce context switching and improve cache locality.
 
 !!! example "Troubleshooting"
     - **NumPy ≥2.0 error**: Downgrade using `pip install "numpy<2.0"`.
