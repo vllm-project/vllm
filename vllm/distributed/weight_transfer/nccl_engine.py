@@ -130,6 +130,14 @@ class NCCLWeightTransferEngine(
                       rank offset, and world size
         """
 
+        # Destroy any stale comm from a previous call
+        if self.model_update_group is not None:
+            try:
+                self.model_update_group.destroy()
+            except Exception:
+                pass
+            self.model_update_group = None
+
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
         dp_rank = self.parallel_config.data_parallel_index
