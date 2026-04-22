@@ -189,6 +189,18 @@ class OpenAIServingChat(OpenAIServing):
             )
         )
 
+    def _effective_chat_template_kwargs(
+        self, request: ChatCompletionRequest
+    ) -> dict[str, Any]:
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs
+        )
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -231,10 +243,7 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-            request.chat_template_kwargs,
-            self.default_chat_template_kwargs,
-        )
+        chat_template_kwargs = self._effective_chat_template_kwargs(request)
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
             reasoning_parser = self.reasoning_parser_cls(

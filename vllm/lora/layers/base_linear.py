@@ -203,7 +203,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        return self._apply_lora_to_output(x, output)
 
+    def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_output = self.base_layer(x)
+        output = base_output[0] if isinstance(base_output, tuple) else base_output
+        return self._apply_lora_to_output(x, output)
+
+    def _apply_lora_to_output(
+        self, x: torch.Tensor, output: torch.Tensor
+    ) -> torch.Tensor:
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
