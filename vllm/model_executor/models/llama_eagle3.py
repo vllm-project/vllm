@@ -340,10 +340,13 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """Vocab-parallel argmax without gathering full logits when possible."""
-        if not self._has_identity_draft_vocab_mapping:
-            return self.compute_logits(hidden_states).argmax(dim=-1)
-        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+        """TP-safe vocab-parallel argmax without gathering full logits."""
+        draft_top_tokens = self.logits_processor.get_top_tokens(
+            self.lm_head, hidden_states
+        )
+        if self._has_identity_draft_vocab_mapping:
+            return draft_top_tokens
+        return draft_top_tokens + self.draft_id_to_target_id[draft_top_tokens]
 
     def compute_logits(
         self,
