@@ -634,15 +634,26 @@ class SpeculativeConfig:
                     )
                 )
 
-                hf_config = self.draft_model_config.hf_config
-                max_pos = getattr(hf_config, "max_position_embeddings", None)
+                draft_max_model_len = self.draft_model_config.max_model_len
+                hf = self.draft_model_config.hf_config
+                max_position_embeddings = getattr(hf, "max_position_embeddings", None)
                 if (
-                    max_pos is not None
-                    and max_pos < self.draft_model_config.max_model_len
+                    max_position_embeddings is not None
+                    and max_position_embeddings < draft_max_model_len
                 ):
-                    hf_config.max_position_embeddings = (
-                        self.draft_model_config.max_model_len
-                    )
+                    if getattr(hf, "rope_scaling", None) is not None:
+                        logger.warning(
+                            "Draft model has rope_scaling with "
+                            "max_position_embeddings (%d) < "
+                            "max_model_len (%d). Capping "
+                            "max_model_len to %d.",
+                            max_position_embeddings,
+                            draft_max_model_len,
+                            max_position_embeddings,
+                        )
+                        self.draft_model_config.max_model_len = max_position_embeddings
+                    else:
+                        hf.max_position_embeddings = draft_max_model_len
 
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
@@ -695,43 +706,34 @@ class SpeculativeConfig:
     ) -> int:
         """Determine the max sequence len for the draft model.
 
-        If the user explicitly sets speculative_max_model_len, that value
-        is used. Otherwise, the draft model's max_model_len is clamped to
-        at least target_max_model_len so that the drafter's KV cache and
-        CUDA graphs are sized to handle any sequence the target model can
-        process. This prevents DP hangs when sequences exceed the drafter's
-        native context window — the drafter still runs (keeping DP ranks
-        synchronized) but may produce lower-quality drafts, which the
-        verifier rejects.
+        If speculative_max_model_len is set explicitly, respect it.
+        Otherwise, clamp to at least target_max_model_len so the
+        drafter's buffers can handle any sequence the target can.
+        This prevents DP hangs from per-batch skip decisions.
         """
-
         if speculative_max_model_len is not None:
             if speculative_max_model_len > draft_max_model_len:
                 raise ValueError(
                     f"{speculative_max_model_len=} cannot be "
                     f"larger than {draft_max_model_len=}"
                 )
-
             if speculative_max_model_len > target_max_model_len:
                 raise ValueError(
                     f"{speculative_max_model_len=} cannot be "
                     f"larger than {target_max_model_len=}"
                 )
-
             return speculative_max_model_len
 
         if draft_max_model_len < target_max_model_len:
             logger.warning(
-                "Draft model max_model_len (%d) is less than target "
-                "model max_model_len (%d). Overriding to %d to prevent "
-                "DP hangs. Drafts for sequences longer than %d tokens "
-                "may be low quality.",
+                "Draft model max_model_len (%d) < target (%d). "
+                "Overriding to %d for DP safety. Drafts beyond "
+                "%d tokens may be low quality.",
                 draft_max_model_len,
                 target_max_model_len,
                 target_max_model_len,
                 draft_max_model_len,
             )
-
         return max(draft_max_model_len, target_max_model_len)
 
     @staticmethod
