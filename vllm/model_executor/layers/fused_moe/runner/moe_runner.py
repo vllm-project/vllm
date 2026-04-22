@@ -84,7 +84,7 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
 
 # Note: _moe_forward and _moe_forward_shared should not contain any
 # implementation details, They should merely pass along control to
-# the runner's '_forward_dispatch' method.
+# the runner's '_forward_impl' method.
 # These functions should never be called directly since they do not
 # include all the functionality of the MoE layer.
 def _moe_forward(
@@ -94,7 +94,7 @@ def _moe_forward(
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner._forward_dispatch(
+    return layer.runner._forward_impl(
         layer,
         hidden_states,
         router_logits,
@@ -118,7 +118,7 @@ def _moe_forward_shared(
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner._forward_dispatch(
+    return layer.runner._forward_impl(
         layer,
         hidden_states,
         router_logits,
@@ -531,7 +531,7 @@ class MoERunner(MoERunnerInterface):
         Calling sequence
         - forward
           - self._forward_entry (_moe_forward or _moe_forward_shared custom op)
-            - _forward_dispatch
+            - _forward_impl
 
         Note: The existence of _moe_forward and _moe_forward_shared custom ops are due
         to the following reason:
@@ -606,11 +606,13 @@ class MoERunner(MoERunnerInterface):
         # NOTE: this will be removed once all kernels are migrated into the
         # MoEKernel framework.
         if self.do_naive_dispatch_combine:
-            hidden_states, router_logits = get_ep_group().dispatch_router_logits(
+            result = get_ep_group().dispatch_router_logits(
                 hidden_states,
                 router_logits,
                 self.moe_config.is_sequence_parallel,
             )
+            assert len(result) == 2
+            hidden_states, router_logits = result
 
         # NOTE: Similar with DP, PCP also needs dispatch and combine. For
         # simplicity, AgRsAll2All was added separately for PCP here. Maybe
@@ -649,7 +651,7 @@ class MoERunner(MoERunnerInterface):
         else:
             return hidden_states
 
-    def _forward_dispatch(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
