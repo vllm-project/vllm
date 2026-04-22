@@ -437,12 +437,21 @@ class LoRAModelManager:
                     ),
                 )
 
-            # In some models, especially multimodal ones, layers with the same
-            # name may have different types, such as nn.Linear and
-            # ReplicatedLinear. The nn.Linear layers cannot be replaced with
-            # LoRA layers, leading to assertion error. The following check
-            # aims to prevent this error
-            if self.supports_mm and not isinstance(new_module, BaseLayerWithLoRA):
+            # Some matched modules can be unsupported by LoRA wrappers
+            # (e.g. subclasses with specialized forward behavior).
+            if not isinstance(new_module, BaseLayerWithLoRA):
+                error_msg = (
+                    "LoRA target module "
+                    f"{module_name} ({type(module).__name__}) matched the "
+                    "deployment configuration but could not be wrapped by any "
+                    "LoRA layer implementation."
+                )
+                if self.lora_config.target_modules is not None:
+                    raise ValueError(
+                        f"{error_msg} target_modules="
+                        f"{sorted(self.lora_config.target_modules)}"
+                    )
+                logger.warning_once("%s It will be ignored.", error_msg)
                 continue
             self.register_module(module_name, new_module)
 
@@ -578,6 +587,38 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        """Return a dummy LoRA rank compatible with wrapped modules.
+
+        Dummy LoRAs keep warmup memory low by using a small rank. Fully
+        sharded MoE wrappers additionally require the dummy rank to be divisible
+        by tensor parallel size because they shard W13 along the rank axis.
+        """
+        if not self.lora_config.fully_sharded_loras:
+            return default_rank
+
+        required_multiple = 1
+        for module in self.modules.values():
+            if not getattr(module, "fully_sharded", False):
+                continue
+            required_multiple = math.lcm(required_multiple, module.tp_size)
+
+        if required_multiple == 1 or default_rank % required_multiple == 0:
+            return default_rank
+
+        adjusted_rank = (
+            (default_rank + required_multiple - 1) // required_multiple
+        ) * required_multiple
+        if adjusted_rank > self.lora_config.max_lora_rank:
+            raise ValueError(
+                "Unable to choose a dummy LoRA warmup rank compatible with "
+                "fully sharded MoE modules: "
+                f"default_rank={default_rank}, "
+                f"required_multiple={required_multiple}, "
+                f"max_lora_rank={self.lora_config.max_lora_rank}"
+            )
+        return adjusted_rank
+
     def _match_target_modules(self, module_name: str) -> bool:
         """Check if a module should have LoRA applied.
 
@@ -594,7 +635,11 @@ class LoRAModelManager:
         """
         if not is_supported_lora_module(module_name, self.supported_lora_modules):
             return False
-        return is_in_target_modules(module_name, self.lora_config.target_modules)
+        return is_in_target_modules(
+            module_name,
+            self.lora_config.target_modules,
+            self.packed_modules_mapping,
+        )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
