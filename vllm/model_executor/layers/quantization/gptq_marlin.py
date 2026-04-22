@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.oracle.wna16 import (
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     select_wna16_moe_backend,
@@ -505,16 +505,16 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
-            self.quant_type = scalar_types.uint4b8
-            self.scale = kInt4StaticGroupScale
+            quant_type = scalar_types.uint4b8
+            scale = kInt4StaticGroupScale
         elif self.quant_config.quant_type.size_bits == 8:
-            self.quant_type = scalar_types.uint8b128
-            self.scale = kInt8StaticGroupScale
+            quant_type = scalar_types.uint8b128
+            scale = kInt8StaticGroupScale
         else:
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
         self.input_dtype = None
         self.use_marlin = True
-        weight_key = QuantKey(self.quant_type, self.scale)
+        weight_key = QuantKey(quant_type, scale)
 
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe, weight_key, quant_config.weight_bits
@@ -533,7 +533,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_type == scalar_types.uint4b8, (
+            assert self.quant_config.quant_type.size_bits == 8, (
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
@@ -680,7 +680,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_type == scalar_types.uint4b8, (
+            assert self.quant_config.quant_type.size_bits == 8, (
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
@@ -776,9 +776,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             shared_experts=layer.shared_experts,
         )
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
         )
