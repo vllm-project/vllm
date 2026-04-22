@@ -724,11 +724,13 @@ class SpeculativeConfig:
                     f"{speculative_max_model_len=} cannot be "
                     f"larger than {draft_max_model_len=}"
                 )
+
             if speculative_max_model_len > target_max_model_len:
                 raise ValueError(
                     f"{speculative_max_model_len=} cannot be "
                     f"larger than {target_max_model_len=}"
                 )
+
             if speculative_max_model_len < target_max_model_len:
                 logger.warning(
                     "speculative_max_model_len (%d) < target "
