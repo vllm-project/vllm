@@ -1091,7 +1091,6 @@ def get_moe_configs(
         "Using default MoE config. Performance might be sub-optimal! "
         "Config file not found at %s",
         ", ".join(config_file_paths),
-        scope="local",
     )
     return None
 
