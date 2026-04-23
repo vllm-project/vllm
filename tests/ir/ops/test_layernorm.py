@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-Tests for the RMSNorm IR op, including lowering tests.
+Tests for the RMSNorm IR op.
 
-These tests verify that:
-1. supports_args returns bool (not SymBool) with unbacked SymInts
-2. Provider implementations match native semantics
-3. Lowering produces numerically correct results compared to baselines
+Three layers of testing:
+1. TestRmsNormSymbolic — supports_args + SymInt compatibility (fast)
+2. TestRmsNormNumerical — impl numerical correctness (parametrized)
+3. TestRmsNormLowering — torch.compile integration (e2e)
 """
 
 import pytest
@@ -19,9 +19,10 @@ from tests.ir.ir_test_utils import (
     COMMON_HIDDEN_SIZES,
     NUM_TOKENS,
     assert_close,
+    assert_dispatch_matches_direct,
+    assert_impl_numerical,
     assert_op_e2e_correctness,
     assert_supports_args_returns_bool,
-    clone_args,
     supported_providers,
 )
 from vllm import ir
@@ -29,22 +30,12 @@ from vllm.ir.ops.layernorm import rms_norm
 from vllm.platforms import current_platform
 
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
+_all_providers = supported_providers(rms_norm) + ["native"]
 
 
-class TestRmsNormLowering:
-    """Tests for RMSNorm lowering behavior."""
-
-    @pytest.mark.parametrize("provider", supported_providers(rms_norm) + ["native"])
-    def test_supports_args_returns_bool(self, provider: str):
-        """Verify supports_args returns bool with unbacked SymInts."""
-        assert_supports_args_returns_bool(
-            rms_norm,
-            provider,
-            num_tokens=8,
-            hidden_size=64,
-            dtype=torch.bfloat16,
-            epsilon=1e-5,
-        )
+# ============================================================
+# Platform/registration checks
+# ============================================================
 
 
 @pytest.mark.skipif(
@@ -67,96 +58,6 @@ def test_rms_norm_registration():
     assert actual == expected
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("n_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
-@pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
-class TestRmsNormImplCorrectness:
-    @classmethod
-    def setup_class(cls, **kwargs):
-        torch.set_default_device(current_platform.device_type)
-
-    def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
-        x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
-            num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
-        )
-        out = rms_norm_native(x, weight, epsilon=epsilon)
-
-        # Check shape, dtype, device
-        assert out.shape == x.shape
-        assert out.dtype == x.dtype
-        assert out.device == x.device
-
-        # Check the scaling property of rms norm
-        out2 = rms_norm_native(x * 2.0, weight, epsilon=epsilon)
-        torch.testing.assert_close(out2, out)
-
-        # Check behavior with and without weight
-        weight1 = torch.ones_like(weight)
-        out3 = rms_norm_native(x, weight1, epsilon=epsilon)
-        out4 = rms_norm_native(x, None, epsilon=epsilon)
-        torch.testing.assert_close(out3, out4)
-
-    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
-    def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
-        impl = ir.ops.rms_norm.impls[provider]
-        x, weight, eps = ir.ops.rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
-        )
-        args = (x, weight, eps)
-
-        if not impl.supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
-
-        ref_output = rms_norm_native(*clone_args(args))
-        output = impl.impl_fn(*clone_args(args))
-        assert_close(ir.ops.rms_norm, output, ref_output)
-
-        # check that dispatched call matches direct call
-        with ir.ops.rms_norm.set_priority([provider, "native"]):
-            out_dispatched = ir.ops.rms_norm(*args)
-        out_direct = impl.impl_fn(*args)
-        torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
-
-        # none of these support variance_size override
-        assert not impl.supports_args(x, weight, eps, 4)
-        assert not impl.supports_args(x, weight, eps, variance_size=4)
-
-        # test weight=None behavior
-        out_no_weight = impl.impl_fn(x, None, eps)
-        out_unit_weight = impl.impl_fn(x, torch.ones_like(weight), eps)
-        assert_close(ir.ops.rms_norm, out_no_weight, out_unit_weight)
-
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
-    def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
-        if not ir.ops.rms_norm.impls[provider].supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
-
-        args = ir.ops.rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
-        )
-
-        # When checking the torch op, we have to set priority and use dispatch
-        with ir.ops.rms_norm.set_priority([provider, "native"]):
-            torch.library.opcheck(torch.ops.vllm_ir.rms_norm, args)
-
-
-class TestRmsNormE2E:
-    """E2E correctness tests comparing lowering with baselines."""
-
-    @pytest.mark.parametrize("provider", supported_providers(rms_norm) + ["native"])
-    def test_e2e_correctness(self, provider: str, default_vllm_config):
-        """Compare lowering pipeline output with two baselines."""
-        real_args = rms_norm.generate_inputs(
-            num_tokens=8, hidden_size=16, dtype=torch.bfloat16, epsilon=1e-5
-        )
-        assert_op_e2e_correctness(rms_norm, provider, real_args)
-
-
 @pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="aiter is only supported on ROCm",
@@ -169,3 +70,120 @@ def test_aiter_rejects_unsupported_dtypes():
             num_tokens=8, hidden_size=4096, dtype=dtype, epsilon=1e-5
         )
         assert not impl.supports_args(*args), f"aiter should reject dtype={dtype}"
+
+
+# ============================================================
+# Symbolic tests — supports_args + SymInt compatibility
+# ============================================================
+
+
+class TestRmsNormSymbolic:
+    @pytest.mark.parametrize("provider", _all_providers)
+    def test_supports_args_returns_bool(self, provider: str):
+        """Verify supports_args returns bool with unbacked SymInts."""
+        assert_supports_args_returns_bool(
+            rms_norm,
+            provider,
+            num_tokens=8,
+            hidden_size=64,
+            dtype=torch.bfloat16,
+            epsilon=1e-5,
+        )
+
+
+# ============================================================
+# Numerical tests — impl correctness
+# ============================================================
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    reason="Currently only kernels on CUDA, ROCm and XPU",
+)
+class TestRmsNormNumerical:
+    @classmethod
+    def setup_class(cls):
+        torch.set_default_device(current_platform.device_type)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
+    def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        """Verify native rms_norm has correct shape/dtype/scaling."""
+        x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
+            num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
+        )
+        out = rms_norm_native(x, weight, epsilon=epsilon)
+
+        assert out.shape == x.shape
+        assert out.dtype == x.dtype
+        assert out.device == x.device
+
+        # Scaling property: rms_norm(2*x) == rms_norm(x)
+        out2 = rms_norm_native(x * 2.0, weight, epsilon=epsilon)
+        torch.testing.assert_close(out2, out)
+
+        # weight=None == unit weight
+        out3 = rms_norm_native(x, torch.ones_like(weight), epsilon=epsilon)
+        out4 = rms_norm_native(x, None, epsilon=epsilon)
+        torch.testing.assert_close(out3, out4)
+
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    def test_impl_numerical(self, provider, dtype):
+        """Verify impl matches native numerically."""
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=32, hidden_size=2048, dtype=dtype, epsilon=1e-5
+        )
+        assert_impl_numerical(rms_norm, provider, args)
+
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
+    def test_dispatch_matches_direct(self, provider):
+        """Verify priority-based dispatch works correctly."""
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=32, hidden_size=2048, dtype=torch.bfloat16, epsilon=1e-5
+        )
+        assert_dispatch_matches_direct(rms_norm, provider, args)
+
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
+    def test_weight_none(self, provider):
+        """Verify all impls handle weight=None correctly."""
+        impl = ir.ops.rms_norm.impls[provider]
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=32, hidden_size=2048, dtype=torch.bfloat16, epsilon=1e-5
+        )
+        x, weight, eps = args
+
+        out_no_weight = impl.impl_fn(x, None, eps)
+        out_unit_weight = impl.impl_fn(x, torch.ones_like(weight), eps)
+        assert_close(rms_norm, out_no_weight, out_unit_weight)
+
+    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    def test_torch_opcheck(self, provider, dtype):
+        """Verify torch op schema is correct."""
+        if not ir.ops.rms_norm.impls[provider].supported:
+            pytest.skip(f"{provider} impl not supported on this platform")
+
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=32, hidden_size=2048, dtype=dtype, epsilon=1e-5
+        )
+
+        with ir.ops.rms_norm.set_priority([provider, "native"]):
+            torch.library.opcheck(torch.ops.vllm_ir.rms_norm, args)
+
+
+# ============================================================
+# Lowering tests — torch.compile integration
+# ============================================================
+
+
+class TestRmsNormLowering:
+    @pytest.mark.parametrize("provider", _all_providers)
+    def test_e2e_correctness(self, provider: str, default_vllm_config):
+        """Verify lowering produces correct results."""
+        args = rms_norm.generate_inputs(
+            num_tokens=8, hidden_size=16, dtype=torch.bfloat16, epsilon=1e-5
+        )
+        assert_op_e2e_correctness(rms_norm, provider, args)

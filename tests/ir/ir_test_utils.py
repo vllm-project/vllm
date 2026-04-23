@@ -197,3 +197,43 @@ def assert_op_e2e_correctness(
     torch.testing.assert_close(
         output, output_no_lowering, atol=tolerance["atol"], rtol=tolerance["rtol"]
     )
+
+
+def assert_impl_numerical(op: IrOp, provider: str, args: tuple) -> None:
+    """
+    Assert that impl produces numerically correct results compared to native.
+
+    This verifies the implementation's numerical correctness without going
+    through the lowering pipeline.
+
+    Args:
+        op: The IrOp to test.
+        provider: The provider/implementation to test.
+        args: The concrete input arguments.
+    """
+    impl = op.impls[provider]
+    if not impl.supports_args(*args):
+        pytest.skip(f"{provider} does not support args")
+
+    ref = op.impls["native"].impl_fn(*clone_args(args))
+    out = impl.impl_fn(*clone_args(args))
+    assert_close(op, out, ref)
+
+
+def assert_dispatch_matches_direct(
+    op: IrOp, provider: str, args: tuple
+) -> None:
+    """
+    Assert that dispatch matches direct implementation call.
+
+    This verifies the priority-based dispatch is working correctly.
+
+    Args:
+        op: The IrOp to test.
+        provider: The provider/implementation to test.
+        args: The concrete input arguments.
+    """
+    with op.set_priority([provider, "native"]):
+        out_dispatched = op(*args)
+    out_direct = op.impls[provider].impl_fn(*args)
+    torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
