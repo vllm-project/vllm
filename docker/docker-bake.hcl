@@ -88,7 +88,6 @@ target "test-ubuntu2404" {
   args = {
     UBUNTU_VERSION          = "24.04"
     GDRCOPY_OS_VERSION      = "Ubuntu24_04"
-    FLASHINFER_AOT_COMPILE  = "true"
   }
   output = ["type=docker"]
 }
@@ -100,7 +99,6 @@ target "openai-ubuntu2404" {
   args = {
     UBUNTU_VERSION          = "24.04"
     GDRCOPY_OS_VERSION      = "Ubuntu24_04"
-    FLASHINFER_AOT_COMPILE  = "true"
   }
   output = ["type=docker"]
 }
