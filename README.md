@@ -50,7 +50,7 @@ vLLM is flexible and easy to use with:
 - Efficient multi-LoRA support for dense and MoE layers
 - Support for NVIDIA GPUs, AMD GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
 
-vLLM seamlessly supports 200+ model architectures on HuggingFace, including:
+vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
 
 - Decoder-only LLMs (e.g., Llama, Qwen, Gemma)
 - Mixture-of-Expert LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
