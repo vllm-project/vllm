@@ -10,7 +10,7 @@ import json
 import os
 import pathlib
 import textwrap
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Generator, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
 from typing import (
@@ -644,6 +644,30 @@ def _impl_validate_deferred_fields_initialized(self: Any) -> None:
             f"{type(self).__name__}: deferred fields were never initialized: "
             f"{uninitialized}. This is a bug in VllmConfig initialization."
         )
+
+
+def _walk_deferred(obj: Any) -> Generator[Any, None, None]:
+    """Depth-first generator over *obj* and all nested dataclass children."""
+    yield obj
+    if is_dataclass(obj):
+        for f in fields(obj):  # type: ignore[arg-type]
+            child = getattr(obj, f.name)
+            if child is not None and child is not obj and is_dataclass(child):
+                yield from _walk_deferred(child)
+
+
+def initialize_deferred_fields_recursive(obj: Any, vllm_config: Any) -> None:
+    """Initialize deferred fields in *obj* and all nested ``@config`` dataclasses."""
+    for node in _walk_deferred(obj):
+        if isinstance(node, HasDeferredFields):
+            node.initialize_deferred_fields(vllm_config)
+
+
+def validate_deferred_fields_recursive(obj: Any) -> None:
+    """Validate deferred fields in *obj* and all nested ``@config`` dataclasses."""
+    for node in _walk_deferred(obj):
+        if isinstance(node, HasDeferredFields):
+            node.validate_deferred_fields_initialized()
 
 
 def _inject_deferred_methods(cls: type) -> None:

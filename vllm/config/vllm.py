@@ -47,7 +47,14 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import HasDeferredFields, SupportsHash, _DeferredValue, config, replace
+from .utils import (
+    SupportsHash,
+    _DeferredValue,
+    config,
+    initialize_deferred_fields_recursive,
+    replace,
+    validate_deferred_fields_recursive,
+)
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -971,12 +978,13 @@ class VllmConfig:
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
 
-        # Initialize deferred fields in PassConfig (must run after the
-        # optimization-level table is applied so the table's explicit values
+        # Initialize deferred fields in all nested sub-configs (must run after
+        # the optimization-level table is applied so the table's explicit values
         # take priority over the Deferred fallbacks).
-        pass_config = self.compilation_config.pass_config
-        if isinstance(pass_config, HasDeferredFields):
-            pass_config.initialize_deferred_fields(self)
+        for _f in fields(self):  # type: ignore[arg-type]
+            _v = getattr(self, _f.name)
+            if _v is not None:
+                initialize_deferred_fields_recursive(_v, self)
 
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
@@ -1361,13 +1369,13 @@ class VllmConfig:
         self.compilation_config.pass_config.log_enabled_passes()
 
         # Validate that every sub-config with Deferred() fields had them all
-        # initialized before __post_init__ completed.  Auto-discovery via the
-        # HasDeferredFields Protocol means new @config classes with Deferred()
-        # fields are covered automatically without touching this loop.
+        # initialized before __post_init__ completed.  The recursive walk means
+        # new @config classes with Deferred() fields nested at any depth are
+        # covered automatically without touching this code.
         for _f in fields(self):  # type: ignore[arg-type]
             _value = getattr(self, _f.name)
-            if isinstance(_value, HasDeferredFields):
-                _value.validate_deferred_fields_initialized()
+            if _value is not None:
+                validate_deferred_fields_recursive(_value)
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
