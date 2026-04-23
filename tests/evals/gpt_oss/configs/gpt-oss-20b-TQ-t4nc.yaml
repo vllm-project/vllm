@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+model_name: "openai/gpt-oss-20b"
+metric_threshold: 0.56
+reasoning_effort: "low"
+server_args: "--kv-cache-dtype turboquant_4bit_nc --kv_cache_dtype_skip_layers sliding_window --max-model-len 4096"
