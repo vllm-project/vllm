@@ -673,7 +673,6 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
             if not self._has_mamba
@@ -1012,11 +1011,8 @@ class NixlConnectorWorker:
             is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
             block_len_per_layer=self.block_len_per_layer,
             block_size=self.block_size,
-            remote_tp_size=remote_tp_size,
-            remote_block_size=nixl_agent_meta.block_size,
-            remote_num_blocks=nixl_agent_meta.num_blocks,
-            remote_block_lens=nixl_agent_meta.block_lens,
-            remote_physical_blocks_per_logical=physical_blocks_per_logical,
+            remote_info=transfer_info,
+            remote_meta=nixl_agent_meta,
         )
         if self._has_mamba:
             assert self._conv_decomp is not None
@@ -1025,7 +1021,6 @@ class NixlConnectorWorker:
                 group_kinds=self._group_kinds,
                 conv_decomp=self._conv_decomp,
                 ssm_sizes=self._mamba_ssm_size,
-                remote_ssm_sizes=nixl_agent_meta.ssm_sizes,
             )
         else:
             self._transfer_plans[engine_id] = generate_dense_plan(
@@ -1901,21 +1896,22 @@ class NixlConnectorWorker:
         ]
 
     def _logical_to_remote_kernel_block_ids(
-        self, block_ids: BlockIds, remote_ratio: int
+        self, block_ids: BlockIds, remote_physical_per_logical: int
     ) -> BlockIds:
         """Map logical block IDs to physical kernel block IDs on the remote.
 
         Args:
             block_ids: per-group lists of logical block IDs.
-            remote_ratio: remote engine's physical blocks per logical block.
+            remote_physical_per_logical: remote engine's physical blocks
+                per logical block.
 
         Returns:
             Same structure with FA groups expanded (each logical block L
-            becomes kernel blocks [L*remote_ratio .. L*remote_ratio +
-            local_ratio - 1]).  Mamba groups are passed through unchanged.
+            becomes kernel blocks [L*ratio .. L*ratio + local_ratio - 1]).
+            Mamba groups are passed through unchanged.
         """
         local_ratio = self._physical_blocks_per_logical_kv_block
-        if remote_ratio == 1:
+        if remote_physical_per_logical == 1:
             return block_ids
         local_arange = np.arange(local_ratio).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
@@ -1923,7 +1919,7 @@ class NixlConnectorWorker:
         for i, group in enumerate(block_ids):
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec):
                 arr = np.array(group).reshape(-1, 1)
-                expanded = (arr * remote_ratio + local_arange).flatten()
+                expanded = (arr * remote_physical_per_logical + local_arange).flatten()
                 result.append(expanded.tolist())
             else:
                 # Mamba blocks are 1:1 logical-to-physical (no expansion).

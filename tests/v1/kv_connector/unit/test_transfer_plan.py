@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.utils import EngineTransferInfo
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
     GroupKind,
@@ -77,11 +78,18 @@ def _common_plan_params(
         is_blocks_first=is_blocks_first,
         block_len_per_layer=block_len_per_layer,
         block_size=block_size,
-        remote_tp_size=remote_tp_size,
-        remote_block_size=remote_block_size,
-        remote_num_blocks=remote_num_blocks,
-        remote_block_lens=remote_block_lens,
-        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+        remote_info=EngineTransferInfo(
+            remote_tp_size=remote_tp_size,
+            remote_block_size=remote_block_size,
+            remote_block_len=remote_block_lens[0],
+            remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+        ),
+        remote_meta=_make_nixl_meta(
+            base_addrs=[0] * len(block_len_per_layer),
+            num_blocks=remote_num_blocks,
+            block_lens=remote_block_lens,
+            block_size=remote_block_size,
+        ),
         local_physical_blocks_per_logical=local_physical_blocks_per_logical,
     )
 
