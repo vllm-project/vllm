@@ -12,7 +12,6 @@ Architecture:
        — the ONLY model-specific code.
     2. Generic executors (build_remote_descs_from_plan, etc.)
        — consume plans without model branching.
-    3. Visualization (visualize_plan).
 """
 
 from __future__ import annotations
@@ -101,9 +100,6 @@ class RegionPlan:
     page_stride: int
     num_blocks: int
 
-    # Block ID expansion (HMA / kernel block mismatch)
-    physical_per_logical: int
-
 
 @dataclass(frozen=True)
 class EngineTransferPlan:
@@ -123,9 +119,6 @@ class EngineTransferPlan:
     fa_regions: tuple[RegionPlan, ...]
     ssm_regions: tuple[RegionPlan, ...]
 
-    # Per-group geometric properties (worker-facing, model-agnostic)
-    physical_per_logical: tuple[int, ...]
-
     # Per-group type — used only for descriptor indexing (save path).
     group_kinds: tuple[GroupKind, ...]
 
@@ -137,12 +130,6 @@ class EngineTransferPlan:
 
     # Maps each source rank to its FA head slot index.
     rank_to_attention_slot: dict[int, int]
-
-    # Remote engine facts (needed by worker at read time)
-    remote_tp_size: int
-    remote_block_size: int
-    remote_block_len: int
-    remote_physical_blocks_per_logical: int
 
     # Stride for expanding remote logical block IDs to kernel block IDs.
     # Dense: local_physical_blocks_per_logical.
@@ -268,7 +255,6 @@ def _build_fa_regions(
     num_attn_reads: int,
     rank_offset_factor: int,
     remote_num_blocks: int,
-    remote_physical_blocks_per_logical: int,
 ) -> list[RegionPlan]:
     """Build FA (attention) regions for the transfer plan.
 
@@ -292,7 +278,6 @@ def _build_fa_regions(
                 offset_in_page=rank_offset,
                 page_stride=page_stride,
                 num_blocks=remote_num_blocks,
-                physical_per_logical=remote_physical_blocks_per_logical,
             )
         )
 
@@ -306,7 +291,6 @@ def _build_fa_regions(
                     offset_in_page=rank_offset + page_stride // 2,
                     page_stride=page_stride,
                     num_blocks=remote_num_blocks,
-                    physical_per_logical=remote_physical_blocks_per_logical,
                 )
             )
 
@@ -354,21 +338,15 @@ def generate_dense_plan(
         num_attn_reads=len(m.source_ranks_per_group[0]),
         rank_offset_factor=m.rank_offset_factor,
         remote_num_blocks=remote_num_blocks,
-        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
     )
 
     return EngineTransferPlan(
         fa_regions=tuple(fa_regions),
         ssm_regions=(),
-        physical_per_logical=(remote_physical_blocks_per_logical,),
         group_kinds=(GroupKind.FA,),
         source_ranks_per_group=m.source_ranks_per_group,
         all_source_ranks=m.all_source_ranks,
         rank_to_attention_slot=m.rank_to_attention_slot,
-        remote_tp_size=remote_tp_size,
-        remote_block_size=remote_block_size,
-        remote_block_len=remote_block_lens[0],
-        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
         remote_expansion_stride=local_physical_blocks_per_logical,
     )
 
@@ -417,7 +395,6 @@ def generate_mamba_plan(
         num_attn_reads=len(m.source_ranks_per_group[0]),
         rank_offset_factor=m.rank_offset_factor,
         remote_num_blocks=remote_num_blocks,
-        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
     )
 
     # ---- SSM regions ----
@@ -462,7 +439,6 @@ def generate_mamba_plan(
                     offset_in_page=off,
                     page_stride=page_stride,
                     num_blocks=ssm_num_blocks,
-                    physical_per_logical=1,
                 )
             )
 
@@ -474,25 +450,16 @@ def generate_mamba_plan(
                 offset_in_page=conv_size_remote + local_offset * ssm_read_size,
                 page_stride=page_stride,
                 num_blocks=ssm_num_blocks,
-                physical_per_logical=1,
             )
         )
 
-    physical_per_logical_per_group = tuple(
-        1 if k.is_ssm else remote_physical_blocks_per_logical for k in group_kinds
-    )
     return EngineTransferPlan(
         fa_regions=tuple(fa_regions),
         ssm_regions=tuple(ssm_regions),
-        physical_per_logical=physical_per_logical_per_group,
         group_kinds=group_kinds,
         source_ranks_per_group=m.source_ranks_per_group,
         all_source_ranks=m.all_source_ranks,
         rank_to_attention_slot=m.rank_to_attention_slot,
-        remote_tp_size=remote_tp_size,
-        remote_block_size=remote_block_size,
-        remote_block_len=remote_block_lens[0],
-        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
         remote_expansion_stride=remote_physical_blocks_per_logical,
     )
 
@@ -500,29 +467,6 @@ def generate_mamba_plan(
 # ======================================================================
 # 4. Generic executors — identical for ALL models
 # ======================================================================
-
-
-def logical_to_kernel_block_ids(
-    block_ids: BlockIds,
-    physical_per_logical: tuple[int, ...],
-) -> BlockIds:
-    """Convert logical block IDs to kernel-level physical block IDs.
-
-    Each group has its own ratio in ``physical_per_logical``.
-    Groups with ratio == 1 are passed through unchanged.
-    """
-    if all(r == 1 for r in physical_per_logical):
-        return block_ids
-    result: list[list[int]] = []
-    for i, group in enumerate(block_ids):
-        ratio = physical_per_logical[i]
-        if ratio == 1:
-            result.append(group)
-        else:
-            arr = np.array(group).reshape(-1, 1)
-            arange = np.arange(ratio).reshape(1, -1)
-            result.append((arr * ratio + arange).flatten().tolist())
-    return result
 
 
 def build_remote_descs_from_plan(
@@ -776,48 +720,3 @@ def build_local_descs(
         physical_blocks_per_logical,
     )
     return fa_descs + mamba_descs
-
-
-# ======================================================================
-# 6. Visualization
-# ======================================================================
-
-
-def visualize_plan(plan: EngineTransferPlan) -> str:
-    """Human-readable transfer plan for logging and debugging."""
-    lines = [
-        f"EngineTransferPlan(remote_tp={plan.remote_tp_size}, "
-        f"remote_bs={plan.remote_block_size}):",
-        f"  Source ranks: all={list(plan.all_source_ranks)}",
-    ]
-    total_descs = 0
-
-    if plan.fa_regions:
-        lines.append(f"  FA regions ({len(plan.fa_regions)}):")
-        for idx, r in enumerate(plan.fa_regions):
-            ratio_str = (
-                f", p/l={r.physical_per_logical}" if r.physical_per_logical > 1 else ""
-            )
-            lines.append(
-                f"    [{idx}] {r.kind.value:12s} L{r.layer_idx}  "
-                f"{r.descriptor_bytes:6d}B x {r.num_blocks:4d} blks  "
-                f"stride={r.page_stride:6d}  "
-                f"off={r.offset_in_page:6d}"
-                f"{ratio_str}"
-            )
-            total_descs += r.num_blocks
-
-    if plan.ssm_regions:
-        lines.append(f"  SSM regions ({len(plan.ssm_regions)}):")
-        for idx, r in enumerate(plan.ssm_regions):
-            lines.append(
-                f"    [{idx}] {r.kind.value:12s} L{r.layer_idx}  "
-                f"{r.descriptor_bytes:6d}B x {r.num_blocks:4d} blks  "
-                f"stride={r.page_stride:6d}  "
-                f"off={r.offset_in_page:6d}"
-            )
-            total_descs += r.num_blocks
-
-    lines.append(f"  Groups: {[k.value for k in plan.group_kinds]}")
-    lines.append(f"  Total descriptors: {total_descs}")
-    return "\n".join(lines)
