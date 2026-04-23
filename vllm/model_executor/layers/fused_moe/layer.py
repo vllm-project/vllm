@@ -1618,6 +1618,7 @@ class FusedMoE(PluggableLayer):
         return s
 
 
+# This is a temporary forwarding method which will be removed/modified layer.
 def fused_moe_make_expert_params_mapping(
     model: torch.nn.Module,
     ckpt_gate_proj_name: str,
