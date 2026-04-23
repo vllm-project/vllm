@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
+    BasevLLMParameter,
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
     GroupQuantScaleParameter,
@@ -41,7 +42,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     PerTensorScaleParameter,
     RowvLLMParameter,
-    BasevLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
 

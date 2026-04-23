@@ -500,11 +500,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     if tp_rank != 0:
                         weight.zero_()
                 weight_loader(
-                    param,
-                    weight,
-                    weight_name=name,
-                    shard_id=None,
-                    expert_id=None,
+                    param, weight, weight_name=name, shard_id=None, expert_id=None
                 )
                 loaded_params.add(name)
                 continue
