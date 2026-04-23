@@ -1003,28 +1003,33 @@ class NixlConnectorWorker:
         # Generate the pre-computed transfer plan for this remote engine.
         # Plan generation is model-aware (if/else), but the per-request
         # hot path only consumes the plan (model-agnostic).
-        plan_common = dict(
-            tp_rank=self.tp_rank,
-            tp_size=self.world_size,
-            is_mla=self.use_mla,
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
-            block_len_per_layer=self.block_len_per_layer,
-            block_size=self.block_size,
-            remote_info=transfer_info,
-            remote_meta=nixl_agent_meta,
-        )
         if self._has_mamba:
             assert self._conv_decomp is not None
             self._transfer_plans[engine_id] = generate_mamba_plan(
-                **plan_common,
+                tp_rank=self.tp_rank,
+                tp_size=self.world_size,
+                is_mla=self.use_mla,
+                total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+                is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+                block_len_per_layer=self.block_len_per_layer,
+                block_size=self.block_size,
+                remote_info=transfer_info,
+                remote_meta=nixl_agent_meta,
                 group_kinds=self._group_kinds,
                 conv_decomp=self._conv_decomp,
                 ssm_sizes=self._mamba_ssm_size,
             )
         else:
             self._transfer_plans[engine_id] = generate_dense_plan(
-                **plan_common,
+                tp_rank=self.tp_rank,
+                tp_size=self.world_size,
+                is_mla=self.use_mla,
+                total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+                is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+                block_len_per_layer=self.block_len_per_layer,
+                block_size=self.block_size,
+                remote_info=transfer_info,
+                remote_meta=nixl_agent_meta,
                 local_physical_blocks_per_logical=(
                     self._physical_blocks_per_logical_kv_block
                 ),
