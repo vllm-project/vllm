@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -155,7 +156,7 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
 
-def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
+def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
     """Map user's moe_backend string to Mxfp4MoeBackend."""
     mapping: dict[str, Mxfp4MoeBackend] = {
         "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -212,10 +213,12 @@ def select_gpt_oss_mxfp4_moe_backend(
     Select the primary MXFP4 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    triton_kernels_supported = has_triton_kernels() and (
-        9,
-        0,
-    ) <= current_platform.get_device_capability() < (11, 0)
+    device_capability = current_platform.get_device_capability()
+    triton_kernels_supported = (
+        has_triton_kernels()
+        and device_capability is not None
+        and (9, 0) <= device_capability < (11, 0)
+    )
 
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
@@ -266,7 +269,7 @@ def select_gpt_oss_mxfp4_moe_backend(
                 k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -360,10 +363,10 @@ def select_gpt_oss_mxfp4_moe_backend(
                 k_cls, config, kMxfp4Static, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
             else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                logger.debug_once(_make_log_unsupported(backend, reason))
 
     if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
@@ -858,7 +861,7 @@ def make_mxfp4_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:

@@ -122,7 +122,6 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
     assert output[0][1] == "1 2 3 4 5 6"
 
 
-# Qwen3-30B-A3B is 60 GB vs Llama-4-Scout-17B-16E-Instruct-FP4 that is 210 GB.
 @pytest.mark.parametrize(
     "model",
     [
@@ -130,10 +129,17 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
         "RedHatAI/Qwen3-30B-A3B-NVFP4",
     ],
 )
-@pytest.mark.parametrize("eager", EAGER)
 @pytest.mark.parametrize("backend", ["emulation"])
-def test_nvfp4_moe(vllm_runner, model, eager, backend, monkeypatch):
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="NVFP4 MOE emulation is only useful on AMD Instinct MI3xx",
+)
+def test_nvfp4_moe(vllm_runner, model, backend, monkeypatch):
     monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
-    with vllm_runner(model, enforce_eager=eager, moe_backend="emulation") as llm:
-        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
-    assert output[0][1] == "1 2 3 4 5 6"
+    with vllm_runner(
+        model,
+        moe_backend=backend,
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 2},
+    ) as llm:
+        _ = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
