@@ -184,9 +184,8 @@ class OpenAISpeechToText(OpenAIServing):
         request_id: str,
     ) -> tuple[list[EngineInput], float]:
         # Validate request
-        language = self.model_cls.validate_language(request.language)
-        # Skip to_language validation to avoid extra logging for Whisper.
-        to_language = (
+        request.language = self.model_cls.validate_language(request.language)
+        request.to_language = (
             self.model_cls.validate_language(request.to_language)
             if request.to_language
             else None
@@ -229,28 +228,23 @@ class OpenAISpeechToText(OpenAIServing):
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
 
-        if language is None and getattr(
+        if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
             # Auto-detect language from the first chunk.
-            language = await self._detect_language(
+            request.language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
             )
-            request.language = language
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
-            # The model has control over the construction, as long as it
-            # returns a valid PromptType.
-            prompt = self.model_cls.get_generation_prompt(
+            stt_params = request.build_stt_params(
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
-                to_language=to_language,
             )
+            prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
             if request.response_format == "verbose_json":
@@ -388,6 +382,9 @@ class OpenAISpeechToText(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if not request.model:
+            request.model = self.models.model_name()
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a

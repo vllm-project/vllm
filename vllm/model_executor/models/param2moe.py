@@ -16,7 +16,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# limitations under the License.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
@@ -33,7 +32,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -202,10 +201,10 @@ class Param2MoEAttention(nn.Module):
         )
 
         self.attn = Attention(
-            num_heads=self.num_heads,
+            num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
-            num_kv_heads=self.num_kv_heads,
+            num_kv_heads=self.num_local_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -216,15 +215,15 @@ class Param2MoEAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # 1. Fused QKV projection → split into local Q / K / V
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split(
             [self.q_size_local, self.kv_size_local, self.kv_size_local],
             dim=-1,
         )
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
-        # 2. Optional per-head QK norms
-        #    Reshape to (T, num_local_heads, head_dim), norm, reshape back.
         if self.use_qk_norm:
             T = q.shape[0]
             q = self.q_layernorm(q.view(T, self.num_local_heads, self.head_dim)).view(
@@ -234,13 +233,8 @@ class Param2MoEAttention(nn.Module):
                 k.view(T, self.num_local_kv_heads, self.head_dim)
             ).view(T, self.kv_size_local)
 
-        # 3. Rotary position embeddings
         q, k = self.rotary_emb(positions, q, k)
-
-        # 4. Paged attention
         attn_output = self.attn(q, k, v)
-
-        # 5. Output projection
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -359,13 +353,12 @@ class Param2MoEMoEBlock(nn.Module):
         else:
             self.shared_experts = None  # type: ignore[assignment]
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -377,7 +370,7 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> SharedFusedMoE:
+    def maybe_get_fused_moe(self) -> FusedMoE:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -394,23 +387,10 @@ class Param2MoEMoEBlock(nn.Module):
             self.gate.weight.float(),
         ).to(hidden_states.dtype)
 
-        final_hidden = self.experts(
+        expert_output = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-
-        if self.shared_experts is not None:
-            shared_output, expert_output = final_hidden
-        else:
-            shared_output, expert_output = None, final_hidden
-
-        if shared_output is not None:
-            expert_output = expert_output + shared_output
-
-        if self.tp_size > 1:
-            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(
-                expert_output
-            )
 
         return expert_output.view(num_tokens, hidden_dim)
 
@@ -710,7 +690,7 @@ class Param2MoEModel(nn.Module):
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return SharedFusedMoE.make_expert_params_mapping(
+        return FusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

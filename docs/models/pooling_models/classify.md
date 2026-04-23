@@ -273,27 +273,25 @@ Affine Score Calibration, also known as [Platt Scaling](https://en.wikipedia.org
 
 The calibration follows the transformation:
 
-`activation(logit_scale * (logit - logit_bias))`
+`activation((logit - logit_mean) / logit_sigma)`
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `logit_bias` | `None` | Bias subtracted from logits before activation |
-| `logit_scale` | `None` | Scale factor applied to logits after bias subtraction |
-
-Note: `logit_bias` is **subtracted** from the logits (not added), consistent with the `sigmoid_normalize` convention where `sigmoid(x - bias)` centers the sigmoid around the bias value.
+| `logit_mean` | `None` | Mean subtracted from logits (centers scores) |
+| `logit_sigma` | `None` | Standard deviation used to scale logits after mean subtraction |
 
 The computation order is as follows:
 
 ```python
-logits -= logit_bias    # subtract bias (center scores)
-logits *= logit_scale   # scale logits
+logits -= logit_mean   # subtract mean (center scores)
+logits /= logit_sigma  # divide by sigma (scale)
 logits = activation(logits)  # e.g. sigmoid
 ```
 
 Example configuration:
 
 ```bash
---pooler-config '{"use_activation": true, "logit_bias": 4.5, "logit_scale": 1.0}'
+--pooler-config '{"use_activation": true, "logit_mean": 4.5, "logit_sigma": 1.0}'
 ```
 
 ## Removed Features
@@ -301,3 +299,7 @@ Example configuration:
 ### Remove softmax from PoolingParams
 
 We have already removed `softmax` and `activation` from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+
+### Remove `logit_bias` and `logit_scale`
+
+`logit_bias` and `logit_scale` are deprecated aliases for `logit_mean` and `logit_sigma` respectively. When using `logit_scale`, it is automatically converted to `logit_sigma = 1/logit_scale`. These deprecated parameters will be removed in v0.21.
