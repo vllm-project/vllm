@@ -83,7 +83,9 @@ pub(crate) fn prepare_completion_request(
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
             bad_words: None,
+            logprob_token_ids: None,
             structured_outputs,
+            skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
                 request.vllm_xargs,
                 request.kv_transfer_params.as_ref(),

@@ -78,8 +78,17 @@ pub struct SamplingParams {
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Words to avoid during generation (tokenized to IDs during lowering).
     pub bad_words: Option<Vec<String>>,
+    /// Specific token IDs for which log probabilities should be returned at each position.
+    ///
+    /// When set, the engine returns logprobs for exactly these tokens in addition to the
+    /// sampled/scored token. Mutually exclusive with `logprobs` in practice.
+    pub logprob_token_ids: Option<Vec<u32>>,
     /// Parameters for configuring structured outputs (guided decoding).
     pub structured_outputs: Option<StructuredOutputsParams>,
+    /// If true, bypass reads from the prefix cache for this request (the prompt will not
+    /// reuse cached KV blocks from earlier requests, though newly computed blocks may still
+    /// populate the cache). `None` defers to engine-core defaults.
+    pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
 }
@@ -105,7 +114,9 @@ impl Default for SamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words: None,
+            logprob_token_ids: None,
             structured_outputs: None,
+            skip_reading_prefix_cache: None,
             vllm_xargs: None,
         }
     }

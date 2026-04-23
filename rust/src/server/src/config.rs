@@ -55,6 +55,8 @@ pub struct Config {
     pub enable_log_requests: bool,
     /// When `true`, suppress periodic stats logging (throughput, queue depth, cache usage).
     pub disable_log_stats: bool,
+    /// TCP port for the gRPC Generate service. When `None`, no gRPC server is started.
+    pub grpc_port: Option<u16>,
 }
 
 impl Config {

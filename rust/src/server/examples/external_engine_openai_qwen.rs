@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         enable_log_requests: false,
         disable_log_stats: false,
+        grpc_port: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

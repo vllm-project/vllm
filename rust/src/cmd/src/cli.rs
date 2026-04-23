@@ -114,6 +114,10 @@ pub struct SharedRuntimeArgs {
     /// instead of the model's `max_position_embeddings` from `config.json`.
     #[arg(long)]
     pub max_model_len: Option<u32>,
+    /// TCP port for the gRPC Generate service. When not set, no gRPC server is started.
+    #[arg(long)]
+    #[serde(default)]
+    pub grpc_port: Option<u16>,
 
     /// The file path to the chat template, or the template in single-line form for the specified
     /// model.
@@ -199,6 +203,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
+            grpc_port: self.grpc_port,
         }
     }
 
@@ -233,6 +238,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
+            grpc_port: self.grpc_port,
         }
     }
 }

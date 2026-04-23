@@ -44,6 +44,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         max_model_len: Some(
                             512,
                         ),
+                        grpc_port: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -203,6 +204,7 @@ fn frontend_args_accept_json() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         max_model_len: None,
+                        grpc_port: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -585,6 +587,7 @@ fn serve_args_accept_handshake_aliases() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         max_model_len: None,
+                        grpc_port: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -697,6 +700,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template_content_format: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
+            grpc_port: None,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -756,6 +760,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template_content_format: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
+            grpc_port: None,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -830,6 +835,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template_content_format: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
+            grpc_port: None,
         }
     "#]]
     .assert_debug_eq(&config);

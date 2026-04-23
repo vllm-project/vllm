@@ -10,6 +10,8 @@ futures.workspace = true
 futures-async-stream.workspace = true
 http-body.workspace = true
 libc.workspace = true
+prost.workspace = true
+prost-types.workspace = true
 rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,7 +19,10 @@ serde_with.workspace = true
 socket2.workspace = true
 thiserror-ext.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-futures.workspace = true
@@ -29,6 +34,9 @@ vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-metrics.workspace = true
 vllm-text.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

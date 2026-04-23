@@ -9,6 +9,11 @@ use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
 };
 
+/// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM / OpenAI default.
+fn default_completion_max_tokens() -> Option<u32> {
+    Some(16)
+}
+
 /// vLLM-compatible request type for the Completions API.
 ///
 /// Mirrors the Python vLLM `CompletionRequest` class. The local copy keeps the request type
@@ -40,7 +45,9 @@ pub struct CompletionRequest {
     /// Include the log probabilities on the logprobs most likely tokens
     pub logprobs: Option<u32>,
 
-    /// The maximum number of tokens to generate
+    /// The maximum number of tokens to generate (defaults to 16 when absent, matching the
+    /// Python vLLM / OpenAI API convention)
+    #[serde(default = "default_completion_max_tokens")]
     pub max_tokens: Option<u32>,
 
     /// How many completions to generate for each prompt
