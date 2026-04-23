@@ -192,10 +192,13 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
     interleaved [THTHWHTHW...TT], preserving frequency continuity.
     """
-    x_t = x[0].clone()
-    x_t[..., 1 : mrope_section[1] * 3 : 3] = x[1, ..., 1 : mrope_section[1] * 3 : 3]
-    x_t[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
-    return x_t
+    half_rd = x.shape[-1]
+    idx = torch.arange(half_rd, device=x.device)
+    h_mask = (idx % 3 == 1) & (idx < 3 * mrope_section[1])
+    w_mask = (idx % 3 == 2) & (idx < 3 * mrope_section[2])
+    out = torch.where(h_mask, x[1], x[0])
+    out = torch.where(w_mask, x[2], out)
+    return out
 
 
 class MRotaryEmbedding(RotaryEmbeddingBase):
