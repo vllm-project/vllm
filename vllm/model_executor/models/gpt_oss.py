@@ -394,7 +394,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w13",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -416,7 +416,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w2",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -442,7 +442,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w13",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -465,7 +465,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w2",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -484,7 +484,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     param,
                     narrow_weight,
                     weight_name=name,
-                    shard_id="w13",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
@@ -503,7 +503,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     param,
                     weight,
                     weight_name=name,
-                    shard_id="w2",
+                    shard_id=None,
                     expert_id=None,
                 )
                 loaded_params.add(name)
