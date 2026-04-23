@@ -47,7 +47,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import DeferredFieldsMixin, SupportsHash, _DeferredValue, config, replace
+from .utils import HasDeferredFields, SupportsHash, _DeferredValue, config, replace
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -974,7 +974,9 @@ class VllmConfig:
         # Initialize deferred fields in PassConfig (must run after the
         # optimization-level table is applied so the table's explicit values
         # take priority over the Deferred fallbacks).
-        self.compilation_config.pass_config.initialize_deferred_fields(self)
+        pass_config = self.compilation_config.pass_config
+        if isinstance(pass_config, HasDeferredFields):
+            pass_config.initialize_deferred_fields(self)
 
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
@@ -1358,13 +1360,13 @@ class VllmConfig:
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
-        # Validate that every DeferredFieldsMixin sub-config had all its
-        # deferred fields initialized before __post_init__ completed.
-        # Auto-discovery means new DeferredFieldsMixin sub-configs are covered
-        # automatically without touching this loop.
+        # Validate that every sub-config with Deferred() fields had them all
+        # initialized before __post_init__ completed.  Auto-discovery via the
+        # HasDeferredFields Protocol means new @config classes with Deferred()
+        # fields are covered automatically without touching this loop.
         for _f in fields(self):  # type: ignore[arg-type]
             _value = getattr(self, _f.name)
-            if isinstance(_value, DeferredFieldsMixin):
+            if isinstance(_value, HasDeferredFields):
                 _value.validate_deferred_fields_initialized()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:

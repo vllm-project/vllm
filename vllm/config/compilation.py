@@ -14,7 +14,6 @@ import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Deferred,
-    DeferredFieldsMixin,
     Range,
     config,
     get_hash_factors,
@@ -106,7 +105,7 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-class PassConfig(DeferredFieldsMixin):
+class PassConfig:
     """Configuration for custom Inductor passes.
 
     This is separate from general `CompilationConfig` so that inductor passes
