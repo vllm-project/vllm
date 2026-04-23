@@ -48,6 +48,7 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
@@ -164,6 +165,16 @@ class TurboQuantAttentionBackend(AttentionBackend):
         # not the model's actual head_dim. Accept any positive value.
         return head_size > 0
 
+    @classmethod
+    def supports_sink(cls) -> bool:
+        """Return True to indicate TurboQuant supports sink tokens.
+
+        Sink tokens provide stable attention anchors at the start of context.
+        The TQ decode kernel initializes online softmax with pre-computed
+        sink attention logits for proper attention distribution.
+        """
+        return True
+
 
 @dataclass
 class TurboQuantMetadata(AttentionMetadata):
@@ -277,6 +288,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
+
+        # Sink tokens support: store reference from kwargs if provided.
+        # Sinks are pre-computed attention logits [Hq] that anchor attention
+        # to sink tokens at the start of context (used by GPT-OSS and similar).
+        # Note: sinks is passed directly via **extra_impl_args spread, not nested.
+        self.sinks = kwargs.get("sinks")
 
     def _ensure_on_device(self, layer, device):
         """One-time derivation of TQ buffers (rotation matrix, midpoints).
@@ -498,22 +515,26 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         layer: Any = None,
     ) -> torch.Tensor:
         N, Hq, D = query.shape
+        Hk = key.shape[1]
 
-        # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
+        # Fast path: first-chunk prefills (all K/V in batch).
         # max_query_len == max_seq_len means no request has prior cached KV.
-        # Both are Python ints — no GPU sync.
-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
-            return flash_attn_varlen_func(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                cu_seqlens_k=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_query_len,
-                max_seqlen_k=attn_metadata.max_query_len,
-                softmax_scale=self.scale,
-                causal=True,
-            )
+        # When sinks are present, skip this fast path because the paged attention
+        # block table setup is incorrect for batched sequences (all sequences
+        # would incorrectly attend to concatenated K/V from all requests).
+        if self.sinks is None and attn_metadata.max_query_len == attn_metadata.max_seq_len:
+            if _HAS_FLASH_ATTN:
+                return flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=attn_metadata.query_start_loc,
+                    cu_seqlens_k=attn_metadata.query_start_loc,
+                    max_seqlen_q=attn_metadata.max_query_len,
+                    max_seqlen_k=attn_metadata.max_query_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                )
 
         # Continuation or no flash_attn: per-request attention.
         # For continuation chunks (seq_len > q_len), we must attend to
@@ -549,7 +570,40 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
-                if _HAS_FLASH_ATTN:
+                if self.sinks is not None:
+                    # Use unified attention for sink support
+                    out = torch.empty_like(q_seq)
+                    k_cache = k_seq.unsqueeze(0)  # [1, q_len, Hk, D]
+                    v_cache = v_seq.unsqueeze(0)  # [1, q_len, Hk, D]
+                    cu_single = torch.tensor(
+                        [0, q_len], dtype=torch.int32, device=query.device
+                    )
+                    seq_lens_single = torch.tensor(
+                        [q_len], dtype=torch.int32, device=query.device
+                    )
+                    block_table_single = torch.zeros(
+                        (1, 1), dtype=torch.int32, device=query.device
+                    )
+                    unified_attention(
+                        q=q_seq,
+                        k=k_cache,
+                        v=v_cache,
+                        out=out,
+                        cu_seqlens_q=cu_single,
+                        max_seqlen_q=q_len,
+                        seqused_k=seq_lens_single,
+                        max_seqlen_k=q_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        window_size=(-1, -1),
+                        block_table=block_table_single,
+                        softcap=0.0,
+                        q_descale=None,
+                        k_descale=None,
+                        v_descale=None,
+                        sinks=self.sinks,
+                    )
+                elif _HAS_FLASH_ATTN:
                     _cu_2[1] = q_len
                     cu = _cu_2
                     out = flash_attn_varlen_func(
@@ -606,6 +660,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
+                        sinks=self.sinks,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -796,5 +851,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             lse_buf=lse_buf,
             buf_holder=layer,
             max_num_kv_splits=self.max_num_kv_splits,
+            sinks=self.sinks,
         )
         return result

@@ -1642,30 +1642,21 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        # TurboQuant: auto-skip first/last 2 layers (boundary protection).
-        # These layers are most sensitive to quantization error.
-        # Users can add extra layers via --kv-cache-dtype-skip-layers.
         if resolved_cache_dtype.startswith("turboquant_"):
-            if model_config.is_hybrid:
-                raise NotImplementedError(
-                    "TurboQuant KV cache is not supported for hybrid "
-                    "(attention + Mamba) models. Boundary layer protection "
-                    "requires uniform attention layers."
-                )
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
 
-            num_layers = model_config.hf_text_config.num_hidden_layers
-            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
-            merged = sorted(existing | set(boundary), key=lambda x: int(x))
-            cache_config.kv_cache_dtype_skip_layers = merged
-            logger.info(
-                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
-                merged,
-                num_layers,
-            )
+            combined = existing | set(boundary)
+            # Separate special string values (e.g., "sliding_window") from
+            # numeric layer indices for proper sorting
+            special_values = {v for v in combined if not v.isdigit()}
+            numeric_values = {v for v in combined if v.isdigit()}
+            cache_config.kv_cache_dtype_skip_layers = sorted(
+                numeric_values, key=int
+            ) + sorted(special_values)
 
         ray_runtime_env = None
         if is_ray_initialized():
