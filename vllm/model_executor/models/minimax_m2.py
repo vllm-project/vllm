@@ -36,10 +36,12 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -104,7 +106,6 @@ class MiniMaxM2MoE(nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            reduce_results=False,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -134,9 +135,6 @@ class MiniMaxM2MoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        final_hidden_states = final_hidden_states
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -398,7 +396,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",

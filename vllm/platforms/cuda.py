@@ -131,6 +131,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
         else:
             return [
@@ -138,6 +139,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
 
 
@@ -255,11 +257,6 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities = []
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
 
-        # TurboQuant KV cache: route directly to TQ backend
-        kv_cache_dtype = attn_selector_config.kv_cache_dtype
-        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
-            return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
-
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             device_capability,
@@ -372,7 +369,6 @@ class CudaPlatformBase(Platform):
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
             "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
         )
 
         return selected_backend.get_path()
@@ -426,7 +422,6 @@ class CudaPlatformBase(Platform):
                 if is_backend_supported:
                     logger.info_once(
                         f"Using backend {vit_attn_backend} for vit attention",
-                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:

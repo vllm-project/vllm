@@ -123,7 +123,6 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "NixlEPPrepareAndFinalize is setup to dispatch raw/unquantized "
                 f"activations despite ({fused_experts.__class__.__name__}) being able "
                 "to support quantized activations.",
-                scope="local",
             )
 
     def num_dispatchers(self) -> int:

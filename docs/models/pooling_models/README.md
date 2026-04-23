@@ -59,6 +59,16 @@ please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models
 are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
+### Pooling Types
+
+| Pooling Tasks  | Granularity   | Description                                                                                                                                                                                       |
+|----------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CLS` pooling  | Sequence-wise | For BERT‑like (bidirectional self‑attention) models, CLS pooling is used by default. This means the last_hidden_states corresponding to the first token (the [CLS] token) is taken as the output. |
+| `LAST` pooling | Sequence-wise | For GPT‑like (causal self‑attention) models, LAST pooling is used by default. This means the last_hidden_states corresponding to the last token is taken as the output.                           |
+| `MEAN` pooling | Sequence-wise | Many studies have shown that averaging the last_hidden_states over all input tokens performs better on certain downstream tasks. Therefore, more and more models are using MEAN pooling.          |
+| `ALL` pooling  | Token-wise    | Outputs the last_hidden_states for all input tokens.                                                                                                                                              |
+| `STEP` pooling | Token-wise    | Filters and outputs the last_hidden_states corresponding to the token IDs returned by returned_token_ids.                                                                                         |
+
 ### Score Types
 
 The scoring models is designed to compute similarity scores between two input prompts. It supports three model types
@@ -276,10 +286,10 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task is deprecated and will be removed in v0.20. Please use `classify` instead. Only when a
-classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+`score` task have has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support
 
-Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task is not what you want,
+Pooling multitask support has been removed in v0.21. When the default pooling task is not what you want,
 you need to manually specify it via `PoolerConfig(task=<task>)` offline or `--pooler-config.task <task>` online.

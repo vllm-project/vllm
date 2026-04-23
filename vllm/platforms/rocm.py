@@ -33,6 +33,7 @@ try:
         amdsmi_init,
         amdsmi_shut_down,
         amdsmi_topo_get_link_type,
+        amdsmi_topo_get_numa_node_number,
     )
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
@@ -382,6 +383,7 @@ def _get_backend_priorities(
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    backends.append(AttentionBackendEnum.TURBOQUANT)
 
     return backends
 
@@ -799,7 +801,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        return on_gfx9() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
@@ -954,3 +956,30 @@ class RocmPlatform(Platform):
             rms_norm = default
 
         return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+
+    @classmethod
+    @with_amdsmi_context
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible GPU devices."""
+        try:
+            handles = amdsmi_get_processor_handles()
+            numa_nodes = []
+            for device_id in range(cls.device_count()):
+                physical_device_id = cls.device_id_to_physical_device_id(device_id)
+                try:
+                    numa_node = amdsmi_topo_get_numa_node_number(
+                        handles[physical_device_id]
+                    )
+                except AmdSmiException as e:
+                    logger.warning(
+                        "Could not detect NUMA node for GPU %d, "
+                        "disabling automatic NUMA binding: %s",
+                        device_id,
+                        e,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
+            return None
