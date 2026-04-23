@@ -7,14 +7,7 @@ Extracts hidden states from a CacheOnlyAttentionLayer's KV cache,
 mean-pools over prompt tokens, and returns the resulting vector via
 kv_transfer_params in the API response.
 
-Usage (server launch — requires extract_hidden_states spec decode method):
-    --speculative-config '{
-        "method": "extract_hidden_states",
-        "num_speculative_tokens": 1,
-        "draft_model_config": {
-            "hf_config": {"eagle_aux_hidden_state_layer_ids": [16]}
-        }
-    }'
+Usage (server launch):
     --kv-transfer-config '{
         "kv_connector": "MeanPoolHiddenStatesConnector",
         "kv_role": "kv_producer",
@@ -23,29 +16,18 @@ Usage (server launch — requires extract_hidden_states spec decode method):
         }
     }'
 
-WARNING: This connector uses a shared directory for communication.
-If running multiple vLLM instances, you MUST provide a unique `shared_storage_path`
-for each instance to avoid conflicts.
+Requires the target model to embed a ``CacheOnlyAttentionLayer`` whose
+prefix contains ``"hidden_state_cache"``. Supported architectures (which
+embed the layer automatically when this connector is configured):
+    - LlamaForCausalLM
+    - Qwen3ForCausalLM
 
-Files for completed requests are removed automatically.
-However, in case of a server crash, stale files may accumulate in
-the `shared_storage_path`. It is the user's responsibility to handle
-periodic cleanup of this directory.
+The model writes its hidden states into the layer; this
+connector then reads the cached values, mean-pools over prompt tokens,
+and returns the pooled vector.
 
-Note on last-layer hidden states:
-    Hidden states are captured by ``_maybe_add_hidden_state`` **before** the
-    final RMSNorm (``model.norm``). This means the last valid layer index
-    (``num_hidden_layers``) returns the **pre-norm** output, which differs
-    from HuggingFace's ``output_hidden_states`` where the last entry is
-    **post-norm**. For indices < ``num_hidden_layers``, vLLM and HF match.
-
-Limitations:
-    The extract_hidden_states method piggybacks on the speculative decoding
-    framework.
-
-    - Online serving (``vllm serve``): NOT supported.
-    - Offline batched inference (``llm.generate(prompts, ...)``): Fully
-      supported.
+Supports both offline batched inference (``llm.generate(...)``) and
+online serving (``vllm serve``).
 """
 
 import os
@@ -53,14 +35,21 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from torch import nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.models.extract_hidden_states import (
+    CacheOnlyAttentionLayer,
+    CacheOnlyAttentionMetadata,
+)
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -70,6 +59,66 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+CONNECTOR_NAME = "MeanPoolHiddenStatesConnector"
+HIDDEN_STATE_CACHE_PREFIX = "hidden_state_cache"
+
+
+def has_mean_pool_connector(vllm_config: "VllmConfig") -> bool:
+    """Return True if MeanPoolHiddenStatesConnector is configured.
+
+    Models call this in __init__ to decide whether to embed a
+    CacheOnlyAttentionLayer for capturing hidden states.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return False
+    return kv_transfer_config.kv_connector == CONNECTOR_NAME
+
+
+def maybe_init_hidden_state_cache(
+    vllm_config: "VllmConfig",
+    hidden_size: int,
+    num_hidden_layers: int,
+    prefix: str = "",
+) -> nn.Module | None:
+    """Create a CacheOnlyAttentionLayer if the connector is active.
+
+    Returns ``None`` when the connector is not configured or this is not
+    the last pipeline-parallel rank, so callers can safely assign the
+    result and check for ``None`` before forwarding hidden states.
+    """
+    if not get_pp_group().is_last_rank:
+        return None
+    if not has_mean_pool_connector(vllm_config):
+        return None
+
+    return CacheOnlyAttentionLayer(
+        num_heads=1,
+        head_size=hidden_size,
+        cache_config=vllm_config.cache_config,
+        prefix=maybe_prefix(prefix, f"{HIDDEN_STATE_CACHE_PREFIX}.{num_hidden_layers}"),
+    )
+
+
+def maybe_cache_hidden_states(
+    hidden_state_cache: nn.Module | None,
+    model_output: Any,
+) -> None:
+    """Push the model's post-norm hidden states into the cache layer.
+
+    No-op when ``hidden_state_cache`` is ``None`` (connector inactive or
+    non-last PP rank) or when ``model_output`` does not carry a hidden
+    state tensor (e.g. ``IntermediateTensors`` on intermediate PP ranks).
+    """
+    if hidden_state_cache is None:
+        return
+
+    hidden_states = model_output[0] if isinstance(model_output, tuple) else model_output
+    if isinstance(hidden_states, torch.Tensor):
+        # CacheOnlyAttentionLayer expects [num_tokens, num_heads, head_size].
+        hidden_state_cache(hidden_states.unsqueeze(1))
 
 
 @dataclass
@@ -132,9 +181,11 @@ class MeanPoolHiddenStatesConnector(KVConnectorBase_V1):
     Connector that mean-pools prompt hidden states and returns the
     resulting vector in the API response (via kv_transfer_params).
 
-    Works with the extract_hidden_states speculative decoding method.
-    This connector extracts those hidden states, mean-pools over prompt
-    tokens, and saves the result for retrieval when the request finishes.
+    Requires a CacheOnlyAttentionLayer (prefix containing
+    ``"hidden_state_cache"``) embedded in the target model. The layer
+    writes hidden states to its KV cache; this connector
+    extracts them, mean-pools over prompt tokens, and saves the result
+    for retrieval when the request finishes.
     """
 
     @property
@@ -156,7 +207,7 @@ class MeanPoolHiddenStatesConnector(KVConnectorBase_V1):
 
         # Shared storage for passing mean-pooled vectors from worker to
         # scheduler (they run in separate processes with V1 multiprocessing).
-        # Default to /dev/shm/vllm_mean_pool for lower latency on Linux,
+        # Default to /dev/shm/vllm_mean_pool for lower latency on Linux.
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path",
             "/dev/shm/vllm_mean_pool",
@@ -195,12 +246,13 @@ class MeanPoolHiddenStatesConnector(KVConnectorBase_V1):
             return 0
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             for layer_name in group.layer_names:
-                if "cache_only" in layer_name.lower():
+                if HIDDEN_STATE_CACHE_PREFIX in layer_name:
                     return gid
         raise ValueError(
             "MeanPoolHiddenStatesConnector requires a CacheOnlyAttentionLayer "
-            "but none was found in kv_cache_groups. Ensure "
-            "--speculative-config with method='extract_hidden_states' is set."
+            f"with '{HIDDEN_STATE_CACHE_PREFIX}' in its prefix, but none was "
+            "found in kv_cache_groups. Ensure the target model embeds the "
+            "layer (currently supported: LlamaForCausalLM, Qwen3ForCausalLM)."
         )
 
     # ==============================
@@ -216,10 +268,6 @@ class MeanPoolHiddenStatesConnector(KVConnectorBase_V1):
         pass
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        from vllm.model_executor.models.extract_hidden_states import (
-            CacheOnlyAttentionLayer,
-        )
-
         layers = get_layers_from_vllm_config(
             self._vllm_config, CacheOnlyAttentionLayer, list(kv_caches.keys())
         )
@@ -251,10 +299,6 @@ class MeanPoolHiddenStatesConnector(KVConnectorBase_V1):
         and save the result for each request."""
         if layer_name not in self.cache_layers:
             return
-
-        from vllm.model_executor.models.extract_hidden_states import (
-            CacheOnlyAttentionMetadata,
-        )
 
         assert isinstance(attn_metadata, CacheOnlyAttentionMetadata)
 

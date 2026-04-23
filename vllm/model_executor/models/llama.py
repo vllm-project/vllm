@@ -34,6 +34,10 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.kv_transfer.kv_connector.v1.mean_pool_hidden_states_connector import (  # noqa: E501
+    maybe_cache_hidden_states,
+    maybe_init_hidden_state_cache,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -556,6 +560,13 @@ class LlamaForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
+        self.hidden_state_cache = maybe_init_hidden_state_cache(
+            vllm_config,
+            hidden_size=config.hidden_size,
+            num_hidden_layers=config.num_hidden_layers,
+            prefix=prefix,
+        )
+
     def _init_model(
         self,
         vllm_config: VllmConfig,
@@ -577,6 +588,7 @@ class LlamaForCausalLM(
         model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
+        maybe_cache_hidden_states(self.hidden_state_cache, model_output)
         return model_output
 
     def compute_logits(

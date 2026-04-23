@@ -3,295 +3,117 @@
 """
 Tests for MeanPoolHiddenStatesConnector.
 
-1. Unit test with PredictableLlamaForCausalLM (deterministic values)
-2. E2E accuracy tests with Llama-3.2-1B and Qwen3-0.6B
+1. End-to-end accuracy tests for Llama-3.2-3B-Instruct and Qwen3-0.6B that
+   compare the connector's mean-pooled hidden states against vLLM's own
+   embed task (``runner="pooling"`` + ``pooling_type="MEAN"``), which
+   mean-pools the same hidden states using the standard pooler
+   path.
+2. LoRA test for Llama-3.2-3B-Instruct using the
+   ``jeeejeee/llama32-3b-text2sql-spider`` adapter, verifying the
+   connector keeps working when LoRA is applied at request time.
 """
 
 import gc
+import os
 import tempfile
 
 import pytest
 import torch
 
-from vllm import LLM, ModelRegistry, SamplingParams
+from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 
-# =====================================================================
-# Unit test: Predictable model with deterministic hidden states
-# =====================================================================
-
-
-@pytest.fixture(scope="module")
-def predictable_llama_config_path(tmp_path_factory):
-    """Create a minimal LlamaConfig for PredictableLlamaForCausalLM."""
-    from transformers import AutoTokenizer, LlamaConfig
-
-    config_dir = tmp_path_factory.mktemp("predictable_llama_mean_pool")
-
-    config = LlamaConfig(
-        vocab_size=128256,
-        hidden_size=256,
-        intermediate_size=512,
-        num_hidden_layers=24,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=128,
-        architectures=["PredictableLlamaForCausalLM"],
-    )
-    config.save_pretrained(config_dir)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        "meta-llama/Llama-3.2-1B",
-        local_files_only=True,
-    )
-    tokenizer.save_pretrained(config_dir)
-
-    return str(config_dir)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def register_predictable_model():
-    """Register the PredictableLlamaForCausalLM model."""
-    from tests.v1.kv_connector.extract_hidden_states_integration.predictable_llama import (  # noqa: E501
-        PredictableLlamaForCausalLM,
-    )
-
-    if "PredictableLlamaForCausalLM" not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model(
-            "PredictableLlamaForCausalLM", PredictableLlamaForCausalLM
-        )
-    yield
-
-
-def test_mean_pool_with_predictable_model(predictable_llama_config_path, tmp_path):
-    """Test mean pooling with deterministic hidden states.
-
-    PredictableLlamaForCausalLM produces hidden states where layer i
-    outputs values equal to i. If we extract layer 5, mean pooling over
-    prompt tokens should produce a vector of all 5.0s.
-    """
-    layer_id = 5
-    storage_path = str(tmp_path / "mean_pool")
-
-    llm = LLM(
-        model=predictable_llama_config_path,
-        speculative_config={
-            "method": "extract_hidden_states",
-            "num_speculative_tokens": 1,
-            "draft_model_config": {
-                "hf_config": {"eagle_aux_hidden_state_layer_ids": [layer_id]}
-            },
-        },
-        kv_transfer_config={
-            "kv_connector": "MeanPoolHiddenStatesConnector",
-            "kv_role": "kv_producer",
-            "kv_connector_extra_config": {
-                "shared_storage_path": storage_path,
-            },
-        },
-        max_model_len=128,
-        enforce_eager=True,
-        trust_remote_code=True,
-        load_format="dummy",
-    )
-
-    prompts = [
-        "Short",
-        "Medium length prompt",
-        "Much longer prompt with many tokens for testing",
-        "Much longer prompt with many tokens for testing",  # repeated
-    ]
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    hidden_size = llm.llm_engine.model_config.get_hidden_size()
-    outputs = llm.generate(prompts, sampling_params)
-    del llm
-    gc.collect()
-
-    assert len(outputs) == len(prompts)
-
-    for output in outputs:
-        assert output.kv_transfer_params is not None, (
-            "kv_transfer_params should not be None"
-        )
-        pooled_list = output.kv_transfer_params.get("mean_pooled_hidden_states")
-        assert pooled_list is not None, (
-            "mean_pooled_hidden_states not found in kv_transfer_params"
-        )
-
-        pooled = torch.tensor(pooled_list)
-        # With num_heads=1 (single layer), pooled shape is [hidden_size]
-        assert pooled.shape == (hidden_size,), (
-            f"Expected shape ({hidden_size},), got {pooled.shape}"
-        )
-
-        # Mean pooling a constant value = that constant value
-        expected = torch.full((hidden_size,), float(layer_id))
-        assert torch.allclose(pooled, expected, atol=1e-4), (
-            f"Expected all values to be {float(layer_id)}, "
-            f"but got mean={pooled.mean():.4f}, "
-            f"min={pooled.min():.4f}, max={pooled.max():.4f}"
-        )
-
-
-def test_mean_pool_multiple_layers(predictable_llama_config_path, tmp_path):
-    """Test mean pooling with multiple hidden state layers.
-
-    When extracting multiple layers, the pooled result should have shape
-    [num_layers, hidden_size] with each row equal to the layer index.
-    """
-    layer_ids = [3, 7, 15]
-    storage_path = str(tmp_path / "mean_pool_multi")
-
-    llm = LLM(
-        model=predictable_llama_config_path,
-        speculative_config={
-            "method": "extract_hidden_states",
-            "num_speculative_tokens": 1,
-            "draft_model_config": {
-                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
-            },
-        },
-        kv_transfer_config={
-            "kv_connector": "MeanPoolHiddenStatesConnector",
-            "kv_role": "kv_producer",
-            "kv_connector_extra_config": {
-                "shared_storage_path": storage_path,
-            },
-        },
-        max_model_len=128,
-        enforce_eager=True,
-        trust_remote_code=True,
-        load_format="dummy",
-    )
-
-    prompts = ["Test prompt for multi-layer mean pooling"]
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    hidden_size = llm.llm_engine.model_config.get_hidden_size()
-    outputs = llm.generate(prompts, sampling_params)
-    del llm
-    gc.collect()
-
-    assert len(outputs) == 1
-    output = outputs[0]
-    assert output.kv_transfer_params is not None
-    pooled_list = output.kv_transfer_params.get("mean_pooled_hidden_states")
-    assert pooled_list is not None
-
-    pooled = torch.tensor(pooled_list)
-    # With num_heads > 1, shape is [num_heads, hidden_size]
-    assert pooled.shape == (len(layer_ids), hidden_size), (
-        f"Expected shape ({len(layer_ids)}, {hidden_size}), got {pooled.shape}"
-    )
-
-    # Each row should equal the corresponding layer index
-    for idx, layer_id in enumerate(layer_ids):
-        expected = torch.full((hidden_size,), float(layer_id))
-        assert torch.allclose(pooled[idx], expected, atol=1e-4), (
-            f"Layer {layer_id} at index {idx}: expected {float(layer_id)}, "
-            f"got mean={pooled[idx].mean():.4f}"
-        )
+# Defaults are HF repo IDs and resolve from ~/.cache/huggingface/hub.
+LLAMA_MODEL = os.environ.get(
+    "VLLM_TEST_LLAMA_MODEL", "meta-llama/Llama-3.2-3B-Instruct"
+)
+QWEN_MODEL = os.environ.get("VLLM_TEST_QWEN_MODEL", "Qwen/Qwen3-0.6B")
+LLAMA_LORA_PATH = os.environ.get(
+    "VLLM_TEST_LLAMA_LORA_PATH", "jeeejeee/llama32-3b-text2sql-spider"
+)
 
 
 # =====================================================================
-# E2E accuracy tests with real models
+# End-to-end accuracy: connector vs. vLLM's own embed (MEAN) task
 # =====================================================================
 
 
-def _get_hf_mean_pooled_hidden_states(
+def _get_vllm_mean_pooled_embeddings(
     model_name: str,
     prompts: list[str],
-    layer_ids: list[int],
-    device: str = "cuda",
+    lora_path: str | None = None,
+    max_lora_rank: int = 8,
 ) -> list[torch.Tensor]:
-    """Get mean-pooled hidden states from HuggingFace model as reference.
+    """Run vLLM's embed task with MEAN pooling as a reference.
 
-    Returns a list of tensors, one per prompt. Each tensor shape:
-    - [hidden_size] if single layer
-    - [num_layers, hidden_size] if multiple layers
+    Both the connector and the embed task operate on the
+    hidden states from ``LlamaForCausalLM`` / ``Qwen3ForCausalLM``, so
+    their mean-pooled outputs should match (modulo dtype precision).
+
+    If ``lora_path`` is provided, the LoRA adapter is loaded and applied to
+    every embed request, so the reference reflects LoRA-modified hidden
+    states.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    llm_kwargs: dict = {}
+    lora_request = None
+    if lora_path is not None:
+        llm_kwargs["enable_lora"] = True
+        llm_kwargs["max_loras"] = 1
+        llm_kwargs["max_lora_rank"] = max_lora_rank
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        local_files_only=True,
+    llm = LLM(
+        model=model_name,
+        runner="pooling",
+        convert="embed",
+        pooler_config={
+            "pooling_type": "MEAN",
+            "use_activation": False,
+        },
+        max_model_len=128,
+        enforce_eager=True,
+        dtype="bfloat16",
+        **llm_kwargs,
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        local_files_only=True,
-        torch_dtype=torch.bfloat16,
-    ).to(device)
-    model.eval()
+    if lora_path is not None:
+        lora_request = LoRARequest("ref_lora", 1, lora_path)
+        llm.llm_engine.add_lora(lora_request)
 
-    results = []
-    with torch.no_grad():
-        for prompt in prompts:
-            inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(
-                device
-            )
-            outputs = model(
-                **inputs,
-                output_hidden_states=True,
-            )
-            # outputs.hidden_states is a tuple:
-            # (embedding, layer_0_output, layer_1_output, ..., layer_N_output)
-            # layer_ids index into this tuple (0 = embedding, 1 = layer_0, etc.)
-            selected = []
-            for lid in layer_ids:
-                # HF hidden_states[0] = embedding, [1] = after layer 0, etc.
-                # vLLM's _maybe_add_hidden_state captures at idx=0
-                # (pre-first-layer) and idx=i+1 (post-layer-i).
-                # So layer_id in vLLM corresponds to hidden_states[layer_id]
-                # in HF.
-                hs = outputs.hidden_states[lid]  # [1, seq_len, hidden_size]
-                hs = hs.squeeze(0)  # [seq_len, hidden_size]
-                selected.append(hs.mean(dim=0, dtype=torch.float32))
-
-            if len(selected) == 1:
-                results.append(selected[0].cpu())
-            else:
-                results.append(torch.stack(selected, dim=0).cpu())
-
-    del model
+    outputs = llm.embed(prompts, lora_request=lora_request, use_tqdm=False)
+    embeddings = [torch.tensor(o.outputs.embedding) for o in outputs]
+    del llm
     gc.collect()
     torch.accelerator.empty_cache()
-    return results
+    return embeddings
 
 
 @pytest.mark.parametrize(
-    "model_name,layer_ids",
+    "model_name",
     [
-        ("meta-llama/Llama-3.2-1B", [8]),  # middle layer
-        ("Qwen/Qwen3-0.6B", [14]),  # middle layer
+        LLAMA_MODEL,
+        QWEN_MODEL,
     ],
 )
 @torch.inference_mode()
-def test_mean_pool_accuracy_vs_hf(model_name: str, layer_ids: list[int]):
-    """Compare vLLM mean-pooled hidden states against HuggingFace reference.
+def test_mean_pool_accuracy_vs_embed_task(model_name: str):
+    """Compare connector mean-pool against vLLM's embed-task MEAN pooler.
 
-    Tests that the mean-pooled hidden states from vLLM's
-    MeanPoolHiddenStatesConnector match HuggingFace's output within
-    tolerance (accounting for FlashAttention numerical differences).
+    The connector caches hidden states (via the embedded
+    ``CacheOnlyAttentionLayer``) and mean-pools over prompt tokens. The
+    embed task applies ``MeanPool`` to the same hidden states.
+    Outputs should match within bf16 precision.
     """
     prompts = [
         "The quick brown fox jumps over the lazy dog.",
         "Machine learning is a subset of artificial intelligence.",
     ]
 
-    # Get HF reference
-    hf_results = _get_hf_mean_pooled_hidden_states(model_name, prompts, layer_ids)
+    # Reference: vLLM embed task with MEAN pooling.
+    embed_results = _get_vllm_mean_pooled_embeddings(model_name, prompts)
 
-    # Get vLLM results
+    # System under test: generate task with MeanPoolHiddenStatesConnector.
     with tempfile.TemporaryDirectory() as storage_path:
         llm = LLM(
             model=model_name,
-            speculative_config={
-                "method": "extract_hidden_states",
-                "num_speculative_tokens": 1,
-                "draft_model_config": {
-                    "hf_config": {
-                        "eagle_aux_hidden_state_layer_ids": layer_ids,
-                    }
-                },
-            },
             kv_transfer_config={
                 "kv_connector": "MeanPoolHiddenStatesConnector",
                 "kv_role": "kv_producer",
@@ -311,7 +133,7 @@ def test_mean_pool_accuracy_vs_hf(model_name: str, layer_ids: list[int]):
 
     assert len(outputs) == len(prompts)
 
-    for i, (output, hf_ref) in enumerate(zip(outputs, hf_results)):
+    for i, (output, ref) in enumerate(zip(outputs, embed_results)):
         assert output.kv_transfer_params is not None, (
             f"Prompt {i}: kv_transfer_params should not be None"
         )
@@ -320,19 +142,104 @@ def test_mean_pool_accuracy_vs_hf(model_name: str, layer_ids: list[int]):
             f"Prompt {i}: mean_pooled_hidden_states not found"
         )
 
-        vllm_pooled = torch.tensor(pooled_list)
-        assert vllm_pooled.shape == hf_ref.shape, (
-            f"Prompt {i}: shape mismatch: vLLM {vllm_pooled.shape} vs HF {hf_ref.shape}"
+        connector_pooled = torch.tensor(pooled_list)
+        assert connector_pooled.shape == ref.shape, (
+            f"Prompt {i}: shape mismatch: "
+            f"connector {connector_pooled.shape} vs embed {ref.shape}"
         )
 
-        # Absolute accuracy check.
-        # FlashAttention vs standard attention introduces numerical
-        # differences in bf16. Max observed diff is ~0.08 on Qwen3-0.6B
-        # (relative to values of magnitude ~40, this is <0.2%).
-        max_diff = (vllm_pooled - hf_ref).abs().max().item()
-        assert max_diff < 0.1, (
-            f"Prompt {i} ({model_name}): max absolute diff {max_diff:.4f} "
-            f"exceeds tolerance 0.1. "
-            f"vLLM mean={vllm_pooled.mean():.4f}, "
-            f"HF mean={hf_ref.mean():.4f}"
+        cos_sim = torch.nn.functional.cosine_similarity(
+            connector_pooled.float().unsqueeze(0),
+            ref.float().unsqueeze(0),
+        ).item()
+        assert cos_sim > 0.999, (
+            f"Prompt {i} ({model_name}): cosine similarity {cos_sim:.6f} "
+            f"below threshold 0.999."
+        )
+
+
+# =====================================================================
+# LoRA: connector still returns pooled hidden states with adapters
+# =====================================================================
+
+
+@torch.inference_mode()
+def test_mean_pool_with_lora_vs_embed_task():
+    """Compare LoRA-applied connector mean-pool against LoRA-applied embed.
+
+    Same comparison as ``test_mean_pool_accuracy_vs_embed_task`` but with the
+    ``jeeejeee/llama32-3b-text2sql-spider`` adapter applied to every request
+    on both sides. Confirms the connector reflects LoRA-modified
+    hidden states and matches what the standard MeanPool pooler produces
+    when LoRA is active.
+    """
+    hidden_size = 3072  # Llama-3.2-3B-Instruct
+    prompts = [
+        "Translate to SQL: list the names of all employees.",
+        "Translate to SQL: count the number of orders per customer.",
+    ]
+
+    # Reference: vLLM embed task with MEAN pooling, LoRA applied.
+    embed_results = _get_vllm_mean_pooled_embeddings(
+        LLAMA_MODEL, prompts, lora_path=LLAMA_LORA_PATH, max_lora_rank=8
+    )
+
+    # System under test: generate task with the connector, LoRA applied.
+    with tempfile.TemporaryDirectory() as storage_path:
+        llm = LLM(
+            model=LLAMA_MODEL,
+            kv_transfer_config={
+                "kv_connector": "MeanPoolHiddenStatesConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                    "shared_storage_path": storage_path,
+                },
+            },
+            enable_lora=True,
+            max_loras=1,
+            max_lora_rank=8,
+            max_model_len=128,
+            enforce_eager=True,
+            dtype="bfloat16",
+        )
+
+        lora_request = LoRARequest("text2sql", 1, LLAMA_LORA_PATH)
+        llm.llm_engine.add_lora(lora_request)
+        assert 1 in llm.llm_engine.list_loras()
+
+        sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+        outputs = llm.generate(
+            prompts,
+            sampling_params,
+            lora_request=lora_request,
+            use_tqdm=False,
+        )
+
+        del llm
+        gc.collect()
+        torch.accelerator.empty_cache()
+
+    assert len(outputs) == len(prompts)
+
+    for i, (output, ref) in enumerate(zip(outputs, embed_results)):
+        assert output.kv_transfer_params is not None, (
+            f"Prompt {i}: kv_transfer_params should not be None"
+        )
+        pooled_list = output.kv_transfer_params.get("mean_pooled_hidden_states")
+        assert pooled_list is not None, (
+            f"Prompt {i}: mean_pooled_hidden_states not found"
+        )
+
+        connector_pooled = torch.tensor(pooled_list)
+        assert connector_pooled.shape == (hidden_size,), (
+            f"Prompt {i}: shape {connector_pooled.shape} != ({hidden_size},)"
+        )
+        assert connector_pooled.shape == ref.shape
+
+        cos_sim = torch.nn.functional.cosine_similarity(
+            connector_pooled.float().unsqueeze(0),
+            ref.float().unsqueeze(0),
+        ).item()
+        assert cos_sim > 0.999, (
+            f"Prompt {i}: LoRA cosine similarity {cos_sim:.6f} below 0.999"
         )
