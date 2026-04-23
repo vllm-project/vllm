@@ -10,7 +10,8 @@ import torch.distributed as dist
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_world_group
 
-dist.init_process_group(backend="gloo")
+# Let PyTorch choose the WORLD backend for the current device type.
+dist.init_process_group()
 
 # Create prompts
 prompts = [
@@ -22,15 +23,14 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-# set different `gpu_memory_utilization` and `swap_space` for different ranks,
+# set different `gpu_memory_utilization` for different ranks,
 # to test if all ranks agree on the same kv cache configuration.
 llm = LLM(
     model="facebook/opt-125m",
     tensor_parallel_size=2,
     pipeline_parallel_size=int(os.getenv("PP_SIZE", 1)),
     distributed_executor_backend="external_launcher",
-    gpu_memory_utilization=random.uniform(0.7, 0.9),
-    swap_space=random.randint(1, 4),
+    gpu_memory_utilization=random.uniform(0.8, 0.92),
     seed=0,
 )
 

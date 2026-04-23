@@ -7,28 +7,26 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.inputs.data import (
-    ProcessorInputs,
+from vllm.inputs import (
+    EngineInput,
     PromptType,
-    SingletonInputs,
+    SingletonInput,
+    split_enc_dec_input,
 )
-from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import (
-    MultiModalFeatureSpec,
-)
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
-from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
@@ -73,33 +71,6 @@ class InputProcessor:
             mm_registry=mm_registry,
         )
 
-        from vllm.platforms import current_platform
-
-        platform_validate_request = current_platform.validate_request
-        if supports_kw(platform_validate_request, "prompt"):
-            logger.warning_once(
-                "The signature of Platform.validate_request has changed from "
-                "`(cls, prompt, params, processed_inputs) -> None` to "
-                "`(cls, processed_inputs, params) -> None`. The old signature "
-                "will no longer be supported starting from v0.18."
-            )
-
-            orig_validate_request = platform_validate_request
-
-            def compat_validate_request(
-                processed_inputs: ProcessorInputs,
-                params: SamplingParams | PoolingParams,
-            ):
-                return orig_validate_request(
-                    processed_inputs,
-                    params,
-                    processed_inputs,  # type: ignore
-                )  # type: ignore
-
-            platform_validate_request = compat_validate_request
-
-        self._platform_validate_request = platform_validate_request
-
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.renderer.tokenizer
@@ -126,6 +97,16 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+
+            if params.thinking_token_budget is not None and (
+                self.vllm_config.reasoning_config is None
+                or not self.vllm_config.reasoning_config.enabled
+            ):
+                raise ValueError(
+                    "thinking_token_budget is set but reasoning_config is "
+                    "not configured. Please set --reasoning-config to use "
+                    "thinking_token_budget."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -191,10 +172,49 @@ class InputProcessor:
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
 
+    def inject_into_mm_cache(
+        self,
+        mm_hashes: dict[str, list[str]],
+        mm_kwargs: dict[str, list],
+    ) -> None:
+        """Inject pre-processed mm_kwargs into the processor cache.
+
+        Call this when mm_kwargs have already been through the HF processor
+        externally (e.g. by a frontend that transfers pre-processed tensors
+        to the backend).  This ensures MM cache hit rate metrics are reported
+        accurately and avoids redundant processing on subsequent requests
+        with the same images.
+
+        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        since token expansion has already been handled externally.
+        """
+        cache = self.renderer.mm_processor_cache
+        if cache is None:
+            return
+        try:
+            for modality, hashes in mm_hashes.items():
+                items = mm_kwargs.get(modality, [])
+                for i, mm_hash in enumerate(hashes):
+                    if i < len(items) and items[i] is not None:
+                        # Insert into cache via get_and_update_item.
+                        # Use the returned item (may be an address for SHM
+                        # cache or the original item for LRU cache).
+                        items[i], _ = cache.get_and_update_item(
+                            (items[i], []),
+                            mm_hash,
+                        )
+            # Update cache stats to reflect the externally processed items
+            self.renderer.update_mm_cache_stats()
+        except Exception:
+            logger.warning(
+                "Failed to inject mm_kwargs into processor cache",
+                exc_info=True,
+            )
+
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
-        that adds 8 random characters in order to ensure uniquness.
+        that adds 8 random characters in order to ensure uniqueness.
         """
         if request.external_req_id is not None:
             raise ValueError(
@@ -214,7 +234,7 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
@@ -249,7 +269,7 @@ class InputProcessor:
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
-            processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
+            processed_inputs: EngineInput = prompt  # type: ignore[assignment]
         else:
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
@@ -265,9 +285,9 @@ class InputProcessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        self._platform_validate_request(processed_inputs, params)
+        current_platform.validate_request(processed_inputs, params)
 
-        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+        encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
         # Mypy can be conservative for TypedDict unions; normalize access.
@@ -402,7 +422,7 @@ class InputProcessor:
 
     def _validate_model_input(
         self,
-        prompt_inputs: SingletonInputs,
+        prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
         model_config = self.model_config
@@ -410,27 +430,25 @@ class InputProcessor:
 
         prompt_ids = (
             None
-            if prompt_inputs["type"] == "embeds"
-            else prompt_inputs["prompt_token_ids"]
+            if prompt_input["type"] == "embeds"
+            else prompt_input["prompt_token_ids"]
         )
         prompt_embeds = (
-            prompt_inputs["prompt_embeds"]
-            if prompt_inputs["type"] == "embeds"
-            else None
+            prompt_input["prompt_embeds"] if prompt_input["type"] == "embeds" else None
         )
 
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         self._validate_prompt_len(prompt_len, prompt_type)
 
-        if prompt_inputs["type"] == "multimodal":
-            decoder_mm_positions = prompt_inputs["mm_placeholders"]
+        if prompt_input["type"] == "multimodal":
+            decoder_mm_positions = prompt_input["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds()
-                    if embed_length > self.mm_encoder_cache_size:
+                    num_embeds = mm_position.get_num_embeds()
+                    if num_embeds > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with length {embed_length}, which exceeds the "
+                            f"with {num_embeds} embedding tokens, which exceeds the "
                             f"pre-allocated encoder cache size "
                             f"{self.mm_encoder_cache_size}. Please reduce the input "
                             f"size or increase the encoder cache size "
@@ -456,10 +474,10 @@ class InputProcessor:
 
     def _validate_model_inputs(
         self,
-        encoder_inputs: SingletonInputs | None,
-        decoder_inputs: SingletonInputs,
+        encoder_input: SingletonInput | None,
+        decoder_input: SingletonInput,
     ):
-        if encoder_inputs is not None:
-            self._validate_model_input(encoder_inputs, prompt_type="encoder")
+        if encoder_input is not None:
+            self._validate_model_input(encoder_input, prompt_type="encoder")
 
-        self._validate_model_input(decoder_inputs, prompt_type="decoder")
+        self._validate_model_input(decoder_input, prompt_type="decoder")

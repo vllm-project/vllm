@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -15,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -24,6 +26,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+logger = init_logger(__name__)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -45,6 +50,9 @@ class TrtLlmNvFp4ExpertsBase:
             moe_config.intermediate_size_per_partition
         )
         self.hidden_dim = moe_config.hidden_dim
+        self.hidden_dim_unpadded = (
+            moe_config.hidden_dim_unpadded or moe_config.hidden_dim
+        )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
@@ -56,16 +64,35 @@ class TrtLlmNvFp4ExpertsBase:
             # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
             self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
-            self.g1_scale_c = (
-                torch.ones_like(self.quant_config.a1_gscale)
-                * self.quant_config.a2_gscale
-            )
+            self.g1_scale_c = self.quant_config.a2_gscale.clone()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        # Recompute g1_scale_c since g1_alphas was just fused in-place.
+        # Register as a layer parameter so EPLB rearranges it alongside
+        # other expert weights.
+        assert self.quant_config.g1_alphas is not None
+        assert self.quant_config.a2_gscale is not None
+        if self.moe_config.is_act_and_mul:
+            g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+        else:
+            g1_scale_c = self.quant_config.a2_gscale.clone()
+        layer.register_parameter(
+            "g1_scale_c",
+            torch.nn.Parameter(g1_scale_c, requires_grad=False),
+        )
+        self.g1_scale_c = layer.g1_scale_c
 
     @staticmethod
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""
         p = current_platform
-        return p.is_cuda() and p.is_device_capability_family(100)
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and has_flashinfer_trtllm_fused_moe()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -90,8 +117,12 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
-        """Requires hidden dim to be multiple of 512."""
-        return hidden_dim % 512 == 0
+        # Weights are zero-padded to 256-alignment at load time and the MoE
+        # runner pads activations via _maybe_pad_hidden_states, so any
+        # hidden_dim is accepted.
+        # NOTE: non-256-aligned dims will trigger a warning log and may
+        # cause performance degradation due to activation slicing.
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -157,22 +188,22 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        import flashinfer
+
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
         # Pack topk ids and weights into format expected by the kernel.
-        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-            torch.bfloat16
-        ).view(torch.int16)
+        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
 
         # trtllm_fp4_block_scale_routed_moe does not support autotuning
         # so skip this kernel during dummy run for autotuning.
         import vllm.utils.flashinfer as fi_utils
 
         if fi_utils._is_fi_autotuning:
-            return hidden_states
+            return
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -236,6 +267,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
+            RoutingMethodType.Simulated,
         ]
 
     @staticmethod
@@ -245,13 +277,18 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> bool:
         """
         The FlashInfer TRTLLM NvFp4 kernel expects bfloat16 router_logits by default.
-        Only DeepSeekV3 routing supports float32 router_logits (which is converted
-        internally in the kernel).
+        DeepSeekV3 routing supports float32 router_logits (converted internally).
+        Simulated routing generates synthetic decisions and is agnostic to dtype.
         """
         if router_logits_dtype == torch.float32:
-            # Only DeepSeekV3 routing handles float32 logits
+            # DeepSeekV3 routing handles float32 logits internally.
+            # Simulated routing generates synthetic decisions, so the
+            # kernel doesn't care about the actual logits dtype.
             # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method == RoutingMethodType.DeepSeekV3
+            return routing_method in (
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Simulated,
+            )
         return True
 
     def apply(
@@ -271,6 +308,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        import flashinfer
+
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
@@ -283,20 +322,24 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Prepare routing bias into kernel format.
-        routing_bias = e_score_correction_bias
-        if routing_bias is not None:
-            routing_bias = routing_bias.to(torch.bfloat16)
+        # Prepare router logits for kernel format.
         router_logits = (
             router_logits.to(torch.float32)
             if self.routing_method_type == RoutingMethodType.DeepSeekV3
             else router_logits
         )
 
+        # Currently FI requires bfloat16 routing bias.
+        # https://github.com/flashinfer-ai/flashinfer/issues/2909
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
+
         # Invoke kernel.
+        # NOTE: Activation padding and output
+        # truncation are handled by the MoE runner's
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
-            routing_bias=routing_bias,
+            routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
@@ -323,4 +366,5 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
+            activation_type=activation_to_flashinfer_int(activation),
         )[0]

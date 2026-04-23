@@ -106,7 +106,7 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
 
@@ -413,7 +413,7 @@ def _gen_mm_extra_hash_keys(
     # We do not need to check all mm inputs if the start token index is out of
     # range. This usually happens in the late prefill phase and decoding phase.
     last_pos = mm_features[-1].mm_position
-    if last_pos.offset + last_pos.length < start_token_idx:
+    if last_pos.offset + last_pos.length <= start_token_idx:
         return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
@@ -428,13 +428,16 @@ def _gen_mm_extra_hash_keys(
         offset = mm_feature.mm_position.offset
         length = mm_feature.mm_position.length
         if end_token_idx > offset:
-            if start_token_idx > offset + length:
+            if start_token_idx >= offset + length:
                 # This block has passed the current mm input.
                 curr_mm_idx += 1
                 continue
 
-            # The block contains the current mm input.
-            extra_keys.append(mm_feature.identifier)
+            # The block contains the current mm input. Include its offset
+            # relative to the start of the block so prefix-cache keys stay
+            # distinct when the same MM item appears at different positions
+            # within otherwise-identical placeholder blocks.
+            extra_keys.append((mm_feature.identifier, offset - start_token_idx))
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
@@ -817,24 +820,31 @@ def get_max_concurrency_for_kv_cache_config(
     return max_concurrency
 
 
-def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
+def may_override_num_blocks(
+    vllm_config: VllmConfig, num_blocks: int, suppress_log: bool = False
+) -> int:
     """
     Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
     """
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_gpu_blocks_override = vllm_config.cache_config.num_gpu_blocks_override
-        logger.info(
-            "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-            num_blocks,
-            num_gpu_blocks_override,
-        )
+        if not suppress_log:
+            logger.info(
+                "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
+                num_blocks,
+                num_gpu_blocks_override,
+            )
         num_blocks = num_gpu_blocks_override
 
     return num_blocks
 
 
 def get_num_blocks(
-    vllm_config: VllmConfig, num_layers: int, available_memory: int, page_size: int
+    vllm_config: VllmConfig,
+    num_layers: int,
+    available_memory: int,
+    page_size: int,
+    suppress_log: bool = False,
 ) -> int:
     """
     Get the number of kv cache blocks.
@@ -844,10 +854,14 @@ def get_num_blocks(
         num_layers: The number of layers
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
+        suppress_log: Whether to suppress override log messages. Used when creating a
+            temporary/dummy KV cache config, e.g. during CG memory profiling
     """
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+    num_blocks = may_override_num_blocks(
+        vllm_config, num_blocks, suppress_log=suppress_log
+    )
     return num_blocks
 
 
@@ -1040,12 +1054,14 @@ def _get_kv_cache_groups_uniform_page_size(
     min_num_layers = min([len(layers) for layers in same_type_layers.values()])
     group_size = min_num_layers
     max_num_layers = max([len(layers) for layers in same_type_layers.values()])
-    if max_num_layers < min_num_layers * 1.25:
-        # If the number of layers is not much larger than the minimum number of layers,
-        # use the maximum number of layers as the group size to avoid too many padding
-        # layers. A typical example is gpt-oss-20b + eagle, with 12 sw + 13 full. We
-        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
-        # magic number to avoid too many padding layers.
+    if max_num_layers < min_num_layers * 1.5:
+        # If the number of layers is not much larger than the minimum number of
+        # layers, use the maximum number of layers as the group size to avoid
+        # too many padding layers. A typical example is gpt-oss-20b + eagle,
+        # with 12 sw + 13 full. We pad it to (13 sw, 13 full) instead of
+        # (12 sw, 24 full). 1.5 is a heuristic to avoid too many padding
+        # layers while accommodating speculative decoding drafters that add
+        # extra layers to one attention type.
         group_size = max_num_layers
     grouped_layers = []
     for layers in same_type_layers.values():
@@ -1077,6 +1093,7 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    suppress_log: bool = False,
 ) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -1108,7 +1125,9 @@ def get_kv_cache_config_from_groups(
         num_blocks = (
             available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
         )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        num_blocks = may_override_num_blocks(
+            vllm_config, num_blocks, suppress_log=suppress_log
+        )
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
@@ -1133,7 +1152,11 @@ def get_kv_cache_config_from_groups(
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
+            vllm_config,
+            group_size,
+            available_memory,
+            page_size,
+            suppress_log=suppress_log,
         )
         kv_cache_tensors = []
         for i in range(group_size):
@@ -1311,7 +1334,7 @@ def _report_kv_cache_config(
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
+    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
@@ -1320,7 +1343,6 @@ def _report_kv_cache_config(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
         max_concurrency,
-        scope="local",
     )
 
 
@@ -1354,8 +1376,10 @@ def _max_memory_usage_bytes_from_groups(
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
-    any_spec = kv_cache_groups[0].kv_cache_spec
-    blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
+    blocks_needed = sum(
+        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+        for group in kv_cache_groups
+    )
 
     return group_size * page_size * blocks_needed
 
@@ -1420,7 +1444,6 @@ def _auto_fit_max_model_len(
             "Auto-fit max_model_len: attention-free model, "
             "using derived max_model_len=%d",
             original_max,
-            scope="local",
         )
         return
 
@@ -1447,7 +1470,6 @@ def _auto_fit_max_model_len(
             "Auto-fit max_model_len: full model context length %d fits in "
             "available GPU memory",
             original_max,
-            scope="local",
         )
     else:
         # Need to reduce max_model_len to fit in memory
@@ -1458,7 +1480,6 @@ def _auto_fit_max_model_len(
             original_max,
             auto_fit_max,
             format_gib(limiting_worker_mem),
-            scope="local",
         )
 
 

@@ -32,10 +32,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
     ReqId,
     ReqMeta,
+    TransferId,
     WriteTask,
     get_moriio_mode,
+    get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
+    parse_moriio_zmq_address,
     set_role,
     zmq_ctx,
 )
@@ -277,6 +280,30 @@ class MoRIIOConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
+        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
+
+    def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
+        self.transfer_id_to_request_id[transfer_id] = request_id
+        self.request_id_to_transfer_id[request_id] = transfer_id
+
+    def unmap_request_id(self, request_id: ReqId):
+        if request_id in self.request_id_to_transfer_id:
+            transfer_id = self.request_id_to_transfer_id[request_id]
+            del self.request_id_to_transfer_id[request_id]
+            if transfer_id in self.transfer_id_to_request_id:
+                del self.transfer_id_to_request_id[transfer_id]
+            else:
+                logger.warning(
+                    "transfer id not in transfer_id_to_request_id lookup"
+                    "table. there is likely a bug!"
+                )
+        else:
+            logger.warning(
+                "Could not find %s  in transfer_id_to_request_id"
+                "lookup table.  This could lead to a possible hang.",
+                request_id,
+            )
 
     def get_num_new_matched_tokens(
         self,
@@ -309,7 +336,12 @@ class MoRIIOConnectorScheduler:
         return len(token_ids) - 1 - num_computed_tokens, False
 
     def send_notify_block(
-        self, req_id: str, block_notify_list: list[int], host=None, port=None
+        self,
+        req_id: ReqId,
+        transfer_id: TransferId,
+        block_notify_list: list[int],
+        host=None,
+        port=None,
     ):
         path = make_zmq_path("tcp", host, port)
         if path not in self.paths:
@@ -321,6 +353,7 @@ class MoRIIOConnectorScheduler:
 
         data = {
             "req_id": req_id,
+            "transfer_id": transfer_id,
             "block_notify_list": block_notify_list or [],
             "decode_rank": self.dp_rank,
             "type": "remote_blocks",
@@ -338,6 +371,9 @@ class MoRIIOConnectorScheduler:
         params = request.kv_transfer_params
         if not params:
             return
+        transfer_id = params["transfer_id"]
+        request_id = request.request_id
+        self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -345,13 +381,12 @@ class MoRIIOConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             if self.mode == MoRIIOMode.READ:
                 if remote_block_ids := params.get("remote_block_ids"):
-                    if all(
-                        p in params
-                        for p in ("remote_engine_id", "remote_host", "remote_port")
-                    ):
-                        # If remote_blocks and num_external_tokens = 0, we
+                    # remote_engine_id is returned by the prefill's request_finished.
+                    # host/ports come from the request_id (parsed in add_new_req).
+                    if "remote_engine_id" in params:
+                        # If remote_blocks and num_external_tokens = 0, we have
                         # a full prefix cache hit on the D worker. We need to call
-                        # send_notif in _read_blocks to free the memory on the P.
+                        # send_notify in _read_blocks to free the memory on the P.
 
                         # Get unhashed blocks to pull from remote.
                         local_block_ids = blocks.get_block_ids()[0]
@@ -373,21 +408,30 @@ class MoRIIOConnectorScheduler:
                         )
 
             else:
+                # WRITE mode: prefill scheduler notifies the decode side that
+                # blocks are ready.  Parse the decode's host/notify_port from
+                # the request_id
                 assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
+                peer_zmq = get_peer_zmq_from_request_id(
+                    request.request_id, is_producer=True
+                )
+                remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
+
                 for tp_index in range(self.tp_size):
-                    target_port = request.kv_transfer_params[
-                        "remote_notify_port"
-                    ] + get_port_offset(remote_dp_rank, tp_index)
+                    target_port = remote_notify_port + get_port_offset(
+                        remote_dp_rank, tp_index
+                    )
 
                     self.send_notify_block(
                         req_id=request.request_id,
+                        transfer_id=request.kv_transfer_params["transfer_id"],
                         block_notify_list=blocks.get_block_ids()[0],
-                        host=params.get("remote_host"),
+                        host=remote_host,
                         port=target_port,
                     )
 
@@ -400,6 +444,7 @@ class MoRIIOConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MoRIIOConnectorMetadata()
+        meta.transfer_id_to_request_id = self.transfer_id_to_request_id
 
         if self.mode == MoRIIOMode.WRITE:
             # when async_load_kv finished,
@@ -506,6 +551,9 @@ class MoRIIOConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
 
+        request_id = request.request_id
+        self.unmap_request_id(request_id)
+
         params = request.kv_transfer_params
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "
@@ -545,15 +593,15 @@ class MoRIIOConnectorScheduler:
                 + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
             )
 
-        # If we execute in P-D serial mode, no notification port is needed.
+        # Return KV transfer params forwarded verbatim to the decode instance by
+        # the router.
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=self.host_ip,
-            remote_port=self.handshake_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            transfer_id=params["transfer_id"],
         )
 
 
@@ -726,9 +774,9 @@ class MoRIIOConnectorWorker:
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.cache_config.cache_dtype,
-            self.block_size,
             use_mla=self.use_mla,
         )
+        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -736,7 +784,8 @@ class MoRIIOConnectorWorker:
 
     def schedule_write_blocks(
         self,
-        request_id: str,
+        request_id: ReqId,
+        transfer_id: TransferId,
         dst_engine_id: str,
         local_block_ids: list[int],
         remote_block_ids: list[int] | None,
@@ -749,6 +798,7 @@ class MoRIIOConnectorWorker:
 
         Args:
             request_id: Unique identifier for the request
+            transfer_id: Unique identifier for the transfer
             dst_engine_id: Destination engine ID
             local_block_ids: Local block IDs to transfer
             remote_block_ids: Hint for remote block IDs
@@ -769,6 +819,7 @@ class MoRIIOConnectorWorker:
 
         task = WriteTask(
             request_id=request_id,
+            transfer_id=transfer_id,
             dst_engine_id=dst_engine_id,
             local_block_ids=local_block_ids,
             remote_block_ids_hint=remote_block_ids,
@@ -804,7 +855,15 @@ class MoRIIOConnectorWorker:
         ]
 
     def _ping(self, zmq_context):
-        http_request_address = f"http://{self.request_address}/v1/completions"
+        # Use host:port format for http_address (compatible with official router)
+        http_address = f"{self.request_address}"
+        # Include host so the router embeds it in the request_id; the connector
+        # on the other side parses host/ports from there.
+        zmq_address = (
+            f"host:{self.local_ip},"
+            f"handshake:{self.handshake_port},"
+            f"notify:{self.notify_port}"
+        )
         role = "P" if self.is_producer else "D"
 
         retry_count = 0
@@ -815,14 +874,17 @@ class MoRIIOConnectorWorker:
             while True:
                 try:
                     data = {
-                        "type": "register",
-                        "role": role,
-                        "index": str(index),
-                        "request_address": http_request_address,
-                        "handshake_port": self.handshake_port,
-                        "notify_port": self.notify_port,
+                        "type": role,  # "P" or "D"
+                        "http_address": http_address,
+                        "zmq_address": zmq_address,
+                        # dp_size/tp_size are not used by the official vLLM router
+                        # (routing operates at the http_address level); they are
+                        # consumed only by the toy proxy server.
                         "dp_size": self.moriio_config.dp_size,
                         "tp_size": self.moriio_config.tp_size,
+                        # transfer_mode is included so the router can distinguish
+                        # READ (prefill-then-decode, sequential) from WRITE (concurrent)
+                        # scheduling.
                         "transfer_mode": self.mode.name,
                     }
 
@@ -1011,7 +1073,7 @@ class MoRIIOConnectorWorker:
         return {remote_agent_name}
 
     def _background_moriio_handshake(
-        self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta
+        self, req_id: ReqId, remote_engine_id: EngineId, meta: ReqMeta
     ):
         # Do MoRIIO handshake in background and add to _ready_requests when done.
         fut = None
@@ -1190,6 +1252,13 @@ class MoRIIOConnectorWorker:
             else:
                 done_recving = self._pop_done_transfers()
 
+        done_recving = {
+            self.transfer_id_to_request_id[id]
+            for id in filter(
+                lambda id: id in self.transfer_id_to_request_id, done_recving
+            )
+        }
+
         return done_sending, done_recving
 
     def _pop_done_transfers(self) -> set[str]:
@@ -1270,6 +1339,7 @@ class MoRIIOConnectorWorker:
         Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
+        self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             self.moriio_wrapper.async_wait_reqid()
             return
@@ -1333,9 +1403,10 @@ class MoRIIOConnectorWorker:
             remote_notify_port=meta.remote_notify_port,
         )
 
-    def _write_blocks_for_req(self, req_id: str, meta: ReqMeta, layer_name, kv_layer):
+    def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
         self.schedule_write_blocks(
             request_id=req_id,
+            transfer_id=meta.transfer_id,
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
@@ -1344,9 +1415,6 @@ class MoRIIOConnectorWorker:
             remote_notify_port=meta.remote_notify_port,
             remote_ip=meta.remote_host,
         )
-
-    def _is_last_layer(self, layer_name):
-        return layer_name == list(self.kv_caches.keys())[-1]
 
     def merge_contiguous_blocks(
         self,

@@ -68,7 +68,6 @@ def init_realtime_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
         )
         if "realtime" in supported_tasks
         else None

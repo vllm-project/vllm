@@ -4,15 +4,14 @@
 from typing import TypeAlias
 
 import numpy as np
+from fastapi.responses import JSONResponse
 
-from vllm import ClassificationOutput
-from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServeContext, PoolingServing
 from vllm.logger import init_logger
-from vllm.renderers import BaseRenderer
+from vllm.outputs import ClassificationOutput
 
+from ..base.serving import PoolingServing
+from ..typing import PoolingServeContext
 from .io_processor import ClassifyIOProcessor
 from .protocol import (
     ClassificationData,
@@ -29,30 +28,17 @@ ClassificationServeContext: TypeAlias = PoolingServeContext[ClassificationReques
 class ServingClassification(PoolingServing):
     request_id_prefix = "classify"
 
-    def init_io_processor(
-        self,
-        model_config: ModelConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
-    ) -> ClassifyIOProcessor:
-        return ClassifyIOProcessor(
-            model_config=model_config,
-            renderer=renderer,
-            chat_template_config=chat_template_config,
-        )
+    def init_io_processor(self, *args, **kwargs) -> ClassifyIOProcessor:
+        return ClassifyIOProcessor(*args, **kwargs)
 
-    async def _build_response(
+    def _build_response(
         self,
         ctx: ClassificationServeContext,
-    ) -> ClassificationResponse:
-        final_res_batch_checked = await self.io_processor.post_process_async(
-            ctx.final_res_batch
-        )
-
+    ) -> JSONResponse:
         id2label = getattr(self.model_config.hf_config, "id2label", {})
         num_prompt_tokens = 0
         items: list[ClassificationData] = []
-        for idx, final_res in enumerate(final_res_batch_checked):
+        for idx, final_res in enumerate(ctx.final_res_batch):
             classify_res = ClassificationOutput.from_base(final_res.outputs)
 
             probs = classify_res.probs
@@ -75,10 +61,12 @@ class ServingClassification(PoolingServing):
             total_tokens=num_prompt_tokens,
         )
 
-        return ClassificationResponse(
+        response = ClassificationResponse(
             id=ctx.request_id,
             created=ctx.created_time,
             model=ctx.model_name,
             data=items,
             usage=usage,
         )
+
+        return JSONResponse(content=response.model_dump())

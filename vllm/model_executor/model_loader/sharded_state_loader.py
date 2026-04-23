@@ -6,6 +6,7 @@ import glob
 import os
 import time
 from collections.abc import Generator
+from copy import copy
 from typing import Any
 
 import torch
@@ -42,7 +43,7 @@ class ShardedStateLoader(BaseModelLoader):
         extra_config = (
             {}
             if load_config.model_loader_extra_config is None
-            else load_config.model_loader_extra_config.copy()
+            else copy(load_config.model_loader_extra_config)
         )
         self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
         if extra_config:
@@ -156,7 +157,6 @@ class ShardedStateLoader(BaseModelLoader):
         logger.info_once(
             "Loading weights took %.2f seconds",
             counter_after_loading_weights - counter_before_loading_weights,
-            scope="local",
         )
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")

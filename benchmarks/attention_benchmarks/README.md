@@ -187,7 +187,7 @@ python benchmark.py \
 ## Hardware Requirements
 
 | Backend | Hardware |
-|---------|----------|
+| ------- | -------- |
 | Flash/Triton/FlashInfer | Any CUDA GPU |
 | CUTLASS MLA | Blackwell (SM100+) |
 | FlashAttn MLA | Hopper (SM90+) |

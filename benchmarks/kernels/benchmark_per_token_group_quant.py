@@ -28,7 +28,7 @@ def _time_cuda(
     # warmup
     for _ in range(warmup_iters):
         fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start = torch.Event(enable_timing=True)
     end = torch.Event(enable_timing=True)
@@ -37,7 +37,7 @@ def _time_cuda(
     for _ in range(bench_iters):
         fn()
     end.record()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     return start.elapsed_time(end) / bench_iters  # ms/iter
 
