@@ -1038,17 +1038,32 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             )
 
         if fast_kernel:
-            return self._forward_core_decode_fast(
-                qkvz=qkv_or_qkvz,
-                ba=b_or_ba,
-                z_out=a_or_z_out,
-                core_attn_out=core_attn_out,
-                attn_metadata=attn_metadata,
+            qkvz = qkv_or_qkvz
+            ba = b_or_ba
+            z_out = a_or_z_out
+            if (
+                attn_metadata.spec_sequence_masks is None
+                and attn_metadata.num_prefills == 0
+                and attn_metadata.num_decodes > 0
+            ):
+                return self._forward_core_decode_fast(
+                    qkvz=qkvz,
+                    ba=ba,
+                    z_out=z_out,
+                    core_attn_out=core_attn_out,
+                    attn_metadata=attn_metadata,
+                )
+            core_attn_out.zero_()
+            z_out.zero_()
+            num_tokens_all = qkvz.shape[0]
+            mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
+                qkvz, ba, num_tokens_all
             )
-
-        mixed_qkv = qkv_or_qkvz
-        b = b_or_ba
-        a = a_or_z_out
+            z_out[:] = z
+        else:
+            mixed_qkv = qkv_or_qkvz
+            b = b_or_ba
+            a = a_or_z_out
 
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -1308,239 +1323,54 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
 
-        if spec_sequence_masks is not None or attn_metadata.num_prefills > 0:
-            core_attn_out.zero_()
-            z_out.zero_()
-            num_tokens_all = qkvz.shape[0]
-            mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
-                qkvz, ba, num_tokens_all
-            )
-            z_out[:] = z
-            mixed_qkv = mixed_qkv[:num_actual_tokens]
-            b = b[:num_actual_tokens]
-            a = a[:num_actual_tokens]
-        else:
-            mixed_qkv, b, a = None, None, None
-
-        if spec_sequence_masks is not None:
-            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                mixed_qkv_spec = mixed_qkv
-                mixed_qkv_non_spec = None
-            else:
-                mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
-                mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
-        elif attn_metadata.num_prefills > 0:
-            mixed_qkv_spec = None
-            mixed_qkv_non_spec = mixed_qkv
-        else:
-            mixed_qkv_spec = None
-            mixed_qkv_non_spec = None
-
-        # 1.1: Process the multi-query part
-        if spec_sequence_masks is not None:
-            mixed_qkv_spec = causal_conv1d_update(
-                mixed_qkv_spec,
+        mixed_qkv_non_spec, b, a = (
+            gdn_aiter_fused_reshape_causal_conv1d_update_single_token(
+                qkvz,
+                num_actual_tokens,
+                self.num_k_heads // self.tp_size,
+                self.num_v_heads // self.tp_size,
+                self.head_k_dim,
+                self.head_v_dim,
+                ba,
+                z_out,
+                core_attn_out,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][
-                    : attn_metadata.num_spec_decodes
+                conv_state_indices=non_spec_state_indices_tensor[
+                    : attn_metadata.num_actual_tokens
                 ],
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
-                validate_data=False,
+                validate_data=True,
             )
-
-        # 1.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
-            assert mixed_qkv_non_spec is not None
-            mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
-        elif attn_metadata.num_decodes > 0:
-            if mixed_qkv_non_spec is not None:
-                mixed_qkv_non_spec = gdn_aiter_causal_conv1d_update_single_token(
-                    mixed_qkv_non_spec,
-                    conv_state,
-                    conv_weights,
-                    self.conv1d.bias,
-                    self.activation,
-                    conv_state_indices=non_spec_state_indices_tensor[
-                        : attn_metadata.num_actual_tokens
-                    ],
-                    validate_data=True,
-                )
-            else:
-                mixed_qkv_non_spec, b, a = (
-                    gdn_aiter_fused_reshape_causal_conv1d_update_single_token(
-                        qkvz,
-                        num_actual_tokens,
-                        self.num_k_heads // self.tp_size,
-                        self.num_v_heads // self.tp_size,
-                        self.head_k_dim,
-                        self.head_v_dim,
-                        ba,
-                        z_out,
-                        core_attn_out,
-                        conv_state,
-                        conv_weights,
-                        self.conv1d.bias,
-                        self.activation,
-                        conv_state_indices=non_spec_state_indices_tensor[
-                            : attn_metadata.num_actual_tokens
-                        ],
-                        validate_data=True,
-                    )
-                )
-        else:
-            mixed_qkv_non_spec = None
-
-        if attn_metadata.num_prefills > 0:
-            assert mixed_qkv_non_spec is not None, (
-                "mixed_qkv_non_spec must be provided for prefill path"
-            )
-            if spec_sequence_masks is not None:
-                a_non_spec = a.index_select(0, non_spec_token_indx)
-                b_non_spec = b.index_select(0, non_spec_token_indx)
-            else:
-                a_non_spec = a
-                b_non_spec = b
-
-            (
-                query_non_spec,
-                key_non_spec,
-                value_non_spec,
-                g_non_spec,
-                beta_non_spec,
-            ) = fused_post_conv_prep(
-                conv_output=mixed_qkv_non_spec,
-                a=a_non_spec,
-                b=b_non_spec,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                apply_l2norm=True,
-                output_g_exp=False,
-            )
-            query_non_spec = query_non_spec.unsqueeze(0)
-            key_non_spec = key_non_spec.unsqueeze(0)
-            value_non_spec = value_non_spec.unsqueeze(0)
-            g_non_spec = g_non_spec.unsqueeze(0)
-            beta_non_spec = beta_non_spec.unsqueeze(0)
-        else:
-            g_non_spec = None
-            beta_non_spec = None
-
-        core_attn_flat = (
-            core_attn_out.reshape(-1) if spec_sequence_masks is None else None
         )
 
         # 2. Recurrent attention
 
-        # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = (
-                gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule(
-                    A_log=self.A_log,
-                    a=a,
-                    b=b,
-                    dt_bias=self.dt_bias,
-                    qkv=mixed_qkv_spec,
-                    key_dim=self.key_dim // self.tp_size,
-                    value_dim=self.value_dim // self.tp_size,
-                    head_k_dim=self.head_k_dim,
-                    head_v_dim=self.head_v_dim,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc[
-                        : attn_metadata.num_spec_decodes + 1
-                    ],
-                    ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=num_accepted_tokens,
-                    use_qk_l2norm_in_kernel=True,
-                    core_attn_out=core_attn_flat,
-                )
-            )
-        else:
-            core_attn_out_spec, last_recurrent_state = None, None
+        core_attn_out_spec, last_recurrent_state = None, None
 
-        # 2.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
-                core_attn_out=core_attn_flat,
+        core_attn_out_non_spec, last_recurrent_state = (
+            gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule(
+                A_log=self.A_log,
+                a=a,
+                b=b,
+                dt_bias=self.dt_bias,
+                qkv=mixed_qkv_non_spec,
+                key_dim=self.key_dim // self.tp_size,
+                value_dim=self.value_dim // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[
+                    : attn_metadata.num_decodes + 1
+                ],
+                ssm_state_indices=non_spec_state_indices_tensor,
+                use_qk_l2norm_in_kernel=True,
+                core_attn_out=core_attn_out.reshape(-1),
             )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
-        elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule(
-                    A_log=self.A_log,
-                    a=a,
-                    b=b,
-                    dt_bias=self.dt_bias,
-                    qkv=mixed_qkv_non_spec,
-                    key_dim=self.key_dim // self.tp_size,
-                    value_dim=self.value_dim // self.tp_size,
-                    head_k_dim=self.head_k_dim,
-                    head_v_dim=self.head_v_dim,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
-                    core_attn_out=core_attn_flat,
-                )
-            )
-        else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
+        )
 
-        # 3. Merge core attention output
-        if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
-            )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
-        elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         return
 
     def _forward_core_decode_non_spec(
