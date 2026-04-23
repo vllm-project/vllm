@@ -80,6 +80,21 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
+def _make_control_bundle(node_ip: str) -> dict[str, float]:
+    # The engine actor is scheduled on the final CPU-only bundle. Keep that
+    # bundle colocated with the group's first GPU bundle so the actor does not
+    # float to an unrelated node and reorder worker ranks away from the
+    # advertised DP bootstrap host.
+    return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+
+def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
+    for key in bundle:
+        if key.startswith("node:"):
+            return key.split(":", 1)[1]
+    raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -466,19 +481,6 @@ class CoreEngineActorManager:
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
 
-        def make_control_bundle(node_ip: str) -> dict[str, float]:
-            # The engine actor is scheduled on the final CPU-only bundle. Keep
-            # that bundle colocated with the group's first GPU bundle so the
-            # actor does not float to an unrelated node and reorder worker
-            # ranks away from the advertised DP bootstrap host.
-            return {"CPU": 1.0, "node:" + node_ip: 0.001}
-
-        def get_bundle_node_ip(bundle: dict[str, float]) -> str:
-            for key in bundle:
-                if key.startswith("node:"):
-                    return key.split(":", 1)[1]
-            raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
-
         dp_master_ip_key = f"node:{dp_master_ip}"
         nodes = sorted(
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
@@ -610,12 +612,19 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    control_node_ip = get_bundle_node_ip(collected_bundles[0])
-                    bundles = collected_bundles + [make_control_bundle(control_node_ip)]
+                    control_node_ip = _get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        _make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
+                    # STRICT_PACK already keeps every bundle in the placement
+                    # group on one node, so the explicit node affinity on the
+                    # control bundle is redundant for correctness here. Keep it
+                    # anyway for consistency with the span path and to preserve
+                    # intent if this scheduling strategy changes later.
                     bundles = device_bundle * world_size + [
-                        make_control_bundle(node_ip)
+                        _make_control_bundle(node_ip)
                     ]
 
                 pg = ray.util.placement_group(
