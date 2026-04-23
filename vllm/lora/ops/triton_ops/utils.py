@@ -49,7 +49,11 @@ def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
         lora_strides_d1.append(lora_a_weight.stride(1))
         lora_strides_d2.append(lora_a_weight.stride(2))
     if len(lora_a_weights) > 1:
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+        # Pinned CPU + non_blocking H2D avoids the synchronous copy that
+        # `torch.tensor(list, device=cuda)` would otherwise force.
+        lora_ptr_tensor = torch.tensor(
+            tensor_ptrs, pin_memory=True, dtype=torch.uint64
+        ).to(device, non_blocking=True)
     else:
         lora_ptr_tensor = lora_a_weights[0]
 
@@ -106,11 +110,14 @@ def _get_lora_b_ptr(
         hidden_sizes.append(lora_b_weight.size(1))
 
     if len(lora_weights) > 1:
-        # note these are device tensors
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+        # note these are device tensors. Pinned CPU + non_blocking H2D
+        # avoids the sync that `torch.tensor(list, device=cuda)` forces.
+        lora_ptr_tensor = torch.tensor(
+            tensor_ptrs, pin_memory=True, dtype=torch.uint64
+        ).to(device, non_blocking=True)
         slice_start_tensor = torch.tensor(
-            slice_offset_lst, device=device, dtype=torch.uint64
-        )
+            slice_offset_lst, pin_memory=True, dtype=torch.uint64
+        ).to(device, non_blocking=True)
     else:
         slice_start_tensor = slice_offset_lst[0]
         lora_ptr_tensor = lora_b_weight[0]
@@ -129,10 +136,19 @@ def _get_lora_b_ptr(
         same_stride = True
 
     else:
-        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
-        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
-        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
-        hidden_sizes_tensor = torch.tensor(hidden_sizes, device=device)
+        # Pinned CPU + non_blocking H2D to avoid blocking copies.
+        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, pin_memory=True).to(
+            device, non_blocking=True
+        )
+        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, pin_memory=True).to(
+            device, non_blocking=True
+        )
+        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, pin_memory=True).to(
+            device, non_blocking=True
+        )
+        hidden_sizes_tensor = torch.tensor(hidden_sizes, pin_memory=True).to(
+            device, non_blocking=True
+        )
         same_stride = False
     # MAX_N is the maximum hidden size among all the lora_b weights
     MAX_N = max(hidden_sizes)
