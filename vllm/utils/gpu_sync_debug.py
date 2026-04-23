@@ -11,6 +11,20 @@ from vllm.platforms import current_platform
 
 _GPU_SYNC_ALLOWED_COUNTS: dict[tuple[str, int], int] = {}
 
+# Global sync-check gate. Off during engine setup (model load, KV cache
+# init, warmup/compile) so first-compile and lazy-init syncs pass through;
+# flipped on by `enable_gpu_sync_check()` at the end of
+# `GPUWorker.compile_or_warm_up_model`, after which `with_gpu_sync_check`-
+# decorated functions activate the configured debug mode.
+_sync_check_enabled: bool = False
+
+
+def enable_gpu_sync_check() -> None:
+    """Flip the sync-check gate on. Call once per worker, after warmup /
+    first-compile is complete."""
+    global _sync_check_enabled
+    _sync_check_enabled = True
+
 
 @contextmanager
 def _suppress_gpu_sync_check(prev_mode: int):
@@ -52,31 +66,22 @@ if current_platform.is_cuda_alike():
             _GPU_SYNC_ALLOWED_COUNTS[key] = used + 1
         return _suppress_gpu_sync_check(prev_mode)
 
-    def with_gpu_sync_check(fn=None, *, skip_first: int = 0):
+    def with_gpu_sync_check(fn):
         """Decorator that enables `torch.cuda.set_sync_debug_mode` around `fn`
-        when `VLLM_GPU_SYNC_CHECK` is set.
+        when `VLLM_GPU_SYNC_CHECK` is set *and* the gate has been flipped by
+        `enable_gpu_sync_check()`. Before the gate flips (i.e. during
+        engine setup / warmup) the decorated function runs as-is.
 
         The env var is parsed once at decoration time; this module is imported
         lazily after `VllmConfig.__post_init__` has finalized `VLLM_GPU_SYNC_CHECK`.
-
-        Supports two forms:
-          @with_gpu_sync_check                 # bare (skip_first=0)
-          @with_gpu_sync_check(skip_first=N)   # skip the first N calls
         """
-        if fn is None:
-            return functools.partial(with_gpu_sync_check, skip_first=skip_first)
-
         mode = envs.VLLM_GPU_SYNC_CHECK
         if mode is None:
             return fn
 
-        remaining = skip_first
-
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            nonlocal remaining
-            if remaining > 0:
-                remaining -= 1
+            if not _sync_check_enabled:
                 return fn(*args, **kwargs)
             prev_mode = torch.cuda.get_sync_debug_mode()
             torch.cuda.set_sync_debug_mode(mode)
@@ -92,7 +97,5 @@ else:
     def gpu_sync_allowed(count: int | None = None):
         return _noop_cm()
 
-    def with_gpu_sync_check(fn=None, *, skip_first: int = 0):
-        if fn is None:
-            return lambda f: f
+    def with_gpu_sync_check(fn):
         return fn

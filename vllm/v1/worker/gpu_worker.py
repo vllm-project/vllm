@@ -712,6 +712,12 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+        # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
+        # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
+        from vllm.utils.gpu_sync_debug import enable_gpu_sync_check
+
+        enable_gpu_sync_check()
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
@@ -765,14 +771,14 @@ class Worker(WorkerBase):
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
-    @with_gpu_sync_check(skip_first=1)
+    @with_gpu_sync_check
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
-    @with_gpu_sync_check(skip_first=1)
+    @with_gpu_sync_check
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
