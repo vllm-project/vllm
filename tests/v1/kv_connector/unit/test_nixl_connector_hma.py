@@ -90,44 +90,40 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,is_mamba_group,remote_ratio,remote_block_ids,expected_remote_block_ids",
+    "is_mamba_group,expansion_stride,remote_block_ids,expected_remote_block_ids",
     [
-        # Non-mamba (FA+SWA): both groups expanded via _logical_to_kernel_block_ids.
+        # Dense (FA+SWA): stride == local_ratio, all groups expanded.
         # Regression for https://github.com/vllm-project/vllm/pull/39724
         (
-            False,
             [False, False],
-            1,
+            2,
             ([0, 1, 2], [3, 4]),
             [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
         ),
-        # Mamba (FA+Mamba): FA expanded via _logical_to_remote_kernel_block_ids,
-        # Mamba passed through unchanged.
-        # remote_ratio=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
-        # the wrong conversion method produces different FA results.
+        # Mamba (FA+Mamba): stride == remote_physical_blocks_per_logical,
+        # FA expanded, Mamba passed through unchanged.
+        # stride=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
+        # the wrong stride produces different FA results.
         (
-            True,
             [False, True],
             261,
             ([0, 1, 2], [10, 11]),
             [[0, 1, 261, 262, 522, 523], [10, 11]],
         ),
     ],
-    ids=["non_mamba_fa_swa", "mamba_fa_ssm"],
+    ids=["dense_fa_swa", "mamba_fa_ssm"],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    has_mamba,
     is_mamba_group,
-    remote_ratio,
+    expansion_stride,
     remote_block_ids,
     expected_remote_block_ids,
 ):
     """_read_blocks_for_req must expand remote logical block IDs to kernel
     block IDs when kernel block size != logical block size.
 
-    Non-mamba path uses _logical_to_kernel_block_ids (all groups expanded).
-    Mamba path uses _logical_to_remote_kernel_block_ids (FA expanded, Mamba
-    passed through).
+    The hot path always calls _logical_to_remote_kernel_block_ids with
+    plan.remote_expansion_stride (model-agnostic).
     """
     from unittest.mock import MagicMock
 
@@ -142,7 +138,6 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
 
     worker = object.__new__(NixlConnectorWorker)
-    worker._has_mamba = has_mamba
     worker._physical_blocks_per_logical_kv_block = 2
     worker._is_mamba_group = is_mamba_group
 
@@ -160,9 +155,8 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker.transfer_policy.compute_read_specs.return_value = []
     worker.use_mla = False
 
-    # Mock the plan with the remote physical blocks ratio
     mock_plan = MagicMock(spec=EngineTransferPlan)
-    mock_plan.remote_physical_blocks_per_logical = remote_ratio
+    mock_plan.remote_expansion_stride = expansion_stride
     worker._transfer_plans = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()

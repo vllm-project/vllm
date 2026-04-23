@@ -120,6 +120,11 @@ class EngineTransferPlan:
     remote_block_len: int
     remote_physical_blocks_per_logical: int
 
+    # Stride for expanding remote logical block IDs to kernel block IDs.
+    # Dense: equals local physical_blocks_per_logical (stride == count).
+    # Mamba: equals remote_physical_blocks_per_logical (stride != count).
+    remote_expansion_stride: int
+
     @property
     def all_regions(self) -> tuple[RegionPlan, ...]:
         return self.fa_regions + self.ssm_regions
@@ -301,6 +306,7 @@ def generate_dense_plan(
     remote_num_blocks: int,
     remote_block_lens: list[int],
     remote_physical_blocks_per_logical: int,
+    local_physical_blocks_per_logical: int,
 ) -> EngineTransferPlan:
     """Generate transfer plan for dense (FA-only) models.
 
@@ -386,6 +392,7 @@ def generate_dense_plan(
         remote_block_size=remote_block_size,
         remote_block_len=remote_block_lens[0],
         remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+        remote_expansion_stride=local_physical_blocks_per_logical,
     )
 
 
@@ -578,6 +585,7 @@ def generate_mamba_plan(
         remote_block_size=remote_block_size,
         remote_block_len=remote_block_lens[0],
         remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+        remote_expansion_stride=remote_physical_blocks_per_logical,
     )
 
 
