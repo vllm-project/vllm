@@ -808,15 +808,12 @@ class EplbState:
 
     def start_async_loop(
         self,
-        rank_mapping: dict[int, int] | None = None,
-        is_profile: bool = False,
     ):
         if not self.is_async:
             return
         if self.async_worker is None:
             self.async_worker = start_async_worker(
                 self,
-                is_profile=is_profile,
             )
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:

@@ -25,7 +25,6 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
-    is_profile: bool = False,
 ) -> threading.Thread:
     eplb_group = get_eplb_group().device_group
     rank = eplb_group.rank()
@@ -44,7 +43,6 @@ def start_async_worker(
                     state=state,
                     eplb_group=eplb_group,
                     cuda_stream=cuda_stream,
-                    is_profile=is_profile,
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -87,7 +85,6 @@ async def transfer_run_periodically(
     state: "EplbState",
     eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
-    is_profile: bool = False,
 ) -> None:
     while True:
         state.rearrange_event.wait(stream=cuda_stream)
@@ -123,9 +120,8 @@ async def transfer_run_periodically(
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
                     expert_weights=model_state.model.expert_weights[layer_idx],
                     expert_weights_buffer=model_state.expert_buffer,
-                    communicator=model_state.communicator,
                     ep_group=eplb_group,
-                    is_profile=is_profile,
+                    communicator=model_state.communicator,
                     cuda_stream=cuda_stream,
                 )
 

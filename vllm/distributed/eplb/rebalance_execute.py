@@ -425,9 +425,7 @@ async def transfer_layer(
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     communicator: EplbCommunicator,
-    is_profile: bool = False,
     cuda_stream: torch.cuda.Stream | None = None,
-    rank_mapping: dict[int, int] | None = None,
 ) -> TransferMetadata:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -444,45 +442,18 @@ async def transfer_layer(
         expert_weights_buffer: Intermediate buffers (one per weight tensor).
         ep_group: The device process group for expert parallelism.
         communicator: EplbCommunicator instance for P2P communication.
-        is_profile (bool): If `True`, do not perform any actual weight copy.
-            This is used during profile run, where we only perform dummy
-            communications to reserve enough memory for the buffers.
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
-        rank_mapping: Optional rank mapping for elastic expert parallelism.
 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers,
             including is_unchanged and is_received_locally masks.
     """
-    ep_size = ep_group.size()
-    if rank_mapping is not None:
-        # Add a layer dimension for compatibility with mapping functions
-        old_layer_indices_2d = old_layer_indices.unsqueeze(0)
-        new_layer_indices_2d = new_layer_indices.unsqueeze(0)
-
-        if len(rank_mapping) == ep_group.size():
-            # scale down
-            new_layer_indices_2d = _map_new_expert_indices_with_rank_mapping(
-                new_layer_indices_2d,
-                rank_mapping,
-            )
-        else:
-            # scale up
-            old_layer_indices_2d = _map_old_expert_indices_with_rank_mapping(
-                old_layer_indices_2d,
-                rank_mapping,
-                ep_group.size(),
-            )
-
-        # Remove the layer dimension
-        old_layer_indices = old_layer_indices_2d.squeeze(0)
-        new_layer_indices = new_layer_indices_2d.squeeze(0)
 
     assert old_layer_indices.shape == new_layer_indices.shape
     num_physical_experts = old_layer_indices.shape[0]
-    assert len(expert_weights[0]) >= 1
+    assert len(expert_weights) >= 1 and expert_weights[0].shape[0] >= 1
     num_local_physical_experts = expert_weights[0].shape[0]
-    assert num_physical_experts == ep_size * num_local_physical_experts
+    assert num_physical_experts == ep_group.size() * num_local_physical_experts
 
     old_layer_indices_np = old_layer_indices.cpu().numpy()
     new_layer_indices_np = new_layer_indices.cpu().numpy()
