@@ -62,6 +62,8 @@ class Mxfp4MoeBackend(Enum):
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
+    # Emulation
+    EMULATION = "EMULATION"
 
 
 # Backends that share the same TRTLLM weight format
@@ -143,6 +145,13 @@ def backend_to_kernel_cls(
 
         return [XPUExpertsMXFp4]
 
+    elif backend == Mxfp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+            OCP_MXQuantizationEmulationTritonExperts,
+        )
+
+        return [OCP_MXQuantizationEmulationTritonExperts]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -158,6 +167,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         "marlin": Mxfp4MoeBackend.MARLIN,
         "aiter": Mxfp4MoeBackend.AITER,
         "xpu": Mxfp4MoeBackend.XPU,
+        "emulation": Mxfp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -181,6 +191,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -258,7 +269,7 @@ def select_gpt_oss_mxfp4_moe_backend(
                 k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -352,10 +363,10 @@ def select_gpt_oss_mxfp4_moe_backend(
                 k_cls, config, kMxfp4Static, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
             else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                logger.debug_once(_make_log_unsupported(backend, reason))
 
     if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
@@ -768,6 +779,17 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+        # No additional transformation needed for emulation backend,
+        # weights are dequantized on the fly in the experts class.
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend: {mxfp4_backend}: "
@@ -839,7 +861,7 @@ def make_mxfp4_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
