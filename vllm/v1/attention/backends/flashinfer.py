@@ -43,6 +43,7 @@ from vllm.utils.flashinfer import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
@@ -1445,6 +1446,21 @@ class FlashInferImpl(AttentionImpl):
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
+        # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
+        # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
+        # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
+        # canonicalize_singleton_dim_strides patches metadata via as_strided —
+        # zero-copy.  See vllm.utils.torch_utils.
+        fixed = canonicalize_singleton_dim_strides(kv_cache_permute)
+        if fixed is not kv_cache_permute:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashInfer): "
+                "shape=%s, strides before=%s, strides after=%s",
+                kv_cache_permute.shape,
+                kv_cache_permute.stride(),
+                fixed.stride(),
+            )
+        kv_cache_permute = fixed
 
         # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
         # Split into correctly-strided data and scale views.
@@ -1557,18 +1573,24 @@ class FlashInferImpl(AttentionImpl):
                     # with fp8 kv cache, we can construct a mock block
                     # and mock kv cache with BF16 KV involved in the prefill
                     #
-                    # The inner (block_size, head_size) dims must be
-                    # contiguous; outer dims may have non-canonical strides
-                    # (e.g. cross-layer unified allocation).
-                    # Degenerate strides on outer dims break TMA descriptors
-                    # (see flashinfer-ai/flashinfer#2232).
+                    # The three innermost dims (num_kv_heads, block_size,
+                    # head_size) must have canonical strides for CUDA TMA
+                    # (≥16-byte alignment on all non-outermost strides).
+                    # The num_kv_heads stride is fixed by
+                    # canonicalize_singleton_dim_strides above; outer dims may
+                    # still be non-contiguous (e.g. cross-layer unified alloc).
                     kv_strides = kv_cache_permute.stride()
+                    expected_head_stride = (
+                        kv_cache_permute.shape[-2] * kv_cache_permute.shape[-1]
+                    )
                     assert (
                         kv_strides[-1] == 1
                         and kv_strides[-2] == kv_cache_permute.shape[-1]
+                        and kv_strides[-3] == expected_head_stride
                     ), (
-                        "KV cache inner dims (block_size, head_size) must be "
-                        f"contiguous, got strides {kv_strides}"
+                        "KV cache dims (num_kv_heads, block_size, head_size) "
+                        "must have canonical strides for TMA; got "
+                        f"strides={kv_strides}, shape={kv_cache_permute.shape}"
                     )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_permute,
@@ -1662,16 +1684,25 @@ class FlashInferImpl(AttentionImpl):
                 assert is_strictly_contiguous(block_tables_decode)
                 assert is_strictly_contiguous(seq_lens_decode)
                 # kv_cache outer dims may be non-contiguous (e.g.
-                # cross-layer unified allocation), but inner dims
-                # (block_size, head_size) must be contiguous and
-                # strides must be canonical to avoid TMA descriptor
-                # failures (see flashinfer-ai/flashinfer#2232).
+                # cross-layer unified allocation), but the three innermost
+                # dims (num_kv_heads, block_size, head_size) must have
+                # canonical strides for CUDA TMA (≥16-byte alignment on all
+                # non-outermost strides).  The num_kv_heads stride is fixed
+                # by canonicalize_singleton_dim_strides above; assert all three
+                # here so regressions surface with a readable message rather
+                # than cudaErrorIllegalInstruction.
                 kv_strides = kv_cache_permute.stride()
+                expected_head_stride = (
+                    kv_cache_permute.shape[-2] * kv_cache_permute.shape[-1]
+                )
                 assert (
-                    kv_strides[-1] == 1 and kv_strides[-2] == kv_cache_permute.shape[-1]
+                    kv_strides[-1] == 1
+                    and kv_strides[-2] == kv_cache_permute.shape[-1]
+                    and kv_strides[-3] == expected_head_stride
                 ), (
-                    "KV cache inner dims (block_size, head_size) must be "
-                    f"contiguous, got strides {kv_strides}"
+                    "KV cache dims (num_kv_heads, block_size, head_size) must "
+                    "have canonical strides for TMA; got "
+                    f"strides={kv_strides}, shape={kv_cache_permute.shape}"
                 )
 
                 if output.dtype == FP4_DTYPE:
