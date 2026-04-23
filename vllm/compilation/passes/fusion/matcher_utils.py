@@ -10,6 +10,7 @@ from torch._ops import OpOverload
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -158,6 +159,133 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         return result
 
 
+class MatcherFusedAddRMSNorm(MatcherCustomOp):
+    def __init__(
+        self,
+        epsilon: float,
+        enabled: bool | None = None,
+        match_rocm_aiter: bool = False,
+    ) -> None:
+        if enabled is None:
+            enabled = RMSNorm.enabled()
+
+        super().__init__(enabled)
+        self.epsilon = epsilon
+        self.match_rocm_aiter = match_rocm_aiter
+
+        self._rmsnorm_op = RMS_ADD_OP
+
+        if match_rocm_aiter:
+            self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_fused_add_op()
+
+    def inputs(self) -> list[torch.Tensor]:
+        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
+        weight = self.empty(16)
+        residual = self.empty(5, 16)
+        return [input, weight, residual]
+
+    def forward_rocm_aiter(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._rmsnorm_op(  # type: ignore[no-any-return]
+            x=input, residual=residual, weight=weight, variance_epsilon=self.epsilon
+        )
+
+    def forward_custom(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.match_rocm_aiter:
+            return self.forward_rocm_aiter(input, weight, residual)
+
+        _, result, residual = auto_functionalized(
+            self._rmsnorm_op,
+            input=input,
+            residual=residual,
+            weight=weight,
+            epsilon=self.epsilon,
+        )
+
+        return result, residual
+
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        result: tuple[torch.Tensor, torch.Tensor] = RMSNorm.forward_static(
+            input, self.epsilon, input.size(-1), self.model_dtype, weight, residual
+        )
+        return result
+
+
+class MatcherRMSNormGated(MatcherCustomOp):
+    """Matches RMSNormGated with norm_before_gate=True and group_size=None."""
+
+    def __init__(
+        self,
+        epsilon: float,
+        enabled: bool | None = None,
+        norm_before_gate: bool = True,
+        group_size: int | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = RMSNormGated.enabled()
+
+        super().__init__(enabled)
+        self.epsilon = epsilon
+        self.norm_before_gate = norm_before_gate
+        self.group_size = group_size
+
+    def inputs(self) -> list[torch.Tensor]:
+        x = self.empty(5, 16)
+        z = self.empty(5, 16)
+        weight = self.empty(16)
+        return [x, z, weight]
+
+    def forward_custom(
+        self,
+        x: torch.Tensor,
+        z: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import (
+            rmsnorm_fn,
+        )
+
+        return rmsnorm_fn(
+            x,
+            weight,
+            bias=None,
+            z=z,
+            eps=self.epsilon,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        z: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return RMSNormGated.forward_static(
+            x,
+            z,
+            weight,
+            self.epsilon,
+            self.model_dtype,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
+
+
 class MatcherQuantFP8(MatcherCustomOp):
     def __init__(
         self,
@@ -167,6 +295,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
         is_tma_aligned: bool = False,
+        use_triton: bool = False,
     ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
@@ -189,12 +318,12 @@ class MatcherQuantFP8(MatcherCustomOp):
                     "ROCm aiter fusion pass currently supports "
                     "quantization operation with group_size 128"
                 )
-                if current_platform.is_fp8_fnuz():
-                    self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
-                else:
+                if use_triton:
                     self.QUANT_OP = (
                         torch.ops.vllm.triton_per_token_group_quant_fp8.default
                     )
+                else:
+                    self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
 
         else:
             assert quant_key in QUANT_OPS, (
