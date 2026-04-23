@@ -11,6 +11,8 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -53,10 +55,6 @@ class MultipleOf:
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
 
-    # For some attention backends, we allocate an output tensor before
-    # calling the custom op. When piecewise cudagraph is enabled, this
-    # makes sure the output tensor is allocated inside the cudagraph.
-    accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
         "auto",
@@ -779,7 +777,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -884,7 +882,12 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
-        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+        return quant_key in (
+            kFp8StaticTensorSym,
+            kNvfp4Dynamic,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
+        )
 
     def do_kv_cache_update(
         self,
@@ -922,7 +925,12 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
-        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+        return quant_key in (
+            kFp8StaticTensorSym,
+            kNvfp4Dynamic,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
+        )
 
     @abstractmethod
     def __init__(

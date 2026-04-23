@@ -13,10 +13,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
+    RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
 
@@ -24,8 +24,6 @@ logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
-    accept_output_buffer: bool = True
-
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
@@ -54,6 +52,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @classmethod
     def supports_sink(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return False
 
     forward_includes_kv_cache_update: bool = False
 
@@ -142,8 +144,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        attn_metadata: RocmAttentionMetadata,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -159,8 +161,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
-
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"

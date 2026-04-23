@@ -820,24 +820,31 @@ def get_max_concurrency_for_kv_cache_config(
     return max_concurrency
 
 
-def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
+def may_override_num_blocks(
+    vllm_config: VllmConfig, num_blocks: int, suppress_log: bool = False
+) -> int:
     """
     Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
     """
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_gpu_blocks_override = vllm_config.cache_config.num_gpu_blocks_override
-        logger.info(
-            "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-            num_blocks,
-            num_gpu_blocks_override,
-        )
+        if not suppress_log:
+            logger.info(
+                "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
+                num_blocks,
+                num_gpu_blocks_override,
+            )
         num_blocks = num_gpu_blocks_override
 
     return num_blocks
 
 
 def get_num_blocks(
-    vllm_config: VllmConfig, num_layers: int, available_memory: int, page_size: int
+    vllm_config: VllmConfig,
+    num_layers: int,
+    available_memory: int,
+    page_size: int,
+    suppress_log: bool = False,
 ) -> int:
     """
     Get the number of kv cache blocks.
@@ -847,10 +854,14 @@ def get_num_blocks(
         num_layers: The number of layers
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
+        suppress_log: Whether to suppress override log messages. Used when creating a
+            temporary/dummy KV cache config, e.g. during CG memory profiling
     """
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+    num_blocks = may_override_num_blocks(
+        vllm_config, num_blocks, suppress_log=suppress_log
+    )
     return num_blocks
 
 
@@ -1082,6 +1093,7 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    suppress_log: bool = False,
 ) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -1113,7 +1125,9 @@ def get_kv_cache_config_from_groups(
         num_blocks = (
             available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
         )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        num_blocks = may_override_num_blocks(
+            vllm_config, num_blocks, suppress_log=suppress_log
+        )
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
@@ -1138,7 +1152,11 @@ def get_kv_cache_config_from_groups(
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
+            vllm_config,
+            group_size,
+            available_memory,
+            page_size,
+            suppress_log=suppress_log,
         )
         kv_cache_tensors = []
         for i in range(group_size):
@@ -1316,7 +1334,7 @@ def _report_kv_cache_config(
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
+    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
@@ -1325,7 +1343,6 @@ def _report_kv_cache_config(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
         max_concurrency,
-        scope="local",
     )
 
 
@@ -1427,7 +1444,6 @@ def _auto_fit_max_model_len(
             "Auto-fit max_model_len: attention-free model, "
             "using derived max_model_len=%d",
             original_max,
-            scope="local",
         )
         return
 
@@ -1454,7 +1470,6 @@ def _auto_fit_max_model_len(
             "Auto-fit max_model_len: full model context length %d fits in "
             "available GPU memory",
             original_max,
-            scope="local",
         )
     else:
         # Need to reduce max_model_len to fit in memory
@@ -1465,7 +1480,6 @@ def _auto_fit_max_model_len(
             original_max,
             auto_fit_max,
             format_gib(limiting_worker_mem),
-            scope="local",
         )
 
 

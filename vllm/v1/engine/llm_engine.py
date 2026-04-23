@@ -19,7 +19,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -57,7 +56,6 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
@@ -90,11 +88,6 @@ class LLMEngine:
         self.should_execute_dummy_batch = False
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
-        self.io_processor = get_io_processor(
-            self.vllm_config,
-            self.renderer,
-            self.model_config.io_processor_plugin,
-        )
 
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
