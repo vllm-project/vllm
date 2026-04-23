@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -955,6 +956,7 @@ class ModelConfig:
                 "humming",
                 "gguf",
             ]
+            # if the user specifies humming, we should always use humming
             if self.quantization == "humming":
                 overrides = ["humming"] + overrides
             quantization_methods = [

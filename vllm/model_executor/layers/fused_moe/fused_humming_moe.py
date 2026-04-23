@@ -42,10 +42,10 @@ logger = init_logger(__name__)
 
 
 def get_humming_moe_gemm_type() -> Literal["indexed", "grouped"]:
-    gemm_type = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
-    gemm_type = gemm_type.lower()
-    if gemm_type in ["indexed", "grouped"]:
-        return gemm_type
+    env_gemm_type = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
+    env_gemm_type = env_gemm_type.lower()
+    if env_gemm_type in ["indexed", "grouped"]:
+        gemm_type = env_gemm_type
     elif current_platform.has_device_capability(90):
         # for device that supports TMA, use grouped gemm
         gemm_type = "grouped"
