@@ -6,6 +6,10 @@ from vllm.ir import ops
 
 from .common import LoweringTestConfig
 
+from vllm.platforms import current_platform
+
+torch.set_default_device(current_platform.device_type)
+
 CONFIGS = {
     "rms_norm": LoweringTestConfig(
         op=ops.rms_norm,

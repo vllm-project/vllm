@@ -86,7 +86,7 @@ def run_e2e_lowering_test(monkeypatch, caplog_mp_spawn):
         # check atleast 1 op is lowered
         matches = re.findall(
             r"lowering_pass.py:\d+] VllmIRLoweringPass "
-            r"lowered (\d+) with vLLM IR Nodes",
+            r"lowered (\d+) vLLM IR nodes",
             log_holder.text,
         )
         assert len(matches) == 1
