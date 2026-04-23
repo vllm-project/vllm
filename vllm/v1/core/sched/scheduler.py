@@ -325,7 +325,13 @@ class Scheduler(SchedulerInterface):
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
             if num_computed_tokens_after_sched < last_cache_position:
                 # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+                # If num_new_tokens is less than block_size, the Mamba state
+                # is simply not cached for this chunk (no special handling
+                # needed), so keep the original value to avoid zero-collapse
+                # which would cause the scheduler to skip the request and
+                # deadlock when encoder cache is exhausted.
+                aligned = num_new_tokens // block_size * block_size
+                num_new_tokens = aligned if aligned > 0 else num_new_tokens
             elif (
                 num_computed_tokens
                 < last_cache_position
