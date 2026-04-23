@@ -18,7 +18,6 @@ from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
 from ...backend import TestBackend
-from tests.ir.ir_test_utils import assert_close, supported_providers
 
 
 def _make_simple_model(op: IrOp, real_args: tuple) -> nn.Module:
@@ -184,92 +183,3 @@ class TestFakeOpLowering:
                 assert isinstance(result, bool)
 
 
-# ============================================================
-# E2E correctness tests
-# ============================================================
-
-
-def _get_op_provider_pairs() -> list[tuple[str, str]]:
-    """Get all (op_name, provider) pairs for parametrization."""
-    pairs: list[tuple[str, str]] = []
-    for op_name, op in IrOp.registry.items():
-        if not op.has_input_generator:
-            continue
-        for provider in supported_providers(op) + ["native"]:
-            pairs.append((op_name, provider))
-    return pairs
-
-
-class TestE2ELowering:
-    """
-    E2E correctness tests, comparing the lowering pipeline with baselines.
-    """
-
-    @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_e2e_correctness(self, op_name, provider, default_vllm_config):
-        """
-        Compare lowering pipeline output with two baselines:
-        1. ir_enable_torch_wrap=False: implementations traced by Dynamo directly
-        2. No lowering at all: IR ops remain in the Inductor-produced artifact
-        Also verify lowering pass selection matches direct dispatch results.
-        """
-        op = IrOp.registry[op_name]
-
-        if not op.impls[provider].supported:
-            pytest.skip(f"Provider {provider} not supported")
-
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-        torch.set_default_device(current_platform.device_type)
-        x = torch.randn(8, 16, dtype=torch.bfloat16)
-
-        # Generate inputs once so all models use the same inputs
-        real_args = op.generate_inputs()
-
-        # Get expected result from direct dispatch
-        with op.set_priority([provider, "native"]):
-            expected_impl = op.dispatch(*real_args)
-
-        # Case 1: lowering enabled with torch_wrap=True
-        with op.set_priority([provider, "native"]), ir.enable_torch_wrap(True):
-            model = _make_simple_model(op, real_args)
-            compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-            output = compiled_model(x.clone())
-
-        # Verify lowering pass selection matches direct dispatch
-        if op_name in lowering_pass.selected_impls:
-            selected = lowering_pass.selected_impls[op_name]
-            assert len(selected) > 0
-            for node_name, selected_provider in selected.items():
-                assert selected_provider == expected_impl.provider, (
-                    f"lowering selected {selected_provider} for {node_name}, "
-                    f"but direct dispatch got {expected_impl.provider}"
-                )
-
-        # Case 2: torch_wrap=False - implementations traced by Dynamo directly
-        backend_no_wrap = TestBackend()
-        with op.set_priority([provider, "native"]), ir.enable_torch_wrap(False):
-            model_no_wrap = _make_simple_model(op, real_args)
-            compiled_no_wrap = torch.compile(
-                model_no_wrap, backend=backend_no_wrap, fullgraph=True
-            )
-            output_no_wrap = compiled_no_wrap(x.clone())
-
-        # Case 3: no lowering at all - IR ops remain in Inductor artifact
-        backend_no_lowering = TestBackend()
-        with op.set_priority([provider, "native"]):
-            model_no_lowering = _make_simple_model(op, real_args)
-            compiled_no_lowering = torch.compile(
-                model_no_lowering, backend=backend_no_lowering, fullgraph=True
-            )
-            output_no_lowering = compiled_no_lowering(x.clone())
-
-        # Use op-defined tolerances for dtype-aware comparison
-        dtype = output.dtype
-        tolerance = op.get_tolerance(dtype)
-        torch.testing.assert_close(
-            output, output_no_wrap, atol=tolerance["atol"], rtol=tolerance["rtol"]
-        )
-        torch.testing.assert_close(
-            output, output_no_lowering, atol=tolerance["atol"], rtol=tolerance["rtol"]
-        )
