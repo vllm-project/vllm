@@ -116,21 +116,7 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings(self.vllm_config):
-            self._dummy_run(
-                min(
-                    max(16, self.max_num_reqs),
-                    self.scheduler_config.max_num_batched_tokens,
-                )
-            )
-
-        # Warm up drafter for speculative decoding
-        if self.speculative_config and (self.speculative_config.uses_draft_model()):
-            from vllm.v1.spec_decode.draft_model import DraftModelProposer
-
-            if isinstance(self.drafter, (DraftModelProposer)):
-                logger.info("Warming up drafter model...")
-                self.drafter.dummy_run(max(16, self.max_num_reqs))
-
+            self.profile_run()
         logger.info("Warming up done.")
 
     def initialize_kv_cache(
