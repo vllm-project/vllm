@@ -65,6 +65,7 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
 
+    # TODO: does this need to be shifted by 1 like in gpu_model_runner?
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
 
