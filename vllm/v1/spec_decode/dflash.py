@@ -76,7 +76,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             attention_config=replace(
                 base.attention_config,
                 use_non_causal=True,
-                backend=None,  # ignore the user-specified backend
             ),
         )
 
