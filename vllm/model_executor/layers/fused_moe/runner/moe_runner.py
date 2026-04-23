@@ -335,7 +335,7 @@ class MoERunner(MoERunnerInterface):
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
 
-        * If the combine kernel does the reduction for fused_ouput, reduce
+        * If the combine kernel does the reduction for fused_output, reduce
           shared_output separately. O.w, reduce fused_output+shared_output later.
         * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
           in the model.
