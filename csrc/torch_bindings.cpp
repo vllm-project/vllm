@@ -536,7 +536,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.def(
       "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
       "                  Tensor sizes,"
-      "                  bool src_access_order_any=False) -> ()");
+      "                  bool is_src_access_order_any=False) -> ()");
   cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
 
   // Reshape the key and value tensors and cache them.
