@@ -1661,10 +1661,6 @@ class EngineArgs:
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             merged = sorted(existing | set(boundary), key=lambda x: int(x))
 
-            # NOTE: head_dim>256 skip removed — testing whether latest
-            # vllm_xpu_kernels handles global_head_dim=512 natively.
-            hf_cfg = model_config.hf_text_config
-            layer_types = getattr(hf_cfg, "layer_types", None)
 
             # KV-shared layers reuse their target's cache tensor.  The
             # shared layer's kv_cache_dtype MUST match the target's,
@@ -1676,6 +1672,8 @@ class EngineArgs:
             # target layers.  Quantization error in a target's KV cache
             # is amplified across every consumer layer, so target layers
             # should stay in bf16.
+            hf_cfg = model_config.hf_text_config
+            layer_types = getattr(hf_cfg, "layer_types", None)
             num_kv_shared = getattr(hf_cfg, "num_kv_shared_layers", 0)
             if num_kv_shared > 0 and layer_types is not None:
                 first_shared = num_layers - num_kv_shared
