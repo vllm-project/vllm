@@ -45,12 +45,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+    EngineTransferPlan,
+    generate_dense_plan,
+    generate_mamba_plan,
+    logical_to_kernel_block_ids,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
     compute_physical_blocks_per_logical,
+    derive_mamba_conv_split,
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
@@ -66,7 +74,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
@@ -124,9 +131,18 @@ class NixlConnectorWorker:
             for group in kv_cache_config.kv_cache_groups
         ]
         mamba_ssm_size = (0, 0)
+        self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(self._is_mamba_group)
         if self._has_mamba:
             assert self._is_hma_required
+            from vllm.model_executor.layers.mamba.mamba_utils import (
+                is_conv_state_dim_first,
+            )
+
+            assert is_conv_state_dim_first(), (
+                "3-read Mamba conv transfer requires DS conv state layout. "
+                "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
+            )
             mamba_spec = next(
                 spec
                 for spec in self._layer_specs.values()
@@ -143,6 +159,10 @@ class NixlConnectorWorker:
             mamba_ssm_size = (
                 conv_shape.numel() * conv_nbytes,
                 ssm_shape.numel() * ssm_nbytes,
+            )
+            self._conv_decomp = derive_mamba_conv_split(
+                mamba_spec,
+                vllm_config.parallel_config.tensor_parallel_size,
             )
         self._mamba_ssm_size = mamba_ssm_size
 
@@ -316,6 +336,10 @@ class NixlConnectorWorker:
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
+
+        # Per-engine transfer plans. Generated during handshake, used by
+        # per-request hot path (model-agnostic).
+        self._transfer_plans: dict[EngineId, EngineTransferPlan] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -971,6 +995,37 @@ class NixlConnectorWorker:
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
+        # Generate the pre-computed transfer plan for this remote engine.
+        # Plan generation is model-aware (if/else), but the per-request
+        # hot path only consumes the plan (model-agnostic).
+        plan_common = dict(
+            tp_rank=self.tp_rank,
+            tp_size=self.world_size,
+            is_mla=self.use_mla,
+            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+            block_len_per_layer=self.block_len_per_layer,
+            block_size=self.block_size,
+            remote_tp_size=remote_tp_size,
+            remote_block_size=nixl_agent_meta.block_size,
+            remote_num_blocks=nixl_agent_meta.num_blocks,
+            remote_block_lens=nixl_agent_meta.block_lens,
+            remote_physical_blocks_per_logical=physical_blocks_per_logical,
+        )
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            self._transfer_plans[engine_id] = generate_mamba_plan(
+                **plan_common,
+                is_mamba_group=self._is_mamba_group,
+                conv_decomp=self._conv_decomp,
+                ssm_sizes=self._mamba_ssm_size,
+                remote_ssm_sizes=nixl_agent_meta.ssm_sizes,
+            )
+        else:
+            self._transfer_plans[engine_id] = generate_dense_plan(
+                **plan_common,
+            )
+
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
         )
@@ -1572,18 +1627,10 @@ class NixlConnectorWorker:
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        # TODO (ZhanqiuHu): Unify logical_to_kernel_block_ids
-        # and logical_to_remote_kernel_block_ids.
-        if self._has_mamba:
-            # Expand remote logical → kernel block IDs.
-            meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
-                meta.remote.block_ids,
-                remote_info.remote_physical_blocks_per_logical,
-            )
-        else:
-            meta.remote.block_ids = self._logical_to_kernel_block_ids(
-                meta.remote.block_ids
-            )
+        plan = self._transfer_plans[engine_id]
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
+            meta.remote.block_ids, plan.physical_per_logical
+        )
         remote_block_ids = meta.remote.block_ids
         read_specs = self.transfer_policy.compute_read_specs(
             local_block_ids=meta.local_physical_block_ids,
@@ -1734,16 +1781,13 @@ class NixlConnectorWorker:
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
+        # Partial prefix cache hit: trim remote blocks to match local count.
+        # SSM groups share the block table so counts always match (no-op trim).
         remote_block_ids = list(remote_block_ids)
         for i, remote_group in enumerate(remote_block_ids):
-            num_remote_blocks = len(remote_group)
             num_local_blocks = len(local_block_ids[i])
-            if not self._is_mamba_group[i]:
-                assert num_local_blocks <= num_remote_blocks
-            # Partial prefix cache hit: just read uncomputed blocks.
-            # Skip mamba groups — their blocks represent full state (conv+ssm),
-            # not per-token data, so trimming would corrupt the transfer.
-            if num_local_blocks < num_remote_blocks and not self._is_mamba_group[i]:
+            assert num_local_blocks <= len(remote_group)
+            if num_local_blocks < len(remote_group):
                 remote_block_ids[i] = remote_group[-num_local_blocks:]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
@@ -1826,61 +1870,25 @@ class NixlConnectorWorker:
 
         return mapped_2d.flatten().astype(np.int64)
 
-    def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
-        """
-        Convert logical block ids to kernel physical block ids.
-        This is required when the logical block size (the one set by the user)
-        does not match the one required by the attn backend.
-        """
-        if self._physical_blocks_per_logical_kv_block == 1:
-            # Noop when physical and logical block sizes are the same
-            return block_ids
-        block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
-            1, -1
-        )
-        # Mamba blocks have no logical<>physical discrepancy
-        group_specs = self.kv_cache_config.kv_cache_groups
-        return [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                self._physical_blocks_per_logical_kv_block,
-                block_arange,
-            ).tolist()
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
-            else group
-            for i, group in enumerate(block_ids)
-        ]
-
-    def _logical_to_remote_kernel_block_ids(
-        self, block_ids: BlockIds, remote_physical_per_logical: int
+    def _logical_to_kernel_block_ids(
+        self,
+        block_ids: BlockIds,
+        physical_per_logical: tuple[int, ...] | None = None,
     ) -> BlockIds:
-        """Map logical block IDs to physical kernel block IDs on the remote.
+        """Convert logical block IDs to kernel physical block IDs.
 
         Args:
             block_ids: per-group lists of logical block IDs.
-            remote_physical_per_logical: remote engine's physical blocks
-                per logical block.
-
-        Returns:
-            Same structure with FA groups expanded (each logical block L
-            becomes kernel blocks [L*ratio .. L*ratio + local_ratio - 1]).
-            Mamba groups are passed through unchanged.
+            physical_per_logical: per-group expansion ratios. When *None*
+                (local expansion), FA groups use the local kernel ratio
+                and Mamba groups are 1:1.
         """
-        local_ratio = self._physical_blocks_per_logical_kv_block
-        if remote_physical_per_logical == 1:
-            return block_ids
-        local_arange = np.arange(local_ratio).reshape(1, -1)
-        group_specs = self.kv_cache_config.kv_cache_groups
-        result: list[list[int]] = []
-        for i, group in enumerate(block_ids):
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec):
-                arr = np.array(group).reshape(-1, 1)
-                expanded = (arr * remote_physical_per_logical + local_arange).flatten()
-                result.append(expanded.tolist())
-            else:
-                # Mamba blocks are 1:1 logical-to-physical (no expansion).
-                result.append(group)
-        return result
+        if physical_per_logical is None:
+            blk_ratio = self._physical_blocks_per_logical_kv_block
+            physical_per_logical = tuple(
+                1 if m else blk_ratio for m in self._is_mamba_group
+            )
+        return logical_to_kernel_block_ids(block_ids, physical_per_logical)
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
