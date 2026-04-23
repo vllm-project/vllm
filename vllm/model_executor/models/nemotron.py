@@ -52,7 +52,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import NemotronConfig
+from vllm.transformers_utils.configs.nemotron import NemotronConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (

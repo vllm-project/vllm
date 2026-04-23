@@ -14,7 +14,6 @@ pin_memory = is_pin_memory_available()
 
 @dataclass
 class PoolingCursor:
-    index: list[int]
     first_token_indices_gpu: torch.Tensor
     last_token_indices_gpu: torch.Tensor
     prompt_lens_cpu: torch.Tensor
@@ -23,7 +22,6 @@ class PoolingCursor:
 
     def __getitem__(self, indices: slice):
         return PoolingCursor(
-            index=self.index[indices],
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
             prompt_lens_cpu=self.prompt_lens_cpu[indices],
@@ -52,7 +50,8 @@ class PoolingMetadata:
     """Tensors for pooling."""
 
     prompt_lens: torch.Tensor  # CPU Tensor
-    prompt_token_ids: torch.Tensor | None
+    prompt_token_ids: torch.Tensor | None  # Model-device tensor
+    prompt_token_ids_cpu: torch.Tensor | None  # CPU tensor
     pooling_params: list[PoolingParams]
     pooling_states: list[PoolingStates]
     pooling_cursor: PoolingCursor | None = None
@@ -75,6 +74,9 @@ class PoolingMetadata:
             prompt_token_ids=None
             if self.prompt_token_ids is None
             else self.prompt_token_ids[indices],
+            prompt_token_ids_cpu=None
+            if self.prompt_token_ids_cpu is None
+            else self.prompt_token_ids_cpu[indices],
             pooling_params=self.pooling_params[indices],
             pooling_states=self.pooling_states[indices],
             pooling_cursor=None
@@ -87,7 +89,13 @@ class PoolingMetadata:
         assert prompt_token_ids is not None, (
             "Please set `requires_token_ids=True` in `get_pooling_updates`"
         )
+        return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
+    def get_prompt_token_ids_cpu(self) -> list[torch.Tensor]:
+        prompt_token_ids = self.prompt_token_ids_cpu
+        assert prompt_token_ids is not None, (
+            "Please set `requires_token_ids=True` in `get_pooling_updates`"
+        )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
     def get_pooling_cursor(self) -> PoolingCursor:
@@ -108,7 +116,6 @@ class PoolingMetadata:
 
         assert len(prompt_lens) == n_seq
 
-        index = list(range(n_seq))
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
         if query_start_loc_gpu is None:
             cumsum = torch.zeros(
@@ -130,7 +137,6 @@ class PoolingMetadata:
                 )
             cumsum = query_start_loc_gpu
         self.pooling_cursor = PoolingCursor(
-            index=index,
             first_token_indices_gpu=cumsum[:n_seq],
             last_token_indices_gpu=cumsum[1:] - 1,
             prompt_lens_cpu=prompt_lens,
