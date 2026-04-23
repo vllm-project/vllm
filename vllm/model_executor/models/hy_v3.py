@@ -39,7 +39,6 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -182,7 +181,6 @@ class HYV3MoEFused(nn.Module):
             top_k=top_k,
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=config.route_norm,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -209,17 +207,9 @@ class HYV3MoEFused(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if self.shared_mlp is not None:
-            final_hidden_states, shared_output = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
-            final_hidden_states = final_hidden_states + shared_output
-        else:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
         return final_hidden_states.view(orig_shape)
 
 

@@ -623,6 +623,7 @@ class HYV3ToolParser(ToolParser):
 
         # --- construct return DeltaMessage ---
         if name_delta is not None and argument_diff:
+            nd_func = name_delta.tool_calls[0].function
             return DeltaMessage(
                 tool_calls=[
                     DeltaToolCall(
@@ -630,7 +631,7 @@ class HYV3ToolParser(ToolParser):
                         id=self._current_tool_call_id,
                         type="function",
                         function=DeltaFunctionCall(
-                            name=name_delta.tool_calls[0].function.name,
+                            name=nd_func.name if nd_func else None,
                             arguments=argument_diff,
                         ),
                     )
