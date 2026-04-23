@@ -1261,9 +1261,6 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
 
     @functools.wraps(func)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Make the process the leader of its own process group
-        # to avoid sending SIGTERM to the parent process
-        os.setpgrp()
         from _pytest.outcomes import Skipped
 
         # Create a unique temporary file to store exception info from child
@@ -1283,6 +1280,9 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
             pid = os.fork()
             print(f"Fork a new process to run a test {pid}")
             if pid == 0:
+                # Make the child process the leader of its own process group
+                # to avoid sending SIGTERM to the parent process
+                os.setpgrp()
                 # Parent process responsible for deleting, don't delete
                 # in child.
                 delete_after.pop_all()
@@ -1322,14 +1322,12 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                 else:
                     os._exit(0)
             else:
-                pgid = os.getpgid(pid)
+                # After setpgrp(), the child's pgid equals its pid
+                pgid = pid
                 _pid, _exitcode = os.waitpid(pid, 0)
-                # ignore SIGTERM signal itself
-                old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                # kill all child processes
-                os.killpg(pgid, signal.SIGTERM)
-                # restore the signal handler
-                signal.signal(signal.SIGTERM, old_signal_handler)
+                # kill all child processes - but they may already have exited cleanly
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGTERM)
                 if _exitcode != 0:
                     # Try to read the exception from the child process
                     exc_info = {}
@@ -1828,6 +1826,7 @@ class TestFP8Layer(torch.nn.Module):
             self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
             self.input_scale = None
             self.weight_scale = None
+            self.weight_block_size = [block_size, block_size]
             if transpose_weights:
                 self.weight = self.weight.t()
         else:
@@ -1858,6 +1857,7 @@ class TestFP8Layer(torch.nn.Module):
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )
+        self.kernel.process_weights_after_loading(self)
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()

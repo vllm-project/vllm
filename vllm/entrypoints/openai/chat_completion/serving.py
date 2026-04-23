@@ -73,7 +73,10 @@ from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+from vllm.tool_parsers.mistral_tool_parser import (
+    MistralToolCall,
+    MistralToolParser,
+)
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -140,6 +143,12 @@ class OpenAIServingChat(OpenAIServing):
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
         )
+        _is_mistral_tool_parser = self.tool_parser is not None and issubclass(
+            self.tool_parser, MistralToolParser
+        )
+        if _is_mistral_tool_parser and self.reasoning_parser_cls is not None:
+            MistralToolParser.model_can_reason = True
+
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
@@ -178,6 +187,18 @@ class OpenAIServingChat(OpenAIServing):
                 chat_template_content_format=self.chat_template_content_format,
                 chat_template_kwargs=self.default_chat_template_kwargs,
             )
+        )
+
+    def _effective_chat_template_kwargs(
+        self, request: ChatCompletionRequest
+    ) -> dict[str, Any]:
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs
         )
 
     async def render_chat_request(
@@ -222,10 +243,7 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-            request.chat_template_kwargs,
-            self.default_chat_template_kwargs,
-        )
+        chat_template_kwargs = self._effective_chat_template_kwargs(request)
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
             reasoning_parser = self.reasoning_parser_cls(
@@ -309,6 +327,11 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 if not request.include_reasoning:
+                    reasoning_ended = True
+                elif request._grammar_from_tool_parser:
+                    # The Mistral grammar already includes an optional
+                    # `think?` rule that handles both reasoning and
+                    # non-reasoning outputs.
                     reasoning_ended = True
                 elif reasoning_parser:
                     reasoning_ended = reasoning_parser.is_reasoning_end(
@@ -530,6 +553,8 @@ class OpenAIServingChat(OpenAIServing):
             harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
+        is_mistral_grammar_path = request._grammar_from_tool_parser
+
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
@@ -539,6 +564,20 @@ class OpenAIServingChat(OpenAIServing):
         tool_choice_auto = (
             not tool_choice_function_name
             and self._should_stream_with_auto_tool_parsing(request)
+        )
+
+        # Determine whether required/named tool_choice should fall back to
+        # the auto tool_parser path instead of the standard JSON-based parsing.
+        # This happens when the parser declares supports_required_and_named=False
+        # (e.g. GLM models that output XML instead of JSON).
+        tool_choice_uses_parser = (
+            self.tool_parser is not None
+            and not self.tool_parser.supports_required_and_named
+            and request.tools
+            and (
+                request.tool_choice == "required"
+                or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            )
         )
 
         all_previous_token_ids: list[list[int]] | None
@@ -553,7 +592,12 @@ class OpenAIServingChat(OpenAIServing):
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if tool_choice_auto or reasoning_parser:
+        if (
+            is_mistral_grammar_path
+            or tool_choice_auto
+            or tool_choice_uses_parser
+            or reasoning_parser
+        ):
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[] for _ in range(num_choices)]
             reasoning_end_arr = [False] * num_choices
@@ -748,7 +792,12 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: DeltaMessage | None
 
                     # just update previous_texts and previous_token_ids
-                    if tool_choice_auto or reasoning_parser:
+                    if (
+                        is_mistral_grammar_path
+                        or tool_choice_auto
+                        or tool_choice_uses_parser
+                        or reasoning_parser
+                    ):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -772,8 +821,34 @@ class OpenAIServingChat(OpenAIServing):
                             )
                         )
                         harmony_tools_streamed[i] |= tools_streamed_flag
+                    # Mistral grammar path: combined reasoning + tool streaming
+                    elif is_mistral_grammar_path:
+                        assert tool_parser is not None
+                        assert isinstance(tool_parser, MistralToolParser)
+                        assert reasoning_end_arr is not None
+                        output_token_ids = as_list(output.token_ids)
+                        result = tool_parser.extract_maybe_reasoning_and_tool_streaming(
+                            reasoning_parser=reasoning_parser,
+                            previous_text=previous_text,
+                            current_text=current_text,
+                            delta_text=delta_text,
+                            previous_token_ids=previous_token_ids,
+                            current_token_ids=current_token_ids,
+                            output_token_ids=output_token_ids,
+                            reasoning_ended=reasoning_end_arr[i],
+                            prompt_is_reasoning_end=(prompt_is_reasoning_end_arr[i]),
+                            request=request,
+                        )
+                        delta_message = result.delta_message
+                        reasoning_end_arr[i] = result.reasoning_ended
+                        current_text = result.current_text
+                        current_token_ids = result.current_token_ids
+                        if result.tools_called:
+                            tools_streamed[i] = True
                     # handle streaming deltas for tools with named tool_choice
-                    elif tool_choice_function_name:
+                    # Skip when tool_choice_uses_parser so it falls through
+                    # to the auto tool_parser branches below.
+                    elif tool_choice_function_name and not tool_choice_uses_parser:
                         # When encountering think end id in prompt_token_ids
                         # i.e {"enable_thinking": False},
                         # check BEFORE calling the parser to avoid a spurious
@@ -811,7 +886,6 @@ class OpenAIServingChat(OpenAIServing):
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
-                                    # This need to be added to next `delta_text`
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
@@ -856,7 +930,12 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             tools_streamed[i] = True
 
-                    elif request.tool_choice == "required":
+                    # Skip when tool_choice_uses_parser so it falls through
+                    # to the auto tool_parser branches below.
+                    elif (
+                        request.tool_choice == "required"
+                        and not tool_choice_uses_parser
+                    ):
                         assert previous_texts is not None
                         previous_text = previous_texts[i]
                         current_text = previous_text + delta_text
@@ -925,7 +1004,12 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if (tool_choice_auto or reasoning_parser) and not self.use_harmony:
+                    if (
+                        is_mistral_grammar_path
+                        or tool_choice_auto
+                        or tool_choice_uses_parser
+                        or reasoning_parser
+                    ) and not self.use_harmony:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
@@ -1312,7 +1396,24 @@ class OpenAIServingChat(OpenAIServing):
             tool_call_class = (
                 MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
-            if (not self.enable_auto_tools or not self.tool_parser) and (
+
+            use_mistral_tool_parser = request._grammar_from_tool_parser
+            if use_mistral_tool_parser:
+                tool_call_items = MistralToolParser.build_non_streaming_tool_calls(
+                    tool_calls
+                )
+                if tool_call_items:
+                    auto_tools_called = (
+                        request.tool_choice is None or request.tool_choice == "auto"
+                    )
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tool_calls=tool_call_items,
+                )
+
+            elif (not self.enable_auto_tools or not self.tool_parser) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):

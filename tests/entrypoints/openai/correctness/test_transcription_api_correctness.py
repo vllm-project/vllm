@@ -13,7 +13,6 @@ import io
 import time
 from statistics import mean, median
 
-import librosa
 import pytest
 import soundfile
 import torch
@@ -21,6 +20,7 @@ from datasets import load_dataset
 from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
+from vllm.multimodal.audio import get_audio_duration
 from vllm.tokenizers import get_tokenizer
 
 from ....models.registry import HF_EXAMPLE_MODELS
@@ -84,7 +84,7 @@ async def process_dataset(model, client, data, concurrent_request):
         trust_remote_code=model_info.trust_remote_code,
     )
 
-    # Warmup call as the first `librosa.load` server-side is quite slow.
+    # Warmup call as the first `load_audio` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
@@ -118,7 +118,7 @@ def print_performance_metrics(results, total_time):
 
 def add_duration(sample):
     y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
-    sample["duration_ms"] = librosa.get_duration(y=y, sr=sr) * 1000
+    sample["duration_ms"] = get_audio_duration(y=y, sr=sr) * 1000
     return sample
 
 

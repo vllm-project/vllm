@@ -110,6 +110,7 @@ _TEXT_GENERATION_MODELS = {
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
+    "Rnj1ForCausalLM": ("rnj1", "Rnj1ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
     "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
     "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
@@ -227,6 +228,7 @@ _EMBEDDING_MODELS = {
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
+    "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
@@ -406,6 +408,10 @@ _MULTIMODAL_MODELS = {
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
     ),
+    "Granite4VisionForConditionalGeneration": (
+        "granite4_vision",
+        "Granite4VisionForConditionalGeneration",
+    ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "HunYuanVLForConditionalGeneration": (
         "hunyuan_vision",
@@ -473,6 +479,8 @@ _MULTIMODAL_MODELS = {
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
     "OpenPanguVLForConditionalGeneration": (

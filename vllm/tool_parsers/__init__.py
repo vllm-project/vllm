@@ -94,6 +94,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "longcat_tool_parser",
         "LongcatFlashToolParser",
     ),
+    "mimo": (
+        "qwen3xml_tool_parser",
+        "Qwen3XMLToolParser",
+    ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
         "MinimaxM2ToolParser",
