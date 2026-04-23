@@ -116,10 +116,10 @@ enabling the corresponding APIs.
 
 ### Offline APIs corresponding to pooling usages
 
-| Pooling Usages              | Dedicated API       | Pooling task for `LLM.encode' API | Score Types                | scoring function         |
+| Pooling Usages              | Dedicated API       | Pooling task for `LLM.encode` API | Score Types                | scoring function         |
 |-----------------------------|---------------------|-----------------------------------|----------------------------|--------------------------|
-| Classification Usages       | `LLM.embed(...)`    | `embed`                           | `cross-encoder` (see note) | linear classifier        |
-| Embedding Usages            | `LLM.classify(...)` | `classify`                        | `bi-encoder`               | cosine similarity        |
+| Classification Usages       | `LLM.classify(...)` | `classify`                        | `cross-encoder` (see note) | linear classifier        |
+| Embedding Usages            | `LLM.embed(...)`    | `embed`                           | `bi-encoder`               | cosine similarity        |
 | Token Classification Usages | nan                 | `token_classify`                  | nan                        | nan                      |
 | Token Embedding Usages      | nan                 | `token_embed`                     | `late-interaction`         | late interaction(MaxSim) |
 | Reward Usages               | nan                 | `classify` & `token_classify`     | nan                        | nan                      |
