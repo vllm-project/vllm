@@ -913,6 +913,49 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor,
+    eps: float,
+    norm_before_gate: bool,
+    activation: str,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant import fused_rms_gated_fp8_group_quant
+
+    return fused_rms_gated_fp8_group_quant(
+        x,
+        weight,
+        bias,
+        z,
+        eps,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+        out_dtype=FP8_DTYPE,
+        group_size=group_size,
+    )
+
+
+def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor,
+    eps: float,
+    norm_before_gate: bool,
+    activation: str,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -1486,6 +1529,29 @@ class rocm_aiter_ops:
             return False
 
     @staticmethod
+    def are_gdn_triton_kernels_available() -> bool:
+        """Check if AITER Triton kernels for GDN attention are importable.
+
+        These are optional Triton kernels (conv1d fast-path, gated delta net)
+        used by GatedDeltaNetAttention's decode fast-path.  They may be absent
+        in older aiter builds.  Combine with ``is_enabled()`` to also gate on
+        the environment variable::
+
+            if rocm_aiter_ops.is_enabled() and \\
+               rocm_aiter_ops.are_gdn_triton_kernels_available():
+                ...
+        """
+        if not is_aiter_found_and_supported():
+            return False
+        try:
+            import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
+            import aiter.ops.triton.gated_delta_net  # noqa: F401
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    @staticmethod
     @if_aiter_supported
     def register_ops_once() -> None:
         global _OPS_REGISTERED
@@ -1599,6 +1665,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
+                op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
@@ -1688,6 +1760,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_rmsnorm_group_fused_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant.default
 
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
