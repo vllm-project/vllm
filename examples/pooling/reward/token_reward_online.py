@@ -8,9 +8,10 @@ to start up the server in vLLM. e.g.
 
 vllm serve internlm/internlm2-1_8b-reward --trust-remote-code
 
-The key distinction between sequence classification and token classification lies in their output
-granularity: sequence classification produces a single result for an entire input sequence,
-whereas token classification yields a result for each individual token within the sequence.
+The key distinction between sequence classification and token classification
+lies in their output granularity: sequence classification produces a single
+result for an entire input sequence, whereas token classification yields a
+result for each individual token within the sequence.
 """
 
 import argparse

@@ -150,7 +150,7 @@ It is primarily designed for [score models](scoring.md).
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
-Please use one of the more specific methods or set the task directly when using `LLM.encode`, refer to the [table above](#offline-apis-corresponding-to-pooling-tasks).
+Please use one of the more specific methods or set the task directly when using `LLM.encode`, refer to the [table above](#offline-apis-corresponding-to-pooling-usages).
 
 ### Examples
 

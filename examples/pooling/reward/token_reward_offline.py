@@ -4,9 +4,10 @@
 """
 Example offline usage of token reward models.
 
-The key distinction between sequence classification and token classification lies in their output
-granularity: sequence classification produces a single result for an entire input sequence,
-whereas token classification yields a result for each individual token within the sequence.
+The key distinction between sequence classification and token classification
+lies in their output granularity: sequence classification produces a single
+result for an entire input sequence, whereas token classification yields a
+result for each individual token within the sequence.
 """
 
 from argparse import Namespace
