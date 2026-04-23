@@ -447,10 +447,9 @@ def split_decodes_prefills_and_extends(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
-    # The upper bound is exact for fresh-prefill rows (num_computed == 0 there),
-    # so `seq_lens == query_lens` detects prefills correctly even when the
-    # field is an optimistic upper bound for decode rows under async spec
-    # decode (upper-bound decode rows still have seq_len > query_len).
+    # Upper bound is exact for prefill rows; decode rows still satisfy
+    # seq_len > query_len under the optimistic bound, so `seq_lens ==
+    # query_lens` identifies prefills correctly either way.
     assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
     seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
 

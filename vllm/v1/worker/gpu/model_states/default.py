@@ -175,9 +175,7 @@ class DefaultModelState(ModelState):
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
-            # During cudagraph capture, some backends (e.g. FA with sliding
-            # window) pick a kernel based on max_seq_len; they need the
-            # worst-case bound so the captured graph is valid at any replay.
+            # Capture with worst-case max_seq_len so the graph is valid at any replay.
             max_seq_len = self.max_model_len
         else:
             max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())

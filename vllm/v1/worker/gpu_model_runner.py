@@ -2155,8 +2155,6 @@ class GPUModelRunner(
             :num_reqs_padded
         ]
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
-        # Precise for prefill rows; optimistic upper bound for async-spec-decode
-        # decode rows (assumes every draft was accepted).
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
         # is_prefilling: True if request is still in prefill phase.

@@ -1186,11 +1186,7 @@ class SpecDecodeBaseProposer:
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        # Under async spec decode, the CPU upper bound equals the GPU seq_lens
-        # (both = num_computed + num_scheduled, assuming all drafts accepted);
-        # subtracting num_rejected_tokens yields the post-rejection actual
-        # seq_lens without a GPU->CPU sync. In non-async mode, the upper bound
-        # is precise, giving the same result as before.
+        # upper_bound - rejected = actual post-rejection seq_lens (no D2H sync).
         assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
         new_seq_lens_cpu = (
             common_attn_metadata.seq_lens_cpu_upper_bound - num_rejected_tokens

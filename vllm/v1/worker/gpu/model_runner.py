@@ -799,9 +799,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits,
         )
 
-        # CPU upper bound on seq_lens (precise outside async spec decode; an
-        # upper bound otherwise). Sized num_reqs_padded to match the GPU
-        # seq_lens tensor; padded entries are left at zero.
+        # CPU upper bound on seq_lens; padded entries left at zero.
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
             self.req_states.num_computed_tokens_np[idx_mapping_np],
@@ -939,8 +937,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
-        # Advance the CPU mirror of num_computed_tokens optimistically
-        # (assumes all scheduled tokens accepted). Upper bound on the GPU value.
+        # Advance the CPU mirror optimistically (assume all scheduled accepted).
         self.req_states.num_computed_tokens_np[idx_mapping_np] += (
             input_batch.num_scheduled_tokens
         )
@@ -1314,8 +1311,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
-        # Advance the CPU mirror of num_computed_tokens optimistically
-        # (assumes all scheduled tokens accepted). Upper bound on the GPU value.
+        # Advance the CPU mirror optimistically (assume all scheduled accepted).
         self.req_states.num_computed_tokens_np[idx_mapping_np] += (
             input_batch.num_scheduled_tokens
         )

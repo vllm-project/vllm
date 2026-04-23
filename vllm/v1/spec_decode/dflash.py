@@ -151,10 +151,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
-        # The upper bound for the new metadata is the parent's upper bound
-        # plus the draft query length; it ignores num_rejected_tokens (which
-        # is only known on GPU), which is allowed — overestimating is safe
-        # for an upper bound.
+        # Skip num_rejected_tokens (GPU-only); overestimating is fine here.
         new_seq_lens_cpu_upper_bound = (
             cad.seq_lens_cpu_upper_bound + num_query_per_req
             if cad.seq_lens_cpu_upper_bound is not None

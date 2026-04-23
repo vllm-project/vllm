@@ -177,9 +177,7 @@ def _make_metadata_with_slice(
         query_start_loc[1:] -= tokens_skipped
         query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
-    # Use the raw underscore-prefixed fields so we don't accidentally trigger
-    # the deprecated seq_lens_cpu / num_computed_tokens_cpu properties (which
-    # fall back to a blocking GPU->CPU copy when they're not populated).
+    # Read raw fields to avoid triggering the deprecated D2H-syncing properties.
     seq_lens_cpu = (
         attn_metadata._seq_lens_cpu[request_slice]
         if attn_metadata._seq_lens_cpu is not None
@@ -215,9 +213,6 @@ def _make_metadata_with_slice(
             seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound.clone()
             seq_lens_cpu_upper_bound[-1] -= tokens_skipped
 
-    # Upper bound is populated by the runner and is a valid max_seq_len input
-    # for backends that use it for kernel dispatch / workspace sizing
-    # (precise in non-async mode, optimistic under async spec decode).
     assert seq_lens_cpu_upper_bound is not None
     max_seq_len = int(seq_lens_cpu_upper_bound.max())
 

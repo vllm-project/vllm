@@ -90,13 +90,9 @@ def create_cross_attention_backend(
             assert new_metadata.encoder_seq_lens_cpu is not None
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Any computed tokens indicated decode step>1 (no chunked prefill).
-            # Derive num_computed_tokens from the CPU upper bound to avoid a
-            # blocking GPU->CPU sync. The upper bound is precise for this
-            # test: fresh-prefill rows have num_computed == 0 exactly (no
-            # speculation is involved during prefill), and any decode row has
-            # num_computed > 0 under both upper bound and actual — so the
-            # "> 0" / "== 0" check matches either way.
+            # Any computed tokens indicates decode step>1 (no chunked prefill).
+            # The upper bound is exact for this `> 0` test - prefill rows have
+            # num_computed == 0 and decode rows have num_computed > 0.
             query_lens_cpu = (
                 common_attn_metadata.query_start_loc_cpu[1:]
                 - common_attn_metadata.query_start_loc_cpu[:-1]

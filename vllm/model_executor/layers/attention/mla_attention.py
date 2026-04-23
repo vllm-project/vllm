@@ -1829,12 +1829,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_prefills > 0:
             reqs_start = num_decodes  # prefill_start
 
-            # Derive prefill context lengths from CPU data only.
-            # `seq_lens_cpu_upper_bound` is precise for prefill rows in all
-            # modes (including async spec decode), so this is sync-free and
-            # doesn't rely on the deprecated `num_computed_tokens_cpu` /
-            # `seq_lens_cpu` properties (which fall through to a D2H copy
-            # when the runner has opted out of CPU caching).
+            # Upper bound is exact for prefill rows (no D2H sync).
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_query_lens_cpu = (
