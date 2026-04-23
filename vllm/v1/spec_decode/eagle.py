@@ -1270,14 +1270,16 @@ class SpecDecodeBaseProposer:
                 ),
             )
 
-        if spec_cfg.attention_backend is not None:
-            base = replace(
-                base,
-                attention_config=replace(
-                    base.attention_config,
-                    backend=spec_cfg.attention_backend,
-                ),
-            )
+        # Note (matt): Never inherit the attention backend from base, because there are
+        # many opportunities for incompatibility, so we always independently autoselect
+        # unless explicitly specified in the speculative config.
+        base = replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                backend=spec_cfg.attention_backend,
+            ),
+        )
 
         return base
 
