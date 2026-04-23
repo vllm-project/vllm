@@ -23,7 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     compute_desc_ids_from_plan,
     compute_read_specs_from_plan,
     generate_dense_plan,
-    visualize_plan,
 )
 
 # ======================================================================
@@ -295,16 +294,6 @@ class TestDensePlanExecutors:
                 assert length == 1024 // remote_tp_size
 
 
-class TestDensePlanVisualization:
-    def test_visualize_produces_output(self):
-        plan = generate_dense_plan(
-            **_common_plan_params(),
-        )
-        output = visualize_plan(plan)
-        assert "FA regions" in output
-        assert "fa_k" in output
-
-
 class TestDensePlanStructure:
     def test_source_ranks_homogeneous(self):
         plan = generate_dense_plan(
@@ -367,7 +356,6 @@ def _make_mamba_plan_for_desc_ids(
             offset_in_page=0,
             page_stride=100,
             num_blocks=fa_num_blocks,
-            physical_per_logical=1,
         )
         for i in range(num_fa_regions)
     )
@@ -379,25 +367,18 @@ def _make_mamba_plan_for_desc_ids(
             offset_in_page=0,
             page_stride=200,
             num_blocks=ssm_num_blocks,
-            physical_per_logical=1,
         )
         for i in range(num_ssm_regions)
     )
-    physical_per_logical = tuple(1 for _ in group_kinds)
     all_ranks = (0,)
     source_ranks_per_group = tuple(all_ranks for _ in group_kinds)
     return EngineTransferPlan(
         fa_regions=fa_regions,
         ssm_regions=ssm_regions,
-        physical_per_logical=physical_per_logical,
         group_kinds=group_kinds,
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=(0,),
         rank_to_attention_slot={0: 0},
-        remote_tp_size=1,
-        remote_block_size=16,
-        remote_block_len=0,
-        remote_physical_blocks_per_logical=1,
         remote_expansion_stride=1,
     )
 
@@ -465,15 +446,10 @@ class TestMambaPlanReadSpecs:
         plan = EngineTransferPlan(
             fa_regions=(),
             ssm_regions=(),
-            physical_per_logical=(1, 1),
             group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             source_ranks_per_group=(both, both),
             all_source_ranks=(0, 1),
             rank_to_attention_slot={0: 0, 1: 1},
-            remote_tp_size=2,
-            remote_block_size=16,
-            remote_block_len=0,
-            remote_physical_blocks_per_logical=1,
             remote_expansion_stride=1,
         )
 
@@ -493,15 +469,10 @@ class TestMambaPlanReadSpecs:
         plan = EngineTransferPlan(
             fa_regions=(),
             ssm_regions=(),
-            physical_per_logical=(1, 1),
             group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1, 2),
             rank_to_attention_slot={0: 0},
-            remote_tp_size=3,
-            remote_block_size=16,
-            remote_block_len=0,
-            remote_physical_blocks_per_logical=1,
             remote_expansion_stride=1,
         )
 
@@ -541,18 +512,12 @@ class TestMambaPlanSplitHandles:
                     offset_in_page=0,
                     page_stride=100,
                     num_blocks=10,
-                    physical_per_logical=1,
                 ),
             ),
-            physical_per_logical=(1, 1),
             group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1),
             rank_to_attention_slot={0: 0, 1: 0},
-            remote_tp_size=2,
-            remote_block_size=16,
-            remote_block_len=0,
-            remote_physical_blocks_per_logical=1,
             remote_expansion_stride=1,
         )
 

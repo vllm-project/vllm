@@ -78,6 +78,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
@@ -1126,8 +1127,8 @@ class NixlConnectorWorker:
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self.transfer_topo is not None
-        plan = self._transfer_plans[remote_engine_id]
-        assert plan.remote_tp_size == remote_tp_size
+        remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
+        assert remote_info.remote_tp_size == remote_tp_size
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
@@ -1412,9 +1413,9 @@ class NixlConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             # post processing for heteroblocksize
-            plan = self._transfer_plans[meta.remote.engine_id]
+            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
-                plan.remote_block_size
+                remote_info.remote_block_size
             )
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
@@ -1628,7 +1629,8 @@ class NixlConnectorWorker:
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
         plan = self._transfer_plans[engine_id]
-        tp_ratio = self.transfer_topo.tp_ratio(plan.remote_tp_size)
+        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
             meta.remote.block_ids,
@@ -1651,7 +1653,7 @@ class NixlConnectorWorker:
             remote_rank = spec.remote_rank
             local_block_ids = spec.local_block_ids
             remote_block_ids = spec.remote_block_ids
-            remote_block_size = plan.remote_block_size
+            remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
@@ -1716,7 +1718,10 @@ class NixlConnectorWorker:
         """
         assert self.transfer_topo is not None
         plan = self._transfer_plans[dst_engine_id]
-        block_size_ratio = self.transfer_topo.block_size_ratio(plan.remote_block_size)
+        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            remote_info.remote_block_size
+        )
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
             assert not self._is_hma_required
@@ -1801,7 +1806,7 @@ class NixlConnectorWorker:
             plan,
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            physical_blocks_per_logical=plan.remote_physical_blocks_per_logical,
+            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
         )
         local_block_descs_ids = compute_desc_ids_from_plan(
             plan,
@@ -1871,18 +1876,26 @@ class NixlConnectorWorker:
         return mapped_2d.flatten().astype(np.int64)
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
-        """Convert logical block IDs to kernel physical block IDs.
-
-        Required when the logical block size (set by the user) does not match
-        the one required by the attention backend.
+        """
+        Convert logical block ids to kernel physical block ids.
+        This is required when the logical block size (the one set by the user)
+        does not match the one required by the attn backend.
         """
         if self._physical_blocks_per_logical_kv_block == 1:
+            # Noop when physical and logical block sizes are the same
             return block_ids
-        ratio = self._physical_blocks_per_logical_kv_block
-        arange = np.arange(ratio).reshape(1, -1)
+        block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
+            1, -1
+        )
+        # Mamba blocks have no logical<>physical discrepancy
+        group_specs = self.kv_cache_config.kv_cache_groups
         return [
-            (np.array(group).reshape(-1, 1) * ratio + arange).flatten().tolist()
-            if self._group_kinds[i].is_attention
+            BlockTable.map_to_kernel_blocks(
+                np.array(group),
+                self._physical_blocks_per_logical_kv_block,
+                block_arange,
+            ).tolist()
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
             else group
             for i, group in enumerate(block_ids)
         ]
@@ -1905,13 +1918,15 @@ class NixlConnectorWorker:
         if remote_ratio == 1:
             return block_ids
         local_arange = np.arange(local_ratio).reshape(1, -1)
+        group_specs = self.kv_cache_config.kv_cache_groups
         result: list[list[int]] = []
         for i, group in enumerate(block_ids):
-            if self._group_kinds[i].is_attention:
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec):
                 arr = np.array(group).reshape(-1, 1)
                 expanded = (arr * remote_ratio + local_arange).flatten()
                 result.append(expanded.tolist())
             else:
+                # Mamba blocks are 1:1 logical-to-physical (no expansion).
                 result.append(group)
         return result
 

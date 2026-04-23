@@ -71,17 +71,17 @@ def test_logical_to_kernel_block_ids_with_hma():
         NixlConnectorWorker,
     )
 
+    # Create a mock worker with just the required attributes
+    # (use __new__ to skip __init__)
     worker = object.__new__(NixlConnectorWorker)
 
     # Simulate HMA scenario: logical block size = 32, kernel block size = 16
     # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
-        GroupKind,
-    )
-
     worker._physical_blocks_per_logical_kv_block = 2
-    worker._group_kinds = (GroupKind.FA, GroupKind.SWA)
+    # FA + SW groups (neither is MambaSpec, so both get expanded)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
 
+    # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
     kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
 
