@@ -34,26 +34,24 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
     will correspond to logically contiguous blocks, e.g. blocks 5-10 of a some request.
     block_indices[i] will represent the block index of the first block in group #i.
     Thus, len(block_indices) == len(group_sizes) = number of KV cache groups.
-    This information is required in order to support loading from offloaded blocks
+    This information is required in order to support off/loading from offloaded blocks
     which are larger than GPU blocks.
     In such cases, the first GPU block per each group may be unaligned to the offloaded
     block size, and so knowing block_indices[i] allows the worker to correctly
     skip part of the first matching offloaded block.
-    Offloading from GPU is always aligned to offloaded block size, and so
-    block_indices will only be set by the offloading connector when loading into GPU.
     """
 
     def __init__(
         self,
         block_ids: list[int],
         group_sizes: Sequence[int],
-        block_indices: Sequence[int] | None = None,
+        block_indices: Sequence[int],
     ):
         super().__init__(block_ids)
         assert sum(group_sizes) == len(block_ids)
-        assert block_indices is None or len(block_indices) == len(group_sizes)
+        assert len(block_indices) == len(group_sizes)
         self.group_sizes: Sequence[int] = group_sizes
-        self.block_indices: Sequence[int] | None = block_indices
+        self.block_indices: Sequence[int] = block_indices
 
     @staticmethod
     def medium() -> str:

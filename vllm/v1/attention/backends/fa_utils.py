@@ -118,7 +118,6 @@ def get_flash_attn_version(
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
                 "defaulting to FA version 2.",
-                scope="local",
             )
             fa_version = 2
 
