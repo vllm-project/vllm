@@ -45,9 +45,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn.cute.interface import (
-    _flash_attn_fwd as _fa4_fwd,
-)
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -335,36 +333,25 @@ class FlashAttentionMLASparseImpl(
             NUM_TOPK_TOKENS=topk_tokens,
         )
 
-        k_flat = k_pe_cache.reshape(total_k, 1, self.qk_rope_head_dim)
-        v_flat = kv_c_cache.reshape(total_k, 1, self.kv_lora_rank)
-
         num_reqs = attn_metadata.num_reqs
         cu_seqlens_k = self.cu_seqlens_k_buffer[: num_reqs + 1]
         seqused_k = self.seqused_k_buffer[:num_reqs]
         seqused_k.fill_(total_k)
 
-        # FA4 CuTE kernel launches on a TVM-FFI managed stream (CUDA
-        # default stream 0x0) which differs from PyTorch's current stream.
-        # Sync before to ensure inputs (gather_kv_indices from triton) are
-        # visible, and after to ensure the output is visible to PyTorch.
-        # TODO: eliminate these syncs by making the CuTE kernel use
-        # PyTorch's current stream (tvm_ffi.use_torch_stream doesn't
-        # propagate to the compiled kernel's TVMFFIEnvGetStream).
-        torch.accelerator.synchronize()
-        attn_out, _ = _fa4_fwd(
-            q_pe,
-            k_flat,
-            v_flat,
-            qv=q_nope,
-            max_seqlen_q=max(attn_metadata.max_query_len, 1),
+        attn_out = flash_attn_varlen_func(
+            q=q_pe,
+            k=k_pe_cache.reshape(total_k, 1, self.qk_rope_head_dim),
+            v=kv_c_cache.reshape(total_k, 1, self.kv_lora_rank),
+            q_v=q_nope,
             cu_seqlens_q=attn_metadata.query_start_loc,
-            max_seqlen_k=total_k,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
+            max_seqlen_q=max(attn_metadata.max_query_len, 1),
+            max_seqlen_k=total_k,
             softmax_scale=self.scale,
             causal=False,
+            fa_version=4,
             gather_kv_indices=gather_kv_indices,
         )
-        torch.accelerator.synchronize()
 
         return attn_out, None

@@ -265,9 +265,6 @@ def flash_attn_varlen_func(
     assert cu_seqlens_k is not None or seqused_k is not None, (
         "cu_seqlens_k or seqused_k must be provided"
     )
-    assert cu_seqlens_k is None or seqused_k is None, (
-        "cu_seqlens_k and seqused_k cannot be provided at the same time"
-    )
     assert block_table is None or seqused_k is not None, (
         "seqused_k must be provided if block_table is provided"
     )
