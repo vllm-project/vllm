@@ -63,6 +63,10 @@ _MISSING_PROMPT_TOKEN_IDS_ERROR: Final[str] = (
     "are present. This indicates the chat template was invoked with "
     "tokenize=False."
 )
+_TOKENIZE_OVERRIDE_WARNING: Final[str] = (
+    "Overriding `tokenize=False` to `True` because `prompt_embeds` "
+    "post-processing requires tokenized IDs."
+)
 
 
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
@@ -801,11 +805,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if not mm_data:
                 mm_data = None
 
+        chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        if prompt_embeds_tensors:
+            # prompt_embeds post-processing requires prompt_token_ids.
+            if chat_template_kwargs.get("tokenize") is False:
+                logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
+            chat_template_kwargs["tokenize"] = True
+
         prompt_raw = safe_apply_chat_template(
             model_config,
             tokenizer,
             conversation,
-            **params.get_apply_chat_template_kwargs(),
+            **chat_template_kwargs,
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
@@ -881,11 +892,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if not mm_data:
                 mm_data = None
 
+        chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        if prompt_embeds_tensors:
+            # prompt_embeds post-processing requires prompt_token_ids.
+            if chat_template_kwargs.get("tokenize") is False:
+                logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
+            chat_template_kwargs["tokenize"] = True
+
         prompt_raw = await self._apply_chat_template_async(
             model_config,
             tokenizer,
             conversation,
-            **params.get_apply_chat_template_kwargs(),
+            **chat_template_kwargs,
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
