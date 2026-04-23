@@ -237,18 +237,6 @@ class IquestMoeAttention(nn.Module):
         # NOTE(yxing): sink tokens
         self.num_sink_tokens = config.num_sink_tokens
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        if self.num_sink_tokens:
-            # TODO(yxing): refactor it to use cascade attention
-            # use lse to merge attn states from sink_k and normal kv
-            self.sink_k = torch.nn.Parameter(
-                torch.zeros(
-                    (self.num_sink_tokens, self.num_kv_heads, self.head_dim),
-                    device=current_platform.current_device(),
-                    dtype=config.torch_dtype,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(self.sink_k, {"weight_loader": self.sinks_k_weight_loader})
 
         self.attn = Attention(
             self.num_heads,
@@ -262,6 +250,30 @@ class IquestMoeAttention(nn.Module):
             prefix=f"{prefix}.attn",
             enable_sinks_kv=self.num_sink_tokens > 0,
         )
+        if self.num_sink_tokens:
+            # TODO(yxing): refactor it to use cascade attention
+            # use lse to merge attn states from sink_k and normal kv
+            self.sink_k = torch.nn.Parameter(
+                torch.zeros(
+                    (self.num_sink_tokens, self.num_kv_heads, self.head_dim),
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(self.sink_k, {"weight_loader": self.sinks_k_weight_loader})
+            self.sinks_k = torch.zeros(
+                (
+                    self.max_num_seqs,
+                    self.num_sink_tokens,
+                    self.num_kv_heads,
+                    self.head_dim,
+                ),
+                device=self.sink_k.device,
+                dtype=config.torch_dtype,
+            )
+            self.sinks_v = torch.zeros_like(self.sinks_k)
+            self.attn.populate_sinks_kv(sinks_k=self.sinks_k, sinks_v=self.sinks_v)
 
     def sinks_k_weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         weight_shard_start = self.tp_rank * self.num_kv_heads
@@ -275,11 +287,9 @@ class IquestMoeAttention(nn.Module):
             f"expect shape of loaded_weight is 3-dim, now is {loaded_weight.shape}"
         )
         param.copy_(loaded_weight)
-        self.sinks_k = (
+        self.sinks_k.copy_(
             param.unsqueeze(0).expand(self.max_num_seqs, -1, -1, -1).contiguous()
         )
-        self.sinks_v = torch.zeros_like(self.sinks_k)
-        self.attn.populate_sinks_kv(sinks_k=self.sinks_k, sinks_v=self.sinks_v)
 
     def forward(
         self,
