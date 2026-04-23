@@ -111,28 +111,16 @@ using OutType = cutlass::float_e4m3_t;
 using KS = cutlass::gemm::collective::KernelScheduleAuto;
 using ES = cutlass::epilogue::collective::EpilogueScheduleAuto;
 
-// M > 256
+// M > 64
 using BmmGemm_Default =
     cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogue,
                               Shape<_256, _128, _128>, Shape<_2, _2, _1>, KS,
-                              ES, false>;
-
-// 64 < M <= 256
-using BmmGemm_M256 =
-    cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogue,
-                              Shape<_128, _128, _128>, Shape<_2, _1, _1>, KS,
                               ES, false>;
 
 // M <= 64
 using BmmGemm_M64 =
     cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogue,
                               Shape<_64, _64, _128>, Shape<_1, _1, _1>, KS, ES,
-                              false>;
-
-// M <= 16
-using BmmGemm_M16 =
-    cutlass_3x_gemm_sm100_fp8<InType, OutType, c3x::ScaledEpilogue,
-                              Shape<_128, _32, _128>, Shape<_1, _1, _1>, KS, ES,
                               false>;
 
 }  // namespace vllm
@@ -169,14 +157,8 @@ void mla_absorption_bmm(torch::Tensor& out, torch::Tensor const& a,
 
   uint32_t M = a.size(1);
 
-  if (M <= 16) {
-    return vllm::cutlass_bmm_caller_sm100_fp8<vllm::BmmGemm_M16>(
-        out, a, b, scale_a, scale_b);
-  } else if (M <= 64) {
+  if (M <= 64) {
     return vllm::cutlass_bmm_caller_sm100_fp8<vllm::BmmGemm_M64>(
-        out, a, b, scale_a, scale_b);
-  } else if (M <= 256) {
-    return vllm::cutlass_bmm_caller_sm100_fp8<vllm::BmmGemm_M256>(
         out, a, b, scale_a, scale_b);
   } else {
     return vllm::cutlass_bmm_caller_sm100_fp8<vllm::BmmGemm_Default>(
