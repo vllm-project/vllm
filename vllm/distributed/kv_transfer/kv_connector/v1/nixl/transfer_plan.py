@@ -114,7 +114,9 @@ class EngineTransferPlan:
 
     Regions are split into ``fa_regions`` and ``ssm_regions`` matching
     the descriptor handle layout: [FA descriptors | SSM descriptors].
-    ``group_kinds`` maps each kv_cache_group to its type.
+    ``group_kinds`` maps each kv_cache_group to its type for descriptor
+    indexing.  ``source_ranks_per_group`` encodes which ranks read each
+    group — executors use this instead of group_kinds for rank routing.
     """
 
     # Regions in descriptor handle order
@@ -124,18 +126,17 @@ class EngineTransferPlan:
     # Per-group geometric properties (worker-facing, model-agnostic)
     physical_per_logical: tuple[int, ...]
 
-    # Per-group type (FA, SWA, MAMBA, GDN).
+    # Per-group type — used only for descriptor indexing (save path).
     group_kinds: tuple[GroupKind, ...]
 
-    # Source rank routing
-    all_source_ranks: tuple[int, ...]
-    fa_source_ranks: tuple[int, ...]
-    fa_source_set: frozenset[int]
+    # Per-group ordered source ranks. Position = local piece index.
+    source_ranks_per_group: tuple[tuple[int, ...], ...]
 
-    # Split handle parameters
-    num_fa_reads: int
-    num_mamba_reads: int
-    fa_head_slots: dict[int, int]
+    # Superset of all source ranks (union of all groups).
+    all_source_ranks: tuple[int, ...]
+
+    # Maps each source rank to its FA head slot index.
+    rank_to_attention_slot: dict[int, int]
 
     # Remote engine facts (needed by worker at read time)
     remote_tp_size: int
@@ -144,8 +145,8 @@ class EngineTransferPlan:
     remote_physical_blocks_per_logical: int
 
     # Stride for expanding remote logical block IDs to kernel block IDs.
-    # Dense: equals local physical_blocks_per_logical (stride == count).
-    # Mamba: equals remote_physical_blocks_per_logical (stride != count).
+    # Dense: local_physical_blocks_per_logical.
+    # Mamba: remote_physical_blocks_per_logical.
     remote_expansion_stride: int
 
     @property
@@ -168,146 +169,148 @@ def _get_kv_block_len(
     return block_len_per_layer[layer_idx]
 
 
-def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
-    if tp_size <= num_heads:
-        assert num_heads % tp_size == 0
-        per_rank = num_heads // tp_size
-        return range(rank * per_rank, (rank + 1) * per_rank)
-    else:
-        h = rank * num_heads // tp_size
-        return range(h, h + 1)
+@dataclass(frozen=True)
+class TPMapping:
+    """Complete local-to-remote TP mapping for one remote engine."""
+
+    source_ranks_per_group: tuple[tuple[int, ...], ...]
+    all_source_ranks: tuple[int, ...]
+    rank_to_attention_slot: dict[int, int]
+    rank_offset_factor: int
 
 
-def _range_overlap(a: range, b: range) -> range:
-    start = max(a.start, b.start)
-    stop = min(a.stop, b.stop)
-    return range(start, max(start, stop))
-
-
-def _compute_tp_ratio(tp_size: int, remote_tp_size: int) -> int:
-    if tp_size >= remote_tp_size:
-        assert tp_size % remote_tp_size == 0
-        return tp_size // remote_tp_size
-    assert remote_tp_size % tp_size == 0
-    return -(remote_tp_size // tp_size)
-
-
-def _compute_fa_source_ranks(
+def _compute_tp_mapping(
     tp_rank: int,
     tp_size: int,
     remote_tp_size: int,
     is_mla: bool,
     total_num_kv_heads: int,
-) -> tuple[list[int], list[int], int, int]:
-    """Compute FA and all source ranks for Mamba models.
+    group_kinds: tuple[GroupKind, ...],
+) -> TPMapping:
+    """Build the complete local-to-remote TP mapping.
 
-    Returns (fa_source_ranks, all_source_ranks, num_fa_reads, num_mamba_reads).
-    Mirrors the logic in MambaModelBlockTransferPolicy.build_engine_transfer_info.
+    Computes source ranks, head slot assignments, and the rank offset
+    factor in a single pass.  Both generators call this and unpack.
     """
     K = total_num_kv_heads
-    tp_ratio = _compute_tp_ratio(tp_size, remote_tp_size)
-    abs_tp = -tp_ratio if tp_ratio < 0 else 1
-    mamba_range: range | None = None
-    if tp_ratio < 0:
-        mamba_range = range(tp_rank * abs_tp, (tp_rank + 1) * abs_tp)
 
-    fa_source_ranks: list[int]
-    if is_mla or tp_ratio >= 0:
-        num_fa_reads = 1
-        if is_mla:
-            fa_source_ranks = [0]
-        elif tp_ratio > 0:
-            fa_source_ranks = [tp_rank // tp_ratio]
-        else:
-            fa_source_ranks = [tp_rank]
+    # --- Attention source ranks ---
+    if is_mla:
+        attn_ranks = [0]
+    elif tp_size >= remote_tp_size:
+        attn_ranks = [tp_rank * remote_tp_size // tp_size]
     else:
-        local_needs = _physical_head_range(tp_size, K, tp_rank)
-        search_range = mamba_range if mamba_range is not None else range(remote_tp_size)
-        seen: set[tuple[int, int]] = set()
-        fa_source_ranks = []
-        for p in search_range:
-            p_has = _physical_head_range(remote_tp_size, K, p)
-            ov = _range_overlap(local_needs, p_has)
-            if len(ov) > 0:
-                key = (ov.start, ov.stop)
-                if key not in seen:
-                    seen.add(key)
-                    fa_source_ranks.append(p)
-        if not fa_source_ranks:
-            for p in range(remote_tp_size):
-                p_has = _physical_head_range(remote_tp_size, K, p)
-                ov = _range_overlap(local_needs, p_has)
-                if len(ov) > 0:
-                    key = (ov.start, ov.stop)
-                    if key not in seen:
-                        seen.add(key)
-                        fa_source_ranks.append(p)
-        num_fa_reads = len(fa_source_ranks)
+        # P > D: one local rank reads from multiple remote ranks.
+        # GQA dedup: when K < remote_tp_size, several remote ranks
+        # hold the same KV head.  np.unique keeps only the first
+        # rank per unique head so we don't issue redundant reads.
+        abs_tp = remote_tp_size // tp_size
+        start = tp_rank * abs_tp
+        heads = np.arange(start, start + abs_tp) * K // remote_tp_size
+        _, unique_idx = np.unique(heads, return_index=True)
+        attn_ranks = (start + np.sort(unique_idx)).tolist()
 
-    if mamba_range is not None and abs_tp > num_fa_reads:
-        num_mamba_reads = abs_tp
-        all_source_ranks = list(mamba_range)
+    # --- All source ranks (expand for SSM if needed) ---
+    has_ssm = any(k.is_ssm for k in group_kinds)
+    if not has_ssm or tp_size >= remote_tp_size:
+        all_ranks = list(attn_ranks)
     else:
-        num_mamba_reads = num_fa_reads
-        all_source_ranks = list(fa_source_ranks)
-
-    return fa_source_ranks, all_source_ranks, num_fa_reads, num_mamba_reads
-
-
-def _compute_fa_head_slots(
-    fa_source_ranks: list[int],
-    all_source_ranks: list[int],
-    remote_tp_size: int,
-    total_num_kv_heads: int,
-) -> dict[int, int]:
-    """Pre-compute the FA head slot for each source rank.
-
-    Mirrors _fa_head_slot from block_transfer_policy.py but pre-computes
-    all values at plan generation time.
-    """
-    fa_index = {r: i for i, r in enumerate(fa_source_ranks)}
-    K = total_num_kv_heads
-    result: dict[int, int] = {}
-    for rank in all_source_ranks:
-        if rank in fa_index:
-            result[rank] = fa_index[rank]
+        abs_tp = remote_tp_size // tp_size
+        if abs_tp > len(attn_ranks):
+            all_ranks = list(
+                range(
+                    tp_rank * abs_tp,
+                    (tp_rank + 1) * abs_tp,
+                )
+            )
         else:
-            r_head = _physical_head_range(remote_tp_size, K, rank)
-            for target in fa_source_ranks:
-                t_head = _physical_head_range(remote_tp_size, K, target)
-                if _range_overlap(r_head, t_head):
-                    result[rank] = fa_index[target]
-                    break
-            else:
-                result[rank] = 0
-    return result
+            all_ranks = list(attn_ranks)
 
+    # --- Per-group ordered source ranks ---
+    attn_tuple = tuple(attn_ranks)
+    all_tuple = tuple(all_ranks)
+    source_ranks_per_group = tuple(
+        all_tuple if k.is_ssm else attn_tuple for k in group_kinds
+    )
 
-def _compute_fa_rank_offset(
-    tp_rank: int,
-    tp_size: int,
-    tp_ratio: int,
-    is_mla: bool,
-    total_num_kv_heads: int,
-    remote_tp_size: int,
-    fa_source_ranks: list[int],
-    remote_kv_block_len: int,
-) -> int:
-    """Byte offset into remote FA block for this local rank.
+    # --- Attention head slots ---
+    head_to_slot: dict[int, int] = {}
+    for i, r in enumerate(attn_ranks):
+        head_to_slot[r * K // remote_tp_size] = i
+    rank_to_attention_slot = {
+        r: head_to_slot.get(r * K // remote_tp_size, 0) for r in all_ranks
+    }
 
-    Mirrors _fa_rank_offset from block_transfer_policy.py, but takes
-    raw parameters instead of MambaEngineTransferInfo.
-    """
-    if is_mla or tp_ratio <= 0:
-        return 0
-    K = total_num_kv_heads
-    is_local_replicated = tp_size > K
-    if is_local_replicated:
+    # --- Rank offset factor ---
+    if is_mla or tp_size <= remote_tp_size:
+        rank_offset_factor = 0
+    elif tp_size > K:
         local_head = tp_rank * K // tp_size
-        p_rank = fa_source_ranks[0]
-        p_start = p_rank * K // remote_tp_size
-        return (local_head - p_start) * remote_kv_block_len
-    return tp_rank % tp_ratio * remote_kv_block_len
+        p_start = attn_ranks[0] * K // remote_tp_size
+        rank_offset_factor = local_head - p_start
+    else:
+        rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
+
+    return TPMapping(
+        source_ranks_per_group=source_ranks_per_group,
+        all_source_ranks=all_tuple,
+        rank_to_attention_slot=rank_to_attention_slot,
+        rank_offset_factor=rank_offset_factor,
+    )
+
+
+def _build_fa_regions(
+    *,
+    block_len_per_layer: list[int],
+    remote_block_lens: list[int],
+    is_blocks_first: bool,
+    block_size_ratio: int,
+    num_attn_reads: int,
+    rank_offset_factor: int,
+    remote_num_blocks: int,
+    remote_physical_blocks_per_logical: int,
+) -> list[RegionPlan]:
+    """Build FA (attention) regions for the transfer plan.
+
+    K bytes = remote_kv_block_len / num_attn_reads.
+    V bytes = local_block_len / num_attn_reads (no block_size_ratio).
+    Offset = rank_offset_factor * remote_kv_block_len per layer.
+    """
+    fa_regions: list[RegionPlan] = []
+    for i in range(len(remote_block_lens)):
+        local_block_len = _get_kv_block_len(i, block_len_per_layer, is_blocks_first)
+        remote_kv_block_len = local_block_len // block_size_ratio
+        k_desc_bytes = remote_kv_block_len // num_attn_reads
+        rank_offset = rank_offset_factor * remote_kv_block_len
+        page_stride = remote_block_lens[i]
+
+        fa_regions.append(
+            RegionPlan(
+                kind=RegionKind.FA_K,
+                layer_idx=i,
+                descriptor_bytes=k_desc_bytes,
+                offset_in_page=rank_offset,
+                page_stride=page_stride,
+                num_blocks=remote_num_blocks,
+                physical_per_logical=remote_physical_blocks_per_logical,
+            )
+        )
+
+        if is_blocks_first:
+            v_desc_bytes = local_block_len // num_attn_reads
+            fa_regions.append(
+                RegionPlan(
+                    kind=RegionKind.FA_V,
+                    layer_idx=i,
+                    descriptor_bytes=v_desc_bytes,
+                    offset_in_page=rank_offset + page_stride // 2,
+                    page_stride=page_stride,
+                    num_blocks=remote_num_blocks,
+                    physical_per_logical=remote_physical_blocks_per_logical,
+                )
+            )
+
+    return fa_regions
 
 
 # ======================================================================
@@ -331,86 +334,37 @@ def generate_dense_plan(
     remote_physical_blocks_per_logical: int,
     local_physical_blocks_per_logical: int,
 ) -> EngineTransferPlan:
-    """Generate transfer plan for dense (FA-only) models.
-
-    Mirrors the combined logic of:
-      - DenseModelBlockTransferPolicy.build_engine_transfer_info()
-      - DenseModelBlockTransferPolicy.build_remote_descs()
-    """
-    tp_ratio = _compute_tp_ratio(tp_size, remote_tp_size)
+    """Generate transfer plan for dense (FA-only) models."""
     block_size_ratio = block_size // remote_block_size
-    indexes_into_remote = (
-        not (is_mla or remote_tp_size > total_num_kv_heads) and tp_ratio > 0
+
+    m = _compute_tp_mapping(
+        tp_rank,
+        tp_size,
+        remote_tp_size,
+        is_mla,
+        total_num_kv_heads,
+        group_kinds=(GroupKind.FA,),
     )
 
-    # Source ranks — mirrors TransferTopology.target_remote_ranks for dense
-    if tp_ratio > 0:
-        all_source_ranks: tuple[int, ...] = (tp_rank // tp_ratio,)
-    else:
-        abs_ratio = -tp_ratio
-        all_source_ranks = tuple(tp_rank * abs_ratio + i for i in range(abs_ratio))
-
-    # Build FA regions — one (K, optionally V) per layer
-    fa_regions: list[RegionPlan] = []
-    for i in range(len(remote_block_lens)):
-        local_block_len = _get_kv_block_len(i, block_len_per_layer, is_blocks_first)
-        remote_kv_block_len = local_block_len // block_size_ratio
-
-        k_desc_bytes = local_block_len
-        if block_size_ratio > 1:
-            k_desc_bytes = remote_kv_block_len
-        if tp_ratio < 0 and not is_mla:
-            k_desc_bytes = k_desc_bytes // (-tp_ratio)
-
-        rank_offset = (
-            tp_rank % tp_ratio * remote_kv_block_len if indexes_into_remote else 0
-        )
-        page_stride = remote_block_lens[i]
-
-        fa_regions.append(
-            RegionPlan(
-                kind=RegionKind.FA_K,
-                layer_idx=i,
-                descriptor_bytes=k_desc_bytes,
-                offset_in_page=rank_offset,
-                page_stride=page_stride,
-                num_blocks=remote_num_blocks,
-                physical_per_logical=remote_physical_blocks_per_logical,
-            )
-        )
-
-        if is_blocks_first:
-            v_desc_bytes = _get_kv_block_len(i, block_len_per_layer, is_blocks_first)
-            if tp_ratio < 0 and not is_mla:
-                v_desc_bytes = v_desc_bytes // (-tp_ratio)
-
-            fa_regions.append(
-                RegionPlan(
-                    kind=RegionKind.FA_V,
-                    layer_idx=i,
-                    descriptor_bytes=v_desc_bytes,
-                    offset_in_page=rank_offset + page_stride // 2,
-                    page_stride=page_stride,
-                    num_blocks=remote_num_blocks,
-                    physical_per_logical=remote_physical_blocks_per_logical,
-                )
-            )
-
-    # For dense split handles: fa_head_slots maps rank → index,
-    # so the executor uniformly splits all descs by abs_tp.
-    fa_head_slots = {r: i for i, r in enumerate(all_source_ranks)}
+    fa_regions = _build_fa_regions(
+        block_len_per_layer=block_len_per_layer,
+        remote_block_lens=remote_block_lens,
+        is_blocks_first=is_blocks_first,
+        block_size_ratio=block_size_ratio,
+        num_attn_reads=len(m.source_ranks_per_group[0]),
+        rank_offset_factor=m.rank_offset_factor,
+        remote_num_blocks=remote_num_blocks,
+        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+    )
 
     return EngineTransferPlan(
         fa_regions=tuple(fa_regions),
         ssm_regions=(),
         physical_per_logical=(remote_physical_blocks_per_logical,),
         group_kinds=(GroupKind.FA,),
-        all_source_ranks=all_source_ranks,
-        fa_source_ranks=all_source_ranks,
-        fa_source_set=frozenset(all_source_ranks),
-        num_fa_reads=len(all_source_ranks),
-        num_mamba_reads=0,
-        fa_head_slots=fa_head_slots,
+        source_ranks_per_group=m.source_ranks_per_group,
+        all_source_ranks=m.all_source_ranks,
+        rank_to_attention_slot=m.rank_to_attention_slot,
         remote_tp_size=remote_tp_size,
         remote_block_size=remote_block_size,
         remote_block_len=remote_block_lens[0],
@@ -438,119 +392,49 @@ def generate_mamba_plan(
     ssm_sizes: tuple[int, int],
     remote_ssm_sizes: tuple[int, int],
 ) -> EngineTransferPlan:
-    """Generate transfer plan for hybrid Mamba (SSM + FA) models.
-
-    Mirrors the combined logic of:
-      - MambaModelBlockTransferPolicy.build_engine_transfer_info()
-      - MambaModelBlockTransferPolicy._build_fa_remote_descs()
-      - MambaModelBlockTransferPolicy._build_mamba_remote_descs()
-    """
-    tp_ratio = _compute_tp_ratio(tp_size, remote_tp_size)
+    """Generate transfer plan for hybrid Mamba (SSM + FA) models."""
     block_size_ratio = block_size // remote_block_size
     assert block_size_ratio == 1, (
         "Mamba 3-read transfer with block_size_ratio != 1 "
         f"is not tested. Got {block_size_ratio=}."
     )
 
-    # ---- Source rank computation ----
-    (
-        fa_source_ranks,
-        all_source_ranks,
-        num_fa_reads,
-        num_mamba_reads,
-    ) = _compute_fa_source_ranks(
+    m = _compute_tp_mapping(
         tp_rank,
         tp_size,
         remote_tp_size,
         is_mla,
         total_num_kv_heads,
-    )
-
-    # ---- FA head slots (for split handles) ----
-    fa_head_slots = _compute_fa_head_slots(
-        fa_source_ranks,
-        all_source_ranks,
-        remote_tp_size,
-        total_num_kv_heads,
+        group_kinds,
     )
 
     # ---- FA regions ----
-    fa_regions: list[RegionPlan] = []
-    for i in range(len(remote_block_lens)):
-        local_block_len = _get_kv_block_len(
-            i,
-            block_len_per_layer,
-            is_blocks_first,
-        )
-        remote_kv_block_len = local_block_len // block_size_ratio
-
-        k_desc_bytes = local_block_len
-        if block_size_ratio > 1:
-            k_desc_bytes = remote_kv_block_len
-        if tp_ratio < 0 and not is_mla:
-            k_desc_bytes = k_desc_bytes // num_fa_reads
-
-        rank_offset = _compute_fa_rank_offset(
-            tp_rank,
-            tp_size,
-            tp_ratio,
-            is_mla,
-            total_num_kv_heads,
-            remote_tp_size,
-            fa_source_ranks,
-            remote_kv_block_len,
-        )
-
-        page_stride = remote_block_lens[i]
-
-        fa_regions.append(
-            RegionPlan(
-                kind=RegionKind.FA_K,
-                layer_idx=i,
-                descriptor_bytes=k_desc_bytes,
-                offset_in_page=rank_offset,
-                page_stride=page_stride,
-                num_blocks=remote_num_blocks,
-                physical_per_logical=remote_physical_blocks_per_logical,
-            )
-        )
-
-        if is_blocks_first:
-            v_desc_bytes = _get_kv_block_len(
-                i,
-                block_len_per_layer,
-                is_blocks_first,
-            )
-            if tp_ratio < 0 and not is_mla:
-                v_desc_bytes = v_desc_bytes // num_fa_reads
-
-            fa_regions.append(
-                RegionPlan(
-                    kind=RegionKind.FA_V,
-                    layer_idx=i,
-                    descriptor_bytes=v_desc_bytes,
-                    offset_in_page=rank_offset + page_stride // 2,
-                    page_stride=page_stride,
-                    num_blocks=remote_num_blocks,
-                    physical_per_logical=remote_physical_blocks_per_logical,
-                )
-            )
+    fa_regions = _build_fa_regions(
+        block_len_per_layer=block_len_per_layer,
+        remote_block_lens=remote_block_lens,
+        is_blocks_first=is_blocks_first,
+        block_size_ratio=block_size_ratio,
+        num_attn_reads=len(m.source_ranks_per_group[0]),
+        rank_offset_factor=m.rank_offset_factor,
+        remote_num_blocks=remote_num_blocks,
+        remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+    )
 
     # ---- SSM regions ----
-    effective_ratio = max(tp_ratio, 1)
-    local_offset = tp_rank % effective_ratio
+    effective_ratio = tp_size // remote_tp_size if tp_size >= remote_tp_size else 1
+    local_offset = tp_rank % max(effective_ratio, 1)
     conv_size_remote = remote_ssm_sizes[0]
     remote_ratio = remote_physical_blocks_per_logical
     ssm_num_blocks = remote_num_blocks // remote_ratio
 
-    if tp_ratio >= 1:
+    if tp_size >= remote_tp_size:
         conv_offsets = conv_decomp.remote_conv_offsets(
             local_offset,
             effective_ratio,
         )
         ssm_read_size = ssm_sizes[1]
     else:
-        abs_ratio = -tp_ratio
+        abs_ratio = remote_tp_size // tp_size
         xb_p = conv_decomp.x_bytes // abs_ratio
         bb_p = conv_decomp.b_bytes // abs_ratio
         conv_offsets = [
@@ -560,7 +444,11 @@ def generate_mamba_plan(
         ]
         ssm_read_size = remote_ssm_sizes[1]
 
-    conv_kinds = [RegionKind.SSM_CONV_X, RegionKind.SSM_CONV_B, RegionKind.SSM_CONV_C]
+    conv_kinds = [
+        RegionKind.SSM_CONV_X,
+        RegionKind.SSM_CONV_B,
+        RegionKind.SSM_CONV_C,
+    ]
     ssm_regions: list[RegionPlan] = []
     for i in range(len(remote_block_lens)):
         page_stride = remote_block_lens[i] * remote_ratio
@@ -598,12 +486,9 @@ def generate_mamba_plan(
         ssm_regions=tuple(ssm_regions),
         physical_per_logical=physical_per_logical_per_group,
         group_kinds=group_kinds,
-        all_source_ranks=tuple(all_source_ranks),
-        fa_source_ranks=tuple(fa_source_ranks),
-        fa_source_set=frozenset(fa_source_ranks),
-        num_fa_reads=num_fa_reads,
-        num_mamba_reads=num_mamba_reads,
-        fa_head_slots=fa_head_slots,
+        source_ranks_per_group=m.source_ranks_per_group,
+        all_source_ranks=m.all_source_ranks,
+        rank_to_attention_slot=m.rank_to_attention_slot,
         remote_tp_size=remote_tp_size,
         remote_block_size=remote_block_size,
         remote_block_len=remote_block_lens[0],
@@ -646,8 +531,7 @@ def build_remote_descs_from_plan(
 ) -> list[tuple[int, int, int]]:
     """Build (addr, len, dev_id) descriptor tuples from plan.
 
-    Replaces DenseModelBlockTransferPolicy.build_remote_descs() and
-    MambaModelBlockTransferPolicy.build_remote_descs().
+    Builds remote descriptors from a pre-computed plan.
     """
     result: list[tuple[int, int, int]] = []
     dev_id = nixl_agent_meta.device_id
@@ -670,8 +554,7 @@ def compute_desc_ids_from_plan(
 ) -> np.ndarray:
     """Compute NIXL descriptor IDs for given block IDs.
 
-    Replaces DenseModelBlockTransferPolicy.get_block_descs_ids() and
-    MambaModelBlockTransferPolicy.get_block_descs_ids().
+    Computes descriptor indices from a pre-computed plan.
     """
     num_fa_regions = len(plan.fa_regions)
     num_ssm_regions = len(plan.ssm_regions)
@@ -687,7 +570,12 @@ def compute_desc_ids_from_plan(
     all_descs: list[np.ndarray] = []
     for i, group in enumerate(block_ids):
         group_arr = np.asarray(group)
-        if plan.group_kinds[i].is_ssm:
+        if plan.group_kinds[i].is_attention:
+            fa_region_ids = np.arange(num_fa_regions)[:, None]
+            all_descs.append(
+                (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
+            )
+        elif plan.group_kinds[i].is_ssm:
             ssm_region_ids = np.arange(num_ssm_regions)[:, None]
             all_descs.append(
                 (
@@ -695,10 +583,7 @@ def compute_desc_ids_from_plan(
                 ).flatten()
             )
         else:
-            fa_region_ids = np.arange(num_fa_regions)[:, None]
-            all_descs.append(
-                (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
-            )
+            raise ValueError(f"Unknown group kind {plan.group_kinds[i]} at index {i}")
 
     return np.concatenate(all_descs)
 
@@ -710,39 +595,28 @@ def compute_read_specs_from_plan(
 ) -> list[ReadSpec]:
     """Compute read specs from plan.
 
-    Replaces compute_read_specs() + filter_block_ids_for_rank().
-    No _should_skip_fa — the plan structurally encodes which ranks
-    serve which groups via fa_source_set.
+    For each source rank, includes only the groups whose
+    source_ranks_per_group contains that rank.
     """
-    specs: list[ReadSpec] = []
-    for rank in plan.all_source_ranks:
-        skip_fa = rank not in plan.fa_source_set
-        if not skip_fa:
-            specs.append(
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=local_block_ids,
-                    remote_block_ids=remote_block_ids,
-                )
-            )
-        else:
-            num_groups = len(local_block_ids)
-            filtered_local: list[list[int]] = [
-                list(local_block_ids[g]) if plan.group_kinds[g].is_ssm else []
+    num_groups = len(local_block_ids)
+    return [
+        ReadSpec(
+            remote_rank=rank,
+            local_block_ids=[
+                list(local_block_ids[g])
+                if rank in plan.source_ranks_per_group[g]
+                else []
                 for g in range(num_groups)
-            ]
-            filtered_remote: list[list[int]] = [
-                list(remote_block_ids[g]) if plan.group_kinds[g].is_ssm else []
+            ],
+            remote_block_ids=[
+                list(remote_block_ids[g])
+                if rank in plan.source_ranks_per_group[g]
+                else []
                 for g in range(num_groups)
-            ]
-            specs.append(
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=filtered_local,
-                    remote_block_ids=filtered_remote,
-                )
-            )
-    return specs
+            ],
+        )
+        for rank in plan.all_source_ranks
+    ]
 
 
 def build_local_splits_from_plan(
@@ -752,30 +626,29 @@ def build_local_splits_from_plan(
 ) -> list[list[tuple[int, int, int]]]:
     """Build split handle data for P_TP > D_TP scenario.
 
-    Replaces DenseModelBlockTransferPolicy.build_src_split_handles() and
-    MambaModelBlockTransferPolicy.build_src_split_handles() +
-    compute_split_handle_data().
-
-    When num_ssm_regions == 0 (dense), all descs are FA and the split
-    is uniform.  When SSM regions exist, FA and SSM descs get different
-    split factors.
+    num_fa_descs is the boundary between FA and SSM descriptors.
+    Split counts are derived from source_ranks_per_group lengths.
+    FA uses rank_to_attention_slot for the slot offset;
+    SSM uses the rank's positional index.
     """
-    abs_tp = len(plan.all_source_ranks)
+    fa_num_splits = len(plan.source_ranks_per_group[0])
+
+    has_ssm_descs = num_fa_descs < len(src_blocks_data)
+    ssm_num_splits = len(plan.source_ranks_per_group[-1]) if has_ssm_descs else 0
+
     result: list[list[tuple[int, int, int]]] = []
 
     for p_idx, p_rank in enumerate(plan.all_source_ranks):
-        skip_fa = p_rank not in plan.fa_source_set
-        fa_slot = plan.fa_head_slots.get(p_rank, 0) if not skip_fa else 0
+        fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
 
         handle: list[tuple[int, int, int]] = []
         for j, (addr, local_len, dev) in enumerate(src_blocks_data):
             if j < num_fa_descs:
-                assert plan.num_fa_reads >= 1
-                fa_chunk = local_len // plan.num_fa_reads
-                handle.append((addr + fa_slot * fa_chunk, fa_chunk, dev))
+                chunk = local_len // fa_num_splits
+                handle.append((addr + fa_slot * chunk, chunk, dev))
             else:
-                mamba_chunk = local_len // abs_tp
-                handle.append((addr + p_idx * mamba_chunk, mamba_chunk, dev))
+                chunk = local_len // ssm_num_splits
+                handle.append((addr + p_idx * chunk, chunk, dev))
         result.append(handle)
 
     return result
@@ -915,8 +788,7 @@ def visualize_plan(plan: EngineTransferPlan) -> str:
     lines = [
         f"EngineTransferPlan(remote_tp={plan.remote_tp_size}, "
         f"remote_bs={plan.remote_block_size}):",
-        f"  Source ranks: all={list(plan.all_source_ranks)}, "
-        f"fa={list(plan.fa_source_ranks)}",
+        f"  Source ranks: all={list(plan.all_source_ranks)}",
     ]
     total_descs = 0
 

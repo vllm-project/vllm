@@ -21,6 +21,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    EngineTransferInfo,
     TransferTopology,
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -29,9 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (
-    ModelBlockTransferPolicy,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -48,6 +46,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
     GroupKind,
+    build_local_descs,
+    build_local_splits_from_plan,
+    build_remote_descs_from_plan,
+    compute_desc_ids_from_plan,
+    compute_read_specs_from_plan,
     generate_dense_plan,
     generate_mamba_plan,
 )
@@ -342,13 +345,6 @@ class NixlConnectorWorker:
 
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
-
-        self.transfer_policy = ModelBlockTransferPolicy.create(
-            kv_cache_config=kv_cache_config,
-            layer_specs=self._layer_specs,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
-        )
 
         # Per-engine transfer plans. Generated during handshake, used by
         # per-request hot path (model-agnostic).
@@ -899,17 +895,18 @@ class NixlConnectorWorker:
         block_size_ratio = self.block_size // block_size
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
-        blocks_data = self.transfer_policy.build_local_descs(
-            # Memory
+        blocks_data = build_local_descs(
+            has_mamba=self._has_mamba,
+            conv_decomp=self._conv_decomp,
+            ssm_sizes=self._mamba_ssm_size,
             base_addresses=local_base_addresses,
             device_id=self.device_id,
-            # Block geometry
             num_blocks=self.num_blocks,
             logical_num_blocks=self._logical_num_blocks,
             block_size_ratio=block_size_ratio,
             block_len_per_layer=self.block_len_per_layer,
-            # Layout
             is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
         )
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
@@ -994,12 +991,7 @@ class NixlConnectorWorker:
             if self._has_mamba
             else 1
         )
-        transfer_info = self.transfer_policy.build_engine_transfer_info(
-            # Local topology
-            transfer_topo=transfer_topo,
-            # Block geometry
-            local_block_len=self.block_len_per_layer[0],
-            # Remote facts (from NixlAgentMetadata handshake)
+        transfer_info = EngineTransferInfo(
             remote_tp_size=remote_tp_size,
             remote_block_size=nixl_agent_meta.block_size,
             remote_block_len=nixl_agent_meta.block_lens[0],
@@ -1075,6 +1067,8 @@ class NixlConnectorWorker:
             tp_ratio,
         )
 
+        plan = self._transfer_plans[engine_id]
+
         ### (Optional) Register local agent memory regions. MLA is not split.
         if (
             tp_ratio < 0
@@ -1086,9 +1080,8 @@ class NixlConnectorWorker:
             # we only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            for handle_data in self.transfer_policy.build_src_split_handles(
-                transfer_topo,
-                engine_id,
+            for handle_data in build_local_splits_from_plan(
+                plan,
                 self.src_blocks_data,
                 self.num_descs,
             ):
@@ -1099,12 +1092,7 @@ class NixlConnectorWorker:
                 self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         ### Register remote agent memory regions
-        blocks_data = self.transfer_policy.build_remote_descs(
-            transfer_topo,
-            engine_id,
-            nixl_agent_meta,
-            self.block_len_per_layer,
-        )
+        blocks_data = build_remote_descs_from_plan(plan, nixl_agent_meta)
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
@@ -1138,8 +1126,8 @@ class NixlConnectorWorker:
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self.transfer_topo is not None
-        remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
-        assert remote_info.remote_tp_size == remote_tp_size
+        plan = self._transfer_plans[remote_engine_id]
+        assert plan.remote_tp_size == remote_tp_size
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
@@ -1424,9 +1412,9 @@ class NixlConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             # post processing for heteroblocksize
-            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+            plan = self._transfer_plans[meta.remote.engine_id]
             block_size_ratio = self.transfer_topo.block_size_ratio(
-                remote_info.remote_block_size
+                plan.remote_block_size
             )
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
@@ -1639,21 +1627,18 @@ class NixlConnectorWorker:
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        remote_ranks = self.transfer_topo.target_remote_ranks(engine_id)
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
-
         plan = self._transfer_plans[engine_id]
+        tp_ratio = self.transfer_topo.tp_ratio(plan.remote_tp_size)
+
         meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
             meta.remote.block_ids,
             plan.remote_expansion_stride,
         )
         remote_block_ids = meta.remote.block_ids
-        read_specs = self.transfer_policy.compute_read_specs(
+        read_specs = compute_read_specs_from_plan(
+            plan,
             local_block_ids=meta.local_physical_block_ids,
             remote_block_ids=remote_block_ids,
-            remote_ranks=remote_ranks,
-            remote_info=remote_info,
         )
 
         # D may have to perform multiple reads from different remote ranks.
@@ -1666,7 +1651,7 @@ class NixlConnectorWorker:
             remote_rank = spec.remote_rank
             local_block_ids = spec.local_block_ids
             remote_block_ids = spec.remote_block_ids
-            remote_block_size = remote_info.remote_block_size
+            remote_block_size = plan.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
@@ -1730,10 +1715,8 @@ class NixlConnectorWorker:
         a single remote worker.
         """
         assert self.transfer_topo is not None
-        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            remote_info.remote_block_size
-        )
+        plan = self._transfer_plans[dst_engine_id]
+        block_size_ratio = self.transfer_topo.block_size_ratio(plan.remote_block_size)
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
             assert not self._is_hma_required
@@ -1811,19 +1794,19 @@ class NixlConnectorWorker:
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.
-        remote_block_descs_ids = self.transfer_policy.get_block_descs_ids(
+        # Get descs ids.  Both calls use the same plan since region counts
+        # (len(fa_regions), len(ssm_regions)) are model-determined and
+        # identical across engines.
+        remote_block_descs_ids = compute_desc_ids_from_plan(
+            plan,
             block_ids=remote_block_ids,
-            num_regions=self.num_regions,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_len_per_layer=self.block_len_per_layer,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            physical_blocks_per_logical=plan.remote_physical_blocks_per_logical,
         )
-        local_block_descs_ids = self.transfer_policy.get_block_descs_ids(
+        local_block_descs_ids = compute_desc_ids_from_plan(
+            plan,
             block_ids=local_block_ids,
-            num_regions=self.num_regions,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_len_per_layer=self.block_len_per_layer,
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
         )
