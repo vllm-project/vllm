@@ -38,8 +38,11 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
-    create_moe_runner,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -586,7 +589,7 @@ class FusedMoE(PluggableLayer):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self.runner = create_moe_runner(
+        self.runner: MoERunnerInterface = MoERunner(
             layer_name=self.layer_name,
             moe_config=self.moe_config,
             router=self.router,
@@ -1613,6 +1616,25 @@ class FusedMoE(PluggableLayer):
         )
 
         return s
+
+
+# This is a temporary forwarding method which will be removed/modified layer.
+def fused_moe_make_expert_params_mapping(
+    model: torch.nn.Module,
+    ckpt_gate_proj_name: str,
+    ckpt_down_proj_name: str,
+    ckpt_up_proj_name: str,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    return FusedMoE.make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name,
+        ckpt_down_proj_name,
+        ckpt_up_proj_name,
+        num_experts,
+        num_redundant_experts,
+    )
 
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters

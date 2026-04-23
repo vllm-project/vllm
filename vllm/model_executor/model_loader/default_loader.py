@@ -384,7 +384,6 @@ class DefaultModelLoader(BaseModelLoader):
         logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
-            scope="local",
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
