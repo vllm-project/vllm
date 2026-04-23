@@ -1377,19 +1377,26 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         num_experts = getattr(self.config, "num_experts", None) or 0
         expert_params_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
-            (
-                "experts.w13_"
-                if proj_name in ["gate_proj", "up_proj"]
-                else "experts.w2_",
-                f"experts.{expert_id}.{proj_name}.",
-                expert_id,
-                shard_id,
-            )
+            (param_name, weight_name, expert_id, shard_id)
             for expert_id in range(num_experts)
             for shard_id, proj_name in [
                 ("w1", "gate_proj"),
                 ("w2", "down_proj"),
                 ("w3", "up_proj"),
+            ]
+            for param_name, weight_name in [
+                # Strategy A: dot-separated suffix (AWQ/GPTQ .qweight, .scales)
+                (
+                    "experts.w13_" if proj_name != "down_proj" else "experts.w2_",
+                    f"experts.{expert_id}.{proj_name}.",
+                ),
+                # Strategy B: underscore suffix (CompressedTensors _packed, _scale)
+                (
+                    "experts.w13_weight_"
+                    if proj_name != "down_proj"
+                    else "experts.w2_weight_",
+                    f"experts.{expert_id}.{proj_name}_",
+                ),
             ]
         ]
         params_dict = dict(self.named_parameters())
