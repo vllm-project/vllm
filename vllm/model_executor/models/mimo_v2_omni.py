@@ -1132,6 +1132,16 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # audio encoder
+            # "audio_encoder.audio_projection.": "audio_encoder.projection.",
+            # "audio_encoder.audio_input_local_transformer.": (
+            #     "audio_encoder.input_local_transformer."
+            # ),
+            # "audio_projection.": "audio_encoder.projection.",
+            # "audio_input_local_transformer.": (
+            #     "audio_encoder.input_local_transformer."
+            # ),
+            "speech_embeddings.": "audio_encoder.speech_embeddings.",
             # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
             "model.visual.": "visual.",
@@ -1439,60 +1449,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         params_dict = dict(self.named_parameters())
         audio_loaded: set[str] = set()
 
-        def _preprocess(weights_iter: Iterable[tuple[str, torch.Tensor]]):
-            for name, loaded_weight in weights_iter:
-                # Skip audio tokenizer weights (loaded independently in __init__)
-                if "audio_tokenizer" in name:
-                    continue
-
-                # Remap old audio projection naming
-                if "audio" in name and "projection" in name:
-                    if "audio_encoder.audio_projection" in name:
-                        name = name.replace(
-                            "audio_encoder.audio_projection",
-                            "audio_encoder.projection",
-                        )
-                    elif (
-                        "audio_projection" in name
-                        and "audio_encoder.projection" not in name
-                    ):
-                        name = name.replace(
-                            "audio_projection", "audio_encoder.projection"
-                        )
-
-                # Remap old input_local_transformer naming
-                if (
-                    "audio_input_local_transformer" in name
-                    and "audio_encoder.input_local_transformer" not in name
-                ):
-                    name = name.replace(
-                        "audio_input_local_transformer",
-                        "audio_encoder.input_local_transformer",
-                    )
-
-                # Remap speech_embeddings to audio_encoder.speech_embeddings
-                if (
-                    "speech_embeddings" in name
-                    and "audio_encoder.speech_embeddings" not in name
-                ):
-                    name = name.replace(
-                        "speech_embeddings", "audio_encoder.speech_embeddings"
-                    )
-
-                # Load speech_embeddings with vocab-size truncation
-                if "audio_encoder.speech_embeddings" in name and name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight[: param.shape[0]])
-                    audio_loaded.add(name)
-                    continue
-
-                yield name, loaded_weight
-
-        loader = AutoWeightsLoader(self)
-        auto_loaded = loader.load_weights(
-            _preprocess(weights), mapper=self.hf_to_vllm_mapper
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
+        auto_loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return audio_loaded | auto_loaded
