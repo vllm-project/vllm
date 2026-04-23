@@ -292,7 +292,7 @@ class ExampleConnector(KVConnectorBase_V1):
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
         token_ids = request.prompt_token_ids or []
-        num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
+        num_tokens_to_check = align_to_block_size(len(token_ids), self._block_size)
 
         return num_tokens_to_check - num_computed_tokens, False
 
@@ -404,7 +404,7 @@ class ExampleConnector(KVConnectorBase_V1):
         mm_hashes: list[str],
     ) -> bool:
         num_tokens_to_check = align_to_block_size(
-            len(prompt_token_ids) - 1, self._block_size
+            len(prompt_token_ids), self._block_size
         )
         foldername = self._generate_foldername_debug(
             torch.tensor(prompt_token_ids)[:num_tokens_to_check],
