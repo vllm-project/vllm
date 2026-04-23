@@ -52,10 +52,10 @@ def test_full_mode_emits_only_non_trivial_parallelism():
     )
 
 
-def test_get_caches_and_respects_set_default():
+def test_get_respects_set_default():
     cfg = _cfg(tp=8)
     full = fp.get_system_fingerprint(cfg)
-    assert fp.get_system_fingerprint(cfg) is full  # cached identity
+    assert full == fp.get_system_fingerprint(cfg)
 
     fp.set_default_fingerprint_mode("hash")
     hashed = fp.get_system_fingerprint(cfg)

@@ -13,8 +13,9 @@ Four modes, configured via ``--fingerprint-mode``:
 * ``custom``: user-provided literal via ``--fingerprint-value``.
 * ``none``: the field is omitted (serialized as ``null``).
 
-The string is computed once at serving init and cached, so per-request cost
-is a single attribute read.
+``get_system_fingerprint`` is only called at serving-class init (a handful
+of times per server); each subclass caches the returned string on
+``self.system_fingerprint``, so per-request cost is one attribute read.
 """
 
 from __future__ import annotations
@@ -26,10 +27,6 @@ FingerprintMode = Literal["full", "hash", "custom", "none"]
 _DEFAULT_MODE: FingerprintMode = "full"
 _CUSTOM_VALUE: str | None = None
 
-# Sentinel distinguishes "cached None" (mode=none / custom unset) from "miss".
-_MISS: Any = object()
-_CACHE: dict[tuple[int, str, str | None], str | None] = {}
-
 
 def set_default_fingerprint_mode(
     mode: FingerprintMode,
@@ -40,19 +37,12 @@ def set_default_fingerprint_mode(
     global _DEFAULT_MODE, _CUSTOM_VALUE
     _DEFAULT_MODE = mode
     _CUSTOM_VALUE = custom_value
-    _CACHE.clear()
 
 
 def get_system_fingerprint(vllm_config: Any) -> str | None:
-    """Return the cached fingerprint for ``vllm_config``, or ``None`` when the
-    mode is ``none`` (or ``custom`` with no value)."""
-    key = (id(vllm_config), _DEFAULT_MODE, _CUSTOM_VALUE)
-    cached = _CACHE.get(key, _MISS)
-    if cached is not _MISS:
-        return cached
-    fp = build_system_fingerprint(vllm_config, _DEFAULT_MODE, _CUSTOM_VALUE)
-    _CACHE[key] = fp
-    return fp
+    """Return the fingerprint for ``vllm_config`` using the mode configured by
+    ``set_default_fingerprint_mode``."""
+    return build_system_fingerprint(vllm_config, _DEFAULT_MODE, _CUSTOM_VALUE)
 
 
 def build_system_fingerprint(
@@ -79,12 +69,15 @@ def build_system_fingerprint(
     parts: list[str] = [f"vllm-{vllm_version}"]
     pc = getattr(vllm_config, "parallel_config", None)
     if pc is not None:
-        if getattr(pc, "tensor_parallel_size", 1) > 1:
-            parts.append(f"tp{pc.tensor_parallel_size}")
-        if getattr(pc, "pipeline_parallel_size", 1) > 1:
-            parts.append(f"pp{pc.pipeline_parallel_size}")
-        if getattr(pc, "data_parallel_size", 1) > 1:
-            parts.append(f"dp{pc.data_parallel_size}")
+        tp = getattr(pc, "tensor_parallel_size", 1)
+        if tp > 1:
+            parts.append(f"tp{tp}")
+        pp = getattr(pc, "pipeline_parallel_size", 1)
+        if pp > 1:
+            parts.append(f"pp{pp}")
+        dp = getattr(pc, "data_parallel_size", 1)
+        if dp > 1:
+            parts.append(f"dp{dp}")
         if getattr(pc, "enable_expert_parallel", False):
             parts.append("ep")
     parts.append(hash8)
