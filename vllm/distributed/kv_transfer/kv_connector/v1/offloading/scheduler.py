@@ -443,8 +443,7 @@ class OffloadingConnectorScheduler:
 
             # All workers reported — job is complete.
             self._jobs.pop(job_id)
-            req_status = self._req_status.get(job_status.req_id)
-            assert req_status is not None
+            req_status = self._req_status.get[job_status.req_id]
 
             req_status.transfer_jobs.remove(job_id)
             if job_status.is_store:
