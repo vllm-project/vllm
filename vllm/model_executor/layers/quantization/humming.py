@@ -62,7 +62,6 @@ try:
 
     from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
         BatchedHummingGroupedExperts,
-        BatchedHummingIndexedExperts,
         HummingGroupedExperts,
         HummingIndexedExperts,
         get_humming_moe_gemm_type,
@@ -923,15 +922,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         activation_format = prepare_finalize.activation_format
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-            if get_humming_moe_gemm_type() == "indexed":
-                return BatchedHummingIndexedExperts(layer, self, prepare_finalize)
-            else:
-                return BatchedHummingGroupedExperts(layer, self, prepare_finalize)
+            return BatchedHummingGroupedExperts(layer, self, prepare_finalize)
+        elif get_humming_moe_gemm_type() == "indexed":
+            return HummingIndexedExperts(layer, self, prepare_finalize)
         else:
-            if get_humming_moe_gemm_type() == "indexed":
-                return HummingIndexedExperts(layer, self, prepare_finalize)
-            else:
-                return HummingGroupedExperts(layer, self, prepare_finalize)
+            return HummingGroupedExperts(layer, self, prepare_finalize)
 
     def apply(
         self,

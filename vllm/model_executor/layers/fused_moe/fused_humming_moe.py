@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused MoE utilities for GPTQ."""
+"""Fused MoE utilities for Humming."""
 
 import json
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from humming import dtypes
@@ -18,7 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    batched_moe_align_block_size,
     moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
@@ -42,17 +41,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def get_humming_moe_gemm_type():
-    if envs.VLLM_HUMMING_MOE_PREFER_INDEXED is None:
-        # TODO: choose better gemm type based on device type
-        gemm_type = "indexed"
-    elif envs.VLLM_HUMMING_MOE_PREFER_INDEXED:
-        gemm_type = "indexed"
-    else:
+def get_humming_moe_gemm_type() -> Literal["indexed", "grouped"]:
+    gemm_type = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
+    gemm_type = gemm_type.lower()
+    if gemm_type in ["indexed", "grouped"]:
+        return gemm_type
+    elif current_platform.has_device_capability(90):
+        # for device that supports TMA, use grouped gemm
         gemm_type = "grouped"
+    else:
+        gemm_type = "indexed"
 
     logger.info_once(f"Using {gemm_type} gemm for humming moe")  # noqa
-
     return gemm_type
 
 
@@ -396,7 +396,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         raise NotImplementedError
 
 
-class HummingIndexedExpertsBase(HummingExpertsBase):
+class HummingIndexedExperts(HummingExpertsBase):
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
     @property
     def humming_gemm_type(self) -> HummingGemmType:
         return HummingGemmType.INDEXED
@@ -416,22 +423,13 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
         else:
             raise ValueError(f"cannot found moe_block_size for shape {valid_shape_m}")
 
-        if self.is_batched:
-            assert self.max_num_tokens is not None
-            assert expert_tokens_meta is not None
-            sorted_ids, expert_ids, num_tokens_padded = batched_moe_align_block_size(
-                max_tokens_per_batch=self.max_num_tokens,
-                block_size=moe_block_size,
-                expert_num_tokens=expert_tokens_meta.expert_num_tokens,
-            )
-        else:
-            sorted_ids, expert_ids, num_tokens_padded = moe_align_block_size(
-                topk_ids=topk_ids,
-                block_size=moe_block_size,
-                num_experts=self.global_num_experts,
-                expert_map=expert_map,
-                ignore_invalid_experts=True,
-            )
+        sorted_ids, expert_ids, num_tokens_padded = moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=moe_block_size,
+            num_experts=self.global_num_experts,
+            expert_map=expert_map,
+            ignore_invalid_experts=True,
+        )
 
         moe_common_kwargs = {
             "sorted_ids": sorted_ids,
@@ -441,7 +439,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
             "valid_shape_m": valid_shape_m,
         }
 
-        top_k = 1 if self.is_batched else topk_ids.size(1)
+        top_k = topk_ids.size(1)
         moe_kwargs1 = {"top_k": top_k, "tuning_config": self.w13_tuning_config_str}
         moe_kwargs2 = {"top_k": 1, "tuning_config": self.w2_tuning_config_str}
         moe_kwargs1.update(moe_common_kwargs)
@@ -511,32 +509,13 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
             **moe_kwargs2,
         )
 
-        if not self.is_batched:
-            moe_fused_mul_sum(
-                inputs=buffers["down_output"].view(*topk_ids.shape, -1),
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                expert_map=self.layer.expert_map,
-                outputs=buffers["output"],
-            )
-
-
-class HummingIndexedExperts(HummingIndexedExpertsBase):
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-
-class BatchedHummingIndexedExperts(HummingIndexedExpertsBase):
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceDelegate()
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
+        moe_fused_mul_sum(
+            inputs=buffers["down_output"].view(*topk_ids.shape, -1),
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=self.layer.expert_map,
+            outputs=buffers["output"],
+        )
 
 
 class HummingGroupedExperts(HummingExpertsBase):
