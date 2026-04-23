@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy imp
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
+    GroupKind,
     RegionKind,
     RegionPlan,
     build_local_splits_from_plan,
@@ -532,7 +533,7 @@ class TestDensePlanStructure:
     def test_no_ssm_regions(self):
         plan = generate_dense_plan(**_common_plan_params())
         assert plan.ssm_regions == ()
-        assert plan.is_mamba_group == (False,)
+        assert plan.group_kinds == (GroupKind.FA,)
 
     def test_blocks_first_has_k_and_v(self):
         plan = generate_dense_plan(
@@ -559,7 +560,7 @@ class TestDensePlanStructure:
 def _make_mamba_plan_for_desc_ids(
     num_fa_regions: int,
     num_ssm_regions: int,
-    is_mamba_group: list[bool],
+    group_kinds: tuple[GroupKind, ...],
     fa_num_blocks: int = 100,
     ssm_num_blocks: int = 100,
 ) -> EngineTransferPlan:
@@ -588,12 +589,12 @@ def _make_mamba_plan_for_desc_ids(
         )
         for i in range(num_ssm_regions)
     )
-    physical_per_logical = tuple(1 if m else 1 for m in is_mamba_group)
+    physical_per_logical = tuple(1 for _ in group_kinds)
     return EngineTransferPlan(
         fa_regions=fa_regions,
         ssm_regions=ssm_regions,
         physical_per_logical=physical_per_logical,
-        is_mamba_group=tuple(is_mamba_group),
+        group_kinds=group_kinds,
         all_source_ranks=(0,),
         fa_source_ranks=(0,),
         fa_source_set=frozenset({0}),
@@ -616,7 +617,7 @@ class TestMambaPlanDescIds:
         plan = _make_mamba_plan_for_desc_ids(
             num_fa_regions=2,
             num_ssm_regions=4,  # 4 regions per layer, 1 layer
-            is_mamba_group=[False, True],
+            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             fa_num_blocks=100,
             ssm_num_blocks=100,
         )
@@ -643,7 +644,7 @@ class TestMambaPlanDescIds:
         plan = _make_mamba_plan_for_desc_ids(
             num_fa_regions=2,
             num_ssm_regions=4,
-            is_mamba_group=[False, True],
+            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             fa_num_blocks=num_blocks,
             ssm_num_blocks=logical_blocks,
         )
@@ -671,7 +672,7 @@ class TestMambaPlanReadSpecs:
             fa_regions=(),
             ssm_regions=(),
             physical_per_logical=(1, 1),
-            is_mamba_group=(False, True),
+            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             all_source_ranks=(0, 1),
             fa_source_ranks=(0, 1),
             fa_source_set=frozenset({0, 1}),
@@ -700,7 +701,7 @@ class TestMambaPlanReadSpecs:
             fa_regions=(),
             ssm_regions=(),
             physical_per_logical=(1, 1),
-            is_mamba_group=(False, True),
+            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             all_source_ranks=(0, 1, 2),
             fa_source_ranks=(0,),
             fa_source_set=frozenset({0}),
@@ -752,7 +753,7 @@ class TestMambaPlanSplitHandles:
                 ),
             ),
             physical_per_logical=(1, 1),
-            is_mamba_group=(False, True),
+            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
             all_source_ranks=(0, 1),
             fa_source_ranks=(0,),
             fa_source_set=frozenset({0}),

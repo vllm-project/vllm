@@ -48,6 +48,29 @@ class ReadSpec:
     remote_block_ids: BlockIds
 
 
+class GroupKind(enum.Enum):
+    """KV cache group type for transfer purposes.
+
+    Used by ``EngineTransferPlan`` and block expansion functions to
+    dispatch per-group behavior without model-specific branching.
+    """
+
+    FA = "fa"
+    SWA = "swa"
+    MAMBA = "mamba"
+    GDN = "gdn"
+
+    @property
+    def is_attention(self) -> bool:
+        """FA and SWA both need block expansion and standard descriptors."""
+        return self in (GroupKind.FA, GroupKind.SWA)
+
+    @property
+    def is_ssm(self) -> bool:
+        """MAMBA and GDN have state descriptors instead of KV pages."""
+        return self in (GroupKind.MAMBA, GroupKind.GDN)
+
+
 class RegionKind(enum.Enum):
     """Descriptor region type.  Used for visualization/debugging only;
     executors never branch on this value."""
@@ -91,7 +114,7 @@ class EngineTransferPlan:
 
     Regions are split into ``fa_regions`` and ``ssm_regions`` matching
     the descriptor handle layout: [FA descriptors | SSM descriptors].
-    ``is_mamba_group`` maps kv_cache_groups to the correct section.
+    ``group_kinds`` maps each kv_cache_group to its type.
     """
 
     # Regions in descriptor handle order
@@ -101,8 +124,8 @@ class EngineTransferPlan:
     # Per-group geometric properties (worker-facing, model-agnostic)
     physical_per_logical: tuple[int, ...]
 
-    # kv_cache_group mapping (internal to transfer_plan, worker should not use)
-    is_mamba_group: tuple[bool, ...]
+    # Per-group type (FA, SWA, MAMBA, GDN).
+    group_kinds: tuple[GroupKind, ...]
 
     # Source rank routing
     all_source_ranks: tuple[int, ...]
@@ -381,7 +404,7 @@ def generate_dense_plan(
         fa_regions=tuple(fa_regions),
         ssm_regions=(),
         physical_per_logical=(remote_physical_blocks_per_logical,),
-        is_mamba_group=(False,),
+        group_kinds=(GroupKind.FA,),
         all_source_ranks=all_source_ranks,
         fa_source_ranks=all_source_ranks,
         fa_source_set=frozenset(all_source_ranks),
@@ -410,7 +433,7 @@ def generate_mamba_plan(
     remote_num_blocks: int,
     remote_block_lens: list[int],
     remote_physical_blocks_per_logical: int,
-    is_mamba_group: list[bool],
+    group_kinds: tuple[GroupKind, ...],
     conv_decomp: MambaConvSplitInfo,
     ssm_sizes: tuple[int, int],
     remote_ssm_sizes: tuple[int, int],
@@ -568,13 +591,13 @@ def generate_mamba_plan(
         )
 
     physical_per_logical_per_group = tuple(
-        1 if m else remote_physical_blocks_per_logical for m in is_mamba_group
+        1 if k.is_ssm else remote_physical_blocks_per_logical for k in group_kinds
     )
     return EngineTransferPlan(
         fa_regions=tuple(fa_regions),
         ssm_regions=tuple(ssm_regions),
         physical_per_logical=physical_per_logical_per_group,
-        is_mamba_group=tuple(is_mamba_group),
+        group_kinds=group_kinds,
         all_source_ranks=tuple(all_source_ranks),
         fa_source_ranks=tuple(fa_source_ranks),
         fa_source_set=frozenset(fa_source_ranks),
@@ -664,7 +687,7 @@ def compute_desc_ids_from_plan(
     all_descs: list[np.ndarray] = []
     for i, group in enumerate(block_ids):
         group_arr = np.asarray(group)
-        if plan.is_mamba_group[i]:
+        if plan.group_kinds[i].is_ssm:
             ssm_region_ids = np.arange(num_ssm_regions)[:, None]
             all_descs.append(
                 (
@@ -705,11 +728,11 @@ def compute_read_specs_from_plan(
         else:
             num_groups = len(local_block_ids)
             filtered_local: list[list[int]] = [
-                [] if not plan.is_mamba_group[g] else list(local_block_ids[g])
+                list(local_block_ids[g]) if plan.group_kinds[g].is_ssm else []
                 for g in range(num_groups)
             ]
             filtered_remote: list[list[int]] = [
-                [] if not plan.is_mamba_group[g] else list(remote_block_ids[g])
+                list(remote_block_ids[g]) if plan.group_kinds[g].is_ssm else []
                 for g in range(num_groups)
             ]
             specs.append(
@@ -923,6 +946,6 @@ def visualize_plan(plan: EngineTransferPlan) -> str:
             )
             total_descs += r.num_blocks
 
-    lines.append(f"  Groups: {['SSM' if m else 'FA' for m in plan.is_mamba_group]}")
+    lines.append(f"  Groups: {[k.value for k in plan.group_kinds]}")
     lines.append(f"  Total descriptors: {total_descs}")
     return "\n".join(lines)
