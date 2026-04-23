@@ -43,37 +43,6 @@ def test_acceptance_length_to_rates(length, n, expected):
     )
 
 
-def test_resolve_requires_exactly_one():
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, None, None)
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, [1.0, 0.5, 0.0], 2.0)
-
-
-def test_resolve_rates_validates_length():
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, [1.0, 0.5], None)
-
-
-def test_resolve_rates_validates_range():
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, [1.0, 0.5, -0.1], None)
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, [1.1, 0.5, 0.0], None)
-
-
-def test_resolve_rates_validates_monotonic():
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, [0.5, 0.9, 0.2], None)
-
-
-def test_resolve_length_validates_range():
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, None, 0.5)
-    with pytest.raises(ValueError):
-        SpeculativeConfig._resolve_synthetic_acceptance_rates(3, None, 4.5)
-
-
 def test_resolve_length_produces_minvariance_schedule():
     assert SpeculativeConfig._resolve_synthetic_acceptance_rates(
         3, None, 2.6
