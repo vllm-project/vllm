@@ -11,7 +11,7 @@ from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8000/v1"
+openai_api_base = "http://localhost:8080/v1"
 
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
@@ -21,6 +21,11 @@ messages = [
         "content": "The Los Angeles Dodgers won the World Series in 2020.",
     },
     {"role": "user", "content": "Where was it played?"},
+]
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "how to learn english"},
 ]
 
 
@@ -47,13 +52,15 @@ def main(args):
         messages=messages,
         model=model,
         stream=args.stream,
+        temperature=0,
+        max_completion_tokens=5000,
     )
 
     print("-" * 50)
     print("Chat completion results:")
     if args.stream:
         for c in chat_completion:
-            print(c)
+            print(c.choices[0].delta.content, end="", flush=True)
     else:
         print(chat_completion)
     print("-" * 50)

@@ -472,7 +472,7 @@ class InputBatch:
             return
 
         tmp = self.plt_saved_hidden_states[:, i1].clone()
-        self.plt_saved_hidden_states[:, i1] = self.plt_saved_hidden_states[:i2]
+        self.plt_saved_hidden_states[:, i1] = self.plt_saved_hidden_states[:, i2]
         self.plt_saved_hidden_states[:, i2] = tmp
 
     def update_req_spec_token_ids(
