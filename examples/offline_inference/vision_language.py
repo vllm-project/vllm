@@ -2463,6 +2463,12 @@ MODELS_NEED_VIDEO_METADATA = [
 ]
 
 
+MODELS_SUPPORT_VIT_CUDA_GRAPH = [
+    "qwen3_vl",
+    "qwen3_vl_moe",
+]
+
+
 def get_multi_modal_input(args):
     """
     return {
@@ -2575,6 +2581,29 @@ def apply_image_repeat(
     return inputs, inputs_with_empty_media
 
 
+def maybe_add_vit_cuda_graph_compilation_config(args, engine_args):
+    model = args.model_type
+    modality = args.modality
+    enable_vit_cuda_graph = args.enable_vit_cuda_graph
+
+    if enable_vit_cuda_graph and model in MODELS_SUPPORT_VIT_CUDA_GRAPH:
+        if modality == "image" or modality == "video":
+            vision_items_per_batch = 1
+        elif modality == "image+video":
+            vision_items_per_batch = 2
+        else:
+            raise ValueError(
+                f"modality={modality} is not supported for vit cuda graph."
+            )
+
+        engine_args.compilation_config = {
+            "cudagraph_mm_encoder": True,
+            "encoder_cudagraph_max_vision_items_per_batch": vision_items_per_batch,
+        }
+
+    return engine_args
+
+
 @contextmanager
 def time_counter(enable: bool):
     if enable:
@@ -2625,33 +2654,28 @@ def parse_args():
         default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
-
     parser.add_argument(
         "--image-repeat-prob",
         type=float,
         default=None,
         help="Simulates the hit-ratio for multi-modal preprocessor cache (if enabled)",
     )
-
     parser.add_argument(
         "--disable-mm-processor-cache",
         action="store_true",
         help="If True, disables caching of multi-modal processor.",
     )
-
     parser.add_argument(
         "--time-generate",
         action="store_true",
         help="If True, then print the total generate() call time",
     )
-
     parser.add_argument(
         "--use-different-prompt-per-request",
         action="store_true",
         help="If True, then use different prompt (with the same multi-modal "
         "data) for each request.",
     )
-
     parser.add_argument(
         "--verify-mm-cache-hit-with-uuids",
         action="store_true",
@@ -2664,6 +2688,11 @@ def parse_args():
         type=int,
         default=None,
         help="Tensor parallel size to override the model's default setting. ",
+    )
+    parser.add_argument(
+        "--enable-vit-cuda-graph",
+        action="store_true",
+        help="If True, will enable vit cuda graph capture and replay for the model.",
     )
     return parser.parse_args()
 
@@ -2698,6 +2727,7 @@ def main(args):
     engine_args.mm_processor_cache_gb = mm_processor_cache_gb
     if args.tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = args.tensor_parallel_size
+    engine_args = maybe_add_vit_cuda_graph_compilation_config(args, engine_args)
     llm = LLM.from_engine_args(engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.

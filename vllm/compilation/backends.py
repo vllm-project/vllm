@@ -23,6 +23,10 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
+from vllm.compilation.codegen import (
+    compile_execution_fn,
+    generate_execution_code,
+)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -283,10 +287,6 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                if is_encoder:
-                    compilation_config.encoder_compilation_time += elapsed
-                else:
-                    compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
@@ -388,10 +388,6 @@ class CompilerManager:
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            if is_encoder:
-                compilation_config.encoder_compilation_time += elapsed
-            else:
-                compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
@@ -1129,11 +1125,10 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.perf_counter() - torch_compile_start_time
-        logger.info_once("Dynamo bytecode transform time: %.2f s", dynamo_time)
-        if self.is_encoder:
-            self.compilation_config.encoder_compilation_time += dynamo_time
-        else:
-            self.compilation_config.compilation_time += dynamo_time
+        logger.info_once(
+            "Dynamo bytecode transform time: %.2f s",
+            dynamo_time,
+        )
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
@@ -1251,11 +1246,6 @@ class VllmBackend:
         self._called = True
         graph_to_serialize = (
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
-        )
-
-        from vllm.compilation.codegen import (
-            compile_execution_fn,
-            generate_execution_code,
         )
 
         execution_code, submod_names = generate_execution_code(self.split_gm)
