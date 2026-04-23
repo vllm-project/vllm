@@ -28,7 +28,6 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -471,15 +470,14 @@ class VocabParallelEmbedding(PluggableLayer):
     def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
-            with gpu_sync_allowed(1):
-                masked_input, input_mask = get_masked_input_and_mask(
-                    input_,
-                    self.shard_indices.org_vocab_start_index,
-                    self.shard_indices.org_vocab_end_index,
-                    self.shard_indices.num_org_vocab_padding,
-                    self.shard_indices.added_vocab_start_index,
-                    self.shard_indices.added_vocab_end_index,
-                )
+            masked_input, input_mask = get_masked_input_and_mask(
+                input_,
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+                self.shard_indices.num_org_vocab_padding,
+                self.shard_indices.added_vocab_start_index,
+                self.shard_indices.added_vocab_end_index,
+            )
         else:
             masked_input = input_
         # Get the embeddings.

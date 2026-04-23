@@ -52,19 +52,32 @@ if current_platform.is_cuda_alike():
             _GPU_SYNC_ALLOWED_COUNTS[key] = used + 1
         return _suppress_gpu_sync_check(prev_mode)
 
-    def with_gpu_sync_check(fn):
+    def with_gpu_sync_check(fn=None, *, skip_first: int = 0):
         """Decorator that enables `torch.cuda.set_sync_debug_mode` around `fn`
         when `VLLM_GPU_SYNC_CHECK` is set.
 
         The env var is parsed once at decoration time; this module is imported
         lazily after `VllmConfig.__post_init__` has finalized `VLLM_GPU_SYNC_CHECK`.
+
+        Supports two forms:
+          @with_gpu_sync_check                 # bare (skip_first=0)
+          @with_gpu_sync_check(skip_first=N)   # skip the first N calls
         """
+        if fn is None:
+            return functools.partial(with_gpu_sync_check, skip_first=skip_first)
+
         mode = envs.VLLM_GPU_SYNC_CHECK
         if mode is None:
             return fn
 
+        remaining = skip_first
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            nonlocal remaining
+            if remaining > 0:
+                remaining -= 1
+                return fn(*args, **kwargs)
             prev_mode = torch.cuda.get_sync_debug_mode()
             torch.cuda.set_sync_debug_mode(mode)
             try:
@@ -79,5 +92,7 @@ else:
     def gpu_sync_allowed(count: int | None = None):
         return _noop_cm()
 
-    def with_gpu_sync_check(fn):
+    def with_gpu_sync_check(fn=None, *, skip_first: int = 0):
+        if fn is None:
+            return lambda f: f
         return fn

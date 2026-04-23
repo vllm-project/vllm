@@ -765,14 +765,14 @@ class Worker(WorkerBase):
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
-    @with_gpu_sync_check
+    @with_gpu_sync_check(skip_first=1)
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
-    @with_gpu_sync_check
+    @with_gpu_sync_check(skip_first=1)
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
