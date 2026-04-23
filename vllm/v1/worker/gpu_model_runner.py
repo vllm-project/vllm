@@ -6229,6 +6229,15 @@ class GPUModelRunner(
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                logger.info(
+                    "[DEBUG ATTN INIT] layer=%s: backend=%s, "
+                    "spec_type=%s, page_size=%d, block_size=%d",
+                    layer_name,
+                    full_cls_name,
+                    type(layer_kv_cache_spec).__name__,
+                    layer_kv_cache_spec.page_size_bytes,
+                    layer_kv_cache_spec.block_size,
+                )
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend, layer_kv_cache_spec
@@ -6498,8 +6507,32 @@ class GPUModelRunner(
             dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        logger.info(
+            "[DEBUG KV ALLOC] num_blocks=%d, num_tensors=%d, num_groups=%d",
+            kv_cache_config.num_blocks,
+            len(kv_cache_config.kv_cache_tensors),
+            len(kv_cache_config.kv_cache_groups),
+        )
+        for i, group in enumerate(kv_cache_config.kv_cache_groups):
+            spec = group.kv_cache_spec
+            logger.info(
+                "[DEBUG KV ALLOC] group[%d]: layers=%s, spec_type=%s, "
+                "page_size_bytes=%d, block_size=%d",
+                i,
+                group.layer_names[:3],
+                type(spec).__name__,
+                spec.page_size_bytes,
+                spec.block_size,
+            )
+
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+        for idx, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            logger.info(
+                "[DEBUG KV ALLOC] tensor[%d]: size=%d bytes, shared_by=%s",
+                idx,
+                kv_cache_tensor.size,
+                kv_cache_tensor.shared_by,
+            )
             tensor = torch.zeros(
                 kv_cache_tensor.size, dtype=torch.int8, device=self.device
             )
@@ -6546,18 +6579,39 @@ class GPUModelRunner(
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
+        logger.info("[DEBUG KV RESHAPE] kernel_block_sizes=%s", kernel_block_sizes)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
+            logger.info(
+                "[DEBUG KV RESHAPE] Processing group: kv_cache_group_id=%d, "
+                "backend=%s, spec_type=%s, layers=%s",
+                group.kv_cache_group_id,
+                attn_backend.get_name(),
+                type(kv_cache_spec).__name__,
+                group.layer_names[:2],
+            )
             if group.kv_cache_group_id == len(kernel_block_sizes):
                 # There may be a last group for layers without kv cache.
+                logger.info("[DEBUG KV RESHAPE] Skipping group (no kv cache)")
                 continue
             kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                logger.info(
+                    "[DEBUG KV RESHAPE] layer=%s: raw_tensor.numel()=%d bytes, "
+                    "spec.page_size_bytes=%d, spec.block_size=%d",
+                    layer_name,
+                    raw_tensor.numel(),
+                    kv_cache_spec.page_size_bytes,
+                    kv_cache_spec.block_size,
+                )
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0, (
+                    f"[DEBUG] layer={layer_name}: raw_tensor.numel()={raw_tensor.numel()} "
+                    f"not divisible by page_size_bytes={kv_cache_spec.page_size_bytes}"
+                )
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
@@ -6565,6 +6619,16 @@ class GPUModelRunner(
                         kv_cache_spec.block_size // kernel_block_size
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+                    logger.info(
+                        "[DEBUG KV RESHAPE] layer=%s: num_blocks=%d, "
+                        "kernel_block_size=%d, num_blocks_per_kv_block=%d, "
+                        "kernel_num_blocks=%d",
+                        layer_name,
+                        num_blocks,
+                        kernel_block_size,
+                        num_blocks_per_kv_block,
+                        kernel_num_blocks,
+                    )
 
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
@@ -6572,6 +6636,17 @@ class GPUModelRunner(
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
+                    )
+                    logger.info(
+                        "[DEBUG KV RESHAPE] layer=%s: get_kv_cache_shape("
+                        "num_blocks=%d, block_size=%d, num_kv_heads=%d, "
+                        "head_size=%d) -> shape=%s",
+                        layer_name,
+                        kernel_num_blocks,
+                        kernel_block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        kv_cache_shape,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
@@ -6592,12 +6667,106 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+                    raw_t = kv_cache_raw_tensors[layer_name]
+                    raw_bytes = raw_t.numel()  # int8, so numel == bytes
+                    dtype_size = torch.tensor([], dtype=dtype).element_size()
+                    elements_after_dtype_view = raw_bytes // dtype_size
+                    shape_elements = 1
+                    for s in kv_cache_shape:
+                        shape_elements *= s
+
+                    # Check if padding is present by comparing page sizes
+                    real_page_size = kv_cache_spec.real_page_size_bytes
+                    padded_page_size = kv_cache_spec.page_size_bytes
+                    has_padding = padded_page_size > real_page_size
+
+                    if has_padding:
+                        # Use as_strided to handle padded page size.
+                        # The tensor is allocated with padded_page_size * num_blocks bytes.
+                        # Each page contains both k and v data, plus padding gap.
+                        elements_per_page = padded_page_size // dtype_size
+
+                        # Original shape semantics (before stride_order permutation):
+                        # 5D: (2, num_blocks, block_size, heads, dim) - standard attention
+                        # 4D: (num_blocks, block_size, heads, slot) - TurboQuant
+                        if len(kv_cache_shape) == 5:
+                            # Standard attention: (2, num_blocks, block_size, heads, dim)
+                            # Original strides: [kv_stride, page_stride, bs_stride, h_stride, 1]
+                            original_shape = [
+                                kv_cache_shape[inv_order[i]] for i in range(5)
+                            ]
+
+                            elements_per_kv = (
+                                original_shape[2]
+                                * original_shape[3]
+                                * original_shape[4]
+                            )
+                            original_strides = [
+                                elements_per_kv,  # "2" stride: offset between k and v
+                                elements_per_page,  # num_blocks stride: skip padding
+                                original_shape[3]
+                                * original_shape[4],  # block_size stride
+                                original_shape[4],  # heads stride
+                                1,  # dim stride
+                            ]
+
+                            # Permute strides to match permuted shape
+                            # permuted_strides[i] = original_strides[stride_order[i]]
+                            permuted_strides = [
+                                original_strides[kv_cache_stride_order[i]]
+                                for i in range(5)
+                            ]
+
+                        logger.info(
+                            "[DEBUG KV RESHAPE PADDED] layer=%s: "
+                            "real_page=%d, padded_page=%d, "
+                            "elements_per_page=%d, shape=%s, strides=%s",
+                            layer_name,
+                            real_page_size,
+                            padded_page_size,
+                            elements_per_page,
+                            kv_cache_shape,
+                            permuted_strides,
+                        )
+
+                        typed_tensor = raw_t.view(dtype)
+                        kv_cache = torch.as_strided(
+                            typed_tensor,
+                            size=kv_cache_shape,
+                            stride=permuted_strides,
+                        )
+                        kv_caches[layer_name] = kv_cache.permute(*inv_order)
+                    else:
+                        # No padding, use standard view
+                        logger.info(
+                            "[DEBUG KV RESHAPE] layer=%s: raw_bytes=%d, dtype=%s, "
+                            "dtype_size=%d, elements_after_view=%d, "
+                            "shape=%s, shape_elements=%d, MATCH=%s",
+                            layer_name,
+                            raw_bytes,
+                            dtype,
+                            dtype_size,
+                            elements_after_dtype_view,
+                            kv_cache_shape,
+                            shape_elements,
+                            elements_after_dtype_view == shape_elements,
+                        )
+                        if elements_after_dtype_view != shape_elements:
+                            logger.info(
+                                "[DEBUG KV RESHAPE MISMATCH] layer=%s: "
+                                "tensor has %d elements but shape needs %d elements. "
+                                "Difference: %d",
+                                layer_name,
+                                elements_after_dtype_view,
+                                shape_elements,
+                                elements_after_dtype_view - shape_elements,
+                            )
+                        kv_caches[layer_name] = (
+                            kv_cache_raw_tensors[layer_name]
+                            .view(dtype)
+                            .view(kv_cache_shape)
+                            .permute(*inv_order)
+                        )
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]

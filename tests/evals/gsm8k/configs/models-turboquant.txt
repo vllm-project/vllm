@@ -1,4 +1,6 @@
-Qwen3-4B-TQ-k8v4.yaml
-Qwen3-4B-TQ-t4nc.yaml
-Qwen3-4B-TQ-k3v4nc.yaml
-Qwen3-4B-TQ-t3nc.yaml
+#Qwen3-4B-TQ-k8v4.yaml
+#Qwen3-4B-TQ-t4nc.yaml
+#Qwen3-4B-TQ-k3v4nc.yaml
+#Qwen3-4B-TQ-t3nc.yaml
+Qwen3.5-35B-A3B.yaml
+Qwen3.5-35B-A3B-TQ-t4nc.yaml

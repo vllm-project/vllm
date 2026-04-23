@@ -1649,9 +1649,14 @@ class EngineArgs:
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
+            combined = existing | set(boundary)
+            # Separate special string values (e.g., "sliding_window") from
+            # numeric layer indices for proper sorting
+            special_values = {v for v in combined if not v.isdigit()}
+            numeric_values = {v for v in combined if v.isdigit()}
             cache_config.kv_cache_dtype_skip_layers = sorted(
-                existing | set(boundary), key=int
-            )
+                numeric_values, key=int
+            ) + sorted(special_values)
 
         ray_runtime_env = None
         if is_ray_initialized():

@@ -1,0 +1,4 @@
+# GPT-OSS models with TurboQuant KV cache
+# TurboQuant applied to full-attention layers only (sliding_window layers skipped)
+gpt-oss-20b-baseline.yaml
+gpt-oss-20b-TQ-t4nc.yaml

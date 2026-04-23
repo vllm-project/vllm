@@ -53,6 +53,8 @@ def _tq_decode_stage1(
     Centroids_ptr,  # [n_centroids] float32
     # Output (intermediate for stage2)
     Mid_o_ptr,  # [B, Hq, NUM_KV_SPLITS, D+1] float32
+    # Sink support
+    Sink_ptr,  # [Hq] float32, pre-computed sink attention logits per head
     # Strides
     stride_qb,
     stride_qh,  # Q strides: [B, Hq, D]
@@ -83,6 +85,7 @@ def _tq_decode_stage1(
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    USE_SINKS: tl.constexpr = 0,  # 1 = use sink tokens for attention anchoring
 ):
     bid = tl.program_id(0)  # batch index
     hid = tl.program_id(1)  # q_head index
@@ -124,8 +127,20 @@ def _tq_decode_stage1(
         val_bit_shift = val_bit_off % 8
 
     # Online softmax accumulators
-    m_prev = -float("inf")
-    l_prev = 0.0
+    # Sink tokens provide a pre-computed attention bias that should be
+    # included in the softmax normalization. For the first split (sid==0),
+    # we initialize m_prev with the sink logit. L is always 1.0 for all
+    # splits to match unified attention semantics.
+    if USE_SINKS:
+        if sid == 0:
+            m_prev = tl.load(Sink_ptr + hid).to(tl.float32)
+            l_prev = 1.0
+        else:
+            m_prev = -float("inf")
+            l_prev = 0.0
+    else:
+        m_prev = -float("inf")
+        l_prev = 0.0
     acc = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     bt_base = bid * stride_bt_b
@@ -503,6 +518,7 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    sinks: torch.Tensor | None = None,  # [Hq] float32, pre-computed sink logits
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -551,6 +567,10 @@ def triton_turboquant_decode_attention(
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
     BLOCK_KV = 4
     grid = (B, Hq, NUM_KV_SPLITS)
+
+    # Prepare sink pointer (convert to float32 on device if provided)
+    use_sinks = sinks is not None
+
     _tq_decode_stage1[grid](
         q_rot,
         kv_cache,
@@ -558,6 +578,7 @@ def triton_turboquant_decode_attention(
         seq_lens,
         centroids,
         mid_o,
+        sinks,
         q_rot.stride(0),
         q_rot.stride(1),
         kv_cache.stride(0),
@@ -583,6 +604,7 @@ def triton_turboquant_decode_attention(
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
+        USE_SINKS=1 if use_sinks else 0,
         num_warps=1,
         num_stages=1,
     )
