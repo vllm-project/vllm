@@ -38,8 +38,11 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
-    create_moe_runner,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -230,11 +233,18 @@ class FusedMoE(PluggableLayer):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
         router_logits_dtype: Data type for router logits buffers.
+        routed_scaling_factor: A scaling factor that is applied to the topk_weights
+                               by the router or the output of the layer depending
+                               on the value of `apply_routed_scale_to_output`
+        apply_routed_scale_to_output: Determine whether or not `routed_scaling_factor`
+                                      is applied to the topk_weights or to the experts
+                                      output. It is applied to the experts output
+                                      instead of the topk_weights when this feature is
+                                      not supported by the router (or the experts).
     """
 
     # --8<-- [end:fused_moe]
@@ -246,7 +256,6 @@ class FusedMoE(PluggableLayer):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
-        reduce_results: bool = False,
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
@@ -274,11 +283,11 @@ class FusedMoE(PluggableLayer):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        routed_output_transform: torch.nn.Module | None = None,
+        apply_routed_scale_to_output: bool = False,
         zero_expert_type: str | None = None,
     ):
         super().__init__()
-
-        self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -425,7 +434,6 @@ class FusedMoE(PluggableLayer):
 
         assert intermediate_size % self.tp_size == 0
         intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
         self.renormalize = renormalize
 
         # TODO(bnell): these attributes are only used by monolithic kernels.
@@ -437,7 +445,14 @@ class FusedMoE(PluggableLayer):
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
-        self.routed_scaling_factor = routed_scaling_factor
+        # When apply_routed_scale_to_output is True, we set the scaling factor
+        # to 1.0 so it ends up being a nop. Applying the scale will be handled
+        # by the runner in this case.
+        # The member variable must be set in the same way as the router since
+        # some quantization methods can access it.
+        self.routed_scaling_factor = (
+            routed_scaling_factor if not apply_routed_scale_to_output else 1.0
+        )
         self.e_score_correction_bias = e_score_correction_bias
         # TODO(bnell): end attributes
 
@@ -456,7 +471,7 @@ class FusedMoE(PluggableLayer):
             topk_group=topk_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
@@ -574,16 +589,22 @@ class FusedMoE(PluggableLayer):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self.runner = create_moe_runner(
+        self.runner: MoERunnerInterface = MoERunner(
             layer_name=self.layer_name,
             moe_config=self.moe_config,
             router=self.router,
-            routed_input_transform=self._routed_input_transform,
             gate=gate,
             shared_experts=shared_experts,
             quant_method=self.quant_method,
-            reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+            # When apply_routed_scale_to_output is True, we allow
+            # the scaling factor to be passed to the runner, otherwise
+            # we pass 1.0 so it ends up being a nop.
+            routed_scaling_factor=routed_scaling_factor
+            if apply_routed_scale_to_output
+            else 1.0,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
@@ -1514,32 +1535,11 @@ class FusedMoE(PluggableLayer):
         self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
-    def must_reduce_shared_expert_outputs(self) -> bool:
-        """
-        The shared_experts are typically computed using the RowParallelLinear
-        layer. The result of this function is typically used as
-        the reduce_results argument to the module.
-        When just tensor-parallel is used, it is not required to reduce
-        the shared_experts results immediately. Instead we reduce at the
-        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
-        With EP and all2all kernels - this is no longer viable as all
-        GPU ranks in DP, produce the complete set of hidden_states.
-        Therefore it is required that we reduce the shared_experts output
-        early.
-        """
-        return self.runner.must_reduce_shared_expert_outputs()
-
-    def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
-        """
-        Some combine kernels reduce across GPU ranks by default.
-        """
-        return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return self.runner.forward(
             hidden_states,
             router_logits,
@@ -1613,10 +1613,28 @@ class FusedMoE(PluggableLayer):
             f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
             f"tp_size={self.tp_size},\n"
             f"ep_size={self.ep_size}, "
-            f"reduce_results={self.reduce_results}, "
         )
 
         return s
+
+
+# This is a temporary forwarding method which will be removed/modified layer.
+def fused_moe_make_expert_params_mapping(
+    model: torch.nn.Module,
+    ckpt_gate_proj_name: str,
+    ckpt_down_proj_name: str,
+    ckpt_up_proj_name: str,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    return FusedMoE.make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name,
+        ckpt_down_proj_name,
+        ckpt_up_proj_name,
+        num_experts,
+        num_redundant_experts,
+    )
 
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters
