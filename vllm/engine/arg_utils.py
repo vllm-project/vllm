@@ -1661,29 +1661,10 @@ class EngineArgs:
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             merged = sorted(existing | set(boundary), key=lambda x: int(x))
 
-            # Also skip layers whose head dimension exceeds the XPU FMHA
-            # limit (256).  Gemma 4 has global attention layers with
-            # global_head_dim=512 that cannot run through flash attention.
+            # NOTE: head_dim>256 skip removed — testing whether latest
+            # vllm_xpu_kernels handles global_head_dim=512 natively.
             hf_cfg = model_config.hf_text_config
             layer_types = getattr(hf_cfg, "layer_types", None)
-            global_head_dim = getattr(hf_cfg, "global_head_dim", None)
-            max_fmha_head_dim = 256
-            if (
-                layer_types is not None
-                and global_head_dim is not None
-                and global_head_dim > max_fmha_head_dim
-            ):
-                merged_set = set(merged)
-                for idx, lt in enumerate(layer_types):
-                    if lt == "full_attention":
-                        merged_set.add(str(idx))
-                merged = sorted(merged_set, key=lambda x: int(x))
-                logger.info(
-                    "TQ: also skipping global attention layers with "
-                    "head_dim=%d > %d (FMHA limit)",
-                    global_head_dim,
-                    max_fmha_head_dim,
-                )
 
             # KV-shared layers reuse their target's cache tensor.  The
             # shared layer's kv_cache_dtype MUST match the target's,
