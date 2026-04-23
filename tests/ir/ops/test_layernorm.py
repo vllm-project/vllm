@@ -10,6 +10,7 @@ These tests verify that:
 """
 
 import pytest
+import torch
 
 import vllm.kernels  # noqa: F401 to register kernels
 from vllm.ir.ops.layernorm import rms_norm
@@ -27,7 +28,10 @@ class TestRmsNormLowering:
     @pytest.mark.parametrize("provider", supported_providers(rms_norm) + ["native"])
     def test_supports_args_returns_bool(self, provider: str):
         """Verify supports_args returns bool with unbacked SymInts."""
-        assert_supports_args_returns_bool(rms_norm, provider, hidden_size=64)
+        assert_supports_args_returns_bool(
+            rms_norm, provider, num_tokens=8, hidden_size=64,
+            dtype=torch.bfloat16, epsilon=1e-5
+        )
 
 
 class TestRmsNormE2E:
@@ -36,5 +40,7 @@ class TestRmsNormE2E:
     @pytest.mark.parametrize("provider", supported_providers(rms_norm) + ["native"])
     def test_e2e_correctness(self, provider: str, default_vllm_config):
         """Compare lowering pipeline output with two baselines."""
-        real_args = rms_norm.generate_inputs(num_tokens=8, hidden_size=16)
+        real_args = rms_norm.generate_inputs(
+            num_tokens=8, hidden_size=16, dtype=torch.bfloat16, epsilon=1e-5
+        )
         assert_op_e2e_correctness(rms_norm, provider, real_args)

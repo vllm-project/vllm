@@ -581,14 +581,14 @@ class TestGenerateSymbolicInputs:
 
         # Normal inputs
         result = rms_norm.generate_inputs(
-            num_tokens=128, hidden_size=64, dtype=torch.float32
+            num_tokens=128, hidden_size=64, dtype=torch.float32, epsilon=1e-5
         )
         assert result[0].shape == (128, 64)
         assert result[1].shape == (64,)
 
         # Symbolic inputs
         result = rms_norm.generate_symbolic_inputs(
-            num_tokens=128, hidden_size=64, dtype=torch.float32
+            num_tokens=128, hidden_size=64, dtype=torch.float32, epsilon=1e-5
         )
         # First dim is SymInt
         assert isinstance(result[0].shape[0], SymInt)
