@@ -324,6 +324,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
@@ -1515,6 +1516,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="zai-org/GLM-OCR",
         is_available_online=False,
         min_transformers_version="5.1.0",
+    ),
+    "HYV3MTPModel": _HfExamplesInfo(
+        "tencent/Hy3-preview",
+        speculative_model="tencent/Hy3-preview",
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
