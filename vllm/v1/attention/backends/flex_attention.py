@@ -456,12 +456,7 @@ class FlexAttentionMetadata:
             (is_valid, logical_q_idx, logical_kv_idx) = (
                 self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
             )
-            # Apply mask modification only for valid indices
-            return torch.where(
-                is_valid,
-                self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx),
-                False,
-            )
+            return is_valid & self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx)
 
         return final_mask_mod
 
