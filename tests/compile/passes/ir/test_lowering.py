@@ -6,9 +6,9 @@ from collections.abc import Callable
 
 import pytest
 import torch
-from torch import nn
 
 import vllm.kernels  # noqa: F401 to register kernels
+from tests.ir.ir_test_utils import _make_simple_model
 from vllm import ir
 from vllm.compilation.passes.ir.lowering_pass import (
     VllmIRLoweringPass,
@@ -18,16 +18,6 @@ from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
 from ...backend import TestBackend
-
-
-def _make_simple_model(op: IrOp, real_args: tuple) -> nn.Module:
-    """Create a simple model that calls the op with given arguments."""
-
-    class SimpleModel(nn.Module):
-        def forward(self, x):
-            return op(*real_args)
-
-    return SimpleModel()
 
 
 @contextlib.contextmanager
