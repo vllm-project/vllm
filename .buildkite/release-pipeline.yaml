@@ -1,3 +1,13 @@
+# CUDA architecture lists — following PyTorch RELEASE.md
+# (https://github.com/pytorch/pytorch/blob/main/RELEASE.md)
+# SM86 included for broader Ampere coverage; SM89 for marlin fp8 support
+env:
+  CUDA_ARCH_X86: "7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX"
+  # aarch64 only architectures: 8.7 for Orin, 11.0 for Thor (since CUDA 13)
+  CUDA_ARCH_AARCH64: "8.0 8.7 8.9 9.0 10.0 11.0 12.0+PTX"
+  CUDA_ARCH_X86_CU129: "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+  CUDA_ARCH_AARCH64_CU129: "8.0 8.7 8.9 9.0 10.0 12.0"
+
 steps:
   - input: "Provide Release version here"
     id: input-release-version
@@ -14,12 +24,10 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
-          # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-          - "bash .buildkite/scripts/upload-nightly-wheels.sh"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_31"
         env:
           DOCKER_BUILDKIT: "1"
 
@@ -29,9 +37,7 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
-          # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04  --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04  --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
@@ -57,7 +63,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_31"
@@ -70,7 +76,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
@@ -108,96 +114,95 @@ steps:
     depends_on: block-build-release-images
     allow_dependency_failure: true
     steps:
-      - label: "Build release image - x86_64 - CUDA 12.9"
+      - label: "Build release image - x86_64 - CUDA 13.0"
         depends_on: ~
         id: build-release-image-x86
         agents:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
           # re-tag to default image tag and push, just in case arm64 build fails
           - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
-      - label: "Build release image - aarch64 - CUDA 12.9"
+      - label: "Build release image - aarch64 - CUDA 13.0"
         depends_on: ~
         id: build-release-image-arm64
         agents:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
 
-      - label: "Build release image - x86_64 - CUDA 13.0"
+      - label: "Build release image - x86_64 - CUDA 12.9"
         depends_on: ~
-        id: build-release-image-x86-cuda-13-0
+        id: build-release-image-x86-cuda-12-9
         agents:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129"
           # re-tag to default image tag and push, just in case arm64 build fails
-          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129"
 
-      - label: "Build release image - aarch64 - CUDA 13.0"
+      - label: "Build release image - aarch64 - CUDA 12.9"
         depends_on: ~
-        id: build-release-image-arm64-cuda-13-0
+        id: build-release-image-arm64-cuda-12-9
         agents:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          # compute capability 12.0 for RTX-50 series / RTX PRO 6000 Blackwell, 12.1 for DGX Spark
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0 12.1' --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129"
 
-      - label: "Build release image - x86_64 - CUDA 12.9 - Ubuntu 24.04"
+      - label: "Build release image - x86_64 - CUDA 13.0 - Ubuntu 24.04"
         depends_on: ~
         id: build-release-image-x86-ubuntu2404
         agents:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu24.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404"
           - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404"
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404"
 
-      - label: "Build release image - aarch64 - CUDA 12.9 - Ubuntu 24.04"
+      - label: "Build release image - aarch64 - CUDA 13.0 - Ubuntu 24.04"
         depends_on: ~
         id: build-release-image-arm64-ubuntu2404
         agents:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu24.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404"
 
-      - label: "Build release image - x86_64 - CUDA 13.0 - Ubuntu 24.04"
+      - label: "Build release image - x86_64 - CUDA 12.9 - Ubuntu 24.04"
         depends_on: ~
-        id: build-release-image-x86-cuda-13-0-ubuntu2404
+        id: build-release-image-x86-cuda-12-9-ubuntu2404
         agents:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0 12.1' --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu24.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130-ubuntu2404"
-          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130-ubuntu2404"
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130-ubuntu2404"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
 
-      - label: "Build release image - aarch64 - CUDA 13.0 - Ubuntu 24.04"
+      - label: "Build release image - aarch64 - CUDA 12.9 - Ubuntu 24.04"
         depends_on: ~
-        id: build-release-image-arm64-cuda-13-0-ubuntu2404
+        id: build-release-image-arm64-cuda-12-9-ubuntu2404
         agents:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0 12.1' --build-arg INSTALL_KV_CONNECTORS=true --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu24.04 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130-ubuntu2404"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg UBUNTU_VERSION=24.04 --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404 --target vllm-openai --progress plain -f docker/Dockerfile ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"
 
       - block: "Build release image for x86_64 CPU"
         key: block-cpu-release-image-build
@@ -238,7 +243,7 @@ steps:
   - group: "Publish release images"
     key: "publish-release-images"
     steps:
-      - label: "Create multi-arch manifest - CUDA 12.9"
+      - label: "Create multi-arch manifest - CUDA 13.0"
         depends_on:
           - build-release-image-x86
           - build-release-image-arm64
@@ -250,7 +255,7 @@ steps:
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
-      - label: "Annotate release workflow - CUDA 12.9"
+      - label: "Annotate release workflow - CUDA 13.0"
         depends_on:
           - create-multi-arch-manifest
         id: annotate-release-workflow
@@ -259,19 +264,19 @@ steps:
         commands:
           - "bash .buildkite/scripts/annotate-release.sh"
 
-      - label: "Create multi-arch manifest - CUDA 13.0"
+      - label: "Create multi-arch manifest - CUDA 12.9"
         depends_on:
-          - build-release-image-x86-cuda-13-0
-          - build-release-image-arm64-cuda-13-0
-        id: create-multi-arch-manifest-cuda-13-0
+          - build-release-image-x86-cuda-12-9
+          - build-release-image-arm64-cuda-12-9
+        id: create-multi-arch-manifest-cuda-12-9
         agents:
           queue: small_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu130 --amend"
-          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129 --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129"
 
-      - label: "Create multi-arch manifest - CUDA 12.9 - Ubuntu 24.04"
+      - label: "Create multi-arch manifest - CUDA 13.0 - Ubuntu 24.04"
         depends_on:
           - build-release-image-x86-ubuntu2404
           - build-release-image-arm64-ubuntu2404
@@ -283,17 +288,17 @@ steps:
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-ubuntu2404 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404"
 
-      - label: "Create multi-arch manifest - CUDA 13.0 - Ubuntu 24.04"
+      - label: "Create multi-arch manifest - CUDA 12.9 - Ubuntu 24.04"
         depends_on:
-          - build-release-image-x86-cuda-13-0-ubuntu2404
-          - build-release-image-arm64-cuda-13-0-ubuntu2404
-        id: create-multi-arch-manifest-cuda-13-0-ubuntu2404
+          - build-release-image-x86-cuda-12-9-ubuntu2404
+          - build-release-image-arm64-cuda-12-9-ubuntu2404
+        id: create-multi-arch-manifest-cuda-12-9-ubuntu2404
         agents:
           queue: small_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu130-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu130-ubuntu2404 --amend"
-          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130-ubuntu2404"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129-ubuntu2404 --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
 
       - label: "Publish nightly multi-arch image to DockerHub"
         depends_on:
@@ -313,16 +318,16 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
-      - label: "Publish nightly multi-arch image to DockerHub - CUDA 13.0"
+      - label: "Publish nightly multi-arch image to DockerHub - CUDA 12.9"
         depends_on:
-          - create-multi-arch-manifest-cuda-13-0
+          - create-multi-arch-manifest-cuda-12-9
         if: build.env("NIGHTLY") == "1"
         agents:
           queue: small_cpu_queue_release
         commands:
-          - "bash .buildkite/scripts/push-nightly-builds.sh cu130"
+          - "bash .buildkite/scripts/push-nightly-builds.sh cu129"
           # Clean up old nightly builds (keep only last 14)
-          - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu130-nightly-"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu129-nightly-"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
