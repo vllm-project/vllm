@@ -1696,7 +1696,13 @@ class Qwen2_5_VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_mm_item_output = token_budget // max_batch_size
+        # Use ceil here (not floor) so total captured capacity is never smaller
+        # than token_budget when token_budget is not divisible by max_batch_size
+        # (e.g., 324 budget with max_batch_size=8). Floor under-allocates
+        # input_buffer and can fail replay copy for valid single-item batches.
+        per_mm_item_output = (
+            token_budget + max_batch_size - 1
+        ) // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:
