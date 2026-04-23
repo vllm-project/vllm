@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
+
 import pytest
 import torch
 from torch import Tensor, nn
@@ -16,6 +18,7 @@ from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
 from ...backend import TestBackend
+from .config import LoweringTestConfig
 
 
 def assert_ops_lowered(
@@ -37,6 +40,11 @@ def assert_total_ops_lowered(lowering_pass: VllmIRLoweringPass, expected: int):
         pytest.fail(
             f"Expected {expected} calls to be lowered, found {lowered_count} instead"
         )
+
+
+# ==========================================
+# UNIT TESTS
+# ==========================================
 
 
 @register_op
@@ -217,67 +225,90 @@ class TestOpLoweringPass:
                 assert_total_ops_lowered(lowering_pass, 3)
 
 
-# cartesian product of op x op_impls
-OpImpls = [
-    (op.name, op_impl.provider)
-    for op in IrOp.registry.values()
-    for op_impl in op.impls.values()
-]
-
-TEST_INPUTS: dict[str, list[list]] = {
-    "rms_norm": [[torch.randn(16), torch.randn(16), 1e-5, None]]
-}
+# ==========================================
+# PER OP TESTS
+# ==========================================
 
 
-@pytest.mark.parametrize("op_name, provider", OpImpls)
-def test_op_impl(op_name, provider, default_vllm_config):
-    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-    backend = TestBackend(lowering_pass)
-    unlowered_backend = TestBackend()
-    torch._dynamo.reset()
+class TestPerOpLowering:
+    @pytest.mark.parametrize(
+        "op_name, provider, inputs", LoweringTestConfig.get_test_op_lowering_params()
+    )
+    def test_op_lowering(self, op_name, provider, inputs, default_vllm_config):
+        """test op implementation gets lowered correctly"""
+        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+        backend = TestBackend(lowering_pass)
 
-    op = IrOp.registry[op_name]
-    op_impl = op.impls[provider]
+        op = IrOp.registry[op_name]
 
-    if not op_impl.supported:
-        pytest.skip("Implementation is marked as not supported")
+        class OpImplModel(nn.Module):
+            def forward(self, *args, **kwargs):
+                return op(*args, **kwargs)
 
-    test_inputs = TEST_INPUTS.get(op_name)
-    if not test_inputs:
-        pytest.skip("No test inputs provider for the op")
+        model = OpImplModel()
+        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
 
-    def _filter_test_inputs(inputs: list[list]) -> list[list]:
-        supported_inputs = []
-        for input in inputs:
-            if op_impl.supports_all_args or op_impl.supports_args(*input):
-                supported_inputs.append(input)
-        return supported_inputs
+        with ir.enable_torch_wrap(True), op.set_priority([provider]):
+            compiled_model(*inputs[0])
+            assert_ops_lowered(lowering_pass, op, provider, 1)
 
-    # filter out inputs that the op provider doesnt support
-    test_inputs = _filter_test_inputs(test_inputs)
-    if not test_inputs:
-        pytest.skip("Provider doesnt support any of the test inputs")
+    @pytest.mark.parametrize(
+        "op_name, provider, inputs", LoweringTestConfig.get_test_op_lowering_params()
+    )
+    def test_dynamo_tracing(self, op_name, provider, inputs, default_vllm_config):
+        """
+        test dynamo graphs from tracing the implementation can be compiled and don't
+        have any graph breaks
+        """
+        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+        backend = TestBackend(lowering_pass)
 
-    class OpImplModel(nn.Module):
-        def forward(self, *args, **kwargs):
-            return op(*args, **kwargs)
+        op = IrOp.registry[op_name]
 
-    model = OpImplModel()
-    compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-    unlowered_model = torch.compile(model, backend=unlowered_backend, fullgraph=True)
-    # ensure implementation is lowered correctly
-    with ir.enable_torch_wrap(True), op.set_priority([provider]):
-        lowered_output = compiled_model(*test_inputs[0])
-        assert_ops_lowered(lowering_pass, op, provider, 1)
-        torch._dynamo.reset()
+        class OpImplModel(nn.Module):
+            def forward(self, *args, **kwargs):
+                return op(*args, **kwargs)
 
-    # ensure supports_all_args and implementation is traceable by dynamo
-    with ir.enable_torch_wrap(False), op.set_priority([provider]):
-        unwrapped_output = compiled_model(*test_inputs[0])
-        torch._dynamo.reset()
+        model = OpImplModel()
+        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
 
-    with ir.enable_torch_wrap(True), op.set_priority([provider]):
-        unlowered_output = unlowered_model(*test_inputs[0])
+        with ir.enable_torch_wrap(False), op.set_priority([provider]):
+            for input in inputs:
+                compiled_model(*input)
 
-    torch.testing.assert_close(lowered_output, unwrapped_output)
-    torch.testing.assert_close(lowered_output, unlowered_output)
+    @pytest.mark.parametrize(
+        "op_name, provider, inputs, batched_args",
+        LoweringTestConfig.get_test_batch_specialization_params(),
+    )
+    def test_batch_specialization(
+        self, op_name, provider, inputs, batched_args, default_vllm_config
+    ):
+        """
+        test supports_all_args and implementation don't specialize on batch size
+        of inputs
+        """
+        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+        backend = TestBackend(lowering_pass)
+
+        op = IrOp.registry[op_name]
+
+        native_signature = inspect.signature(op.impls["native"].impl_fn)
+        arg_names = [name for name, _ in native_signature.parameters.items()]
+        # indexes where the input is batched
+        batched_arg_idx = [
+            pos for pos, name in enumerate(arg_names) if name in batched_args
+        ]
+
+        class OpImplModel(nn.Module):
+            def forward(self, *args, **kwargs):
+                return op(*args, **kwargs)
+
+        model = OpImplModel()
+        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
+
+        with ir.enable_torch_wrap(True), op.set_priority([provider]):
+            for input in inputs:
+                # mark 0th index as unbacked for args with batched inputs
+                for idx in batched_arg_idx:
+                    torch._dynamo.decorators.mark_unbacked(input[idx], 0)
+                compiled_model(*input)

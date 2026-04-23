@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from torch.fx import Node
 from collections import defaultdict
 from collections.abc import Iterable
 
@@ -67,11 +66,11 @@ class VllmIROpLoweringRecorder:
         )
         # (op_name, provider) -> list[Node]
         # list fx.Graph nodes that were lowered to a specific op implementation
-        self.selected_impls: dict[str, dict[str, list[Node]]] = defaultdict(
+        self.selected_impls: dict[str, dict[str, list[fx.Node]]] = defaultdict(
             lambda: defaultdict(list)
         )
 
-    def record_op_lowering(self, node: Node, impl: IrOpImpl):
+    def record_op_lowering(self, node: fx.Node, impl: IrOpImpl):
         """Record data related to op lowering"""
         self.selected_impls[impl.op.name][impl.provider].append(node)
         self.selected_impls_count[impl.op.name][impl.provider] += 1
@@ -150,23 +149,18 @@ class VllmIRLoweringPass(VllmInductorPass):
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
 
         # TODO write self.selected_impls to depyf/tlparse dir
-        def count_items(impls: Iterable[str]) -> dict[str, int]:
-            counts: dict[str, int] = defaultdict(lambda: 0)
-            for impl in impls:
-                counts[impl] += 1
-            return counts
-
-        def print_count(counts: dict[str, int]) -> str:
+        def print_count(nodes_by_impl: dict[str, list[fx.Node]]) -> str:
             # e.g., "impl1*3,impl2"
             impl_count = lambda i, c: f"{i}" if c == 1 else f"{i}*{c}"
-            return ",".join(impl_count(impl, count) for impl, count in counts.items())
+            counts = {impl: len(nodes) for impl, nodes in nodes_by_impl.items()}
+            return ",".join([impl_count(impl, count) for impl, count in counts.items()])
 
         logger.debug(
             "Selected implementations: %s",
             lazy(
                 lambda: ", ".join(
-                    f"{op}={print_count(count_items(impls_by_node.values()))}"
-                    for op, impls_by_node in self.selected_impls.items()
+                    f"{op}={print_count(nodes_by_impl)}"
+                    for op, nodes_by_impl in self.recorder.selected_impls.items()
                 )
             ),
         )
