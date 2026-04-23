@@ -216,6 +216,10 @@ class MoERunner(MoERunnerInterface):
         self.gate = gate
         self.quant_method = quant_method
         self.enable_dbo = enable_dbo
+        self._fused_output_is_reduced = (
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
+        )
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -258,6 +262,10 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
         self.quant_method = quant_method
+        self._fused_output_is_reduced = (
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
+        )
 
     def is_internal_router(self) -> bool:
         return self.gate is not None
@@ -320,13 +328,6 @@ class MoERunner(MoERunnerInterface):
             elif shared_output is not None:
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
-
-    @property
-    def _fused_output_is_reduced(self) -> bool:
-        return (
-            self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
-        )
 
     def _maybe_reduce_shared_expert_output(
         self,
