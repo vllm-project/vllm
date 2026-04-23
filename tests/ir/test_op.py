@@ -600,3 +600,24 @@ class TestGenerateSymbolicInputs:
         assert result[1].device.type != "meta"
         # dtype preserved
         assert result[0].dtype == torch.float32
+
+
+def test_all_ops_have_input_generator():
+    """Ensure all registered ops have input generators defined."""
+    # Exclude test-only ops defined in this file
+    test_ops = {
+        "_custom_add",
+        "_custom_sub",
+        "_custom_mul",
+        "_custom_div",
+        "_custom_mm",
+    }
+    missing = [
+        name
+        for name, op in IrOp.registry.items()
+        if not op.has_input_generator and name not in test_ops
+    ]
+    assert not missing, (
+        f"IR ops without input generators: {missing}. "
+        f"Register one with @ir.ops.<name>.register_input_generator"
+    )
