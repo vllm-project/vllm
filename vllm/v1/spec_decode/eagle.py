@@ -57,6 +57,10 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _reuse_mtp_draft_attn_metadata() -> bool:
+    return True
+
+
 class SpecDecodeBaseProposer:
     def __init__(
         self,
@@ -401,6 +405,48 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
+    def _should_reuse_draft_attn_metadata(
+        self, per_layer_attn_metadata: dict[str, object]
+    ) -> bool:
+        if not _reuse_mtp_draft_attn_metadata():
+            return False
+        if self.method != "mtp":
+            return False
+        if self.num_speculative_tokens <= 1 or self.parallel_drafting:
+            return False
+        if not per_layer_attn_metadata:
+            return False
+        return all(
+            getattr(attn_group.get_metadata_builder(),
+                    "supports_update_for_drafting", False)
+            for attn_group in self.draft_attn_groups
+        )
+
+    def _update_reused_draft_attn_metadata(
+        self,
+        per_layer_attn_metadata: dict[str, object],
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> None:
+        updated_ids: set[int] = set()
+        for attn_group in self.draft_attn_groups:
+            if not attn_group.layer_names:
+                continue
+            layer_name = attn_group.layer_names[0]
+            attn_metadata = per_layer_attn_metadata[layer_name]
+            metadata_id = id(attn_metadata)
+            if metadata_id in updated_ids:
+                continue
+            builder = attn_group.get_metadata_builder()
+            attn_metadata = builder.update_for_drafting(
+                attn_metadata,
+                common_attn_metadata,
+                draft_index,
+            )
+            for group_layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[group_layer_name] = attn_metadata
+            updated_ids.add(metadata_id)
+
     def propose(
         self,
         # [num_tokens]
@@ -451,6 +497,10 @@ class SpecDecodeBaseProposer:
         per_group_attn_metadata, per_layer_attn_metadata = (
             self.build_per_group_and_layer_attn_metadata(common_attn_metadata)
         )
+        can_reuse_draft_attn_metadata = self._should_reuse_draft_attn_metadata(
+            per_layer_attn_metadata
+        )
+        reuse_draft_attn_metadata_ready = False
 
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
@@ -594,10 +644,21 @@ class SpecDecodeBaseProposer:
             if common_attn_metadata._num_computed_tokens_cpu is not None:
                 common_attn_metadata._num_computed_tokens_cpu += 1
 
-            # Rebuild attention metadata
-            _, per_layer_attn_metadata = self.build_per_group_and_layer_attn_metadata(
-                common_attn_metadata, draft_index=token_index + 1
-            )
+            if can_reuse_draft_attn_metadata and reuse_draft_attn_metadata_ready:
+                self._update_reused_draft_attn_metadata(
+                    per_layer_attn_metadata,
+                    common_attn_metadata,
+                    token_index + 1,
+                )
+            else:
+                _, per_layer_attn_metadata = (
+                    self.build_per_group_and_layer_attn_metadata(
+                        common_attn_metadata,
+                        draft_index=token_index + 1,
+                    )
+                )
+                if can_reuse_draft_attn_metadata:
+                    reuse_draft_attn_metadata_ready = True
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
