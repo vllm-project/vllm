@@ -50,9 +50,10 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
-    def __init__(self, sampler: Sampler):
+    def __init__(self, sampler: Sampler, acceptance_threshold: float = 0.0):
         super().__init__()
         self.sampler = sampler
+        self.acceptance_threshold = acceptance_threshold
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
@@ -147,6 +148,7 @@ class RejectionSampler(nn.Module):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            acceptance_threshold=self.acceptance_threshold,
         )
 
         logprobs_tensors = None
@@ -362,6 +364,7 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    acceptance_threshold: float = 0.0,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -416,6 +419,10 @@ def rejection_sample(
         sampling_metadata.generators,
         device,
     )
+
+    # Scale uniform probs to bias toward accepting more draft tokens.
+    if acceptance_threshold > 0.0:
+        uniform_probs *= 1.0 - acceptance_threshold
 
     # Sample recovered tokens for each position.
     # [num_tokens]
