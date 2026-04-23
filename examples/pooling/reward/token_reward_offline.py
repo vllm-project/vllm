@@ -9,7 +9,6 @@ granularity: sequence classification produces a single result for an entire inpu
 whereas token classification yields a result for each individual token within the sequence.
 """
 
-
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
