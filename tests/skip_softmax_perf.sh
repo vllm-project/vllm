@@ -9,7 +9,7 @@ PORT="$5"
 
 ISLS=(10000 100000)
 OSL=500
-CONCURRENCIES=(4 16 64)
+CONCURRENCIES=(16)
 NUM_PROMPTS=200           # adjust for longer runs
 RESULTS_DIR="results/perf"
 mkdir -p "$RESULTS_DIR"

@@ -1,0 +1,36 @@
+{
+  "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+  "calibration_params": {
+    "prefill": {
+      "a": 26.71576908074549,
+      "b": 7.011304505784844
+    },
+    "decode": {
+      "a": 1.837020639950889e-05,
+      "b": 19.99999999998225
+    }
+  },
+  "target_sparse_ratio": {
+    "prefill": 0.7,
+    "decode": 0.7
+  },
+  "formula": "scale_factor = a * exp(b * target_sparsity)",
+  "vllm_flags": {
+    "skip_softmax_threshold_scale_factor_prefill": 3616.1570313980146,
+    "skip_softmax_threshold_scale_factor_decode": 22.09208891676608
+  },
+  "additional_operating_points": {
+    "target=0.3": {
+      "prefill": 218.90664164738365,
+      "decode": 0.007411070203926931
+    },
+    "target=0.5": {
+      "prefill": 889.7195015356875,
+      "decode": 0.40463072289873103
+    },
+    "target=0.7": {
+      "prefill": 3616.1570313980146,
+      "decode": 22.09208891676608
+    }
+  }
+}

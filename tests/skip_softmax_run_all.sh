@@ -19,9 +19,24 @@ MODELS=(
 
 # Threshold combinations to sweep, formatted as "<prefill>:<decode>".
 # Use "none" for either side to mean "don't pass that flag at all".
+#
+# The non-baseline pairs below are the scale factors produced by
+# `tools/calibrate_skip_softmax.py` for
+# /models/Qwen3/Qwen3-30B-A3B-Instruct-2507 (samples=24, max_seqlen=16384,
+# chunk_size=4096) — see calibration/qwen3_30b_a3b_instruct_2507.json.
+# Fitted exponential model per phase (scale = a * exp(b * target)):
+#   prefill: a=26.7158,  b=7.0113  (R^2=0.91)
+#   decode:  a=1.837e-5, b=20.0    (R^2=0.67, b hit optimiser clamp)
+# The decode fit's R^2 is mediocre, so at 30%/50% targets the value is a
+# rough order-of-magnitude estimate (see skip_softmax_tuning_guide.md §4.4).
 THRESHOLD_PAIRS=(
   "none:none"
-  "10000:500"
+  # target sparsity 30%  (prefill / decode)
+  "218.91:0.00741"
+  # target sparsity 50%
+  "889.72:0.40463"
+  # target sparsity 70%
+  "3616.16:22.092"
 )
 
 # KV cache data types to test
