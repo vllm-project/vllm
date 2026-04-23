@@ -158,12 +158,8 @@ pub enum ChatEvent {
         id: String,
         name: String,
     },
-    /// One incremental tool-call arguments delta.
-    ToolCallArgumentsDelta {
-        index: usize,
-        id: String,
-        delta: String,
-    },
+    /// One incremental tool-call arguments delta for the currently open tool call.
+    ToolCallArgumentsDelta { index: usize, delta: String },
     /// One tool call has ended.
     ToolCallEnd {
         index: usize,

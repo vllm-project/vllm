@@ -42,6 +42,8 @@ pub enum Error {
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
+    #[error("tool call stream state is inconsistent: {message}")]
+    ToolCallStreamInvariant { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
 }

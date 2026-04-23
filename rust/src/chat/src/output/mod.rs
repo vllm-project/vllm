@@ -7,7 +7,7 @@ use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent
 
 use crate::FinishReason;
 use crate::error::Result;
-use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
+use crate::event::{AssistantBlockKind, ChatEvent};
 
 mod default;
 mod structured;
@@ -37,17 +37,10 @@ pub(crate) enum AssistantEvent {
         logprobs: Option<DecodedLogprobs>,
         token_ids: Vec<u32>,
     },
-    ToolCallStart {
-        id: String,
-        name: String,
-    },
-    ToolCallArgumentsDelta {
-        id: String,
-        delta: String,
-    },
-    ToolCallEnd {
-        call: AssistantToolCall,
-    },
+    /// The start of a new tool call, with its declared name and generated ID.
+    ToolCallStart { id: String, name: String },
+    /// A delta for the arguments of the currently open tool call. Must follow a `ToolCallStart`.
+    ToolCallArgumentsDelta { delta: String },
     #[subenum(ContentEvent)]
     Done {
         prompt_token_count: usize,

@@ -10,11 +10,11 @@ use futures_async_stream::try_stream;
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
-use crate::FinishReason;
 use crate::error::Error;
 use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
 };
+use crate::{FinishReason, Result};
 
 /// One currently open assistant text-like block being assembled from streamed deltas.
 struct OpenTextBlock {
@@ -28,10 +28,14 @@ struct OpenTextBlock {
 
 /// One currently open assistant tool call being assembled from streamed deltas.
 struct OpenToolCall {
-    /// Stable position of this tool call in the final assistant message.
+    /// Stable ordinal of this tool call in the assistant tool-call list.
     index: usize,
-    /// Accumulated finalized tool-call payload.
-    call: AssistantToolCall,
+    /// Stable tool-call ID exposed northbound.
+    id: String,
+    /// Function name.
+    name: String,
+    /// Incremental JSON arguments accumulated so far.
+    arguments: String,
 }
 
 /// Per-stream block assembly state.
@@ -46,6 +50,8 @@ struct StructuredEventState {
     open_text_block: Option<OpenTextBlock>,
     /// Currently open tool call, if any.
     open_tool_call: Option<OpenToolCall>,
+    /// Next OpenAI-compatible tool-call ordinal.
+    next_tool_call_index: usize,
 }
 
 impl StructuredEventState {
@@ -55,15 +61,20 @@ impl StructuredEventState {
             message: AssistantMessage::default(),
             open_text_block: None,
             open_tool_call: None,
+            next_tool_call_index: 0,
         }
     }
 
     /// Convert one parsed text delta into zero or more structured chat events.
-    fn process_text_delta(&mut self, kind: AssistantBlockKind, delta: String) -> Vec<ChatEvent> {
+    fn process_text_delta(
+        &mut self,
+        kind: AssistantBlockKind,
+        delta: String,
+    ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_tool_call(&mut events);
         self.push_text_delta(kind, delta, &mut events);
-        events
+        Ok(events)
     }
 
     /// Forward per-update sample metadata without attaching it to text blocks.
@@ -71,63 +82,45 @@ impl StructuredEventState {
         &mut self,
         logprobs: Option<DecodedLogprobs>,
         token_ids: Vec<u32>,
-    ) -> Vec<ChatEvent> {
-        vec![ChatEvent::LogprobsDelta {
+    ) -> Result<Vec<ChatEvent>> {
+        Ok(vec![ChatEvent::LogprobsDelta {
             logprobs,
             token_ids,
-        }]
+        }])
     }
 
     /// Start one new tool call, closing any incompatible open block first.
-    fn start_tool_call(&mut self, id: String, name: String) -> Vec<ChatEvent> {
+    fn start_tool_call(&mut self, id: String, name: String) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
         self.close_open_tool_call(&mut events);
 
-        let index = self.message.content.len();
+        let index = self.next_tool_call_index;
+        self.next_tool_call_index += 1;
         self.open_tool_call = Some(OpenToolCall {
             index,
-            call: AssistantToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: String::new(),
-            },
+            id: id.clone(),
+            name: name.clone(),
+            arguments: String::new(),
         });
         events.push(ChatEvent::ToolCallStart { index, id, name });
-        events
+        Ok(events)
     }
 
     /// Append one incremental tool-call arguments delta.
-    fn push_tool_call_arguments(&mut self, id: String, delta: String) -> Vec<ChatEvent> {
+    fn push_tool_call_arguments(&mut self, delta: String) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         let Some(open_tool_call) = self.open_tool_call.as_mut() else {
-            return events;
+            return Err(Error::ToolCallStreamInvariant {
+                message: "received tool-call arguments delta without an open tool call".to_string(),
+            });
         };
-        open_tool_call.call.arguments.push_str(&delta);
+        open_tool_call.arguments.push_str(&delta);
         events.push(ChatEvent::ToolCallArgumentsDelta {
             index: open_tool_call.index,
-            id,
             delta,
         });
-        events
-    }
-
-    /// Finalize one tool call and append it to the assembled assistant message.
-    fn end_tool_call(&mut self, call: AssistantToolCall) -> Vec<ChatEvent> {
-        let mut events = Vec::new();
-        // It's possible that a tool call is finalized without an explicit start event (e.g. if the
-        // parser emits a complete tool call on the first delta), so we assign it an index
-        // and emit an end event regardless of whether there's an open tool call or not.
-        let index = self
-            .open_tool_call
-            .as_ref()
-            .map(|open_tool_call| open_tool_call.index)
-            .unwrap_or(self.message.content.len());
-        self.open_tool_call = None;
-        self.message
-            .push_block(AssistantContentBlock::ToolCall(call.clone()));
-        events.push(ChatEvent::ToolCallEnd { index, call });
-        events
+        Ok(events)
     }
 
     /// Close any open block and emit the terminal `Done` event.
@@ -137,7 +130,7 @@ impl StructuredEventState {
         output_token_count: usize,
         finish_reason: FinishReason,
         kv_transfer_params: Option<serde_json::Value>,
-    ) -> Vec<ChatEvent> {
+    ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
         self.close_open_tool_call(&mut events);
@@ -148,7 +141,7 @@ impl StructuredEventState {
             finish_reason,
             kv_transfer_params,
         });
-        events
+        Ok(events)
     }
 
     /// Append one semantic text delta to the current block, or open a new block when the semantic
@@ -219,11 +212,16 @@ impl StructuredEventState {
             return;
         };
 
+        let call = AssistantToolCall {
+            id: open_tool_call.id,
+            name: open_tool_call.name,
+            arguments: open_tool_call.arguments,
+        };
         self.message
-            .push_block(AssistantContentBlock::ToolCall(open_tool_call.call.clone()));
+            .push_block(AssistantContentBlock::ToolCall(call.clone()));
         events.push(ChatEvent::ToolCallEnd {
             index: open_tool_call.index,
-            call: open_tool_call.call,
+            call,
         });
     }
 }
@@ -247,7 +245,7 @@ pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                 }
             }
             AssistantEvent::TextDelta { kind, delta } => {
-                for next in state.process_text_delta(kind, delta) {
+                for next in state.process_text_delta(kind, delta)? {
                     yield next;
                 }
             }
@@ -255,22 +253,17 @@ pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                 logprobs,
                 token_ids,
             } => {
-                for next in state.process_logprobs_delta(logprobs, token_ids) {
+                for next in state.process_logprobs_delta(logprobs, token_ids)? {
                     yield next;
                 }
             }
             AssistantEvent::ToolCallStart { id, name } => {
-                for next in state.start_tool_call(id, name) {
+                for next in state.start_tool_call(id, name)? {
                     yield next;
                 }
             }
-            AssistantEvent::ToolCallArgumentsDelta { id, delta } => {
-                for next in state.push_tool_call_arguments(id, delta) {
-                    yield next;
-                }
-            }
-            AssistantEvent::ToolCallEnd { call } => {
-                for next in state.end_tool_call(call) {
+            AssistantEvent::ToolCallArgumentsDelta { delta } => {
+                for next in state.push_tool_call_arguments(delta)? {
                     yield next;
                 }
             }
@@ -285,10 +278,225 @@ pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                     output_token_count,
                     finish_reason,
                     kv_transfer_params,
-                ) {
+                )? {
                     yield next;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{StreamExt as _, stream};
+
+    use super::structured_chat_event_stream;
+    use crate::FinishReason;
+    use crate::error::Error;
+    use crate::event::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent};
+    use crate::output::AssistantEvent;
+
+    #[tokio::test]
+    async fn structured_stream_closes_tool_call_on_done() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"city":"Paris"}"#.to_string(),
+            }),
+            Ok(AssistantEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(events[0], ChatEvent::ToolCallStart { .. }));
+        assert!(matches!(
+            events[1],
+            ChatEvent::ToolCallArgumentsDelta { .. }
+        ));
+        let ChatEvent::ToolCallEnd { call, .. } = &events[2] else {
+            panic!("expected tool call end");
+        };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(call.arguments, r#"{"city":"Paris"}"#);
+        let ChatEvent::Done { message, .. } = &events[3] else {
+            panic!("expected done");
+        };
+        let tool_calls = message.tool_calls().collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[0].arguments, r#"{"city":"Paris"}"#);
+    }
+
+    #[tokio::test]
+    async fn structured_stream_closes_previous_tool_call_on_next_start() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "first".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"a":1}"#.to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_2".to_string(),
+                name: "second".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"b":2}"#.to_string(),
+            }),
+            Ok(AssistantEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(events[0], ChatEvent::ToolCallStart { .. }));
+        assert!(matches!(
+            events[1],
+            ChatEvent::ToolCallArgumentsDelta { .. }
+        ));
+        let ChatEvent::ToolCallEnd { call, .. } = &events[2] else {
+            panic!("expected first tool call end");
+        };
+        assert_eq!(call.name, "first");
+        assert!(matches!(events[3], ChatEvent::ToolCallStart { .. }));
+        let ChatEvent::Done { message, .. } = &events[6] else {
+            panic!("expected done");
+        };
+        let tool_calls = message.tool_calls().collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].name, "first");
+        assert_eq!(tool_calls[1].name, "second");
+    }
+
+    #[tokio::test]
+    async fn structured_stream_numbers_tool_calls_independent_of_text_blocks() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "before".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"city":"Paris"}"#.to_string(),
+            }),
+            Ok(AssistantEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(
+            events[0],
+            ChatEvent::BlockStart {
+                index: 0,
+                kind: AssistantBlockKind::Text,
+            }
+        ));
+        assert!(matches!(events[2], ChatEvent::BlockEnd { index: 0, .. }));
+        assert!(matches!(
+            events[3],
+            ChatEvent::ToolCallStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            events[4],
+            ChatEvent::ToolCallArgumentsDelta { index: 0, .. }
+        ));
+        assert!(matches!(events[5], ChatEvent::ToolCallEnd { index: 0, .. }));
+    }
+
+    #[tokio::test]
+    async fn structured_stream_closes_tool_call_before_text() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"city":"Paris"}"#.to_string(),
+            }),
+            Ok(AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "done".to_string(),
+            }),
+            Ok(AssistantEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(events[2], ChatEvent::ToolCallEnd { .. }));
+        assert!(matches!(
+            events[3],
+            ChatEvent::BlockStart {
+                kind: AssistantBlockKind::Text,
+                ..
+            }
+        ));
+        let ChatEvent::Done { message, .. } = &events[6] else {
+            panic!("expected done");
+        };
+        assert_eq!(message.text(), "done");
+        assert_eq!(message.tool_calls().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_stream_rejects_arguments_without_open_tool_call() {
+        let events = stream::iter(vec![Ok(AssistantEvent::ToolCallArgumentsDelta {
+            delta: "{}".to_string(),
+        })]);
+
+        let err = structured_chat_event_stream(events)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .next()
+            .expect("expected one event")
+            .expect_err("expected invariant error");
+
+        assert!(matches!(err, Error::ToolCallStreamInvariant { .. }));
     }
 }

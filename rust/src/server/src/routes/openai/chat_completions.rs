@@ -2,7 +2,6 @@ pub mod convert;
 mod types;
 mod validate;
 
-use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -237,7 +236,7 @@ async fn chat_completion_chunk_stream(
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
 ) {
-    let mut tool_call_indices = BTreeMap::<String, u32>::new();
+    let mut saw_tool_calls = false;
 
     // If the client requested logprobs or token_ids, we need to buffer chunks until we receive
     // the separate `LogprobsDelta` event, so that we can emit one combined chunk with both the
@@ -302,9 +301,9 @@ async fn chat_completion_chunk_stream(
             Ok(ChatEvent::BlockEnd { .. }) => {
                 debug!("ending current block");
             }
-            Ok(ChatEvent::ToolCallStart { id, name, .. }) => {
-                let tool_index = tool_call_indices.len() as u32;
-                tool_call_indices.insert(id.clone(), tool_index);
+            Ok(ChatEvent::ToolCallStart { index, id, name }) => {
+                let tool_index = index as u32;
+                saw_tool_calls = true;
                 debug!(
                     tool_call_id = %id,
                     tool_call_name = %name,
@@ -323,20 +322,16 @@ async fn chat_completion_chunk_stream(
                     );
                 }
             }
-            Ok(ChatEvent::ToolCallArgumentsDelta { id, delta, .. }) => {
-                let Some(&tool_index) = tool_call_indices.get(&id) else {
-                    error!(tool_call_id = %id, "missing tool call index");
-                    bail_server_error!("tool call stream state is inconsistent");
-                };
+            Ok(ChatEvent::ToolCallArgumentsDelta { index, delta }) => {
+                let tool_index = index as u32;
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
-                    pending_chunk.push_tool_call_arguments(tool_index, id, delta);
+                    pending_chunk.push_tool_call_arguments(tool_index, delta);
                 } else {
                     yield tool_call_arguments_chunk(
                         &request_id,
                         &response_model,
                         created,
                         tool_index,
-                        id,
                         delta,
                     );
                 }
@@ -373,7 +368,7 @@ async fn chat_completion_chunk_stream(
                     &response_model,
                     created,
                     finish_reason,
-                    !tool_call_indices.is_empty(),
+                    saw_tool_calls,
                 ) {
                     Ok(chunk) => yield chunk,
                     Err(error) => {
@@ -469,13 +464,13 @@ impl PendingChatChunk {
     }
 
     /// Append one incremental tool-call arguments update to the buffered delta.
-    fn push_tool_call_arguments(&mut self, index: u32, id: String, delta: String) {
+    fn push_tool_call_arguments(&mut self, index: u32, delta: String) {
         self.delta
             .tool_calls
             .get_or_insert_with(Vec::new)
             .push(ToolCallDelta {
                 index,
-                id: Some(id),
+                id: None,
                 tool_type: None,
                 function: Some(FunctionCallDelta {
                     name: None,
@@ -665,7 +660,6 @@ fn tool_call_arguments_chunk(
     response_model: &str,
     created: u64,
     tool_index: u32,
-    id: String,
     delta: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
@@ -673,7 +667,7 @@ fn tool_call_arguments_chunk(
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
                 index: tool_index,
-                id: Some(id),
+                id: None,
                 tool_type: None,
                 function: Some(FunctionCallDelta {
                     name: None,
@@ -752,7 +746,7 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
 mod tests {
     use futures::{StreamExt as _, stream};
     use serde_json::json;
-    use vllm_chat::{AssistantBlockKind, ChatEvent, FinishReason};
+    use vllm_chat::{AssistantBlockKind, AssistantToolCall, ChatEvent, FinishReason};
     use vllm_engine_core_client::protocol::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
@@ -963,5 +957,74 @@ mod tests {
             Some("think")
         );
         assert!(chunks[1].choices[0].logprobs.is_some());
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_preserves_tool_call_index_and_omits_id_from_arguments_delta() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::ToolCallStart {
+                index: 3,
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+            }),
+            Ok(ChatEvent::ToolCallArgumentsDelta {
+                index: 3,
+                delta: r#"{"city":"Paris"}"#.to_string(),
+            }),
+            Ok(ChatEvent::ToolCallEnd {
+                index: 3,
+                call: AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Paris"}"#.to_string(),
+                },
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        assert_eq!(
+            chunks[1].choices[0].delta.tool_calls.as_ref().unwrap()[0].index,
+            3
+        );
+        assert_eq!(
+            chunks[1].choices[0].delta.tool_calls.as_ref().unwrap()[0].id,
+            Some("call_1".to_string())
+        );
+        assert_eq!(
+            chunks[2].choices[0].delta.tool_calls.as_ref().unwrap()[0].index,
+            3
+        );
+        assert_eq!(
+            chunks[2].choices[0].delta.tool_calls.as_ref().unwrap()[0].id,
+            None
+        );
     }
 }

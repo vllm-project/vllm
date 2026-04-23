@@ -5,8 +5,6 @@
 //! and translates incremental `tool-parser` output into internal tool-call
 //! events while preserving plain-text fallback behavior.
 
-use std::collections::{BTreeMap, btree_map};
-
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use thiserror_ext::AsReport;
@@ -14,19 +12,10 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::{AssistantEvent, ContentEvent, ContentEventStream};
+use crate::Result;
 use crate::error::Error;
-use crate::event::{AssistantBlockKind, AssistantToolCall};
+use crate::event::AssistantBlockKind;
 use crate::parser::tool::{ToolCallDelta, ToolParseResult, ToolParser};
-
-/// One currently open tool call being assembled from streaming parser output.
-struct OpenToolCallState {
-    /// Stable tool-call ID exposed northbound.
-    id: String,
-    /// Function name.
-    name: String,
-    /// Incremental JSON arguments accumulated so far.
-    arguments: String,
-}
 
 /// Per-stream tool parsing state.
 struct ToolState {
@@ -34,8 +23,11 @@ struct ToolState {
     parser: Box<dyn ToolParser>,
     /// Whether tool parsing has already failed for this stream.
     parser_failed: bool,
-    /// Open tool calls keyed by the parser's tool index.
-    open_calls: BTreeMap<usize, OpenToolCallState>,
+    /// The parser-local index of the currently open tool call, if any.
+    // NOTE: We only allow single open tool call at a time right now, since that's what all
+    // supported parsers currently emit. Change this to a `BTreeMap` if we need to support multiple
+    // interleaved calls in the future.
+    open_call_index: Option<usize>,
 }
 
 impl ToolState {
@@ -44,7 +36,7 @@ impl ToolState {
         Self {
             parser,
             parser_failed: false,
-            open_calls: BTreeMap::new(),
+            open_call_index: None,
         }
     }
 
@@ -54,21 +46,21 @@ impl ToolState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
-    ) -> Vec<AssistantEvent> {
+    ) -> Result<Vec<AssistantEvent>> {
         let mut events = Vec::new();
 
         // Only normal assistant text is eligible for tool parsing. Reasoning
         // blocks and plain-text fallback should pass through unchanged.
         if kind != AssistantBlockKind::Text || self.parser_failed {
-            self.close_all_open_calls(&mut events);
+            self.open_call_index = None;
             events.push(AssistantEvent::TextDelta { kind, delta });
-            return events;
+            return Ok(events);
         }
 
         let parse_result = self.parser.push(&delta);
 
         match parse_result {
-            Ok(result) => self.process_parse_result(kind, result, &mut events),
+            Ok(result) => self.process_parse_result(kind, result, &mut events)?,
             Err(error) => {
                 if !self.parser_failed {
                     warn!(
@@ -77,12 +69,12 @@ impl ToolState {
                     );
                     self.parser_failed = true;
                 }
-                self.close_all_open_calls(&mut events);
+                self.open_call_index = None;
                 events.push(AssistantEvent::TextDelta { kind, delta });
             }
         }
 
-        events
+        Ok(events)
     }
 
     /// Apply one parsed tool result to the current stream state.
@@ -91,39 +83,40 @@ impl ToolState {
         kind: AssistantBlockKind,
         result: ToolParseResult,
         events: &mut Vec<AssistantEvent>,
-    ) {
+    ) -> Result<()> {
         // When we are not currently streaming a tool call, preserve plain
         // text first and then surface any new tool call items.
-        if self.open_calls.is_empty() {
+        if self.open_call_index.is_none() {
             push_text_delta(events, kind, result.normal_text);
-            self.process_tool_items(result.calls, events);
+            self.process_tool_items(result.calls, events)?;
         } else {
             // Once a tool call is open, prioritize tool deltas first. If the
             // parser emits normal text again, close the tool call and resume
             // plain text output.
-            self.process_tool_items(result.calls, events);
+            self.process_tool_items(result.calls, events)?;
             if !result.normal_text.is_empty() {
-                self.close_all_open_calls(events);
+                self.open_call_index = None;
                 push_text_delta(events, kind, result.normal_text);
             }
         }
+        Ok(())
     }
 
     /// Apply one batch of parsed tool-call deltas emitted by the parser.
-    fn process_tool_items(&mut self, items: Vec<ToolCallDelta>, events: &mut Vec<AssistantEvent>) {
+    fn process_tool_items(
+        &mut self,
+        items: Vec<ToolCallDelta>,
+        events: &mut Vec<AssistantEvent>,
+    ) -> Result<()> {
         for item in items {
             if let Some(name) = item.name {
-                // The parser is now advancing a specific tool index, so any
-                // previously open sibling calls must be finalized first.
-                self.close_calls_not_matching(item.tool_index, events);
-
-                if let btree_map::Entry::Vacant(e) = self.open_calls.entry(item.tool_index) {
+                let is_new_tool = match self.open_call_index {
+                    Some(open_call_index) => open_call_index != item.tool_index,
+                    None => true,
+                };
+                if is_new_tool {
                     let id = generate_tool_call_id();
-                    e.insert(OpenToolCallState {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: String::new(),
-                    });
+                    self.open_call_index = Some(item.tool_index);
                     events.push(AssistantEvent::ToolCallStart { id, name });
                 }
             }
@@ -132,53 +125,42 @@ impl ToolState {
                 // No arguments delta to apply.
                 continue;
             }
-            let Some(open_call) = self.open_calls.get_mut(&item.tool_index) else {
-                continue;
+            let Some(open_call_index) = self.open_call_index else {
+                return Err(Error::ToolCallStreamInvariant {
+                    message: format!(
+                        "received arguments for tool index {} before any tool-call start",
+                        item.tool_index
+                    ),
+                });
             };
-            open_call.arguments.push_str(&item.arguments);
+            if open_call_index != item.tool_index {
+                return Err(Error::ToolCallStreamInvariant {
+                    message: format!(
+                        "received arguments for tool index {} while tool index {} is open",
+                        item.tool_index, open_call_index
+                    ),
+                });
+            }
 
             events.push(AssistantEvent::ToolCallArgumentsDelta {
-                id: open_call.id.clone(),
                 delta: item.arguments,
             });
         }
-    }
-
-    /// Close every open tool call except the one still associated with the
-    /// parser's current tool index.
-    fn close_calls_not_matching(
-        &mut self,
-        keep_tool_index: usize,
-        events: &mut Vec<AssistantEvent>,
-    ) {
-        let old = std::mem::take(&mut self.open_calls);
-        for (idx, open_call) in old {
-            if idx == keep_tool_index {
-                self.open_calls.insert(idx, open_call);
-            } else {
-                push_tool_call_end(events, open_call);
-            }
-        }
-    }
-
-    /// Close every currently open tool call.
-    fn close_all_open_calls(&mut self, events: &mut Vec<AssistantEvent>) {
-        for (_, open_call) in std::mem::take(&mut self.open_calls) {
-            push_tool_call_end(events, open_call);
-        }
+        Ok(())
     }
 
     /// Flush parser state at end-of-stream and close any remaining open calls.
-    fn finish(&mut self) -> Vec<AssistantEvent> {
+    fn finish(&mut self) -> Result<Vec<AssistantEvent>> {
         let mut events = Vec::new();
 
         if self.parser_failed {
-            self.close_all_open_calls(&mut events);
-            return events;
+            return Ok(events);
         }
 
         match self.parser.finish() {
-            Ok(result) => self.process_parse_result(AssistantBlockKind::Text, result, &mut events),
+            Ok(result) => {
+                self.process_parse_result(AssistantBlockKind::Text, result, &mut events)?
+            }
             Err(error) => {
                 warn!(
                     error = %error.as_report(),
@@ -188,20 +170,8 @@ impl ToolState {
             }
         }
 
-        self.close_all_open_calls(&mut events);
-        events
+        Ok(events)
     }
-}
-
-/// Emit one `ToolCallEnd` event from a completed open call.
-fn push_tool_call_end(events: &mut Vec<AssistantEvent>, open_call: OpenToolCallState) {
-    events.push(AssistantEvent::ToolCallEnd {
-        call: AssistantToolCall {
-            id: open_call.id,
-            name: open_call.name,
-            arguments: open_call.arguments,
-        },
-    });
 }
 
 /// Push one plain-text delta if it is non-empty.
@@ -275,21 +245,26 @@ async fn final_only_tool_event_stream(
                             };
                         }
                         // `parse_complete` currently returns one complete delta
-                        // per tool call, so we can finalize each call directly
-                        // without reusing the streaming state machine here.
+                        // per tool call, so we can surface each one as a start
+                        // plus its complete arguments payload.
                         for tool_call in calls {
                             let Some(name) = tool_call.name else {
-                                continue;
+                                return Err(Error::ToolCallStreamInvariant {
+                                    message: format!(
+                                        "final-only tool parse produced tool index {} without a function name",
+                                        tool_call.tool_index
+                                    ),
+                                });
                             };
-                            // It's okay to only emit `ToolCallEnd` without a preceding
-                            // `ToolCallStart` or `ToolCallArgumentsDelta`.
-                            yield AssistantEvent::ToolCallEnd {
-                                call: AssistantToolCall {
-                                    id: generate_tool_call_id(),
-                                    name,
-                                    arguments: tool_call.arguments,
-                                },
+                            yield AssistantEvent::ToolCallStart {
+                                id: generate_tool_call_id(),
+                                name,
                             };
+                            if !tool_call.arguments.is_empty() {
+                                yield AssistantEvent::ToolCallArgumentsDelta {
+                                    delta: tool_call.arguments,
+                                };
+                            }
                         }
                     }
                     Err(error) => {
@@ -358,7 +333,7 @@ pub(crate) async fn tool_event_stream(
                 }
             }
             ContentEvent::TextDelta { kind, delta } => {
-                for next in state.process_text_delta(kind, delta) {
+                for next in state.process_text_delta(kind, delta)? {
                     yield next;
                 }
             }
@@ -377,7 +352,7 @@ pub(crate) async fn tool_event_stream(
                 finish_reason,
                 kv_transfer_params,
             } => {
-                for next in state.finish() {
+                for next in state.finish()? {
                     yield next;
                 }
 
@@ -401,6 +376,7 @@ mod tests {
 
     use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
+    use crate::error::Error;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::output::structured::structured_chat_event_stream;
     use crate::parser::tool::{Result, ToolParseResult, ToolParser};
@@ -409,6 +385,11 @@ mod tests {
 
     struct FailingParser {
         fail_next: bool,
+    }
+
+    struct ScriptedParser {
+        push_results: Vec<ToolParseResult>,
+        finish_result: ToolParseResult,
     }
 
     impl ToolParser for FailingParser {
@@ -428,6 +409,30 @@ mod tests {
             }
 
             Ok(ToolParseResult::default())
+        }
+    }
+
+    impl ToolParser for ScriptedParser {
+        fn create(_tools: &[ChatTool]) -> crate::parser::tool::Result<Box<dyn ToolParser>>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self {
+                push_results: Vec::new(),
+                finish_result: ToolParseResult::default(),
+            }))
+        }
+
+        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
+            Ok(self.push_results.pop().unwrap_or_default())
+        }
+
+        fn finish(&mut self) -> Result<ToolParseResult> {
+            Ok(std::mem::take(&mut self.finish_result))
+        }
+
+        fn parse_complete(&mut self, _output: &str) -> Result<ToolParseResult> {
+            Ok(self.finish_result.clone())
         }
     }
 
@@ -570,5 +575,176 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn tool_stream_rejects_interleaved_tool_indices() {
+        let events = stream::iter(vec![
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "ignored".to_string(),
+            }),
+            Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let parser = ScriptedParser {
+            push_results: vec![ToolParseResult {
+                normal_text: String::new(),
+                calls: vec![
+                    crate::parser::tool::ToolCallDelta {
+                        tool_index: 0,
+                        name: Some("first".to_string()),
+                        arguments: String::new(),
+                    },
+                    crate::parser::tool::ToolCallDelta {
+                        tool_index: 1,
+                        name: None,
+                        arguments: "{}".to_string(),
+                    },
+                ],
+            }],
+            finish_result: ToolParseResult::default(),
+        };
+
+        let err = tool_event_stream(events, true, Some(Box::new(parser)))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .find_map(|result| result.err())
+            .expect("expected invariant error");
+
+        assert!(matches!(err, Error::ToolCallStreamInvariant { .. }));
+    }
+
+    #[tokio::test]
+    async fn tool_stream_resets_open_tool_when_normal_text_interrupts_it() {
+        let events = stream::iter(vec![
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "start".to_string(),
+            }),
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "text".to_string(),
+            }),
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "args".to_string(),
+            }),
+        ]);
+
+        let parser = ScriptedParser {
+            push_results: vec![
+                ToolParseResult {
+                    normal_text: String::new(),
+                    calls: vec![crate::parser::tool::ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: "}".to_string(),
+                    }],
+                },
+                ToolParseResult {
+                    normal_text: "plain text".to_string(),
+                    calls: Vec::new(),
+                },
+                ToolParseResult {
+                    normal_text: String::new(),
+                    calls: vec![crate::parser::tool::ToolCallDelta {
+                        tool_index: 0,
+                        name: Some("first".to_string()),
+                        arguments: "{".to_string(),
+                    }],
+                },
+            ],
+            finish_result: ToolParseResult::default(),
+        };
+
+        let err = tool_event_stream(events, true, Some(Box::new(parser)))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .find_map(|result| result.err())
+            .expect("expected invariant error");
+
+        assert!(matches!(
+            err,
+            Error::ToolCallStreamInvariant { message }
+                if message == "received arguments for tool index 0 before any tool-call start"
+        ));
+    }
+
+    #[tokio::test]
+    async fn final_only_tool_stream_emits_start_and_args_for_multiple_calls() {
+        let events = stream::iter(vec![
+            Ok(ContentEvent::Start {
+                prompt_token_ids: vec![1].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "ignored".to_string(),
+            }),
+            Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let parser = ScriptedParser {
+            push_results: Vec::new(),
+            finish_result: ToolParseResult {
+                normal_text: String::new(),
+                calls: vec![
+                    crate::parser::tool::ToolCallDelta {
+                        tool_index: 0,
+                        name: Some("first".to_string()),
+                        arguments: r#"{"a":1}"#.to_string(),
+                    },
+                    crate::parser::tool::ToolCallDelta {
+                        tool_index: 1,
+                        name: Some("second".to_string()),
+                        arguments: r#"{"b":2}"#.to_string(),
+                    },
+                ],
+            },
+        };
+
+        let events = tool_event_stream(events, false, Some(Box::new(parser)))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(events[1], AssistantEvent::ToolCallStart { .. }));
+        assert!(matches!(
+            events[2],
+            AssistantEvent::ToolCallArgumentsDelta { .. }
+        ));
+        assert!(matches!(events[3], AssistantEvent::ToolCallStart { .. }));
+        assert!(matches!(
+            events[4],
+            AssistantEvent::ToolCallArgumentsDelta { .. }
+        ));
+        let collected = ChatEventStream::new(
+            "req_final_only".to_string(),
+            Box::pin(structured_chat_event_stream(stream::iter(
+                events.into_iter().map(Ok),
+            ))),
+        )
+        .collect_message()
+        .await
+        .unwrap();
+        let tool_calls = collected.message.tool_calls().collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].name, "first");
+        assert_eq!(tool_calls[1].name, "second");
     }
 }
