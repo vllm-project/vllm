@@ -85,40 +85,42 @@ class TritonAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+    mm_prefix_range_tensor: torch.Tensor | None = None
 
-    @property
-    def mm_prefix_range_tensor(self) -> torch.Tensor | None:
+    @staticmethod
+    def compute_mm_prefix_range_tensor(
+        mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+        num_seqs: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
         """Convert mm_prefix_range dict to padded tensor for Triton kernel.
 
         Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
         Empty ranges have start==end==0, which kernel skips via is_valid check.
         """
-        # TODO(Isotr0py): Move to model runner's attention metadata
-        # preparation to avoid duplicate computation.
-        if self.mm_prefix_range is None:
+        if mm_prefix_range is None:
             return None
-
-        num_seqs = self.seq_lens.shape[0]
-        device = self.seq_lens.device
 
         # Collect ranges, using [(0,0)] for empty sequences to ensure uniform dims
         range_lists = [
-            self.mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
+            mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
         ]
 
         # Return None if all ranges are trivial (only (0,0) placeholders)
         if all(r == [(0, 0)] for r in range_lists):
             return None
 
-        # Create 2D tensors with shape (num_ranges, 2) for each sequence
-        range_tensors = [
-            torch.tensor(r, dtype=torch.int32, device=device).view(-1, 2)
-            for r in range_lists
-        ]
-
-        return torch.nested.nested_tensor(
-            range_tensors, layout=torch.jagged
-        ).to_padded_tensor(0)
+        # Build on CPU first then move to GPU in a single H2D transfer
+        max_ranges = max(len(r) for r in range_lists)
+        # Pad all sequences to the same number of ranges
+        padded = []
+        for r in range_lists:
+            padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
+            padded.append(padded_r)
+        # Create tensor with efficient H2D transfer
+        return torch.tensor(padded, dtype=torch.int32, device=device).view(
+            num_seqs, max_ranges, 2
+        )
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -294,6 +296,10 @@ class TritonAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "TRITON_ATTN"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
@@ -456,6 +462,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
         use_alibi_sqrt: bool = False,
+        chunk_lookback: int = -1,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -490,6 +497,7 @@ class TritonAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
         self.use_alibi_sqrt = use_alibi_sqrt
+        self.chunk_lookback = chunk_lookback
         self.supports_quant_query_input = current_platform.is_cuda()
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
@@ -629,6 +637,7 @@ class TritonAttentionImpl(AttentionImpl):
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            chunk_lookback=self.chunk_lookback,
         )
 
         return output
