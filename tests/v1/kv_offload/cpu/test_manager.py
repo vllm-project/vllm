@@ -14,12 +14,12 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import (
     CPUOffloadingManager,
     FilterReusedOffloadingManager,
 )
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.cpu.spec import CPULoadStoreSpec
 
 
 def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
