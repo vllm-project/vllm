@@ -10,7 +10,8 @@ import torch.distributed as dist
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_tp_group, get_world_group
 
-dist.init_process_group(backend="gloo")
+# Let PyTorch choose the WORLD backend for the current device type.
+dist.init_process_group()
 
 # Create prompts
 prompts = [
