@@ -43,7 +43,7 @@ def start_async_worker(
                 is_profile=is_profile,
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
-            logger.exception("async worker error (Rank %d): %s", rank, str(exc))
+            logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
     thread = threading.Thread(target=thread_target, daemon=True)
     thread.start()
