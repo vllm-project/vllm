@@ -10,10 +10,14 @@ No GPU or NIXL required.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.utils import EngineTransferInfo
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineTransferInfo,
+    TransferTopology,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
     GroupKind,
@@ -49,6 +53,25 @@ class FakeNixlAgentMeta:
     attn_backend_name: str
 
 
+def _make_fake_topo(
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    is_mla: bool = False,
+    total_num_kv_heads: int = 8,
+    block_size: int = 16,
+    is_blocks_first: bool = False,
+) -> TransferTopology:
+    """Build a lightweight TransferTopology mock (skips __post_init__)."""
+    topo = MagicMock(spec=TransferTopology)
+    topo.tp_rank = tp_rank
+    topo.tp_size = tp_size
+    topo.is_mla = is_mla
+    topo.total_num_kv_heads = total_num_kv_heads
+    topo.block_size = block_size
+    topo.is_kv_layout_blocks_first = is_blocks_first
+    return topo
+
+
 def _common_plan_params(
     tp_rank: int = 0,
     tp_size: int = 1,
@@ -71,13 +94,15 @@ def _common_plan_params(
     if remote_block_lens is None:
         remote_block_lens = list(block_len_per_layer)
     return dict(
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        is_mla=is_mla,
-        total_num_kv_heads=num_kv_heads,
-        is_blocks_first=is_blocks_first,
+        transfer_topo=_make_fake_topo(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            is_mla=is_mla,
+            total_num_kv_heads=num_kv_heads,
+            block_size=block_size,
+            is_blocks_first=is_blocks_first,
+        ),
         block_len_per_layer=block_len_per_layer,
-        block_size=block_size,
         remote_info=EngineTransferInfo(
             remote_tp_size=remote_tp_size,
             remote_block_size=remote_block_size,

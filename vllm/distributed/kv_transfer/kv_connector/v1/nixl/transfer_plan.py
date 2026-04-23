@@ -25,6 +25,7 @@ import numpy as np
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineTransferInfo,
+    TransferTopology,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -74,8 +75,8 @@ class GroupKind(enum.Enum):
 
 
 class RegionKind(enum.Enum):
-    """Descriptor region type.  Used for visualization/debugging only;
-    executors never branch on this value."""
+    """Descriptor region type used for region categorization during plan
+    construction.  Executors never branch on this value."""
 
     FA_K = "fa_k"
     FA_V = "fa_v"
@@ -307,33 +308,28 @@ def _build_fa_regions(
 
 def generate_dense_plan(
     *,
-    tp_rank: int,
-    tp_size: int,
-    is_mla: bool,
-    total_num_kv_heads: int,
-    is_blocks_first: bool,
+    transfer_topo: TransferTopology,
     block_len_per_layer: list[int],
-    block_size: int,
     remote_info: EngineTransferInfo,
     remote_meta: NixlAgentMetadata,
     local_physical_blocks_per_logical: int,
 ) -> EngineTransferPlan:
     """Generate transfer plan for dense (FA-only) models."""
-    block_size_ratio = block_size // remote_info.remote_block_size
+    block_size_ratio = transfer_topo.block_size // remote_info.remote_block_size
 
     m = _compute_tp_mapping(
-        tp_rank,
-        tp_size,
+        transfer_topo.tp_rank,
+        transfer_topo.tp_size,
         remote_info.remote_tp_size,
-        is_mla,
-        total_num_kv_heads,
+        transfer_topo.is_mla,
+        transfer_topo.total_num_kv_heads,
         group_kinds=(GroupKind.FA,),
     )
 
     fa_regions = _build_fa_regions(
         block_len_per_layer=block_len_per_layer,
         remote_block_lens=remote_meta.block_lens,
-        is_blocks_first=is_blocks_first,
+        is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         block_size_ratio=block_size_ratio,
         num_attn_reads=len(m.source_ranks_per_group[0]),
         rank_offset_factor=m.rank_offset_factor,
@@ -353,13 +349,8 @@ def generate_dense_plan(
 
 def generate_mamba_plan(
     *,
-    tp_rank: int,
-    tp_size: int,
-    is_mla: bool,
-    total_num_kv_heads: int,
-    is_blocks_first: bool,
+    transfer_topo: TransferTopology,
     block_len_per_layer: list[int],
-    block_size: int,
     remote_info: EngineTransferInfo,
     remote_meta: NixlAgentMetadata,
     group_kinds: tuple[GroupKind, ...],
@@ -367,12 +358,17 @@ def generate_mamba_plan(
     ssm_sizes: tuple[int, int],
 ) -> EngineTransferPlan:
     """Generate transfer plan for hybrid Mamba (SSM + FA) models."""
+    assert group_kinds[0].is_attention, (
+        f"First group must be an attention group (FA/SWA), got {group_kinds[0]}"
+    )
+    tp_rank = transfer_topo.tp_rank
+    tp_size = transfer_topo.tp_size
     remote_tp_size = remote_info.remote_tp_size
     remote_phys_ratio = remote_info.remote_physical_blocks_per_logical
     remote_block_lens = remote_meta.block_lens
     remote_ssm_sizes = remote_meta.ssm_sizes
 
-    block_size_ratio = block_size // remote_info.remote_block_size
+    block_size_ratio = transfer_topo.block_size // remote_info.remote_block_size
     assert block_size_ratio == 1, (
         "Mamba 3-read transfer with block_size_ratio != 1 "
         f"is not tested. Got {block_size_ratio=}."
@@ -382,8 +378,8 @@ def generate_mamba_plan(
         tp_rank,
         tp_size,
         remote_tp_size,
-        is_mla,
-        total_num_kv_heads,
+        transfer_topo.is_mla,
+        transfer_topo.total_num_kv_heads,
         group_kinds,
     )
 
@@ -391,7 +387,7 @@ def generate_mamba_plan(
     fa_regions = _build_fa_regions(
         block_len_per_layer=block_len_per_layer,
         remote_block_lens=remote_block_lens,
-        is_blocks_first=is_blocks_first,
+        is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         block_size_ratio=block_size_ratio,
         num_attn_reads=len(m.source_ranks_per_group[0]),
         rank_offset_factor=m.rank_offset_factor,
