@@ -219,7 +219,7 @@ class SimpleCPUOffloadScheduler:
         max_hit_len = request.num_tokens - 1 - num_computed_tokens
         if max_hit_len <= 0:
             return 0, False
-        _, hit_length = self.cpu_coordinator.find_longest_cache_hit(
+        _, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
             remaining_hashes, max_hit_len
         )
 
@@ -261,7 +261,7 @@ class SimpleCPUOffloadScheduler:
 
         # Find CPU cached blocks across all groups.
         max_hit_len = len(hashes_to_load) * self.block_size
-        cpu_hit_blocks, hit_length = self.cpu_coordinator.find_longest_cache_hit(
+        cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
             hashes_to_load, max_hit_len
         )
         assert hit_length == num_external_tokens, (
