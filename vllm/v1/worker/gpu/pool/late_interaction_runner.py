@@ -62,7 +62,12 @@ class LateInteractionRunner:
             # d=128 covers ColBERT and ColPali.  Override via env var
             # when running models with other embedding dims.
             d = int(os.environ.get("VLLM_FLASH_MAXSIM_WARMUP_D", "128"))
-            lq_buckets = [32, 64, 128, 256]
+            # Query and doc buckets span realistic rerank workloads.
+            # Include 512/1024 for Lq so workloads that sample longer
+            # queries (e.g. random-rerank with input_len=512 → queries
+            # up to ~380 tokens → Lq bucket 512) don't trigger runtime
+            # autotune on the first request that lands in that bucket.
+            lq_buckets = [32, 64, 128, 256, 512, 1024]
             ld_buckets = [32, 64, 128, 256, 512, 1024]
 
             for Lq in lq_buckets:
