@@ -132,19 +132,16 @@ class OpenAIServingChat(OpenAIServing):
         )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        tokenizer = self.renderer.get_tokenizer()
         self.tool_parser = ParserManager.get_tool_parser(
             tool_parser_name=tool_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
-            tokenizer=tokenizer,
         )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
-            tokenizer=tokenizer,
         )
         _is_mistral_tool_parser = self.tool_parser is not None and issubclass(
             self.tool_parser, MistralToolParser

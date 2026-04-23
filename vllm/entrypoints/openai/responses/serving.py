@@ -203,7 +203,6 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
-            tokenizer=self.renderer.get_tokenizer(),
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage

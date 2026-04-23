@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, ClassVar
 
 import partial_json_parser
 import regex as re
@@ -32,42 +31,43 @@ logger = init_logger(__name__)
 
 
 class JambaToolParser(ToolParser):
-    tool_calls_start_token: ClassVar[str] = "<tool_calls>"
-    tool_calls_end_token: ClassVar[str] = "</tool_calls>"
-    tool_calls_regex: ClassVar[re.Pattern] = re.compile(
-        rf"{tool_calls_start_token}(.*?){tool_calls_end_token}", re.DOTALL
-    )
-    tool_calls_start_token_id: ClassVar[int]
-    tool_calls_end_token_id: ClassVar[int]
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
-    @classmethod
-    def specialize(cls, tokenizer: TokenizerLike) -> dict[str, Any]:
-        res = super().specialize(tokenizer)
-        if is_mistral_tokenizer(tokenizer):
+        if is_mistral_tokenizer(self.model_tokenizer):
             raise ValueError(
                 "Detected a MistralTokenizer tokenizer when using a Jamba model"
             )
 
-        _vocab = tokenizer.get_vocab()
-        _start_token_id = _vocab.get(cls.tool_calls_start_token)
-        _end_token_id = _vocab.get(cls.tool_calls_end_token)
-        if _start_token_id is None or _end_token_id is None:
+        self.current_tool_name_sent: bool = False
+        self.prev_tool_call_arr: list[dict] = []
+        self.current_tool_id: int = -1
+        self.streamed_args_for_tool: list[
+            str
+        ] = []  # map what has been streamed for each tool so far to a list
+
+        self.tool_calls_start_token: str = "<tool_calls>"
+        self.tool_calls_end_token: str = "</tool_calls>"
+
+        self.tool_calls_regex = re.compile(
+            rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}", re.DOTALL
+        )
+
+        if not self.model_tokenizer:
+            raise ValueError(
+                "The model tokenizer must be passed to the ToolParser "
+                "constructor during construction."
+            )
+        self.tool_calls_start_token_id = self.vocab.get(self.tool_calls_start_token)
+        self.tool_calls_end_token_id = self.vocab.get(self.tool_calls_end_token)
+        if (
+            self.tool_calls_start_token_id is None
+            or self.tool_calls_end_token_id is None
+        ):
             raise RuntimeError(
                 "Jamba Tool parser could not locate tool calls start/end "
                 "tokens in the tokenizer!"
             )
-        return res | {
-            "tool_calls_start_token_id": _start_token_id,
-            "tool_calls_end_token_id": _end_token_id,
-        }
-
-    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
-        super().__init__(tokenizer, tools)
-
-        self.current_tool_name_sent: bool = False
-        self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
-        self.streamed_args_for_tool: list[str] = []
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

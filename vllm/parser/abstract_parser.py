@@ -6,7 +6,7 @@ import json
 from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, TypeVar, cast
+from functools import cached_property
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -80,19 +80,6 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
-    vocab: ClassVar[dict[str, int]]
-
-    @classmethod
-    def specialize(cls, tokenizer: TokenizerLike) -> dict[str, Any]:
-        """Specialize the parser for the tokenizer.
-        The output of this function may be used to update the class-level attributes.
-        """
-        res = {
-            "vocab": tokenizer.get_vocab(),
-        }
-        if cls.tool_parser_cls is not None:
-            res["tool_parser_cls"] = maybe_specialize(cls.tool_parser_cls, tokenizer)
-        return res
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         """
@@ -106,6 +93,11 @@ class Parser:
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
         self._stream_state = StreamState()
+
+    @cached_property
+    def vocab(self) -> dict[str, int]:
+        """Get the vocabulary mapping from tokens to IDs."""
+        return self.model_tokenizer.get_vocab()
 
     @property
     def reasoning_parser(self) -> ReasoningParser | None:
@@ -684,31 +676,3 @@ class _WrappedParser(DelegatingParser):
             )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
-
-
-_ParserType = type[ToolParser] | type[Parser]
-P = TypeVar("P", bound=_ParserType)
-
-_parser_cls_cache: dict[tuple[_ParserType, int], _ParserType] = {}
-
-
-def maybe_specialize(parser: P, tokenizer: TokenizerLike | None) -> P:
-    """Specialize a parser for a given tokenizer.
-
-    Create a new parser type that is subclass of the original parser
-    but with class-level attributes specialized for the tokenizer.
-    """
-    if tokenizer is None:
-        return parser
-
-    # Return the cached specialized parser class if it exists.
-    tok_id = id(tokenizer)
-    key = (parser, tok_id)
-    if key in _parser_cls_cache:
-        return cast(P, _parser_cls_cache[key])
-
-    # Cache the specialized parser class to avoid re-creating it for the same tokenizer.
-    attrs = parser.specialize(tokenizer)
-    parser_cls = cast(P, type(f"{parser.__name__}_{tok_id:x}", (parser,), attrs))
-    _parser_cls_cache[key] = parser_cls
-    return parser_cls

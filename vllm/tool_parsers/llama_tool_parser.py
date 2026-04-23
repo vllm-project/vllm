@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, ClassVar
 
 import partial_json_parser
 import regex as re
@@ -46,26 +45,6 @@ class Llama3JsonToolParser(ToolParser):
     llama4_json are set.
     """
 
-    # Regex to find opening braces - use JSON decoder for parsing
-    # This handles arbitrary nesting depth correctly
-    tool_call_start_regex: ClassVar[re.Pattern] = re.compile(r"\{")
-    json_decoder: ClassVar[json.JSONDecoder] = json.JSONDecoder()
-    bot_token: ClassVar[str] = "<|python_tag|>"
-    bot_token_id: ClassVar[int]
-
-    @classmethod
-    def specialize(cls, tokenizer: PreTrainedTokenizerBase) -> dict[str, Any]:
-        res = super().specialize(tokenizer)
-        _bot_token_id = tokenizer.get_vocab().get(cls.bot_token)
-        if _bot_token_id is None:
-            raise RuntimeError(
-                "Llama3JsonToolParser could not locate the bot token "
-                f"token '{cls.bot_token}' in the tokenizer!"
-            )
-        return res | {
-            "bot_token_id": _bot_token_id,
-        }
-
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
@@ -81,6 +60,14 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list
+        self.bot_token = "<|python_tag|>"
+        self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
+            0
+        ]
+        # Simple regex to find opening braces - we'll use JSON decoder for parsing
+        # This handles arbitrary nesting depth correctly
+        self.tool_call_start_regex = re.compile(r"\{")
+        self.json_decoder = json.JSONDecoder()
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest

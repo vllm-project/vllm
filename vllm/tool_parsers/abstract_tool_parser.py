@@ -4,7 +4,7 @@
 import importlib
 import os
 from collections.abc import Callable, Sequence
-from typing import Any, ClassVar
+from functools import cached_property
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -55,36 +55,11 @@ class ToolParser:
     # required/named tool_choice, treating them the same as "auto".
     supports_required_and_named: bool = True
 
-    _is_specialized: ClassVar[bool] = False
-    vocab: ClassVar[dict[str, int]]
-
-    @classmethod
-    def specialize(cls, tokenizer: TokenizerLike) -> dict[str, Any]:
-        """Return a dict that fills in the class variables,
-        specializing the parser for the tokenizer."""
-        return {
-            "vocab": tokenizer.get_vocab(),
-            "_is_specialized": True,
-        }
-
     def __init__(
         self,
         tokenizer: TokenizerLike,
         tools: list[Tool] | None = None,
     ):
-        _cls = type(self)
-        if not _cls._is_specialized:
-            logger.warning(
-                "%s is not specialized for the tokenizer. "
-                "Specializing now by mutating class-level attributes. "
-                "This affects all instances of the class. "
-                "Should be used for unit tests only.",
-                _cls,
-            )
-            attrs = _cls.specialize(tokenizer)
-            for key, value in attrs.items():
-                setattr(_cls, key, value)
-
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -100,6 +75,12 @@ class ToolParser:
             ]
         else:
             self.tools = []
+
+    @cached_property
+    def vocab(self) -> dict[str, int]:
+        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # whereas all tokenizers have .get_vocab()
+        return self.model_tokenizer.get_vocab()
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

@@ -37,7 +37,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     StructuralTagResponseFormat,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall as VllmFunctionCall
-from vllm.parser.abstract_parser import maybe_specialize
 from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -67,22 +66,19 @@ def mistral_tokenizer():
 
 @pytest.fixture
 def mistral_pre_v11_tool_parser(mistral_pre_v11_tokenizer):
-    cls = maybe_specialize(MistralToolParser, mistral_pre_v11_tokenizer)
-    return cls(mistral_pre_v11_tokenizer)
+    return MistralToolParser(mistral_pre_v11_tokenizer)
 
 
 @pytest.fixture
 def mistral_tool_parser(mistral_tokenizer):
-    cls = maybe_specialize(MistralToolParser, mistral_tokenizer)
-    return cls(mistral_tokenizer)
+    return MistralToolParser(mistral_tokenizer)
 
 
 @pytest.fixture
 def non_mistral_parser() -> MistralToolParser:
     mock_tokenizer = MagicMock()
     mock_tokenizer.get_vocab.return_value = {"[TOOL_CALLS]": 1}
-    cls = maybe_specialize(MistralToolParser, mock_tokenizer)
-    return cls(mock_tokenizer)
+    return MistralToolParser(mock_tokenizer)
 
 
 def assert_tool_calls(

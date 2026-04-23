@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, ClassVar
 
 import regex as re
 
@@ -53,24 +52,28 @@ def _is_valid_json(text: str) -> bool:
 
 
 class Hermes2ProToolParser(ToolParser):
-    tool_call_start_token: ClassVar[str] = "<tool_call>"
-    tool_call_end_token: ClassVar[str] = "</tool_call>"
-    tool_call_regex: ClassVar[re.Pattern] = re.compile(
-        r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL
-    )
-    scratch_pad_regex: ClassVar[re.Pattern] = re.compile(
-        r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL
-    )
-
-    @classmethod
-    def specialize(cls, tokenizer: TokenizerLike) -> dict[str, Any]:
-        res = super().specialize(tokenizer)
-        if is_mistral_tokenizer(tokenizer):
-            raise ValueError("Detected Mistral tokenizer when using a Hermes model")
-        return res
-
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
+
+        if is_mistral_tokenizer(tokenizer):
+            logger.error("Detected Mistral tokenizer when using a Hermes model")
+            self.model_tokenizer = tokenizer.tokenizer
+
+        self.tool_call_start_token: str = "<tool_call>"
+        self.tool_call_end_token: str = "</tool_call>"
+
+        self.tool_call_regex = re.compile(
+            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL
+        )
+        self.scratch_pad_regex = re.compile(
+            r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL
+        )
+
+        if not self.model_tokenizer:
+            raise ValueError(
+                "The model tokenizer must be passed to the ToolParser "
+                "constructor during construction."
+            )
 
         # Streaming state: what has been sent to the client.
         self._sent_content_idx: int = 0

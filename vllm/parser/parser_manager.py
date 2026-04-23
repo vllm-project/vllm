@@ -9,8 +9,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.parser.abstract_parser import maybe_specialize
-from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
@@ -160,7 +158,7 @@ class ParserManager:
 
             if isinstance(name, str):
                 names = [name]
-            elif isinstance(name, list) and is_list_of(name, str):
+            elif is_list_of(name, str):
                 names = name
             else:
                 names = [class_name]
@@ -194,11 +192,8 @@ class ParserManager:
         tool_parser_name: str | None = None,
         enable_auto_tools: bool = False,
         model_name: str | None = None,
-        tokenizer: TokenizerLike | None = None,
     ) -> type[ToolParser] | None:
-        """Get the tool parser based on the name.
-        Optionally specialize the parser for the given tokenizer.
-        """
+        """Get the tool parser based on the name."""
         from vllm.tool_parsers import ToolParserManager
 
         parser: type[ToolParser] | None = None
@@ -222,8 +217,6 @@ class ParserManager:
                 f"tool_parser:'{tool_parser_name}' which has not "
                 "been registered"
             ) from e
-
-        parser = maybe_specialize(parser, tokenizer)
         return parser
 
     @classmethod
@@ -251,7 +244,6 @@ class ParserManager:
         reasoning_parser_name: str | None = None,
         enable_auto_tools: bool = False,
         model_name: str | None = None,
-        tokenizer: TokenizerLike | None = None,
     ) -> type[Parser] | None:
         """
         Get a unified Parser that handles both reasoning and tool parsing.
@@ -266,7 +258,6 @@ class ParserManager:
             reasoning_parser_name: The name of the reasoning parser.
             enable_auto_tools: Whether auto tool choice is enabled.
             model_name: The model name for parser-specific warnings.
-            tokenizer: The tokenizer to specialize the parser with.
 
         Returns:
             A Parser class, or None if neither parser is specified.
@@ -284,7 +275,6 @@ class ParserManager:
                     "Using unified parser '%s' for both reasoning and tool parsing.",
                     tool_parser_name,
                 )
-                parser = maybe_specialize(parser, tokenizer)
                 return parser
             except KeyError:
                 pass  # No unified parser with this name
@@ -298,7 +288,6 @@ class ParserManager:
                         "Using unified parser '%s' for reasoning and tool parsing.",
                         name,
                     )
-                    parser = maybe_specialize(parser, tokenizer)
                     return parser
                 except KeyError:
                     pass
@@ -306,7 +295,7 @@ class ParserManager:
         # Strategy 3: Create a DelegatingParser with the individual parser classes
         reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
         tool_parser_cls = cls.get_tool_parser(
-            tool_parser_name, enable_auto_tools, model_name, tokenizer
+            tool_parser_name, enable_auto_tools, model_name
         )
 
         if reasoning_parser_cls is None and tool_parser_cls is None:

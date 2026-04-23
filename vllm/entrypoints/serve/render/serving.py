@@ -96,7 +96,6 @@ class OpenAIServingRender:
             tool_parser_name=tool_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
-            tokenizer=renderer.get_tokenizer(),
         )
         self.reasoning_parser: type[ReasoningParser] | None = (
             ParserManager.get_reasoning_parser(

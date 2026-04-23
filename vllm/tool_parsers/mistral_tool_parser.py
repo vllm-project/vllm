@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from random import choices
 from string import ascii_letters, digits
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 import ijson
 import regex as re
@@ -121,25 +121,6 @@ class MistralToolParser(ToolParser):
     # Used to generate correct grammar in `adjust_request`
     model_can_reason: bool = False
 
-    tool_call_regex: ClassVar[re.Pattern] = re.compile(r"\[{.*}\]", re.DOTALL)
-    bot_token: ClassVar[str] = "[TOOL_CALLS]"
-    bot_token_id: ClassVar[int]
-    _is_pre_v11: ClassVar[bool]
-
-    @classmethod
-    def specialize(cls, tokenizer: TokenizerLike) -> dict[str, Any]:
-        res = super().specialize(tokenizer)
-        _bot_token_id = tokenizer.get_vocab().get(cls.bot_token)
-        if _bot_token_id is None:
-            raise RuntimeError(
-                "Mistral Tool Parser could not locate the tool call token"
-                "in the tokenizer!",
-            )
-        return res | {
-            "bot_token_id": _bot_token_id,
-            "_is_pre_v11": _is_pre_v11_tokeniser(tokenizer),
-        }
-
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -159,6 +140,17 @@ class MistralToolParser(ToolParser):
         if _is_pre_v11_tokeniser(self.model_tokenizer):
             self.parse_coro = ijson.parse_coro(
                 self.update_stream_state_pre_v11_tokenizer()
+            )
+
+        self.bot_token = "[TOOL_CALLS]"
+        self.bot_token_id = self.vocab.get(self.bot_token)
+        self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
+        self._is_pre_v11 = _is_pre_v11_tokeniser(self.model_tokenizer)
+
+        if self.bot_token_id is None:
+            raise RuntimeError(
+                "Mistral Tool Parser could not locate the tool call token in "
+                "the tokenizer!"
             )
 
     def adjust_request(
