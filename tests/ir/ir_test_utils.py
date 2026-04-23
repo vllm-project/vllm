@@ -189,14 +189,8 @@ def assert_op_e2e_correctness(
         output_no_lowering = compiled_no_lowering(x.clone())
 
     # Use op-defined tolerances for dtype-aware comparison
-    dtype = output.dtype
-    tolerance = op.get_tolerance(dtype)
-    torch.testing.assert_close(
-        output, output_no_wrap, atol=tolerance["atol"], rtol=tolerance["rtol"]
-    )
-    torch.testing.assert_close(
-        output, output_no_lowering, atol=tolerance["atol"], rtol=tolerance["rtol"]
-    )
+    assert_close(op, output, output_no_wrap)
+    assert_close(op, output, output_no_lowering)
 
 
 def assert_impl_numerical(op: IrOp, provider: str, args: tuple) -> None:

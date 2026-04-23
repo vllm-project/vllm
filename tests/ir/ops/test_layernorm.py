@@ -120,14 +120,14 @@ class TestRmsNormNumerical:
         assert out.dtype == x.dtype
         assert out.device == x.device
 
-        # Scaling property: rms_norm(2*x) == rms_norm(x)
+        # Scaling property: rms_norm(2*x) ≈ rms_norm(x) (approximate due to epsilon)
         out2 = rms_norm_native(x * 2.0, weight, epsilon=epsilon)
-        torch.testing.assert_close(out2, out)
+        assert_close(rms_norm, out2, out)
 
         # weight=None == unit weight
         out3 = rms_norm_native(x, torch.ones_like(weight), epsilon=epsilon)
         out4 = rms_norm_native(x, None, epsilon=epsilon)
-        torch.testing.assert_close(out3, out4)
+        assert_close(rms_norm, out3, out4)
 
     @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
