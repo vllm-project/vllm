@@ -292,6 +292,7 @@ class MiMoV2Attention(nn.Module):
         if self.v_head_dim != self.head_dim:
             FlashAttentionDiffKVBackend.set_head_size_v(self.v_head_dim)
             attn_backend = FlashAttentionDiffKVBackend
+            logger.info_once("Using FlashAttentionDiffKVBackend for attention.")
         else:
             attn_backend = None
 

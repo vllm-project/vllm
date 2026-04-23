@@ -658,7 +658,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
                     break
 
         # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
-        # or `get_flash_attn_version() == 3/4`
+        # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
         if node.name == "flash_attn_supports_sinks":
             for n in ast.walk(node):
                 if (
@@ -680,6 +680,26 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
                             fa3_supports_sinks = True
                         elif val == 4:
                             fa4_supports_sinks = True
+                elif (
+                    isinstance(n, ast.Compare)
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.In)
+                    and isinstance(n.comparators[0], (ast.Tuple, ast.List, ast.Set))
+                ):
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare:
+                        for elt in n.comparators[0].elts:
+                            if isinstance(elt, ast.Constant):
+                                if elt.value == 3:
+                                    fa3_supports_sinks = True
+                                elif elt.value == 4:
+                                    fa4_supports_sinks = True
 
         # Check get_flash_attn_version for FA3/FA4 compute capability
         if node.name == "get_flash_attn_version":
