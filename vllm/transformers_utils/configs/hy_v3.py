@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 from transformers.configuration_utils import PretrainedConfig
 
 
@@ -45,8 +47,8 @@ class HYV3Config(PretrainedConfig):
             Beginning-of-sequence token id.
         eos_token_id (`int` or `List[int]`, *optional*):
             End-of-sequence token id(s).
-        rope_theta (`float`, *optional*, defaults to 11158840.0):
-            Base period of the RoPE embeddings.
+        rope_parameters (`dict`, *optional*):
+            The parameters of the RoPE embeddings.
         qk_norm (`bool`, *optional*, defaults to `True`):
             Whether to apply RMSNorm to query and key states before attention.
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
@@ -113,7 +115,7 @@ class HYV3Config(PretrainedConfig):
         pad_token_id=None,
         bos_token_id=None,
         eos_token_id=None,
-        rope_parameters=None,
+        rope_parameters: dict[str, Any] | None = None,
         qk_norm=True,
         tie_word_embeddings=False,
         enable_attention_fp32_softmax=False,
@@ -146,6 +148,9 @@ class HYV3Config(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
+        rope_theta = kwargs.pop("rope_theta", 11158840.0)
+        if rope_parameters is None:
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
         self.rope_parameters = rope_parameters
         self.qk_norm = qk_norm
         self.tie_word_embeddings = tie_word_embeddings
