@@ -13,13 +13,14 @@ import io
 import time
 from statistics import mean, median
 
-import librosa
 import pytest
 import soundfile
 import torch
 from datasets import load_dataset
 from evaluate import load
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
+from vllm.multimodal.audio import get_audio_duration
 from vllm.tokenizers import get_tokenizer
 
 from ....models.registry import HF_EXAMPLE_MODELS
@@ -31,6 +32,16 @@ def to_bytes(y, sr):
     soundfile.write(buffer, y, sr, format="WAV")
     buffer.seek(0)
     return buffer
+
+
+# not all models have a normalizer so use the one from whisper as a standard option
+normalizer_model_info = HF_EXAMPLE_MODELS.find_hf_info("openai/whisper-large-v3")
+normalizer_tokenizer = get_tokenizer(
+    "openai/whisper-large-v3",
+    tokenizer_mode=normalizer_model_info.tokenizer_mode,
+    trust_remote_code=normalizer_model_info.trust_remote_code,
+)
+normalizer = EnglishTextNormalizer(normalizer_tokenizer.english_spelling_normalizer)
 
 
 async def transcribe_audio(client, tokenizer, y, sr):
@@ -58,8 +69,8 @@ async def bound_transcribe(sem, client, tokenizer, audio, reference):
     async with sem:
         result = await transcribe_audio(client, tokenizer, *audio)
         # Normalize *english* output/reference for evaluation.
-        out = tokenizer.normalize(result[2])
-        ref = tokenizer.normalize(reference)
+        out = normalizer(result[2])
+        ref = normalizer(reference)
         return result[:2] + (out, ref)
 
 
@@ -73,7 +84,7 @@ async def process_dataset(model, client, data, concurrent_request):
         trust_remote_code=model_info.trust_remote_code,
     )
 
-    # Warmup call as the first `librosa.load` server-side is quite slow.
+    # Warmup call as the first `load_audio` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
@@ -107,7 +118,7 @@ def print_performance_metrics(results, total_time):
 
 def add_duration(sample):
     y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
-    sample["duration_ms"] = librosa.get_duration(y=y, sr=sr) * 1000
+    sample["duration_ms"] = get_audio_duration(y=y, sr=sr) * 1000
     return sample
 
 
@@ -156,8 +167,9 @@ def run_evaluation(
     "model_config",
     [
         ("openai/whisper-large-v3", 12.744980),
-        # TODO (ekagra): add HF ckpt after asr release
-        # ("/host/engines/vllm/audio/2b-release", 11.73),
+        # TODO (ekagra): turn on after asr release
+        # CohereASR is used to test the variable encoder length code paths
+        # ("CohereLabs/cohere-transcribe-03-2026", 11.92),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -8,7 +9,11 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -16,6 +21,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+
+
+@dataclass(frozen=True)
+class AttentionCGSupportInfo:
+    min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend: str | None = None
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -30,15 +41,27 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def init_attn_backend(
-    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig, device: torch.device
-):
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+    active_layer_names: set[str] | None = None,
+) -> tuple[
+    dict[str, type[AttentionBackend]],
+    list[list[AttentionGroup]],
+    AttentionCGSupportInfo,
+]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
     attn_backend_workspace: torch.Tensor | None = None
+    # Find minimum cudagraph support across all attention backends
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if active_layer_names is not None:
+            layer_names = list(active_layer_names.intersection(layer_names))
 
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
@@ -81,8 +104,24 @@ def init_attn_backend(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
+            # Check cudagraph support for the attention backend
+            cg_support = builder.get_cudagraph_support(
+                vllm_config,
+                cast(AttentionSpec, kv_cache_group_spec.kv_cache_spec),
+            )
+            if cg_support.value < min_cg_support.value:
+                min_cg_support = cg_support
+                min_cg_attn_backend = attn_backend.__name__
         attn_groups.append(groups)
-    return attn_backends, attn_groups
+
+    return (
+        attn_backends,
+        attn_groups,
+        AttentionCGSupportInfo(
+            min_cg_support=min_cg_support,
+            min_cg_attn_backend=min_cg_attn_backend,
+        ),
+    )
 
 
 def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
@@ -105,13 +144,17 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
+    cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-        kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-        assert isinstance(kv_cache_spec, AttentionSpec)
         for layer_name in kv_cache_group_spec.layer_names:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+            assert isinstance(kv_cache_spec, AttentionSpec)
+
             raw_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
@@ -122,6 +165,7 @@ def _reshape_kv_cache(
                 kv_cache_spec.block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
+                cache_dtype,
             )
 
             # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
@@ -148,11 +192,14 @@ def init_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
+    cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
+    kv_caches = _reshape_kv_cache(
+        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
+    )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 

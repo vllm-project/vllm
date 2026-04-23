@@ -778,7 +778,7 @@ class LMCacheConnectorV1Impl:
                 continue
 
             if layer_name not in self.kv_caches:
-                self.kv_caches[layer_name] = attn_layer.kv_cache[0]
+                self.kv_caches[layer_name] = attn_layer.kv_cache
 
     ####################
     # Worker side APIs

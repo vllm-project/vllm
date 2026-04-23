@@ -10,7 +10,6 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -23,15 +22,17 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
@@ -108,30 +109,6 @@ class Qwen3CoderToolParser(ToolParser):
         # Store accumulated parameters for type conversion
         self.accumulated_params = {}
         self.streaming_request = None
-
-    def _get_arguments_config(
-        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
-    ) -> dict:
-        """Extract argument configuration for a function."""
-        if tools is None:
-            return {}
-        for config in tools:
-            if not hasattr(config, "type") or not (
-                hasattr(config, "function") and hasattr(config.function, "name")
-            ):
-                continue
-            if config.type == "function" and config.function.name == func_name:
-                if not hasattr(config.function, "parameters"):
-                    return {}
-                params = config.function.parameters
-                if isinstance(params, dict) and "properties" in params:
-                    return params["properties"]
-                elif isinstance(params, dict):
-                    return params
-                else:
-                    return {}
-        logger.debug("Tool '%s' is not defined in the tools list.", func_name)
-        return {}
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -245,16 +222,14 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
-    def _parse_xml_function_call(
-        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
-    ) -> ToolCall | None:
+    def _parse_xml_function_call(self, function_call_str: str) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
         # If there's no ">" character, this is not a valid xml function call
         if end_index == -1:
             return None
         function_name = function_call_str[:end_index]
-        param_config = self._get_arguments_config(function_name, tools)
+        param_config = find_tool_properties(self.tools, function_name)
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match_text in self.tool_call_parameter_regex.findall(parameters):
@@ -316,7 +291,7 @@ class Qwen3CoderToolParser(ToolParser):
                 )
 
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, request.tools)
+                self._parse_xml_function_call(function_call_str)
                 for function_call_str in function_calls
             ]
             # Populate prev_tool_call_arr for serving layer to set finish_reason
@@ -607,9 +582,8 @@ class Qwen3CoderToolParser(ToolParser):
                 self.current_param_name = current_param_name
                 self.accumulated_params[current_param_name] = param_value
 
-                param_config = self._get_arguments_config(
-                    self.current_function_name or "",
-                    self.streaming_request.tools if self.streaming_request else None,
+                param_config = find_tool_properties(
+                    self.tools, self.current_function_name or ""
                 )
 
                 converted_value = self._convert_param_value(
@@ -668,9 +642,6 @@ class Qwen3CoderToolParser(ToolParser):
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
                         )
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr

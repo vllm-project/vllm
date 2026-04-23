@@ -123,6 +123,8 @@ class ViTPatchGenerator(nn.Module):
         register_multiple: int | None = None,
         num_registers: int | None = None,
         patch_bias: bool = False,
+        temporal_patch_size: int = 1,
+        separate_video_embedder: bool = True,
         device=None,
         dtype=None,
     ):
@@ -148,6 +150,7 @@ class ViTPatchGenerator(nn.Module):
         self.patch_size = patch_size
         self.abs_pos = abs_pos
         self.embed_dim = embed_dim
+        self.temporal_patch_size = temporal_patch_size
 
         self.num_rows = max_input_dims[0] // patch_size
         self.num_cols = max_input_dims[1] // patch_size
@@ -159,6 +162,20 @@ class ViTPatchGenerator(nn.Module):
         self.embedder = ViTPatchLinear(
             patch_size, embed_dim, bias=patch_bias, **factory
         )
+
+        if temporal_patch_size > 1:
+            if not separate_video_embedder:
+                raise NotImplementedError(
+                    "Only separate_video_embedder=True is supported for"
+                    " temporal compression (temporal_patch_size > 1)"
+                )
+            self.video_embedder = ViTPatchLinear(
+                patch_size,
+                embed_dim,
+                bias=patch_bias,
+                temporal_patch_size=temporal_patch_size,
+                **factory,
+            )
 
         if abs_pos:
             scale = embed_dim**-0.5
@@ -191,6 +208,55 @@ class ViTPatchGenerator(nn.Module):
             patches = self.embed_patches(x)
             patches, pos_enc = self.apply_pos_enc(patches, input_size=x.shape[2:])
             patches = self.cls_token(patches)
+        patches = self.patch_normalizer(patches)
+        if self.return_pos_enc:
+            return patches, pos_enc
+        return patches
+
+    def forward_video(self, x: torch.Tensor) -> torch.Tensor:
+        """Process video frames with temporal compression.
+
+        Groups T consecutive frames into tubelets before embedding.
+
+        Args:
+            x: [num_frames, 3, H, W] tensor of video frames
+
+        Returns:
+            Embedded patches with temporal compression applied.
+        """
+        assert self.temporal_patch_size > 1
+        T = self.temporal_patch_size
+        input_size = x.shape[2:]
+
+        patches = self.im_to_patches(x)  # [N, num_patches, 3*P*P]
+        num_frames, num_spatial, feat_dim = patches.shape
+
+        # Pad to a multiple of T by repeating the last frame so that
+        # all tubelets have exactly T frames.
+        num_pad_frames = (-num_frames) % T
+        if num_pad_frames > 0:
+            last_frame_dup = patches[-1:].expand(num_pad_frames, -1, -1)
+            patches = torch.cat([patches, last_frame_dup], dim=0)
+
+        # Group T frames per tubelet: for each spatial position, concatenate
+        #   features across T consecutive frames; order follows Megatron training
+        num_frames_padded = patches.shape[0]
+        num_tublets = num_frames_padded // T
+        patches = rearrange(
+            patches,
+            "(tubelets frames) spatial feat -> tubelets spatial (frames feat)",
+            tubelets=num_tublets,
+            frames=T,
+            spatial=num_spatial,
+            feat=feat_dim,
+        )
+
+        patches = self.video_embedder(patches)
+
+        patches, pos_enc = self.apply_pos_enc(patches, input_size=input_size)
+
+        patches = self.cls_token(patches)
+
         patches = self.patch_normalizer(patches)
         if self.return_pos_enc:
             return patches, pos_enc
@@ -381,66 +447,21 @@ class ViTPatchGenerator(nn.Module):
             return pos_embed
 
         if self.cpe_mode:
-            if self.training:
-                min_scale = math.sqrt(0.1)
-                scale = (
-                    torch.rand(batch_size, 1, 1, device=pos_embed.device)
-                    * (1 - min_scale)
-                    + min_scale
-                )
-                aspect_min = math.log(3 / 4)
-                aspect_max = -aspect_min
-                aspect = torch.exp(
-                    torch.rand(batch_size, 1, 1, device=pos_embed.device)
-                    * (aspect_max - aspect_min)
-                    + aspect_min
-                )
+            max_dim = max(input_dims)
+            pos_embed = F.interpolate(
+                pos_embed.float(),
+                size=(max_dim, max_dim),
+                align_corners=False,
+                mode="bilinear",
+            ).to(pos_embed.dtype)
 
-                scale_x = scale * aspect
-                scale_y = scale * (1 / aspect)
-                scale_xy = torch.stack([scale_x, scale_y], dim=-1).clamp_(0, 1)
-
-                pos_xy = torch.rand(batch_size, 1, 1, 2, device=pos_embed.device) * (
-                    1 - scale_xy
-                )
-
-                lin_x = torch.linspace(
-                    0, 1, steps=input_dims[1], device=pos_embed.device
-                )[None, None].expand(batch_size, input_dims[0], -1)
-                lin_y = torch.linspace(
-                    0, 1, steps=input_dims[0], device=pos_embed.device
-                )[None, :, None].expand(batch_size, -1, input_dims[1])
-
-                lin_xy = torch.stack([lin_x, lin_y], dim=-1)
-
-                grid_xy = lin_xy * scale_xy + pos_xy
-
-                # Convert to [-1, 1] range
-                grid_xy.mul_(2).sub_(1)
-
-                pos_embed = F.grid_sample(
-                    pos_embed.float().expand(batch_size, -1, -1, -1),
-                    grid=grid_xy,
-                    mode="bilinear",
-                    padding_mode="zeros",
-                    align_corners=True,
-                ).to(pos_embed.dtype)
-            else:
-                max_dim = max(input_dims)
-                pos_embed = F.interpolate(
-                    pos_embed.float(),
-                    size=(max_dim, max_dim),
-                    align_corners=True,
-                    mode="bilinear",
-                ).to(pos_embed.dtype)
-
-                pos_embed = window_select(pos_embed)
+            pos_embed = window_select(pos_embed)
         else:
             pos_embed = window_select(pos_embed)
 
         if pos_embed.shape[-2:] != input_dims:
             pos_embed = F.interpolate(
-                pos_embed.float(), size=input_dims, align_corners=True, mode="bilinear"
+                pos_embed.float(), size=input_dims, align_corners=False, mode="bilinear"
             ).to(pos_embed.dtype)
 
         pos_embed = pos_embed.flatten(2).permute(0, 2, 1)
@@ -473,9 +494,19 @@ class Im2Patches(nn.Module):
 
 
 class ViTPatchLinear(nn.Linear):
-    def __init__(self, patch_size: int, embed_dim: int, bias: bool = False, **factory):
-        super().__init__(3 * (patch_size**2), embed_dim, bias=bias, **factory)
+    def __init__(
+        self,
+        patch_size: int,
+        embed_dim: int,
+        bias: bool = False,
+        temporal_patch_size: int = 1,
+        **factory,
+    ):
+        super().__init__(
+            3 * temporal_patch_size * (patch_size**2), embed_dim, bias=bias, **factory
+        )
         self.patch_size = patch_size
+        self.temporal_patch_size = temporal_patch_size
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -560,6 +591,7 @@ class RadioInternVisionModel(nn.Module):
         max_img_size = int(
             round(config.cpe_max_size / config.patch_size) * config.patch_size
         )
+        self.temporal_patch_size = config.video_temporal_patch_size
         unique_teachers = set(t["name"] for t in config.teachers)
         self.patch_generator = ViTPatchGenerator(
             config.patch_size,
@@ -569,6 +601,8 @@ class RadioInternVisionModel(nn.Module):
             cls_token=True,
             num_cls_tokens=len(unique_teachers) if config.cls_token_per_teacher else 1,
             register_multiple=config.register_multiple,
+            temporal_patch_size=self.temporal_patch_size,
+            separate_video_embedder=config.separate_video_embedder,
         )
 
         self.encoder = RadioVisionEncoder(
@@ -593,33 +627,68 @@ class RadioInternVisionModel(nn.Module):
     def inter_image_mask_metadata(
         self, imgs_sizes: list[tuple[int, int]], device: torch.device
     ) -> MaskMetadata:
+        """Build mask metadata from image pixel sizes. Adds num_skip to each
+        sequence length (cls/register tokens) to match patch generator output."""
         patch_size = self.patch_generator.patch_size
         num_skip = self.patch_generator.num_skip
 
         seq_lens = calc_seq_lens(imgs_sizes, patch_size)
         adjusted = [s + num_skip for s in seq_lens]
+        return self._inter_image_mask_metadata_from_seq_lens(adjusted, device=device)
+
+    def _inter_image_mask_metadata_from_seq_lens(
+        self, seq_lens: list[int], device: torch.device
+    ) -> MaskMetadata:
+        """Build mask metadata from actual sequence lengths (already including
+        cls/register tokens, i.e. patch_count + num_skip per item).
+        Use inter_image_mask_metadata() when you only have imgs_sizes."""
+        assert len(seq_lens) > 0
         cu_seqlens = torch.tensor(
-            list(accumulate(adjusted, initial=0)), dtype=torch.int32, device=device
+            list(accumulate(seq_lens, initial=0)), dtype=torch.int32, device=device
         )
         # Keep max_seqlen on CPU to avoid .item() sync
         # See: https://github.com/vllm-project/vllm/blob/20b6b01/vllm/v1/attention/ops/vit_attn_wrappers.py#L48
-        max_seqlen = torch.tensor(max(adjusted), dtype=torch.int32)
+        max_seqlen = torch.tensor(max(seq_lens), dtype=torch.int32)
         return MaskMetadata(cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
 
     def forward(
         self,
         x: torch.Tensor,
         imgs_sizes: list[tuple[int, int]] | None = None,
+        num_frames: int | None = None,
     ) -> torch.FloatTensor:
-        hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
+        T = self.temporal_patch_size
+
+        # Build packed-sequence metadata for MMEncoderAttention when needed.
         mask_meta = None
-        if imgs_sizes is not None:
-            assert len(imgs_sizes) > 0
-            # Dynamic resolution: process each image as an independent sequence.
-            mask_meta = self.inter_image_mask_metadata(
-                imgs_sizes, device=hidden_states.device
+        packed_batch_size = None  # Original batch size before packing
+
+        if num_frames is not None and T > 1:
+            # Conv3d video: all tubelets have the same sequence length.
+            # Pack [num_tubelets, seq_per_tubelet, hidden] → [1, total, hidden]
+            hidden_states = self.patch_generator.forward_video(x)
+            packed_batch_size, seq_per_tubelet, hidden_dim = hidden_states.shape
+            hidden_states = hidden_states.reshape(1, -1, hidden_dim)
+            mask_meta = self._inter_image_mask_metadata_from_seq_lens(
+                [seq_per_tubelet] * packed_batch_size, device=hidden_states.device
             )
+        else:
+            # Images for any model, or video for non-conv3d model
+            hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
+            if imgs_sizes is not None and len(imgs_sizes) > 1:
+                # Dynamic resolution w/ > 1 image, create attn mask
+                mask_meta = self.inter_image_mask_metadata(
+                    imgs_sizes, device=hidden_states.device
+                )
+
         encoder_outputs = self.encoder(inputs_embeds=hidden_states, mask_meta=mask_meta)
+
+        # Unpack back to original batch shape if we packed for video
+        if packed_batch_size is not None:
+            encoder_outputs = encoder_outputs.reshape(
+                packed_batch_size, seq_per_tubelet, -1
+            )
+
         return encoder_outputs
 
 
@@ -663,8 +732,13 @@ class RadioModel(nn.Module):
         pixel_embeds: torch.Tensor | None = None,
         *,
         imgs_sizes: list[tuple[int, int]] | None = None,
+        num_frames: int | None = None,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        y = self.model(pixel_values, imgs_sizes=imgs_sizes)
+        y = self.model(
+            pixel_values,
+            imgs_sizes=imgs_sizes,
+            num_frames=num_frames,
+        )
         return self._extract_final(y, imgs_sizes=imgs_sizes)
 
     def load_weights(self, weights) -> set[str]:

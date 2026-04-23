@@ -17,9 +17,7 @@ class NemotronV3ReasoningParser(DeepSeekR1ReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
-        reasoning_content, final_content = super().extract_reasoning(
-            model_output, request
-        )
+        reasoning, final_content = super().extract_reasoning(model_output, request)
         chat_template_kwargs = getattr(request, "chat_template_kwargs", None)
 
         if (
@@ -30,6 +28,6 @@ class NemotronV3ReasoningParser(DeepSeekR1ReasoningParser):
             )
             and final_content is None
         ):
-            reasoning_content, final_content = final_content, reasoning_content
+            reasoning, final_content = final_content, reasoning
 
-        return reasoning_content, final_content
+        return reasoning, final_content

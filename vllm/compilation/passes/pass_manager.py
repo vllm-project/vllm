@@ -14,10 +14,12 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
-from .vllm_inductor_pass import VllmInductorPass
+from .ir.lowering_pass import VllmIRLoweringPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
     from .fusion.rocm_aiter_fusion import (
+        MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -25,7 +27,8 @@ if rocm_aiter_ops.is_enabled():
 
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
-    from .fusion.attn_quant_fusion import AttnFusionPass
+    from .fusion.attn_quant_fusion import AttnQuantFusionPass
+    from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -36,6 +39,7 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
+    from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -99,14 +103,25 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             else:
                 logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
-        # post-cleanup goes before fix_functionalization
-        # because it requires a functional graph
+        # perform the first post-cleanup before IR lowering to clean up fusion artifacts
+        # and make sure no dead IR ops are lowered.
+        self.post_cleanup(graph)
+        VllmInductorPass.dump_prefix += 1
+
+        # lowering before cleanup so DCE can clean up lowered ops.
+        # DCE handles mutating ops correctly as well.
+        self.ir_lowering(graph)
+        VllmInductorPass.dump_prefix += 1
+
+        # clean up after lowering again
         self.post_cleanup(graph)
         VllmInductorPass.dump_prefix += 1
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)
         VllmInductorPass.dump_prefix = None  # Cleanup index
+
+        VllmPatternMatcherPass.log_match_summary()
 
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config
@@ -124,6 +139,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
 
+            if self.pass_config.fuse_minimax_qk_norm:
+                self.passes += [MiniMaxQKNormPass(config)]
+
             if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
@@ -138,19 +156,23 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
 
+            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
+                self.passes += [MLADualRMSNormFusionPass(config)]
+
             if self.pass_config.fuse_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [RopeKVCacheFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
-                self.passes += [AttnFusionPass(config)]
+                self.passes += [AttnQuantFusionPass(config)]
+                self.passes += [MLAAttnQuantFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
-            # needs a functional graph
+            self.ir_lowering = VllmIRLoweringPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
@@ -169,6 +191,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
         for pass_ in self.passes:
             passes.append(pass_.uuid())
+
+        passes.append(self.post_cleanup.uuid())
+        passes.append(self.ir_lowering.uuid())
+        passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
         # Include the compile range in the uuid to ensure that inductor
