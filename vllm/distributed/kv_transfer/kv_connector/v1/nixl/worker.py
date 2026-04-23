@@ -47,6 +47,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
+    GroupKind,
     generate_dense_plan,
     generate_mamba_plan,
 )
@@ -71,19 +72,32 @@ from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
 logger = init_logger(__name__)
 
 
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
+
+    @staticmethod
+    def _spec_to_group_kind(spec: "KVCacheSpec") -> GroupKind:
+        if isinstance(spec, MambaSpec):
+            return GroupKind.MAMBA
+        if isinstance(spec, SlidingWindowSpec):
+            return GroupKind.SWA
+        if isinstance(spec, FullAttentionSpec):
+            return GroupKind.FA
+        raise NotImplementedError(
+            f"Unsupported KVCacheSpec type for NIXL transfer: {type(spec)}"
+        )
 
     def __init__(
         self,
@@ -124,14 +138,14 @@ class NixlConnectorWorker:
         }
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
 
-        # ---- Mamba model state (derived from model config) ----
-        self._is_mamba_group = [
-            isinstance(group.kv_cache_spec, MambaSpec)
+        # ---- Group kinds and model state (derived from model config) ----
+        self._group_kinds = tuple(
+            self._spec_to_group_kind(group.kv_cache_spec)
             for group in kv_cache_config.kv_cache_groups
-        ]
+        )
         mamba_ssm_size = (0, 0)
         self._conv_decomp: MambaConvSplitInfo | None = None
-        self._has_mamba = any(self._is_mamba_group)
+        self._has_mamba = any(k.is_ssm for k in self._group_kinds)
         if self._has_mamba:
             assert self._is_hma_required
             from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -1015,7 +1029,7 @@ class NixlConnectorWorker:
             assert self._conv_decomp is not None
             self._transfer_plans[engine_id] = generate_mamba_plan(
                 **plan_common,
-                is_mamba_group=self._is_mamba_group,
+                group_kinds=self._group_kinds,
                 conv_decomp=self._conv_decomp,
                 ssm_sizes=self._mamba_ssm_size,
                 remote_ssm_sizes=nixl_agent_meta.ssm_sizes,
@@ -1885,7 +1899,7 @@ class NixlConnectorWorker:
         arange = np.arange(ratio).reshape(1, -1)
         return [
             (np.array(group).reshape(-1, 1) * ratio + arange).flatten().tolist()
-            if not self._is_mamba_group[i]
+            if self._group_kinds[i].is_attention
             else group
             for i, group in enumerate(block_ids)
         ]
@@ -1910,7 +1924,7 @@ class NixlConnectorWorker:
         local_arange = np.arange(local_ratio).reshape(1, -1)
         result: list[list[int]] = []
         for i, group in enumerate(block_ids):
-            if not self._is_mamba_group[i]:
+            if self._group_kinds[i].is_attention:
                 arr = np.array(group).reshape(-1, 1)
                 expanded = (arr * remote_ratio + local_arange).flatten()
                 result.append(expanded.tolist())

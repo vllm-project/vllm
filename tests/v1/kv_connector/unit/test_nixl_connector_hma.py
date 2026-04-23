@@ -75,9 +75,12 @@ def test_logical_to_kernel_block_ids_with_hma():
 
     # Simulate HMA scenario: logical block size = 32, kernel block size = 16
     # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+        GroupKind,
+    )
+
     worker._physical_blocks_per_logical_kv_block = 2
-    # FA + SW groups (neither is MambaSpec, so both get expanded)
-    worker._is_mamba_group = [False, False]
+    worker._group_kinds = (GroupKind.FA, GroupKind.SWA)
 
     logical_block_ids = [[0, 1, 2], [3, 4]]
     kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
@@ -90,12 +93,12 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "is_mamba_group,expansion_stride,remote_block_ids,expected_remote_block_ids",
+    "group_kinds,expansion_stride,remote_block_ids,expected_remote_block_ids",
     [
         # Dense (FA+SWA): stride == local_ratio, all groups expanded.
         # Regression for https://github.com/vllm-project/vllm/pull/39724
         (
-            [False, False],
+            ("FA", "SWA"),
             2,
             ([0, 1, 2], [3, 4]),
             [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
@@ -105,7 +108,7 @@ def test_logical_to_kernel_block_ids_with_hma():
         # stride=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
         # the wrong stride produces different FA results.
         (
-            [False, True],
+            ("FA", "MAMBA"),
             261,
             ([0, 1, 2], [10, 11]),
             [[0, 1, 261, 262, 522, 523], [10, 11]],
@@ -114,7 +117,7 @@ def test_logical_to_kernel_block_ids_with_hma():
     ids=["dense_fa_swa", "mamba_fa_ssm"],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    is_mamba_group,
+    group_kinds,
     expansion_stride,
     remote_block_ids,
     expected_remote_block_ids,
@@ -132,6 +135,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
         EngineTransferPlan,
+        GroupKind,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -139,7 +143,7 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = 2
-    worker._is_mamba_group = is_mamba_group
+    worker._group_kinds = tuple(GroupKind[k] for k in group_kinds)
 
     remote_engine_id = "remote-engine"
 
@@ -309,9 +313,12 @@ def test_get_block_descs_ids_hybrid_ssm():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
         MambaModelBlockTransferPolicy,
     )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+        GroupKind,
+    )
 
     policy = object.__new__(MambaModelBlockTransferPolicy)
-    policy._is_mamba_group = [False, True]
+    policy._group_kinds = (GroupKind.FA, GroupKind.MAMBA)
 
     num_blocks = 100
     num_regions = 2
@@ -344,9 +351,12 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
         MambaModelBlockTransferPolicy,
     )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+        GroupKind,
+    )
 
     policy = object.__new__(MambaModelBlockTransferPolicy)
-    policy._is_mamba_group = [False, True]
+    policy._group_kinds = (GroupKind.FA, GroupKind.MAMBA)
 
     ratio = 4
     logical_blocks = 100

@@ -28,6 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     MambaEngineTransferInfo,
     TransferTopology,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+    GroupKind,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
     derive_mamba_conv_split,
@@ -595,10 +598,12 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         physical_blocks_per_logical: int,
     ):
         super().__init__(kv_cache_config, physical_blocks_per_logical)
-        self._is_mamba_group = [
-            isinstance(group.kv_cache_spec, MambaSpec)
+        self._group_kinds = tuple(
+            GroupKind.MAMBA
+            if isinstance(group.kv_cache_spec, MambaSpec)
+            else GroupKind.FA
             for group in kv_cache_config.kv_cache_groups
-        ]
+        )
 
         mamba_spec = next(
             spec for spec in layer_specs.values() if isinstance(spec, MambaSpec)
@@ -673,7 +678,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
-            if self._is_mamba_group[i]:
+            if self._group_kinds[i].is_ssm:
                 # Mamba blocks are 1:1 logical-to-physical (no expansion).
                 all_descs.append(
                     (
@@ -1205,11 +1210,11 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
             return local_ids, remote_ids
         num_groups = len(local_ids)
         filtered_local: list[list[int]] = [
-            [] if not self._is_mamba_group[g] else local_ids[g]
+            local_ids[g] if self._group_kinds[g].is_ssm else []
             for g in range(num_groups)
         ]
         filtered_remote: list[list[int]] = [
-            [] if not self._is_mamba_group[g] else remote_ids[g]
+            remote_ids[g] if self._group_kinds[g].is_ssm else []
             for g in range(num_groups)
         ]
         return filtered_local, filtered_remote
