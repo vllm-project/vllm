@@ -24,8 +24,38 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def torchao_version_at_least(torchao_version: str) -> bool:
+    if find_spec("torchao"):
+        try:
+            if version.parse(importlib.metadata.version("torchao")) >= version.parse(
+                torchao_version
+            ):
+                return True
+        except (ImportError, version.InvalidVersion):
+            return False
+    return False
+
+
+if torchao_version_at_least("0.17.0"):
+    from torchao.quantization.quantize_.workflows import Int8Tensor
+    from torchao.quantization.granularity import PerRow
+    _ZENTORCH_TORCHAO_ENABLED = True
+else:  # torchao not installed or version mismatch
+    Int8Tensor = None
+    _ZENTORCH_TORCHAO_ENABLED = False
+
+
+def _zentorch_enabled() -> bool:
+    return (
+        current_platform.is_zen_cpu() and
+        hasattr(torch.ops, "zentorch") and
+        _ZENTORCH_TORCHAO_ENABLED
+    )
 
 
 def _bond_method_to_cls(func, obj):
@@ -59,18 +89,6 @@ def _restore_weight_attrs(param, recorded_weight_attr):
     for attr_name, attr in recorded_weight_attr.items():
         if not hasattr(param, attr_name):
             setattr(param, attr_name, _bond_method_to_cls(attr, param))
-
-
-def torchao_version_at_least(torchao_version: str) -> bool:
-    if find_spec("torchao"):
-        try:
-            if version.parse(importlib.metadata.version("torchao")) >= version.parse(
-                torchao_version
-            ):
-                return True
-        except (ImportError, version.InvalidVersion):
-            return False
-    return False
 
 
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:
@@ -364,6 +382,20 @@ class TorchAOLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Zen CPU override:
+        # - Int8Tensor with activation quant -> zentorch_dynamic_qlinear (dynamic)
+        if _zentorch_enabled():
+            # Dynamic quantization: Int8Tensor with activation quant args
+            if hasattr(layer, "_zentorch_dynamic_qlinear_weight"):
+                return torch.ops.zentorch.zentorch_dynamic_qlinear(
+                    x,
+                    layer._zentorch_dynamic_qlinear_weight,
+                    layer._zentorch_dynamic_qlinear_scales,
+                    bias,
+                    zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
+                )
+
+        # Default path: let torch/torchao handle linear with packed weights
         return F.linear(x, layer.weight, bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -381,19 +413,52 @@ class TorchAOLinearMethod(LinearMethodBase):
             )
 
             _restore_weight_attrs(layer.weight, recorded_weight_attr)
+        else:
+            # online quantize the weight if the checkpoint is not already
+            # quantized by torchao
+            recorded_weight_attr = _get_weight_attrs(layer.weight)
+
+            weight = torchao_quantize_param_data(
+                layer.weight, self.quant_config.torchao_config
+            )
+            weight = torch.nn.Parameter(
+                convert_to_packed_tensor_based_on_current_hardware(weight),
+                weight.requires_grad,
+            )
+
+            _restore_weight_attrs(weight, recorded_weight_attr)
+            layer.register_parameter("weight", weight)
+
+        # Zen CPU fast path (no-op unless platform, torchao and zentorch are)
+        self.process_weights_after_loading_zendnn(layer)
+
+    def process_weights_after_loading_zendnn(
+        self, layer: torch.nn.Module
+    ) -> None:
+        """Cache zentorch-ready tensors on ``layer`` for the Zen CPU fast path.
+
+        Gated on ``current_platform.is_zen_cpu()``, ``torch.ops.zentorch``
+        availability, and torchao >= 0.17.0 (so Int8Tensor and their attributes
+        exist). On any other configuration this is a no-op and the default
+        torch / torchao path is used.
+        """
+        if not _zentorch_enabled():
             return
 
-        # online quantize the weight if the checkpoint is not already
-        # quantized by torchao
-        recorded_weight_attr = _get_weight_attrs(layer.weight)
+        w = layer.weight
 
-        weight = torchao_quantize_param_data(
-            layer.weight, self.quant_config.torchao_config
-        )
-        weight = torch.nn.Parameter(
-            convert_to_packed_tensor_based_on_current_hardware(weight),
-            weight.requires_grad,
-        )
-
-        _restore_weight_attrs(weight, recorded_weight_attr)
-        layer.register_parameter("weight", weight)
+        # ---- DA8W8 (Int8Tensor) ----
+        if isinstance(w, Int8Tensor):
+            if (
+                w.act_quant_kwargs is not None
+                and hasattr(torch.ops.zentorch, "zentorch_dynamic_qlinear")
+            ):
+                weight_scales = w.scale
+                if weight_scales.dim() == 2 and weight_scales.shape[-1] == 1:
+                    weight_scales = weight_scales.squeeze(-1)
+                else:
+                    # We only support PerRow granularity for weights.
+                    return
+                layer._zentorch_dynamic_qlinear_weight = w.qdata
+                layer._zentorch_dynamic_qlinear_scales = weight_scales
+                layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
