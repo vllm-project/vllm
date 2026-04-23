@@ -459,6 +459,14 @@ class OffloadingConnectorScheduler:
             any_jid = next(iter(req_status.transfer_jobs))
             assert self._jobs[any_jid].is_store
             jobs_to_flush.update(req_status.transfer_jobs)
+            # worker.wait() in handle_preemptions will block until these
+            # stores settle, so the offloaded blocks are safely committed.
+            # Drop scheduler-side tracking so a subsequent load for the
+            # same request (on re-schedule) doesn't trip the
+            # "no other jobs pending" invariant in update_state_after_alloc.
+            for jid in req_status.transfer_jobs:
+                self._jobs.pop(jid, None)
+            req_status.transfer_jobs.clear()
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
@@ -479,19 +487,22 @@ class OffloadingConnectorScheduler:
         meta = connector_output.kv_connector_worker_meta
         assert isinstance(meta, OffloadingWorkerMetadata)
 
+        # Per-job completion: fire complete_store/complete_load for
+        # cache-reuse as soon as the DMA finishes. The job stays in
+        # transfer_jobs (and self._jobs) until the worker's per-request
+        # ack arrives via finished_sending / finished_recving, which is
+        # what the base scheduler uses to free held blocks.
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
-            job_status = self._jobs[job_id]
+            job_status = self._jobs.get(job_id)
+            if job_status is None:
+                # Already cleaned up scheduler-side (preemption flush).
+                continue
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
             assert job_status.pending_count == 0
 
-            # All workers reported — job is complete.
-            self._jobs.pop(job_id)
-            req_status = self._req_status[job_status.req_id]
-
-            req_status.transfer_jobs.remove(job_id)
             if job_status.is_store:
                 self.manager.complete_store(job_status.keys)
             else:
@@ -499,8 +510,37 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            if not req_status.transfer_jobs and req_status.req.is_finished():
-                self._req_status.pop(job_status.req_id)
+        # Worker acks: scheduler is about to free blocks (base-scheduler
+        # side, right after this call). Drop our per-request bookkeeping.
+        for req_id in connector_output.finished_sending or ():
+            req_status = self._req_status.pop(req_id, None)
+            if req_status is None:
+                continue
+            for job_id in req_status.transfer_jobs:
+                self._jobs.pop(job_id, None)
+
+        for req_id in connector_output.finished_recving or ():
+            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            # A finished_recving ack corresponds to a single load job
+            # for this request (per the one-load-or-many-stores
+            # invariant). Drop it from transfer_jobs so a subsequent
+            # store can be issued for the same request.
+            load_job_id = next(
+                (
+                    jid
+                    for jid in req_status.transfer_jobs
+                    if not self._jobs[jid].is_store
+                ),
+                None,
+            )
+            if load_job_id is not None:
+                req_status.transfer_jobs.discard(load_job_id)
+                self._jobs.pop(load_job_id, None)
+            # Aborted while loading: request is terminal, drop state.
+            if req_status.req.is_finished():
+                self._req_status.pop(req_id, None)
 
     def request_finished(
         self,
