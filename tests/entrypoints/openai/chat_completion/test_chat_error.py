@@ -87,7 +87,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        io_processor=engine.io_processor,
         model_registry=models.registry,
         request_logger=None,
         chat_template=None,
@@ -123,7 +122,6 @@ async def test_chat_error_non_stream():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -173,7 +171,6 @@ async def test_chat_error_stream():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)

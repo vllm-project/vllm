@@ -24,6 +24,8 @@
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
 typedef __hip_bfloat16 __nv_bfloat16;
+#else
+  #include <cuda.h>
 #endif
 
 #if defined(__gfx942__)
@@ -70,6 +72,80 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     int64_t dst_offset = dst_block_number * block_size_in_bytes;
     cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset,
                     block_size_in_bytes, memcpy_type, stream);
+  }
+}
+
+void swap_blocks_batch(const torch::Tensor& src_ptrs,
+                       const torch::Tensor& dst_ptrs,
+                       const torch::Tensor& sizes) {
+  TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+  TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+  TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+  TORCH_CHECK(src_ptrs.dtype() == torch::kInt64, "src_ptrs must be int64");
+  TORCH_CHECK(dst_ptrs.dtype() == torch::kInt64, "dst_ptrs must be int64");
+  TORCH_CHECK(sizes.dtype() == torch::kInt64, "sizes must be int64");
+
+  const int64_t n = src_ptrs.size(0);
+  TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+  TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+  if (n == 0) return;
+
+  int64_t* src_data = src_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* dst_data = dst_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* size_data = sizes.mutable_data_ptr<int64_t>();
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // Use cuMemcpyBatchAsync (CUDA 12.8+) to submit all copies in a single
+  // driver call, amortizing per-copy submission overhead.
+  // int64_t and CUdeviceptr/size_t are both 8 bytes on 64-bit platforms,
+  // so we reinterpret_cast the tensor data directly to avoid copies.
+  static_assert(sizeof(CUdeviceptr) == sizeof(int64_t));
+  static_assert(sizeof(size_t) == sizeof(int64_t));
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12080
+  // Resolve cuMemcpyBatchAsync at runtime via cuGetProcAddress so that
+  // binaries compiled with CUDA 12.8+ still work on older drivers, and
+  // we avoid the CUDA 13.0 header remapping (#define to _v2 signature).
+  // The function pointer is cached after the first call.
+  using BatchFn =
+      CUresult (*)(CUdeviceptr*, CUdeviceptr*, size_t*, size_t,
+                   CUmemcpyAttributes*, size_t*, size_t, size_t*, CUstream);
+  static BatchFn batch_fn = []() -> BatchFn {
+    CUdriverProcAddressQueryResult sym_status;
+    void* fn_ptr = nullptr;
+    CUresult res = cuGetProcAddress("cuMemcpyBatchAsync", &fn_ptr, 12080,
+                                    CU_GET_PROC_ADDRESS_DEFAULT, &sym_status);
+    if (res != CUDA_SUCCESS || fn_ptr == nullptr) {
+      return nullptr;
+    }
+    return reinterpret_cast<BatchFn>(fn_ptr);
+  }();
+
+  if (batch_fn != nullptr) {
+    CUmemcpyAttributes attr = {};
+    attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+    size_t attrs_idx = 0;
+    size_t fail_idx = 0;
+    CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data),
+                               reinterpret_cast<CUdeviceptr*>(src_data),
+                               reinterpret_cast<size_t*>(size_data),
+                               static_cast<size_t>(n), &attr, &attrs_idx, 1,
+                               &fail_idx, static_cast<CUstream>(stream));
+    TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
+                fail_idx, " with error ", result);
+  } else
+#endif
+  {
+    // Fallback for CUDA < 12.8, older drivers, and ROCm:
+    // individual async copies.
+    // cudaMemcpyDefault lets the driver infer direction from pointer types.
+    for (int64_t i = 0; i < n; i++) {
+      cudaMemcpyAsync(reinterpret_cast<void*>(dst_data[i]),
+                      reinterpret_cast<void*>(src_data[i]),
+                      static_cast<size_t>(size_data[i]), cudaMemcpyDefault,
+                      stream);
+    }
   }
 }
 
@@ -648,6 +724,28 @@ void reshape_and_cache_flash(
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  if (kv_cache_dtype == "nvfp4") {
+#if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
+    // NVFP4 dispatch is compiled separately for SM100+.
+    extern void reshape_and_cache_nvfp4_dispatch(
+        torch::Tensor & key, torch::Tensor & value, torch::Tensor & key_cache,
+        torch::Tensor & value_cache, torch::Tensor & slot_mapping,
+        torch::Tensor & k_scale, torch::Tensor & v_scale);
+    reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
+                                     slot_mapping, k_scale, v_scale);
+    return;
+#else
+    TORCH_CHECK(false,
+                "NVFP4 KV cache requires SM100+ (Blackwell). "
+                "Please rebuild vllm with a Blackwell-compatible CUDA target.");
+#endif
+  }
+
+  // Original FP8/auto path.
   int block_size = key_cache.size(1);
 
   int64_t key_stride = key.stride(0);
@@ -665,8 +763,6 @@ void reshape_and_cache_flash(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);

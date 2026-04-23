@@ -3,7 +3,7 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_offload.abstract import OffloadKey
 from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
 
 
@@ -23,7 +23,7 @@ class ARCCachePolicy(CachePolicy):
            until a miss or non-ready block is encountered.
 
         2. Cache touch (touch) - Adaptive Learning:
-           For each block_hash (in reverse order):
+           For each key (in reverse order):
            - If in T1: Move to T2 (promotion from recent to frequent).
            - If in T2: Move to MRU position (end of queue).
            - If in B1 ghost list: Increase target_t1_size.
@@ -48,88 +48,88 @@ class ARCCachePolicy(CachePolicy):
     def __init__(self, cache_capacity: int):
         self.cache_capacity: int = cache_capacity
         self.target_t1_size: float = 0.0
-        self.t1: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
-        self.t2: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
-        # block_hash -> None (only care about presence)
-        self.b1: OrderedDict[BlockHash, None] = OrderedDict()
-        self.b2: OrderedDict[BlockHash, None] = OrderedDict()
+        self.t1: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
+        self.t2: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
+        # key -> None (only care about presence)
+        self.b1: OrderedDict[OffloadKey, None] = OrderedDict()
+        self.b2: OrderedDict[OffloadKey, None] = OrderedDict()
 
-    def get(self, block_hash: BlockHash) -> BlockStatus | None:
-        return self.t1.get(block_hash) or self.t2.get(block_hash)
+    def get(self, key: OffloadKey) -> BlockStatus | None:
+        return self.t1.get(key) or self.t2.get(key)
 
-    def insert(self, block_hash: BlockHash, block: BlockStatus) -> None:
-        self.t1[block_hash] = block
-        self.b1.pop(block_hash, None)
-        self.b2.pop(block_hash, None)
+    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
+        self.t1[key] = block
+        self.b1.pop(key, None)
+        self.b2.pop(key, None)
 
-    def remove(self, block_hash: BlockHash) -> None:
-        if self.t1.pop(block_hash, None) is None:
-            self.t2.pop(block_hash, None)
+    def remove(self, key: OffloadKey) -> None:
+        if self.t1.pop(key, None) is None:
+            self.t2.pop(key, None)
 
-    def touch(self, block_hashes: Iterable[BlockHash]) -> None:
-        for block_hash in reversed(list(block_hashes)):
-            if block_hash in self.t1:
-                block = self.t1.pop(block_hash)
+    def touch(self, keys: Iterable[OffloadKey]) -> None:
+        for key in reversed(list(keys)):
+            if key in self.t1:
+                block = self.t1.pop(key)
                 if not block.is_ready:
                     # block was just prepared to be stored, not really touched
                     # twice — keep it in T1 and mark as most recently used
-                    self.t1[block_hash] = block
+                    self.t1[key] = block
                 else:
-                    self.t2[block_hash] = block
+                    self.t2[key] = block
 
-            elif block_hash in self.t2:
-                self.t2.move_to_end(block_hash)
+            elif key in self.t2:
+                self.t2.move_to_end(key)
 
-            elif block_hash in self.b1:
+            elif key in self.b1:
                 delta = max(1, len(self.b2) / len(self.b1))
                 self.target_t1_size = min(
                     self.target_t1_size + delta, self.cache_capacity
                 )
                 # move to MRU position (end) to keep it fresh in the ghost list
-                self.b1.move_to_end(block_hash)
+                self.b1.move_to_end(key)
 
-            elif block_hash in self.b2:
+            elif key in self.b2:
                 delta = max(1, len(self.b1) / len(self.b2))
                 self.target_t1_size = max(self.target_t1_size - delta, 0)
                 # move to MRU position (end) to keep it fresh in the ghost list
-                self.b2.move_to_end(block_hash)
+                self.b2.move_to_end(key)
 
     def evict(
-        self, n: int, protected: set[BlockHash]
-    ) -> list[tuple[BlockHash, BlockStatus]] | None:
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         if n == 0:
             return []
 
         # Collect candidates atomically: simulate T1 size changes as we select,
         # but do not modify actual data structures until all n are found.
         candidates: list[
-            tuple[BlockHash, BlockStatus, bool]
-        ] = []  # (hash, block, from_t1)
-        already_selected: set[BlockHash] = set()
+            tuple[OffloadKey, BlockStatus, bool]
+        ] = []  # (key, block, from_t1)
+        already_selected: set[OffloadKey] = set()
         virtual_t1_size = len(self.t1)
 
         for _ in range(n):
-            candidate: tuple[BlockHash, BlockStatus, bool] | None = None
+            candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
-                for block_hash, block in self.t1.items():
+                for key, block in self.t1.items():
                     if (
                         block.ref_cnt == 0
-                        and block_hash not in protected
-                        and block_hash not in already_selected
+                        and key not in protected
+                        and key not in already_selected
                     ):
-                        candidate = (block_hash, block, True)
+                        candidate = (key, block, True)
                         virtual_t1_size -= 1
                         break
 
             if candidate is None:
-                for block_hash, block in self.t2.items():
+                for key, block in self.t2.items():
                     if (
                         block.ref_cnt == 0
-                        and block_hash not in protected
-                        and block_hash not in already_selected
+                        and key not in protected
+                        and key not in already_selected
                     ):
-                        candidate = (block_hash, block, False)
+                        candidate = (key, block, False)
                         break
                 if candidate is None:
                     return None
@@ -138,15 +138,15 @@ class ARCCachePolicy(CachePolicy):
             already_selected.add(candidate[0])
 
         # Apply all evictions now that we know n candidates exist.
-        result: list[tuple[BlockHash, BlockStatus]] = []
-        for block_hash, block, from_t1 in candidates:
+        result: list[tuple[OffloadKey, BlockStatus]] = []
+        for key, block, from_t1 in candidates:
             if from_t1:
-                del self.t1[block_hash]
-                self.b1[block_hash] = None
+                del self.t1[key]
+                self.b1[key] = None
             else:
-                del self.t2[block_hash]
-                self.b2[block_hash] = None
-            result.append((block_hash, block))
+                del self.t2[key]
+                self.b2[key] = None
+            result.append((key, block))
 
         # Trim ghost lists to cache_capacity.
         for ghost in (self.b1, self.b2):

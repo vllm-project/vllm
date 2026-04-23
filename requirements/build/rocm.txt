@@ -1,0 +1,13 @@
+# Common dependencies
+-r ../common.txt
+
+
+triton==3.6.0
+cmake>=3.26.1,<4
+packaging>=24.2
+setuptools>=77.0.3,<80.0.0
+setuptools-scm>=8
+wheel
+jinja2>=3.1.6
+amdsmi==7.0.2
+timm>=1.0.17

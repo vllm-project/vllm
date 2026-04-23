@@ -78,7 +78,6 @@ steps:
     - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
     - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
 
-# These require fix https://github.com/vllm-project/vllm/pull/36280
 - label: Model Runner V2 Pipeline Parallelism (4 GPUs)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
@@ -101,11 +100,13 @@ steps:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
+  - tests/v1/spec_decode/test_probabilistic_rejection_sampler_utils.py
   - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - tests/v1/e2e/spec_decode/test_spec_decode.py
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
+  - pytest -v -s v1/spec_decode/test_probabilistic_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"

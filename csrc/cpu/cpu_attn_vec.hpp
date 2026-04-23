@@ -53,7 +53,7 @@ class TileGemm82 {
                          const int64_t ldb, const int64_t ldc,
                          const int32_t block_size, const int32_t dynamic_k_size,
                          const bool accum_c) {
-    static_assert(0 < M <= 8);
+    static_assert(0 < M && M <= 8);
     using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
 
     kv_cache_t* __restrict__ curr_b_0 = b_tile;

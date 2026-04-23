@@ -112,7 +112,6 @@ class OpenAIServingModels:
 
         self.model_config = self.engine_client.model_config
         self.renderer = self.engine_client.renderer
-        self.io_processor = self.engine_client.io_processor
         self.input_processor = self.engine_client.input_processor
 
     async def init_static_loras(self):

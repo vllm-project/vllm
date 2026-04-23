@@ -8,7 +8,10 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_head_scales,
+)
 
 logger = init_logger(__name__)
 
@@ -21,6 +24,13 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "turboquant_k8v4",
+    "turboquant_4bit_nc",
+    "turboquant_k3v4_nc",
+    "turboquant_3bit_nc",
+    "int8_per_token_head",
+    "fp8_per_token_head",
+    "nvfp4",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -41,10 +51,10 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
+    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.9. This is a
+    utilization. If unspecified, will use the default value of 0.92. This is a
     per-instance limit, and only applies to the current vLLM instance. It does
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
@@ -92,8 +102,6 @@ class CacheConfig:
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
-    cpu_kvcache_space_bytes: int | None = None
-    """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
@@ -118,14 +126,6 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
-    enable_mamba_cache_stochastic_rounding: bool = False
-    """Enable stochastic rounding when writing SSM state to fp16 cache.
-    Uses random bits to unbias the rounding error, which can improve
-    numerical stability for long sequences."""
-    mamba_cache_philox_rounds: int = 0
-    """Number of Philox PRNG rounds for stochastic rounding random number
-    generation. 0 uses the Triton default. Higher values improve randomness
-    quality at the cost of compute."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -182,7 +182,6 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
@@ -237,37 +236,19 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        if is_quantized_kv_cache(cache_dtype):
+        if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
-                "Using fp8 data type to store kv cache. It reduces the GPU "
+                "Using %s data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "Dynamic per-token-head scales will be computed at runtime.",
+                str(cache_dtype),
+            )
+        elif is_quantized_kv_cache(cache_dtype):
+            logger.info(
+                "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor."
+                "scaling factor",
+                str(cache_dtype),
             )
         return cache_dtype
-
-    def __post_init__(self):
-        if self.enable_mamba_cache_stochastic_rounding:
-            from vllm.platforms import current_platform
-
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache is only supported "
-                    "on NVIDIA CUDA platforms. Please do not specify  "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )
-            if not current_platform.is_device_capability_family(100):
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache requires compute "
-                    "capability 10.0 (data center Blackwell). The `cvt.rs` PTX "
-                    "instruction is not supported on your GPU. Please do not specify "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )
-            if self.mamba_ssm_cache_dtype != "float16":
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache requires "
-                    "the SSM cache to be float16. Please set it explicitly, "
-                    "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
-                    "stochastic rounding by not specifying "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )

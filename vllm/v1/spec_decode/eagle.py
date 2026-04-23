@@ -26,7 +26,6 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -48,6 +47,7 @@ from vllm.v1.spec_decode.utils import (
     eagle_prepare_next_token_padded_kernel,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
+    next_power_of_2,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
@@ -689,9 +689,7 @@ class SpecDecodeBaseProposer:
             max_num_tokens_per_request = (
                 cad.max_query_len + self.net_num_new_slots_per_request
             )
-            BLOCK_SIZE_TOKENS = min(
-                256, triton.next_power_of_2(max_num_tokens_per_request)
-            )
+            BLOCK_SIZE_TOKENS = min(256, next_power_of_2(max_num_tokens_per_request))
             num_blocks = (
                 max_num_tokens_per_request + BLOCK_SIZE_TOKENS - 1
             ) // BLOCK_SIZE_TOKENS
@@ -717,6 +715,7 @@ class SpecDecodeBaseProposer:
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
+
             copy_and_expand_eagle_inputs_kernel[grid](
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
@@ -899,7 +898,7 @@ class SpecDecodeBaseProposer:
         grid = (batch_size,)
 
         # Find the next power of 2 for block sizes
-        BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
+        BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
         eagle_prepare_next_token_padded_kernel[grid](
             sampled_token_ids,
             discard_request_mask,
@@ -1322,13 +1321,15 @@ class SpecDecodeBaseProposer:
             # handle multimodality
             assert hasattr(target_model, "config")
             if self.get_model_name(target_model) in [
-                "Qwen2_5_VLForConditionalGeneration",
-                "Qwen3VLForConditionalGeneration",
-                "Qwen3VLMoeForConditionalGeneration",
-                "HunYuanVLForConditionalGeneration",
+                "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
+                "HunYuanVLForConditionalGeneration",
+                "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
+                "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
+                "Gemma4ForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":

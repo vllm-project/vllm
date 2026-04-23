@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
+DEVICE_TYPE = current_platform.device_type
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -48,7 +49,7 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         model_config=model_config,
         cache_config=CacheConfig(),
         speculative_config=speculative_config,
-        device_config=DeviceConfig(device=current_platform.device_type),
+        device_config=DeviceConfig(device=DEVICE_TYPE),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
         scheduler_config=SchedulerConfig(
@@ -57,7 +58,7 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         ),
     )
 
-    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
+    return EagleProposer(vllm_config=vllm_config, device=DEVICE_TYPE)
 
 
 @mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
@@ -118,7 +119,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
 
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
     total_tokens = sum(seq_lens)
