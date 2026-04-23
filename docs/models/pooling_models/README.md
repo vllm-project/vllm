@@ -188,10 +188,10 @@ The input format is the same as [Embeddings API](embed.md#openai-compatible-embe
 
 Please use one of the more specific APIs or set the task directly when using the Pooling API, refer to the [table above](#offline-apis-corresponding-to-pooling-usages).
 
-Code example:
+Code examples:
 
-- [Online](../../../examples/pooling/reward/token_reward_online.py)
-- [Offline](../../../examples/pooling/reward/token_reward_offline.py)
+- [Online example](../../../examples/pooling/reward/token_reward_online.py)
+- [Offline example](../../../examples/pooling/reward/token_reward_offline.py)
 
 ### Examples
 

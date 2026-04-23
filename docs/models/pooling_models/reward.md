@@ -135,6 +135,10 @@ print(f"Data: {data!r}")
 
 Please refer to the [pooling API](README.md#pooling-api). Pooling task corresponding to reward model types refer to the [table above](#summary).
 
+## More examples
+
+More examples can be found here: [examples/pooling/reward](../../../examples/pooling/reward)
+
 ## Removed Features
 
 ### `LLM.reward`
