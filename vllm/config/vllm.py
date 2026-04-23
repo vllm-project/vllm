@@ -166,10 +166,10 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
-    """Enable MLA dual RMS norm fusion when AITer is available."""
-    from vllm._aiter_ops import rocm_aiter_ops
+    """Enable MLA dual RMS norm fusion when AITer has fused_qk_rmsnorm."""
+    from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
 
-    return rocm_aiter_ops.is_enabled()
+    return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -716,9 +716,7 @@ class VllmConfig:
         self.instance_id = f"{time.time_ns()}"
 
         if self.performance_mode != "balanced":
-            logger.info_once(
-                "Performance mode set to '%s'.", self.performance_mode, scope="local"
-            )
+            logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
 
@@ -818,7 +816,6 @@ class VllmConfig:
                     "Async scheduling not supported with %s-based "
                     "speculative decoding and will be disabled.",
                     self.speculative_config.method,
-                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             elif (
@@ -828,7 +825,6 @@ class VllmConfig:
                 logger.warning_once(
                     "Async scheduling is not compatible with "
                     "disable_padded_drafter_batch=True and will be disabled.",
-                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
@@ -836,7 +832,6 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
-                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -855,7 +850,6 @@ class VllmConfig:
                     logger.info_once(
                         "Disabling NCCL for DP synchronization "
                         "when using async scheduling.",
-                        scope="local",
                     )
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
@@ -870,7 +864,6 @@ class VllmConfig:
             logger.warning_once(
                 "Disabling cascade attention (not yet compatible with "
                 "async speculative decoding).",
-                scope="local",
             )
             self.model_config.disable_cascade_attn = True
 
@@ -1231,7 +1224,6 @@ class VllmConfig:
             self.model_config.disable_cascade_attn = True
             logger.warning_once(
                 "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
-                scope="local",
             )
 
         if self.parallel_config.use_ubatching:
@@ -1418,7 +1410,6 @@ class VllmConfig:
                     " performance. Consider increasing max_num_batched_tokens to"
                     " accommodate the additional draft token slots, or decrease"
                     " num_speculative_tokens or max_num_seqs.",
-                    scope="local",
                 )
 
             max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens

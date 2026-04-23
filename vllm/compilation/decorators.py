@@ -285,7 +285,7 @@ def _try_load_aot_compiled_fn(
     Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
     """
     try:
-        with monitor_torch_compile(model.vllm_config):
+        with monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder):
             with (
                 set_current_vllm_config(model.vllm_config),
                 open(aot_compilation_path, "rb") as f,
@@ -617,7 +617,9 @@ def _support_torch_compile(
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                with monitor_torch_compile(self.vllm_config):
+                with monitor_torch_compile(
+                    self.vllm_config, is_encoder=self._is_encoder
+                ):
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                     compilation_counter.num_aot_compiles += 1
                     # All compilation is done at this point, save the
@@ -631,6 +633,7 @@ def _support_torch_compile(
                     self.vllm_config,
                     "torch.compile and initial profiling/warmup "
                     "run together took %.2f s in total",
+                    is_encoder=self._is_encoder,
                 ):
                     output = TorchCompileWithNoGuardsWrapper.__call__(
                         self,  # type: ignore[arg-type]
@@ -665,7 +668,6 @@ def _support_torch_compile(
             logger.info_once(
                 "saved AOT compiled function to %s",
                 self._aot_compilation_path,
-                scope="local",
             )
         except Exception as e:
             logger.warning(
