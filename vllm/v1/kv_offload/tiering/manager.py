@@ -225,7 +225,7 @@ class TieringOffloadingManager(OffloadingManager):
                 return None
             if secondary_hit:
                 # Found in secondary — initiate promotion and signal retry
-                self._initiate_promotion(tier, [key], req_context)
+                self._initiate_promotion(tier, key, req_context)
                 return None
 
         return False
@@ -233,11 +233,11 @@ class TieringOffloadingManager(OffloadingManager):
     def _initiate_promotion(
         self,
         tier: SecondaryTierManager,
-        keys: list[OffloadKey],
+        key: OffloadKey,
         req_context: ReqContext,
     ):
         """
-        Initiate promotion of blocks from a secondary tier to the primary tier.
+        Initiate promotion of a block from a secondary tier to the primary tier.
 
         This method:
         1. Calls primary.prepare_write() to allocate space in primary tier
@@ -246,11 +246,11 @@ class TieringOffloadingManager(OffloadingManager):
 
         Args:
             tier: The secondary tier to promote from
-            keys: Blocks to promote
+            key: Block to promote
             req_context: Per-request context forwarded to primary.prepare_write().
         """
-        # Allocate space in primary tier for promoted blocks
-        primary_store_result = self.primary_tier.prepare_write(keys, req_context)
+        # Allocate space in primary tier for promoted block
+        primary_store_result = self.primary_tier.prepare_write([key], req_context)
 
         if primary_store_result is None:
             # Cannot allocate space in primary tier (full)
