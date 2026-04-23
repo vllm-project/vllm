@@ -7,6 +7,7 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,
@@ -43,11 +44,13 @@ def _run_ar(
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
-    tensor[0][dp_rank] = orig_num_tokens_per_ubatch
-    tensor[1][dp_rank] = padded_num_tokens_per_ubatch
-    tensor[2][dp_rank] = 1 if should_ubatch else 0
-    tensor[3][dp_rank] = cudagraph_mode
+    # Populate this rank's contribution on CPU to reduce GPU syncs.
+    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32)
+    tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
+    tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
+    tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
+    tensor_cpu[3][dp_rank] = cudagraph_mode
+    tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -134,27 +137,32 @@ def _synchronize_dp_ranks(
         parallel_config=parallel_config,
     )
 
-    # Synchronize cudagraph_mode across ranks first (take min).
-    # This is needed before DP padding decision since we use the synced
-    # cudagraph mode to determine whether DP padding is needed.
-    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+    # The post-all-reduce reads (`.item()` / `.cpu()`) are inherently
+    # GPU->CPU syncs: the values drive Python-level control flow for
+    # ubatching, DP padding, and cudagraph-mode selection.
+    with gpu_sync_allowed():
+        # Synchronize cudagraph_mode across ranks first (take min).
+        # This is needed before DP padding decision since we use the synced
+        # cudagraph mode to determine whether DP padding is needed.
+        synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
 
-    # Check conditions for microbatching
-    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
+        # Check conditions for microbatching
+        should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
-    # DP padding is needed when cudagraph is enabled (synced across ranks)
-    # or when ubatching/DBO is active (ubatching requires uniform batch
-    # sizes across DP ranks currently).
-    # Use the synced runtime cudagraph mode rather than the compilation config
-    # so we can avoid padding when cudagraph is not enabled for this step.
-    should_dp_pad = synced_cudagraph_mode != 0 or should_ubatch
+        # DP padding is needed when cudagraph is enabled (synced across ranks)
+        # or when ubatching/DBO is active (ubatching requires uniform batch
+        # sizes across DP ranks currently).
+        # Use the synced runtime cudagraph mode rather than the compilation
+        # config so we can avoid padding when cudagraph is not enabled for
+        # this step.
+        should_dp_pad = synced_cudagraph_mode != 0 or should_ubatch
 
-    # Pad all DP ranks up to the maximum token count across ranks if
-    # should_dp_pad is True
-    num_tokens_after_padding = _post_process_dp_padding(
-        tensor,
-        should_dp_pad,
-    )
+        # Pad all DP ranks up to the maximum token count across ranks if
+        # should_dp_pad is True
+        num_tokens_after_padding = _post_process_dp_padding(
+            tensor,
+            should_dp_pad,
+        )
 
     return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
