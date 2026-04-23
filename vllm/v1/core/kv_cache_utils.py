@@ -1313,24 +1313,16 @@ def _report_kv_cache_config(
         kv_cache_config: The resolved KV cache configuration
     """
     # Log the KV cache size and maximum concurrency.
-    # Compute max_concurrency first since it uses the correct block accounting
-    # for hybrid models (shared tensor pool, heterogeneous block sizes).
+    # get_max_concurrency_for_kv_cache_config uses the correct block accounting
+    # for hybrid models (shared tensor pool, heterogeneous block sizes) and
+    # already reflects context-parallel sharding: FullAttentionSpec's
+    # max_memory_usage_bytes divides max_model_len by dcp * pcp, so
+    # max_concurrency * max_model_len already yields the system-wide total.
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
     )
     max_model_len = vllm_config.model_config.max_model_len
     num_tokens = int(max_concurrency * max_model_len)
-    dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-    if pcp_size * dcp_size > 1:
-        num_tokens *= pcp_size * dcp_size
-        logger.info(
-            "Multiplying the GPU KV cache size by the cp_world_size %d "
-            "(pcp_world_size %d * dcp_world_size %d).",
-            pcp_size * dcp_size,
-            pcp_size,
-            dcp_size,
-        )
     num_tokens_str = f"{num_tokens:,}"
     logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{max_model_len:,}"
