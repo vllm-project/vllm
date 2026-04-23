@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+from collections import defaultdict
 
 import pytest
 import regex as re
@@ -52,6 +53,16 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
         llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
     )
 
+    # Fetch match table from each worker via RPC and sum across workers.
+    worker_tables = llm.llm_engine.engine_core.collective_rpc(
+        "get_compilation_match_table"
+    )
+    combined: defaultdict[str, int] = defaultdict(int)
+    for table in worker_tables:
+        for k, v in table.items():
+            combined[k] += v
+    return dict(combined)
+
 
 @pytest.fixture
 def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
@@ -73,10 +84,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         rocm_aiter_ops.refresh_env_variables()
 
         # Filter here to reduce code duplication
+        backend_name = attn_backend.backend.name.lower()
         requires_mla = "deepseek" in model_name.lower()
-        is_mla = "mla" in attn_backend.backend.name.lower()
+        is_mla = "mla" in backend_name
+        # DeepSeek V3.2 uses sparse MLA
+        requires_sparse = "v3.2" in model_name.lower()
+        is_sparse = "sparse" in backend_name
 
-        if requires_mla != is_mla:
+        if requires_mla != is_mla or requires_sparse != is_sparse:
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
@@ -101,6 +116,22 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
 
+        # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
+        # decompose_auto_functionalized when +rotary_embedding is forced into
+        # the compile graph. Disable qk_norm+rope fusion (which auto-enables
+        # +rotary_embedding) for this combo to avoid the known torch bug.
+        # TODO: remove once upstream torch fix lands.
+        if requires_sparse:
+            if "pass_config" in compilation_config:
+                compilation_config["pass_config"].enable_qk_norm_rope_fusion = False
+                matches_check = [m for m in matches_check if m != "norm_rope_fusion"]
+            # DSv3.2 sparse indexer uses persistent_topk with k=config.index_topk
+            # (2048 for the default config). max_model_len must be >= index_topk
+            # or the topk kernel raises "k out of range" at runtime.
+            model_kwargs["max_model_len"] = max(
+                model_kwargs.get("max_model_len", 0), 2048
+            )
+
         # Always compile the full graph instead of piecewise
         if not compilation_config["use_inductor_graph_partition"]:
             compilation_config["splitting_ops"] = []
@@ -113,7 +144,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         )
 
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
-            run_model(full_compilation_config, model_name, **model_kwargs)
+            match_table = run_model(full_compilation_config, model_name, **model_kwargs)
 
         num_compile_ranges = len(full_compilation_config.get_compile_ranges())
         assert num_compile_ranges in [1, 2, 3]
@@ -155,11 +186,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             else:
                 num_ranges_activated = num_compile_ranges
 
+            # TODO: Remove log counting in unit tests
+            # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            assert len(log_matches) == n_expected, (
-                f"Could not find {n_expected} {match_name} "
-                f"(found {len(log_matches)}) in:\n {log_holder.text}"
-            )
+            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
+                assert len(log_matches) == n_expected, (
+                    f"Could not find {n_expected} {match_name} "
+                    f"(found {len(log_matches)}) in:\n {log_holder.text}"
+                )
 
             expected_matches = getattr(matches, match_name)
 
@@ -214,6 +248,21 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Expecting 0 ar_rms on "
                     f"{tp_size * (num_ranges_activated - 1)} large-range "
                     f"entries (SP took precedence), found: {log_matches}"
+                )
+
+            elif match_name == "act_quant_fusion":
+                actual_match = match_table.get("activation_quant_fusion_pass", 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
+                )
+            elif match_name == "attn_quant_fusion":
+                actual_match = match_table.get(
+                    "attn_quant_fusion", 0
+                ) + match_table.get("mla_attn_quant_fusion", 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
                 )
             else:
                 expected_matches_list = [expected_matches] * n_expected

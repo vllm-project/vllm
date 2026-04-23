@@ -8,7 +8,6 @@ import os
 import random
 import time
 import warnings
-from dataclasses import fields
 from typing import Any
 
 import torch
@@ -18,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
+    ASRDataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
@@ -53,7 +53,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+    llm = LLM.from_engine_args(engine_args)
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -141,7 +141,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+    llm = LLM.from_engine_args(engine_args)
 
     assert all(
         llm.llm_engine.model_config.max_model_len
@@ -415,6 +415,12 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = ASRDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["asr_min_audio_len_sec"] = args.asr_min_audio_len_sec
+            sample_kwargs["asr_max_audio_len_sec"] = args.asr_max_audio_len_sec
     elif args.dataset_name == "prefix_repetition":
         dataset_cls = PrefixRepetitionRandomDataset
         sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
@@ -558,6 +564,7 @@ def validate_args(args):
         elif args.dataset_path in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
@@ -841,6 +848,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
+
+    # ASR dataset
+    parser.add_argument(
+        "--asr-min-audio-len-sec",
+        type=float,
+        default=0.0,
+        help="Minimum audio duration in seconds for ASR dataset filtering.",
+    )
+    parser.add_argument(
+        "--asr-max-audio-len-sec",
+        type=float,
+        default=float("inf"),
+        help="Maximum audio duration in seconds for ASR dataset filtering.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

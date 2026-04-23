@@ -135,7 +135,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "DeepEPLLPrepareAndFinalize is setup to dispatch raw/unquantized "
                 f"activations despite ({fused_experts.__class__.__name__}) being able "
                 "to support quantized activations.",
-                scope="local",
             )
 
     def num_dispatchers(self) -> int:
@@ -325,7 +324,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
                 **(
                     dict(x_global_scale=qc_a1_gscale_or_scale)
-                    if qc_a1_gscale_or_scale is not None
+                    if qc_a1_gscale_or_scale is not None and nvfp4_dispatch
                     else dict()
                 ),
                 async_finish=False,

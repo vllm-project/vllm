@@ -20,7 +20,7 @@ variable "NVCC_THREADS" {
 }
 
 variable "TORCH_CUDA_ARCH_LIST" {
-  default = "8.0 8.9 9.0 10.0"
+  default = "8.0 8.9 9.0 10.0 11.0 12.0"
 }
 
 variable "COMMIT" {
@@ -31,6 +31,10 @@ variable "COMMIT" {
 
 group "default" {
   targets = ["openai"]
+}
+
+group "all" {
+  targets = ["openai", "openai-ubuntu2404"]
 }
 
 # Base targets
@@ -73,4 +77,28 @@ target "openai" {
   target   = "vllm-openai"
   tags     = ["vllm:openai"]
   output   = ["type=docker"]
+}
+
+# Ubuntu 24.04 targets
+
+target "test-ubuntu2404" {
+  inherits = ["_common", "_labels"]
+  target   = "test"
+  tags     = ["vllm:test-ubuntu24.04"]
+  args = {
+    UBUNTU_VERSION          = "24.04"
+    GDRCOPY_OS_VERSION      = "Ubuntu24_04"
+  }
+  output = ["type=docker"]
+}
+
+target "openai-ubuntu2404" {
+  inherits = ["_common", "_labels"]
+  target   = "vllm-openai"
+  tags     = ["vllm:openai-ubuntu24.04"]
+  args = {
+    UBUNTU_VERSION          = "24.04"
+    GDRCOPY_OS_VERSION      = "Ubuntu24_04"
+  }
+  output = ["type=docker"]
 }

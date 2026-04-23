@@ -40,7 +40,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt8Static,
     kMxfp4Static,
+    kMxfp8Static,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -582,7 +585,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kFp8StaticChannelSym,
             kFp8StaticTensorSym,
             kMxfp4Static,
+            kMxfp8Static,
             kNvfp4Static,
+            kInt4Static,
+            kInt8Static,
         ]
         return weight_key in SUPPORTED_W
 
@@ -609,7 +615,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @property
     def quant_type_id(self) -> int:
-        # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
         if self.quant_config.use_int4_w4a16:
             return scalar_types.uint4b8.id
         elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
@@ -715,7 +720,7 @@ class MarlinExperts(MarlinExpertsBase):
     ):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
-        return fused_marlin_moe(
+        fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,

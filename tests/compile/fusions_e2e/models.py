@@ -58,6 +58,18 @@ TRITON_MLA_ATTN = pytest.param(
     id="TRITON_MLA",
 )
 
+FLASHMLA_SPARSE_ATTN = pytest.param(
+    AttentionBackendCase(
+        backend=AttentionBackendEnum.FLASHMLA_SPARSE,
+        model_kwargs=dict(kv_cache_dtype="fp8_ds_mla"),
+    ),
+    id="FLASHMLA_SPARSE",
+    marks=pytest.mark.skipif(
+        not is_blackwell(),
+        reason="FlashMLA Sparse requires Blackwell",
+    ),
+)
+
 # Models
 llama3_8b = ModelFusionInfo(
     model_name="meta-llama/Llama-3.1-8B-Instruct",
@@ -141,6 +153,18 @@ qwen3_a3b_fp8 = ModelFusionInfo(
     ),
 )
 
+deepseek_coder_v2_lite_fp8 = ModelFusionInfo(
+    model_name="RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8",
+    matches=lambda n_layers: Matches(
+        # first_k_dense_replace=1; MoE hides most rms+quant sites
+        rms_quant_fusion=1,
+        act_quant_fusion=min(1, n_layers),  # dense layers only
+        # MLA attn + static FP8 quant
+        attn_quant_fusion=n_layers,
+        ar_rms_fusion=n_layers * 2 + 1,
+    ),
+)
+
 deepseek_v3_fp8 = ModelFusionInfo(
     model_name="deepseek-ai/DeepSeek-V3",
     matches=lambda n_layers: Matches(
@@ -150,16 +174,36 @@ deepseek_v3_fp8 = ModelFusionInfo(
         # - post_attn_layernorm + MLP
         # 2 per MoE layer (remaining) due to MoE wrapping
         rms_quant_fusion=n_layers * 2 + min(3, n_layers),  # add for 3 dense layers
-        # TODO silu+block quant
-        #  act_quant_fusion=min(3, n_layers), # dense layers only
-        act_quant_fusion=0,
-        # MLA attn + quant not supported yet:
-        # https://github.com/vllm-project/vllm/issues/35792
-        attn_quant_fusion=0,
+        # silu+block quant
+        act_quant_fusion=min(3, n_layers),  # dense layers only
+        # MLA attn + per-group FP8 quant
+        attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
         # TODO
         # sequence_parallel= n_layers * 2 + 1,
         # async_tp=n_layers * 2,
+    ),
+)
+
+deepseek_r1_fp4 = ModelFusionInfo(
+    model_name="nvidia/DeepSeek-R1-0528-NVFP4-v2",
+    matches=lambda n_layers: Matches(
+        rms_quant_fusion=0,
+        act_quant_fusion=min(3, n_layers),
+        attn_quant_fusion=n_layers,
+        ar_rms_fusion=n_layers * 2 + 1,
+    ),
+)
+
+deepseek_v32_fp4 = ModelFusionInfo(
+    model_name="nvidia/DeepSeek-V3.2-NVFP4",
+    matches=lambda n_layers: Matches(
+        rms_quant_fusion=0,
+        # silu+quant on dense layers only; MoE hides the act+quant site
+        act_quant_fusion=min(3, n_layers),
+        # MLA attn + NVFP4 output quant fuses on sparse MLA output path
+        attn_quant_fusion=n_layers,
+        ar_rms_fusion=n_layers * 2 + 1,
     ),
 )
 

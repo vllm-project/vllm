@@ -514,7 +514,6 @@ async def test_header_dp_rank_argument():
         serving_render = OpenAIServingRender(
             model_config=engine.model_config,
             renderer=engine.renderer,
-            io_processor=engine.io_processor,
             model_registry=models.registry,
             request_logger=None,
             chat_template=None,

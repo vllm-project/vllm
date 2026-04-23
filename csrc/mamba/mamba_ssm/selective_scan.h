@@ -21,7 +21,7 @@ struct SSMParamsBase {
     int dim_ngroups_ratio;
     bool is_variable_B;
     bool is_variable_C;
-    int64_t pad_slot_id;
+    int64_t null_block_id;
 
     bool delta_softplus;
     bool cache_enabled;

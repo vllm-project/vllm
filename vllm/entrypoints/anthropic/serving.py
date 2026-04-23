@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
-# https://github.com/vllm/vllm/entrypoints/openai/serving_chat.py
+# https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/serving.py
 
 """Anthropic Messages API serving handler"""
 
@@ -72,6 +72,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -87,6 +88,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self.stop_reason_map = {
             "stop": "end_turn",
@@ -168,7 +170,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             else:
                 cls._convert_message_content(msg, openai_msg, openai_messages)
 
-            openai_messages.append(openai_msg)
+            if not (msg.role == "user" and "content" not in openai_msg):
+                openai_messages.append(openai_msg)
 
     @classmethod
     def _convert_message_content(
@@ -320,6 +323,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return ChatCompletionRequest(
                 model=anthropic_request.model,
                 messages=openai_messages,
+                chat_template_kwargs=anthropic_request.chat_template_kwargs,
             )
 
         return ChatCompletionRequest(
@@ -332,6 +336,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
     @classmethod
@@ -795,12 +800,12 @@ class AnthropicServingMessages(OpenAIServingChat):
         if isinstance(result, ErrorResponse):
             return result
 
-        _, engine_prompts = result
+        _, engine_inputs = result
 
         input_tokens = sum(  # type: ignore
-            len(prompt["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
-            for prompt in engine_prompts
-            if "prompt_token_ids" in prompt
+            len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
+            for engine_input in engine_inputs
+            if "prompt_token_ids" in engine_input
         )
 
         response = AnthropicCountTokensResponse(
