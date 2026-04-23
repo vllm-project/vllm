@@ -18,6 +18,7 @@ torch_compile_start_time: float = 0.0
 def monitor_torch_compile(
     vllm_config: VllmConfig,
     message: str = "torch.compile took %.2f s in total",
+    is_encoder: bool = False,
 ) -> Generator[None, None, None]:
     """Context manager that times torch.compile and manages depyf debugging.
 
@@ -45,6 +46,10 @@ def monitor_torch_compile(
     else:
         total_compile_time = time.perf_counter() - torch_compile_start_time
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            if is_encoder:
+                compilation_config.encoder_compilation_time += total_compile_time
+            else:
+                compilation_config.compilation_time += total_compile_time
             logger.info_once(message, total_compile_time)
     finally:
         if depyf_cm is not None:
