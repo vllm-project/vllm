@@ -45,6 +45,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    get_forward_context,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -3797,6 +3798,10 @@ class GPUModelRunner(
                         plt_loop_num_idx=plt_loop_num_idx,
                         prev_model_output=plt_last_model_output,
                     )
+                    # Each PLT loop iteration re-traverses all MoE layers, so
+                    # reset the index so the custom ops index all_moe_layers
+                    # from the beginning again.
+                    get_forward_context().moe_layer_index = 0
 
                     model_output = self._model_forward(
                         input_ids=input_ids,
@@ -5169,6 +5174,7 @@ class GPUModelRunner(
                 if self.plt_loop_nums > 1:
                     for plt_loop_num_idx in range(self.plt_loop_nums):
                         model_kwargs["loop_num_idx"] = plt_loop_num_idx
+                        get_forward_context().moe_layer_index = 0
                         outputs = self.model(
                             input_ids=input_ids,
                             positions=positions,

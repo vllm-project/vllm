@@ -138,6 +138,7 @@ _TEXT_GENERATION_MODELS = {
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "IQuestPLTCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "IquestMoeForCausalLM": ("iquest_moe", "IquestMoeForCausalLM"),
+    "IquestMoeV12ForCausalLM": ("iquest_moe_v12", "IquestMoeV12ForCausalLM"),
     "IquestMoeV11ForCausalLM": ("iquest_moe_v11", "IquestMoeV11ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
