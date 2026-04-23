@@ -69,7 +69,6 @@ class MeanPool(SequencePoolingMethod):
         )
 
         prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
-
         num_seqs = prompt_lens_cpu.numel()
         hidden_size = hidden_states.shape[-1]
 
@@ -84,7 +83,6 @@ class MeanPool(SequencePoolingMethod):
             torch.arange(num_seqs, dtype=torch.long),
             prompt_lens_cpu,
         ).to(hidden_states.device, non_blocking=True)
-
         prompt_lens = prompt_lens_cpu.to(
             hidden_states.device, dtype=torch.int64, non_blocking=True
         )
