@@ -18,5 +18,5 @@ class WeightTransferConfig:
     - "ipc": CUDA IPC handles for same-node weight sharing
     - "wpi": Weight Propagation Interface — driver-managed NCCL broadcast
              with persistent VRAM buffers and zero-copy FD sharing.
-             Requires `wpi_verl_plugin` package.
+             Requires `wpi_client` package.
     """
