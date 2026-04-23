@@ -13,13 +13,12 @@ import pytest
 import torch
 
 import vllm.kernels  # noqa: F401 to register kernels
-from vllm.ir.ops.layernorm import rms_norm
-
 from tests.ir.ir_test_utils import (
     assert_op_e2e_correctness,
     assert_supports_args_returns_bool,
     supported_providers,
 )
+from vllm.ir.ops.layernorm import rms_norm
 
 
 class TestRmsNormLowering:
@@ -29,8 +28,12 @@ class TestRmsNormLowering:
     def test_supports_args_returns_bool(self, provider: str):
         """Verify supports_args returns bool with unbacked SymInts."""
         assert_supports_args_returns_bool(
-            rms_norm, provider, num_tokens=8, hidden_size=64,
-            dtype=torch.bfloat16, epsilon=1e-5
+            rms_norm,
+            provider,
+            num_tokens=8,
+            hidden_size=64,
+            dtype=torch.bfloat16,
+            epsilon=1e-5,
         )
 
 

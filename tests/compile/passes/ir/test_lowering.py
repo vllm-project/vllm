@@ -181,5 +181,3 @@ class TestFakeOpLowering:
             # This should NOT be a bool - it's a SymBool (Eq(u0, 8))
             with pytest.raises(AssertionError, match="isinstance"):
                 assert isinstance(result, bool)
-
-

@@ -15,6 +15,7 @@ import torch
 from torch import nn
 
 import vllm.kernels  # noqa: F401 to register kernels
+from tests.compile.backend import TestBackend
 from vllm import ir
 from vllm.compilation.passes.ir.lowering_pass import (
     VllmIRLoweringPass,
@@ -22,9 +23,6 @@ from vllm.compilation.passes.ir.lowering_pass import (
 from vllm.config import get_current_vllm_config
 from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
-
-from tests.compile.backend import TestBackend
-
 
 # ============================================================
 # Common test parameters
@@ -199,5 +197,3 @@ def assert_op_e2e_correctness(
     torch.testing.assert_close(
         output, output_no_lowering, atol=tolerance["atol"], rtol=tolerance["rtol"]
     )
-
-

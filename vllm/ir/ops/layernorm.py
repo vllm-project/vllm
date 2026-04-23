@@ -23,10 +23,7 @@ def rms_norm(
 
 @rms_norm.register_input_generator
 def _rms_norm_input_generator(
-    num_tokens: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    epsilon: float,
+    num_tokens: int, hidden_size: int, dtype: torch.dtype, epsilon: float = 1e-5
 ) -> tuple:
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     weight = torch.randn(hidden_size, dtype=dtype)
