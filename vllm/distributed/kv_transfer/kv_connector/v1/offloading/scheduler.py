@@ -485,13 +485,16 @@ class OffloadingConnectorScheduler:
                 connectors output.
         """
         meta = connector_output.kv_connector_worker_meta
-        assert isinstance(meta, OffloadingWorkerMetadata)
-
         # Per-job completion: fire complete_store/complete_load for
         # cache-reuse as soon as the DMA finishes. The job stays in
         # transfer_jobs (and self._jobs) until the worker's per-request
         # ack arrives via finished_sending / finished_recving, which is
-        # what the base scheduler uses to free held blocks.
+        # what the base scheduler uses to free held blocks. Meta is None
+        # on steps where the output only carries request-level acks /
+        # invalid_block_ids — still need to run the ack cleanup below.
+        if not isinstance(meta, OffloadingWorkerMetadata):
+            assert meta is None
+            meta = OffloadingWorkerMetadata()
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             job_status = self._jobs.get(job_id)
