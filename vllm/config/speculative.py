@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "hy_v3_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -363,6 +364,13 @@ class SpeculativeConfig:
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+
+        if hf_config.model_type == "hy_v3":
+            hf_config.model_type = "hy_v3_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+            )
 
         return hf_config
 

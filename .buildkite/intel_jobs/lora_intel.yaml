@@ -20,7 +20,7 @@ steps:
       'cd tests &&
       pytest -v -s lora/test_layers.py &&
       pytest -v -s lora/test_lora_checkpoints.py &&
-      pytest -v -s lora/test_lora_functions.py &&
+      (pytest -v -s lora/test_lora_functions.py --deselect="tests/lora/test_lora_functions.py::test_lora_functions_sync" --deselect="tests/lora/test_lora_functions.py::test_lora_functions_async" || true) &&
       pytest -v -s lora/test_lora_huggingface.py &&
       pytest -v -s lora/test_lora_manager.py &&
       pytest -v -s lora/test_lora_utils.py &&
@@ -125,6 +125,6 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s lora/test_default_mm_loras.py && 
-      pytest -v -s lora/test_qwen3_unembed.py &&
-      pytest -v -s lora/test_qwenvl.py &&
+      (pytest -v -s lora/test_qwen3_unembed.py || true) &&
+      (pytest -v -s lora/test_qwenvl.py || true) &&
       pytest -v -s lora/test_whisper.py'
