@@ -185,7 +185,7 @@ def rocm_unquantized_gemm_impl(
             out = ops.LLMM1(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    if rocm_aiter_ops.is_linear_enabled():
+    if rocm_aiter_ops.is_linear_enabled() and rocm_aiter_ops.is_tgemm_enabled():
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)
