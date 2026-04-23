@@ -443,7 +443,7 @@ class OffloadingConnectorScheduler:
 
             # All workers reported — job is complete.
             self._jobs.pop(job_id)
-            req_status = self._req_status.get[job_status.req_id]
+            req_status = self._req_status[job_status.req_id]
 
             req_status.transfer_jobs.remove(job_id)
             if job_status.is_store:
@@ -453,8 +453,8 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            if not req_status.transfer_jobs:
-                self._req_status.pop(job_status.req_id, None)
+            if not req_status.transfer_jobs and req_status.req.is_finished():
+                self._req_status.pop(job_status.req_id)
 
     def request_finished(
         self,
@@ -479,10 +479,10 @@ class OffloadingConnectorScheduler:
         if req_status is None:
             return False, None
 
-        request_being_stored = bool(req_status.transfer_jobs)
-        if not request_being_stored:
+        req_has_transfers = bool(req_status.transfer_jobs)
+        if not req_has_transfers:
             self._req_status.pop(req_id, None)
-        return request_being_stored, None
+        return req_has_transfers, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         """Take the KV cache events from the connector.
