@@ -739,9 +739,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        cos_thw = cos_thw[window_index_thw, :, :]
+        # window_index_thw is built on CPU; upload non-blocking so the gathers
+        # below don't force a synchronous H2D for the index tensor.
+        window_index_thw_dev = window_index_thw.to(cos_thw.device, non_blocking=True)
+        cos_thw = cos_thw[window_index_thw_dev, :, :]
         cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
-        sin_thw = sin_thw[window_index_thw, :, :]
+        sin_thw = sin_thw[window_index_thw_dev, :, :]
         sin_thw = sin_thw.flatten(start_dim=0, end_dim=1)
 
         cu_seqlens_thw = torch.repeat_interleave(
