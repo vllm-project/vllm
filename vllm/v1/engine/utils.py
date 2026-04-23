@@ -1157,7 +1157,6 @@ def set_domain_device_control_env_var(
 class DomainCoreEngineProcManager(CoreEngineProcManager):
     def __init__(
         self,
-        target_fn: Callable,
         local_engine_count: int,
         start_index: int,
         local_start_index: int,
@@ -1182,6 +1181,10 @@ class DomainCoreEngineProcManager(CoreEngineProcManager):
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
+        is_dp = vllm_config.parallel_config.data_parallel_size > 1
+
+        from vllm.v1.engine.core import EngineCoreProc
+
         self.processes: list[BaseProcess] = []
         local_domain_ranks = []
         for index in range(local_engine_count):
@@ -1203,36 +1206,31 @@ class DomainCoreEngineProcManager(CoreEngineProcManager):
 
             self.processes.append(
                 context.Process(
-                    target=target_fn,
-                    name=f"EngineCore_domain{global_index}",
+                    target=EngineCoreProc.run_domain_engine_core,
+                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs,
                 )
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         domin_parallel = dp_per_domain > 1
 
         try:
             for proc, local_domain_rank in zip(self.processes, local_domain_ranks):
                 """set_device_control_env_var should be set with dycp parallel config"""
-                with (
-                    set_domain_device_control_env_var(vllm_config, local_domain_rank)
-                    if (
-                        data_parallel and domin_parallel
-                        and (
-                            not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.use_ray
-                        )
-                    )
-                    else contextlib.nullcontext()
+                if is_dp and domin_parallel and (
+                    not current_platform.is_cuda_alike()
+                    or vllm_config.parallel_config.use_ray
                 ):
+                    with set_domain_device_control_env_var(vllm_config, local_domain_rank):
+                        proc.start()
+                else:
                     proc.start()
         finally:
               # Kill other procs if not all are running.
             if self.finished_procs():
-                self.close()
+                self.shutdown()
 
 
 @contextlib.contextmanager
@@ -1240,6 +1238,7 @@ def launch_domain_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool,
+    addresses: EngineZmqAddresses,
     num_api_servers: int = 1,
 ) -> Iterator[
     tuple[
@@ -1248,7 +1247,7 @@ def launch_domain_core_engines(
         EngineZmqAddresses,
     ]
 ]:
-    """ 
+    """
         Launch domain engine core and domain coordinator process as needed.
         Now, domain coordinator is not implemented yet.
     """
@@ -1270,24 +1269,6 @@ def launch_domain_core_engines(
     local_engine_count = local_dp_size // dp_per_domain
 
     local_engines_only = parallel_config.local_engines_only
-
-
-    # offline_mode = local_dcp_start_rank is not None
-
-    client_local_only = (
-        local_engines_only or (local_engine_count == domain_size)
-    )
-
-    addresses = EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-    )
 
     run_coordinator = vllm_config.needs_dp_coordinator and domain_rank == 0
 
@@ -1327,6 +1308,10 @@ def launch_domain_core_engines(
         local_engines_only or (local_engine_count == domain_size)
     )
 
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        handshake_local_only = False
+
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port
     )
@@ -1347,7 +1332,6 @@ def launch_domain_core_engines(
         # Start local engines.
         if local_engine_count:
             local_engine_manager = DomainCoreEngineProcManager(
-                EngineCoreProc.run_domain_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,

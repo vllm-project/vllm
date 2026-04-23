@@ -191,7 +191,7 @@ class ParallelConfig:
     processed in a single batch."""
 
     disable_nccl_for_dp_synchronization: bool | None = Field(default=None)
-    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
+    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py
     to use Gloo instead of NCCL for its all reduce.
 
     Defaults to True when async scheduling is enabled, False otherwise.
@@ -230,13 +230,13 @@ class ParallelConfig:
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
     master_addr: str = "127.0.0.1"
-    """distributed master address for multi-node distributed 
+    """distributed master address for multi-node distributed
     inference when distributed_executor_backend is mp."""
     master_port: int = 29501
-    """distributed master port for multi-node distributed 
+    """distributed master port for multi-node distributed
     inference when distributed_executor_backend is mp."""
     node_rank: int = 0
-    """distributed node rank for multi-node distributed 
+    """distributed node rank for multi-node distributed
     inference when distributed_executor_backend is mp."""
     nnodes: int = 1
     """num of nodes for multi-node distributed
@@ -265,7 +265,7 @@ class ParallelConfig:
     It is a list of list[int], with each inner list contains a set of 3 ports
     to be used for setting up the stateless CPU/device/TCPStore groups
     in StatelessGroupCoordinator. The number of inner lists is equal to
-    the number of DP groups, 
+    the number of DP groups,
     i.e., len(self._stateless_dp_group_port_list) == world_size_across_dp // dp_size,
     and len(self._stateless_dp_group_port_list[i]) == 3 for all i.
     """
@@ -539,7 +539,9 @@ class ParallelConfig:
         self, return_store: Literal[True] = ...
     ) -> tuple[ProcessGroup, Store]: ...
 
-    def stateless_init_domain_group(self) -> ProcessGroup:
+    def stateless_init_domain_group(
+        self, return_store: bool = False
+    ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         from torch.distributed import DistNetworkError
 
         from vllm.distributed.utils import (
@@ -557,7 +559,8 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.domain_parallel_rank,
                     self.data_parallel_size // self.dp_per_domain,
-                    backend=current_platform.dist_backend,
+                    backend="gloo",
+                    return_store=return_store,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -653,7 +656,7 @@ class ParallelConfig:
     @property
     def node_rank_within_domain(self) -> int:
         return self.node_rank % self.nnodes_within_domain
-    
+
     @property
     def nnodes_within_domain(self) -> int:
         """

@@ -779,204 +779,6 @@ class EngineCore:
     ):
         raise NotImplementedError
 
-    @contextmanager
-    def log_domain_error_detail(self, scheduler_outputs: list[SchedulerOutput | None]):
-        """Execute the model and log detailed info on failure."""
-        try:
-            yield
-        except Exception as err:
-            # We do not want to catch BaseException here since we're only
-            # interested in dumping info when the exception is due to an
-            # error from execute_model itself.
-
-            # NOTE: This method is exception-free
-            if isinstance(scheduler_outputs,list):
-                for sched_out in scheduler_outputs:
-                    if sched_out is False:
-                        continue
-
-                    dump_engine_exception(
-                        self.vllm_config, sched_out, self.scheduler.make_stats()
-                    )
-            raise err
-
-    def _log_domain_error_callback(self, scheduler_outputs: list[SchedulerOutput]):
-        """Log error details of a future that's not expected to return a result."""
-
-        def callback(f, sched_outputs=scheduler_outputs):
-            with self.log_domain_error_detail(sched_outputs):
-                result = f.result()
-                assert None in result
-            return result
-
-        return callback
-
-    def step_domain_with_batch_queue(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-
-        batch_queue = self.batch_queue
-        assert batch_queue is not None
-
-        # Try to schedule a new batch if the batch queue is not full, but
-        # the scheduler may return an empty batch if all requests are scheduled.
-        # Note that this is not blocking.
-        assert len(batch_queue) < self.batch_queue_size
-
-        model_executed = False
-        deferred_scheduler_output = None
-        if self.scheduler.has_requests():
-            scheduler_outputs = self.scheduler.schedule()
-
-            exec_future = self.model_executor.execute_model(
-                scheduler_outputs, non_block=True
-            )
-            if not self.is_ec_producer:
-                model_executed =  any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs])
-
-            if self.is_pooling_model or not model_executed:
-                future = exec_future
-            else:
-                exec_future.add_done_callback(self._log_domain_error_callback(scheduler_outputs))
-
-                """
-                pending_structured_output_tokens is always False due to unsupported structured output
-                """
-                if any([not so.pending_structured_output_tokens for so in scheduler_outputs if so is not None]):
-                    grammar_outputs = [
-                        None if so.total_num_scheduled_tokens != 0 else True for so in scheduler_outputs
-                    ]
-                    future = self.model_executor.sample_tokens(
-                        grammar_outputs, non_block=True
-                    )
-                else:
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_outputs
-                    # We aren't waiting for any tokens, get any grammar output
-                    # and sample immediately.
-            if not deferred_scheduler_output:
-                # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_outputs))
-                if (
-                    model_executed
-                    and len(batch_queue) < self.batch_queue_size
-                    and not batch_queue[-1][0].done()
-                ):
-                    # Don't block on next worker response unless the queue is full
-                    # or there are no more requests to schedule.
-                    return None, True
-
-        elif not batch_queue:
-            # Queue is empty. We should not reach here since this method should
-            # only be called when the scheduler contains requests or the queue
-            # is non-empty.
-            return None, False
-
-        # Block until the next result is available.
-        future, scheduler_outputs = batch_queue.pop()
-        with self.log_domain_error_detail(scheduler_outputs):
-            model_outputs = future.result()
-
-        # Before processing the model output, process any aborts that happened
-        # during the model execution.
-        self._process_aborts_queue()
-
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_outputs, model_outputs
-        )
-
-        return engine_core_outputs, model_executed
-
-    def step_domain(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        """Schedule, execute, and make output.
-        Returns tuple of outputs and a flag indicating whether the model
-        was executed.
-        """
-
-        # Check for any requests remaining in the scheduler - unfinished,
-        # or finished and not yet removed from the batch.
-        if not self.scheduler.has_requests():
-            return {}, False
-        scheduler_outputs = self.scheduler.schedule()
-
-        future = self.model_executor.execute_model(scheduler_outputs, non_block=True)
-        grammar_output = [None if so.total_num_scheduled_tokens != 0 else True for so in scheduler_outputs]
-
-        with self.log_domain_error_detail(scheduler_outputs):
-            model_outputs = future.result()
-            if None in model_outputs:
-                model_outputs = self.model_executor.sample_tokens(grammar_output)
-
-        self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_outputs, model_outputs
-        )
-
-        model_executed = any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs])
-        return engine_core_outputs, model_executed
-
-    @staticmethod
-    def run_domain_engine_core(*args, domain_rank: int = 0, local_domain_rank: int = 0, **kwargs):
-        """Launch EngineCore busy loop in background process."""
-
-        logger.info("*" * 25)
-        logger.info(f"{'Run domain engine core !':^25}")
-        logger.info("*" * 25)
-
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
-        shutdown_requested = False
-
-        # Ensure we can serialize transformer config after spawning
-        maybe_register_config_serialize_by_value()
-
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
-
-        # Either SIGTERM or SIGINT will terminate the engine_core
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-        engine_core: EngineCoreProc | None = None
-        try:
-            parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
-            if parallel_config.data_parallel_size // parallel_config.dp_per_domain > 1:
-                set_process_title("EngineCore", f"Domain{domain_rank}")
-                decorate_logs()
-                # Set data parallel rank for this engine process.
-                parallel_config.domain_parallel_rank = domain_rank
-                parallel_config.domain_parallel_rank_local = local_domain_rank
-                logger.info(f"Domain rank: {domain_rank}, local domain rank: {local_domain_rank}")
-                engine_core = DomainEngineCoreProc(*args, **kwargs)
-            else:
-                set_process_title("EngineCore")
-                decorate_logs()
-                engine_core = EngineCoreProc(*args, **kwargs)
-
-            scheduler_config = kwargs["vllm_config"].scheduler_config
-            engine_core.step_fn = (
-                engine_core.step_domain_with_batch_queue if scheduler_config.async_scheduling else engine_core.step_domain
-            )
-
-            engine_core.run_busy_loop()
-
-        except SystemExit:
-            logger.debug("EngineCore exiting.")
-            raise
-        except Exception as e:
-            if engine_core is None:
-                logger.exception("EngineCore failed to start.")
-            else:
-                logger.exception("EngineCore encountered a fatal error.")
-                engine_core._send_engine_dead()
-            raise e
-        finally:
-            if engine_core is not None:
-                engine_core.shutdown()
-
 
 class EngineShutdownState(IntEnum):
     RUNNING = 0
@@ -1292,23 +1094,8 @@ class EngineCoreProc(EngineCore):
                     )
             raise err
 
-    def _log_domain_error_callback(self, scheduler_outputs: list[SchedulerOutput]):
-        """Log error details of a future that's not expected to return a result."""
-
-        def callback(f, sched_outputs=scheduler_outputs):
-            with self.log_domain_error_detail(sched_outputs):
-                result = f.result()
-                assert None in result
-            return result
-
-        return callback
 
     def step_domain_with_batch_queue(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
-            return {}, False
-
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -1321,11 +1108,11 @@ class EngineCoreProc(EngineCore):
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_outputs = self.scheduler.schedule()
-
-            exec_future = self.model_executor.execute_model(
-                scheduler_outputs, non_block=True
-            )
-            if not self.is_ec_producer:
+            with self.log_domain_error_detail(scheduler_outputs):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_outputs, non_block=True
+                )
+            if self.is_ec_consumer:
                 model_executed =  any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs])
 
             if self.is_pooling_model or not model_executed:
@@ -1403,11 +1190,6 @@ class EngineCoreProc(EngineCore):
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
-            return {}, False
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -1443,45 +1225,22 @@ class EngineCoreProc(EngineCore):
         logger.info(f"{'Run domain engine core !':^25}")
         logger.info("*" * 25)
 
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
-        shutdown_requested = False
-
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
-
-        # Either SIGTERM or SIGINT will terminate the engine_core
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
         engine_core: EngineCoreProc | None = None
+        signal_callback: SignalCallback | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size // parallel_config.dp_per_domain > 1
             if data_parallel:
                 parallel_config.domain_parallel_rank_local = local_domain_rank
-                maybe_init_worker_tracer(
-                    instrumenting_module_name="vllm.engine_core",
-                    process_kind="engine_core",
-                    process_name=f"EngineCore_Domain{domain_rank}",
-                )
-                set_process_title("EngineCore", f"Domain{domain_rank}")
-                logger.info(f"Domain rank: {domain_rank}, local domain rank: {local_domain_rank}")
+                process_title = f"EngineCore_Domain{domain_rank}"
             else:
-                maybe_init_worker_tracer(
-                    instrumenting_module_name="vllm.engine_core",
-                    process_kind="engine_core",
-                    process_name="EngineCore",
-                )
-                set_process_title("EngineCore")
+                process_title = "EngineCore"
+            set_process_title(process_title)
+            maybe_init_worker_tracer("vllm.engine_core", "engine_core", process_title)
             decorate_logs()
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
@@ -1512,6 +1271,21 @@ class EngineCoreProc(EngineCore):
 
             assert engine_core is not None
 
+            def wakeup_engine():
+                # Wakes up idle engine via input_queue when shutdown is requested
+                # Not safe in a signal handler - we may interrupt the main thread
+                # while it is holding the non-reentrant input_queue.mutex
+                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
+            signal_callback = SignalCallback(wakeup_engine)
+
+            def signal_handler(signum, frame):
+                engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                signal_callback.trigger()
+
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
             scheduler_config = kwargs["vllm_config"].scheduler_config
             engine_core.step_fn = (
                 engine_core.step_domain_with_batch_queue if scheduler_config.async_scheduling else engine_core.step_domain
@@ -1530,6 +1304,10 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            if signal_callback is not None:
+                signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
 
@@ -2515,7 +2293,6 @@ class DomainEngineCoreProc(DPEngineCoreProc):
 
     # def _init_doamin_parallel
     def _init_data_parallel(self, vllm_config: VllmConfig):
-
         domain_count = vllm_config.parallel_config.data_parallel_size // vllm_config.parallel_config.dp_per_domain
         local_domain_rank = vllm_config.parallel_config.domain_parallel_rank_local
         domain_rank = vllm_config.parallel_config.domain_parallel_rank
@@ -2526,7 +2303,7 @@ class DomainEngineCoreProc(DPEngineCoreProc):
 
         self.domain_rank = domain_rank
         logger.info(f"Domain rank: {self.domain_rank} start to init statelss domain group")
-        self.domain_group = vllm_config.parallel_config.stateless_init_domain_group()
+        self.domain_group, self.domain_store = vllm_config.parallel_config.stateless_init_domain_group(return_store=True)
 
         """
         AoChen: For reusing busy loop, so we assign domain_rank to self.dp_rank
