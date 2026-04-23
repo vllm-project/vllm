@@ -160,10 +160,12 @@ class MultiConnector(KVConnectorBase_V1):
 
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
-        for connector_cls, temp_config in self._get_connector_classes_and_configs(
-            vllm_config
-        ):
-            self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
+        for temp_config in self._get_child_configs(vllm_config):
+            connector = KVConnectorFactory.create_connector(
+                temp_config, role, kv_cache_config
+            )
+            assert isinstance(connector, KVConnectorBase_V1)
+            self._connectors.append(connector)
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         # A mapping from request id to the index of the connector chosen to
@@ -183,30 +185,40 @@ class MultiConnector(KVConnectorBase_V1):
         return all(c.prefer_cross_layer_blocks for c in self._connectors)
 
     @classmethod
-    def _get_connector_classes_and_configs(
-        cls, vllm_config: "VllmConfig"
-    ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
+    def _get_child_configs(cls, vllm_config: "VllmConfig") -> list["VllmConfig"]:
+        """Return one VllmConfig per child connector, with kv_transfer_config
+        set to the child's KVTransferConfig.  Class resolution is intentionally
+        omitted here so that callers such as __init__ can delegate it to
+        KVConnectorFactory.create_connector and avoid resolving the class twice.
+        """
         assert vllm_config.kv_transfer_config is not None
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors"
         )
         assert ktcs is not None
-        ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
+        ret: list[VllmConfig] = []
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
             engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id
             )
-            ret.append(
-                (
-                    KVConnectorFactory.get_connector_class(
-                        temp_config.kv_transfer_config
-                    ),
-                    temp_config,
-                )
-            )
+            ret.append(temp_config)
         return ret
+
+    @classmethod
+    def _get_connector_classes_and_configs(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
+        return [
+            (
+                KVConnectorFactory.get_connector_class(
+                    temp_config.kv_transfer_config  # type: ignore[arg-type]
+                ),
+                temp_config,
+            )
+            for temp_config in cls._get_child_configs(vllm_config)
+        ]
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
