@@ -283,10 +283,6 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                if is_encoder:
-                    compilation_config.encoder_compilation_time += elapsed
-                else:
-                    compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
@@ -388,10 +384,6 @@ class CompilerManager:
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            if is_encoder:
-                compilation_config.encoder_compilation_time += elapsed
-            else:
-                compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
@@ -1129,11 +1121,10 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.perf_counter() - torch_compile_start_time
-        logger.info_once("Dynamo bytecode transform time: %.2f s", dynamo_time)
-        if self.is_encoder:
-            self.compilation_config.encoder_compilation_time += dynamo_time
-        else:
-            self.compilation_config.compilation_time += dynamo_time
+        logger.info_once(
+            "Dynamo bytecode transform time: %.2f s",
+            dynamo_time,
+        )
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
