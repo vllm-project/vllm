@@ -7,7 +7,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CanonicalKVCaches,
+    SupportsHMA,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -16,7 +19,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.kv_offload.spec import CanonicalKVCaches
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin,
 )
@@ -297,4 +299,4 @@ def test_allocate_canonical_kv_caches():
     for refs in canonical.group_data_refs:
         assert len(refs) == 1
         assert refs[0].tensor_idx == 0
-        assert refs[0].page_size_bytes == full_page
+        assert refs[0].page_size_bytes == full_page * group_size

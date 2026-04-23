@@ -37,6 +37,7 @@ from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.base import CanonicalKVCaches
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -146,7 +147,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.spec import CanonicalKVCaches
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
