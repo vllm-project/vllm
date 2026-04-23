@@ -335,9 +335,10 @@ class MoERunner(MoERunnerInterface):
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
 
-        This is the "early" all-reduce path. When the combine kernel produces
-        already-reduced fused output, shared output must be reduced separately
-        to match.
+        * If the combine kernel does the reduction for fused_ouput, reduce
+          shared_output separately. O.w, reduce fused_output+shared_output later.
+        * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
+          in the model.
         """
         if (
             shared_output is not None
