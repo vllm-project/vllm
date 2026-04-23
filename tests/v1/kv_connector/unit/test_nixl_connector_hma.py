@@ -145,6 +145,12 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._physical_blocks_per_logical_kv_block = 2
     worker._group_kinds = tuple(GroupKind[k] for k in group_kinds)
 
+    has_mamba = any(k == "MAMBA" for k in group_kinds)
+    has_swa = any(k == "SWA" for k in group_kinds)
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
+    )
+
     remote_engine_id = "remote-engine"
 
     worker.transfer_topo = MagicMock()
