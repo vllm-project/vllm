@@ -52,7 +52,6 @@ steps:
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
@@ -92,7 +91,6 @@ steps:
   - vllm/
   - tests/test_regression
   commands:
-  - pip install modelscope
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -104,7 +102,6 @@ steps:
   - vllm/multimodal
   - examples/
   commands:
-    - pip install tensorizer # for tensorizer test
      # for basic
     - python3 basic/offline_inference/chat.py
     - python3 basic/offline_inference/generate.py --model facebook/opt-125m
@@ -204,7 +201,6 @@ steps:
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]

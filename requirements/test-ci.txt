@@ -1,0 +1,12 @@
+# Dependencies moved from .buildkite/test_areas/*.yaml into the Docker
+# test image so that they are pre-installed instead of fetched at runtime.
+
+# Multi-modal model tests (models_multimodal.yaml)
+mantis-ml @ git+https://github.com/TIGER-AI-Lab/Mantis.git
+
+# Hybrid/extended language model tests (models_language.yaml)
+mamba-ssm @ git+https://github.com/state-spaces/mamba@v2.3.0
+causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2
+
+# GPQA eval tests (lm_eval.yaml)
+gpt-oss[eval]==0.0.5

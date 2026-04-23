@@ -159,7 +159,6 @@ steps:
     - pip install helion==1.0.0
     - pytest -v -s kernels/helion/
 
- 
 - label: Kernels FP8 MoE Test (1 H100)
   timeout_in_minutes: 90
   device: h100
