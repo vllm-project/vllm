@@ -402,10 +402,11 @@ def _fwd_grouped_kernel_stage1(
                     v = (v.to(tl.float32) * vs).to(q.dtype)
             else:
                 # MLA: logits use full K (c_kv [+ k_pe]). V is only the c_kv
-                # prefix (Lv). tl.trans(k) when Lk > Lv includes k_pe and breaks
-                # tl.dot vs acc (#33529 fast-path). Triton does not support
-                # k[:Lv, :] style slices on block tensors; load V from buffer.
-                if Lk == Lv:
+                # prefix (Lv). tl.trans(k) when BLOCK_DMODEL > BLOCK_DV includes
+                # k_pe and breaks tl.dot vs acc (#33529 fast-path). Triton does
+                # not support k[:Lv, :] style slices on block tensors; load V
+                # from buffer.
+                if BLOCK_DMODEL == BLOCK_DV:
                     v = tl.trans(k)
                 else:
                     offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
