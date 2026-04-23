@@ -147,20 +147,15 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     remote_engine_id = "remote-engine"
 
-    # Mock transfer_topo: empty remote ranks skips the transfer machinery
-    # entirely, isolating the block-ID expansion logic.
     worker.transfer_topo = MagicMock()
-    worker.transfer_topo.target_remote_ranks.return_value = []
-    worker.transfer_topo.get_engine_info.return_value = MagicMock(
-        remote_tp_size=1,
-    )
     worker.transfer_topo.tp_ratio.return_value = 1
-    worker.transfer_policy = MagicMock()
-    worker.transfer_policy.compute_read_specs.return_value = []
     worker.use_mla = False
 
     mock_plan = MagicMock(spec=EngineTransferPlan)
     mock_plan.remote_expansion_stride = expansion_stride
+    mock_plan.remote_tp_size = 1
+    mock_plan.all_source_ranks = ()
+    mock_plan.source_ranks_per_group = ()
     worker._transfer_plans = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()
@@ -308,78 +303,68 @@ def test_nixl_metadata_hma_block_ids_structure():
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
-    """Test get_block_descs_ids uses per-group strides for hybrid
+    """Test compute_desc_ids_from_plan uses per-group strides for hybrid
     FA+SSM when ratio=1 (no kernel block size mismatch)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
-        MambaModelBlockTransferPolicy,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
         GroupKind,
+        compute_desc_ids_from_plan,
     )
 
-    policy = object.__new__(MambaModelBlockTransferPolicy)
-    policy._group_kinds = (GroupKind.FA, GroupKind.MAMBA)
+    from .test_transfer_plan import _make_mamba_plan_for_desc_ids
 
-    num_blocks = 100
-    num_regions = 2
-    block_len_per_layer = [100]
+    plan = _make_mamba_plan_for_desc_ids(
+        num_fa_regions=2,
+        num_ssm_regions=4,
+        group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+        fa_num_blocks=100,
+        ssm_num_blocks=100,
+    )
 
     fa_blocks = [3, 5]
     ssm_blocks = [1, 2]
-    result = policy.get_block_descs_ids(
+    result = compute_desc_ids_from_plan(
+        plan,
         block_ids=(fa_blocks, ssm_blocks),
-        num_regions=num_regions,
-        dst_num_blocks=num_blocks,
-        block_len_per_layer=block_len_per_layer,
+        dst_num_blocks=100,
         physical_blocks_per_logical=1,
     )
 
-    # FA group: stride=num_blocks=100, offset=0
-    #   region0: [3, 5],  region1: [103, 105]
-    # SSM group: stride=logical_blocks=100 (=num_blocks/ratio=100/1),
-    #   offset=num_fa_descs=200, 4 regions per Mamba layer (x, B, C, ssm)
-    #   region0: [201, 202], region1: [301, 302],
-    #   region2: [401, 402], region3: [501, 502]
     expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
-    """Test get_block_descs_ids uses different strides for FA
+    """Test compute_desc_ids_from_plan uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
-        MambaModelBlockTransferPolicy,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
         GroupKind,
+        compute_desc_ids_from_plan,
     )
 
-    policy = object.__new__(MambaModelBlockTransferPolicy)
-    policy._group_kinds = (GroupKind.FA, GroupKind.MAMBA)
+    from .test_transfer_plan import _make_mamba_plan_for_desc_ids
 
     ratio = 4
     logical_blocks = 100
     num_blocks = logical_blocks * ratio  # 400 kernel blocks
-    num_regions = 2
-    block_len_per_layer = [100]
 
-    fa_blocks = [3, 7]  # kernel-level block IDs
-    ssm_blocks = [1, 2]  # logical block IDs
-    result = policy.get_block_descs_ids(
+    plan = _make_mamba_plan_for_desc_ids(
+        num_fa_regions=2,
+        num_ssm_regions=4,
+        group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+        fa_num_blocks=num_blocks,
+        ssm_num_blocks=logical_blocks,
+    )
+
+    fa_blocks = [3, 7]
+    ssm_blocks = [1, 2]
+    result = compute_desc_ids_from_plan(
+        plan,
         block_ids=(fa_blocks, ssm_blocks),
-        num_regions=num_regions,
         dst_num_blocks=num_blocks,
-        block_len_per_layer=block_len_per_layer,
         physical_blocks_per_logical=ratio,
     )
 
-    # FA group: stride=num_blocks=400, offset=0
-    #   region0: [3, 7],  region1: [403, 407]
-    # SSM group: stride=logical_blocks=400//4=100, offset=num_fa_descs=800,
-    #   4 regions per Mamba layer (x, B, C, ssm)
-    #   region0: [801, 802], region1: [901, 902],
-    #   region2: [1001, 1002], region3: [1101, 1102]
     expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
