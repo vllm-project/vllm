@@ -7,52 +7,62 @@
     "1048576": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 25.6
+      "use_p2p": false,
+      "time_us": 25.2
     },
     "2097152": {
       "BLOCK_SIZE": 16384,
       "num_warps": 8,
-      "time_us": 34.2
+      "use_p2p": false,
+      "time_us": 35.0
     },
     "4194304": {
       "BLOCK_SIZE": 16384,
       "num_warps": 8,
-      "time_us": 52.1
+      "use_p2p": false,
+      "time_us": 51.9
     },
     "8388608": {
-      "BLOCK_SIZE": 16384,
-      "num_warps": 8,
-      "time_us": 84.6
+      "BLOCK_SIZE": 8192,
+      "num_warps": 32,
+      "use_p2p": false,
+      "time_us": 84.7
     },
     "16777216": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 141.8
+      "use_p2p": true,
+      "time_us": 143.3
     },
     "33554432": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 245.5
+      "use_p2p": true,
+      "time_us": 248.1
     },
     "67108864": {
-      "BLOCK_SIZE": 16384,
+      "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 448.2
+      "use_p2p": true,
+      "time_us": 447.8
     },
     "134217728": {
       "BLOCK_SIZE": 16384,
       "num_warps": 16,
-      "time_us": 827.1
+      "use_p2p": true,
+      "time_us": 828.4
     },
     "268435456": {
       "BLOCK_SIZE": 16384,
       "num_warps": 32,
-      "time_us": 1603.3
+      "use_p2p": true,
+      "time_us": 1605.8
     },
     "536870912": {
       "BLOCK_SIZE": 16384,
       "num_warps": 32,
-      "time_us": 3145.1
+      "use_p2p": true,
+      "time_us": 3145.0
     }
   }
 }

@@ -9,9 +9,9 @@ import os
 import torch
 
 _CONFIGS_DIR = os.path.join(os.path.dirname(__file__), "configs")
-_cache: dict[tuple[str, int, int], dict[int, tuple[int, int]]] = {}
+_cache: dict[tuple[str, int, int], dict[int, tuple[int, int, bool]]] = {}
 
-_FALLBACK = (4096, 16)
+_FALLBACK = (4096, 16, False)
 
 
 def _get_device_name():
@@ -41,7 +41,11 @@ def _load_config(kernel, ws, group_size):
 
     params = {}
     for numel_str, cfg in data.get("params", {}).items():
-        params[int(numel_str)] = (cfg["BLOCK_SIZE"], cfg["num_warps"])
+        params[int(numel_str)] = (
+            cfg["BLOCK_SIZE"],
+            cfg["num_warps"],
+            cfg.get("use_p2p", False),
+        )
 
     _cache[key] = params
     return params
@@ -49,7 +53,7 @@ def _load_config(kernel, ws, group_size):
 
 def load_config(numel, ws, kernel="int8", group_size=256):
     """
-    Look up optimal (BLOCK_SIZE, num_warps) from config files.
+    Look up optimal (BLOCK_SIZE, num_warps, use_p2p) from config files.
 
     Falls back to closest smaller size, or default (4096, 16).
     """

@@ -138,54 +138,66 @@ def run_tune(args):
                 print(f"Tuning {kernel_name} group_size={gs} world_size={ws}")
                 print(f"{'=' * 60}")
 
+            p2p_found = False
             for numel in SIZES:
                 msg = torch.randn(numel, dtype=torch.bfloat16, device=device)
                 golden = msg.clone()
                 dist.all_reduce(golden)
 
-                results = {}
-                for bs in BLOCK_SIZES:
-                    if bs * ws > numel or bs % gs != 0:
-                        for nw in NUM_WARPS:
-                            results[(bs, nw)] = float("inf")
-                        continue
-                    for nw in NUM_WARPS:
-                        try:
-                            fn = functools.partial(
-                                two_shot_quantized_allreduce,
-                                msg.clone(),
-                                torch.empty_like(msg),
-                                block_size=bs,
-                                group_size=gs,
-                                num_warps=nw,
-                                use_fp8=use_fp8,
-                            )
-                            out = fn()
-                            torch.accelerator.synchronize()
-                            diff = (out.float() - golden.float()).abs().max().item()
-                            if diff > 10:
-                                results[(bs, nw)] = float("inf")
-                                continue
-                            t = benchmark_fn(fn)
-                            results[(bs, nw)] = t
-                        except Exception:
-                            results[(bs, nw)] = float("inf")
+                # Tune (bs, nw) with use_p2p fixed.
+                # Once P2P wins at a given size, it stays better
+                # for all larger sizes (monotonicity), so we only
+                # tune with use_p2p=True from that point on.
+                # This matches joint tuning of (bs, nw, p2p).
+                p2p_variants = [True] if p2p_found else [False, True]
 
-                best_key = min(results, key=results.get)
-                best_time = results[best_key]
-                if best_time < float("inf"):
+                best_time = float("inf")
+                best_config = None
+                for p2p in p2p_variants:
+                    for bs in BLOCK_SIZES:
+                        if bs * ws > numel or bs % gs != 0:
+                            continue
+                        for nw in NUM_WARPS:
+                            try:
+                                fn = functools.partial(
+                                    two_shot_quantized_allreduce,
+                                    msg.clone(),
+                                    torch.empty_like(msg),
+                                    block_size=bs,
+                                    group_size=gs,
+                                    num_warps=nw,
+                                    use_fp8=use_fp8,
+                                    use_p2p=p2p,
+                                )
+                                out = fn()
+                                torch.accelerator.synchronize()
+                                diff = (out.float() - golden.float()).abs().max().item()
+                                if diff > 10:
+                                    continue
+                                t = benchmark_fn(fn)
+                                if t < best_time:
+                                    best_time = t
+                                    best_config = (bs, nw, p2p)
+                            except Exception:
+                                pass
+
+                if best_config is not None:
+                    if best_config[2] and not p2p_found:
+                        p2p_found = True
                     optimal[key][str(numel)] = {
-                        "BLOCK_SIZE": best_key[0],
-                        "num_warps": best_key[1],
+                        "BLOCK_SIZE": best_config[0],
+                        "num_warps": best_config[1],
+                        "use_p2p": best_config[2],
                         "time_us": round(best_time, 1),
                     }
 
                 if rank == 0:
-                    if best_time < float("inf"):
+                    if best_config is not None:
                         print(
                             f"  numel={numel:>12}  best:"
-                            f" bs={best_key[0]},"
-                            f" nw={best_key[1]},"
+                            f" bs={best_config[0]},"
+                            f" nw={best_config[1]},"
+                            f" p2p={best_config[2]},"
                             f" {best_time:.1f}us"
                         )
                     else:

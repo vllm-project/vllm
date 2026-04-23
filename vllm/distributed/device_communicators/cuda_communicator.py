@@ -94,8 +94,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        # Quantized all-reduce (controlled by VLLM_ALLREDUCE_USE_QUANTIZED env var)
-        if "tp" in unique_name and self.world_size > 1:
+        # Quantized all-reduce (controlled by VLLM_ALLREDUCE_QUANTIZATION env var)
+        if (
+            "tp" in unique_name
+            and self.world_size > 1
+            and envs.VLLM_ALLREDUCE_QUANTIZATION is not None
+        ):
             self.quant_comm = QuantizedAllReduceCommunicator(
                 group=self.cpu_group,
                 device=self.device,

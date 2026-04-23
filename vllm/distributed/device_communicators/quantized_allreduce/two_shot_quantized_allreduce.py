@@ -18,8 +18,9 @@ scales and quantized data. The algorithm has three phases:
   Phase 3: Each rank dequantizes the remaining stripes from the local
            buffer to produce the full output.
 
-For large tensors (>= 16M elements), Phase 3 uses P2P reads from each
-reducer's buffer instead of broadcast writes, reducing write traffic.
+When USE_P2P is enabled (determined by tuning config), Phase 2 writes
+only to the reducer's own buffer, and Phase 3 uses P2P reads from each
+reducer instead of reading from the local buffer.
 """
 
 import torch
@@ -32,6 +33,7 @@ from . import symm_mem_barrier as ptx_utils
 from .config_loading import load_config as _load_config_from_json
 
 MAX_BLOCK_SIZE = 16384
+DEFAULT_GROUP_SIZE = 256
 
 
 @triton.jit
@@ -51,7 +53,7 @@ def _two_shot_quantized_allreduce_kernel(
     GROUPS_PER_BLOCK: tl.constexpr,
     QMAX: tl.constexpr,
     USE_FP8: tl.constexpr,
-    P2P_PHASE3: tl.constexpr = False,
+    USE_P2P: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     input_ptr = tl.multiple_of(input_ptr, 16)
@@ -137,7 +139,7 @@ def _two_shot_quantized_allreduce_kernel(
         result_2d = tl.clamp(acc_2d * out_scales[:, None], -QMAX, QMAX)
         result_q = tl.reshape(result_2d, [BLOCK_SIZE]).to(QTYPE)
 
-        if P2P_PHASE3:
+        if USE_P2P:
             tl.store(
                 my_scales + num_groups_total + first_group + group_ids,
                 out_scales,
@@ -176,7 +178,7 @@ def _two_shot_quantized_allreduce_kernel(
     )
 
     # --- Phase 3: Dequant OTHER ranks' stripes only ---
-    if P2P_PHASE3:
+    if USE_P2P:
         block_start = pid * stride_per_program
         while block_start < numel:
             for r in tl.static_range(world_size):
@@ -289,7 +291,7 @@ def _get_state(numel, group_size, device):
     return _cache[key]
 
 
-def _get_tuned_config(numel, ws, use_fp8=False, group_size=256):
+def _get_tuned_config(numel, ws, use_fp8=False, group_size=DEFAULT_GROUP_SIZE):
     """Return (block_size, num_warps) for the given tensor size and world size."""
     kernel = "fp8" if use_fp8 else "int8"
     return _load_config_from_json(numel, ws, kernel=kernel, group_size=group_size)
@@ -300,10 +302,11 @@ def two_shot_quantized_allreduce(
     output: torch.Tensor | None = None,
     max_num_blocks: int = 132,
     block_size: int | None = None,
-    group_size: int = 256,
+    group_size: int = DEFAULT_GROUP_SIZE,
     use_fp8: bool = False,
     num_warps: int | None = None,
     state: "_State | None" = None,
+    use_p2p: bool | None = None,
 ) -> torch.Tensor:
     """
     Perform quantized two-shot all-reduce on the input tensor.
@@ -316,12 +319,19 @@ def two_shot_quantized_allreduce(
         group_size: Number of elements per quantization group.
         use_fp8: If True, use FP8 E4M3 quantization instead of int8.
         num_warps: Warps per thread block. Loaded from config if None.
-        state: Pre-allocated buffer state. Created automatically if None.
+        state: Pre-allocated buffer state. If None, one is created
+            using dist.group.WORLD as the process group.
+        use_p2p: If True, use peer-to-peer writes in the final phase
+            instead of broadcasting through shared memory. Faster for
+            large tensors (typically >=16M elements) where the reduced
+            write traffic outweighs the P2P overhead. If None, the
+            value is loaded from the tuned config.
 
     Returns:
         BF16 tensor with the all-reduced result.
     """
     assert input_tensor.dtype == torch.bfloat16
+    assert input_tensor.is_contiguous()
     numel = input_tensor.numel()
     assert numel % 8 == 0
 
@@ -329,14 +339,15 @@ def two_shot_quantized_allreduce(
         state = _get_state(numel, group_size, input_tensor.device)
     ws = state.world_size
 
-    if block_size is None or num_warps is None:
-        tuned_bs, tuned_nw = _get_tuned_config(
-            numel, ws, use_fp8=use_fp8, group_size=group_size
-        )
-        if block_size is None:
-            block_size = tuned_bs
-        if num_warps is None:
-            num_warps = tuned_nw
+    tuned_bs, tuned_nw, tuned_p2p = _get_tuned_config(
+        numel, ws, use_fp8=use_fp8, group_size=group_size
+    )
+    if block_size is None:
+        block_size = tuned_bs
+    if num_warps is None:
+        num_warps = tuned_nw
+    if use_p2p is None:
+        use_p2p = tuned_p2p
 
     assert block_size % group_size == 0
     assert block_size % ws == 0
@@ -354,8 +365,8 @@ def two_shot_quantized_allreduce(
 
     if output is None:
         output = torch.empty_like(input_tensor)
-
-    use_p2p = numel >= 16 * 1024 * 1024
+    else:
+        assert output.is_contiguous()
 
     _two_shot_quantized_allreduce_kernel[(num_blocks,)](
         state.hdl.buffer_ptrs_dev,
@@ -373,7 +384,7 @@ def two_shot_quantized_allreduce(
         GROUPS_PER_BLOCK=groups_per_block,
         QMAX=QMAX,
         USE_FP8=use_fp8,
-        P2P_PHASE3=use_p2p,
+        USE_P2P=use_p2p,
         num_warps=num_warps,
     )
 

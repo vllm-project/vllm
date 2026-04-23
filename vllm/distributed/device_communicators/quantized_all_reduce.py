@@ -5,22 +5,22 @@
 Quantized all-reduce communicator using two-shot per-group quantized kernels.
 
 Enable via environment variable:
-    VLLM_ALLREDUCE_USE_QUANTIZED=int8   # int8 quantization
-    VLLM_ALLREDUCE_USE_QUANTIZED=fp8    # fp8 quantization
+    VLLM_ALLREDUCE_QUANTIZATION=int8   # int8 quantization
+    VLLM_ALLREDUCE_QUANTIZATION=fp8    # fp8 quantization
 """
-
-import os
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# Absolute cap on buffer size (2 GiB of packed int8 data).
-_MAX_BUFFER_NUMEL = 2 * (1024**3)
+# Symmetric memory buffer size constants (in elements).
+_MAX_BUFFER_NUMEL = 2 * (1024**3)  # absolute cap (2 GiB packed)
+_DEFAULT_BUFFER_NUMEL = 16 * 1024 * 8192  # fallback when model config unavailable
 
 
 def _estimate_max_numel() -> int:
@@ -44,18 +44,19 @@ def _estimate_max_numel() -> int:
             return numel
     except Exception:
         pass
-    # Fallback: 16K tokens * 8192 hidden_size = 128M elements
-    return 16 * 1024 * 8192
+    # Fallback when model config is not available
+    return _DEFAULT_BUFFER_NUMEL
 
 
 class QuantizedAllReduceCommunicator:
     """Two-shot quantized all-reduce using symmetric memory."""
 
-    # Minimum numel thresholds where quantized kernels beat existing backends.
-    # Determined empirically on H200.
+    # Minimum numel (element count) thresholds where quantized kernels
+    # beat existing backends. Determined empirically on H200.
+    # {mode: {world_size: min_elements}}
     _MIN_NUMEL = {
-        "int8": {8: 8_388_608, 4: 2_097_152},
-        "fp8": {8: 8_388_608, 4: 2_097_152},
+        "int8": {8: 8_388_608, 4: 2_097_152},  # 16 MiB / 4 MiB in bf16
+        "fp8": {8: 8_388_608, 4: 2_097_152},  # 16 MiB / 4 MiB in bf16
     }
 
     def __init__(
@@ -74,15 +75,18 @@ class QuantizedAllReduceCommunicator:
             device = torch.device(device)
         self.device = device
 
-        mode = os.environ.get("VLLM_ALLREDUCE_USE_QUANTIZED", "0").lower()
-        if mode in ("0", "false", "", "no_reduce"):
+        mode = envs.VLLM_ALLREDUCE_QUANTIZATION
+        if mode is None:
             return
+        mode = mode.lower()
 
         try:
             from vllm.distributed.device_communicators.quantized_allreduce import (
                 two_shot_quantized_allreduce,
             )
             from vllm.distributed.device_communicators.quantized_allreduce.two_shot_quantized_allreduce import (  # noqa: E501
+                DEFAULT_GROUP_SIZE,
+                MAX_BLOCK_SIZE,
                 _State,
             )
         except ImportError:
@@ -91,14 +95,19 @@ class QuantizedAllReduceCommunicator:
             )
             return
 
-        if mode == "fp8":
+        if MAX_BLOCK_SIZE % self.world_size != 0:
+            logger.info(
+                "QuantizedAllReduceCommunicator: disabled for "
+                "world_size=%d (not compatible with MAX_BLOCK_SIZE=%d)",
+                self.world_size,
+                MAX_BLOCK_SIZE,
+            )
+            return
+
+        if mode in ("int8", "fp8"):
             self._kernel_fn = two_shot_quantized_allreduce
-            self._use_fp8 = True
-            self._mode = "fp8"
-        elif mode in ("1", "true", "int8"):
-            self._kernel_fn = two_shot_quantized_allreduce
-            self._use_fp8 = False
-            self._mode = "int8"
+            self._use_fp8 = mode == "fp8"
+            self._mode = mode
         else:
             logger.warning(
                 "QuantizedAllReduceCommunicator: unknown mode '%s', disabling", mode
@@ -111,7 +120,9 @@ class QuantizedAllReduceCommunicator:
             if max_size_override is not None
             else _estimate_max_numel()
         )
-        self._group_size = 256
+        self._group_size = DEFAULT_GROUP_SIZE
+        alignment = self._group_size * self.world_size
+        max_numel = ((max_numel + alignment - 1) // alignment) * alignment
         try:
             self._state = _State(
                 max_numel, self._group_size, self.device, group=self.group
@@ -133,7 +144,7 @@ class QuantizedAllReduceCommunicator:
         self.disabled = False
 
     def should_use_quantized(self, inp: torch.Tensor) -> bool:
-        if self.disabled:
+        if self.disabled or envs.VLLM_BATCH_INVARIANT:
             return False
         if inp.dtype != torch.bfloat16:
             return False
@@ -142,8 +153,8 @@ class QuantizedAllReduceCommunicator:
             return False
         if numel > self._state.max_numel:
             return False
-        thresholds = self._MIN_NUMEL.get(self._mode, {})
-        min_numel = thresholds.get(8 if self.world_size >= 8 else 4, 4_194_304)
+        ws_key = 8 if self.world_size >= 8 else 4
+        min_numel = self._MIN_NUMEL[self._mode][ws_key]
         return numel >= min_numel
 
     def all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:

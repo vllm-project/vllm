@@ -7,52 +7,62 @@
     "1048576": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 25.7
+      "use_p2p": false,
+      "time_us": 26.0
     },
     "2097152": {
       "BLOCK_SIZE": 16384,
       "num_warps": 8,
-      "time_us": 34.7
+      "use_p2p": false,
+      "time_us": 34.5
     },
     "4194304": {
       "BLOCK_SIZE": 16384,
       "num_warps": 8,
-      "time_us": 52.1
+      "use_p2p": false,
+      "time_us": 52.6
     },
     "8388608": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 86.5
+      "use_p2p": false,
+      "time_us": 84.9
     },
     "16777216": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 144.4
+      "use_p2p": true,
+      "time_us": 143.6
     },
     "33554432": {
       "BLOCK_SIZE": 8192,
       "num_warps": 32,
-      "time_us": 249.3
+      "use_p2p": true,
+      "time_us": 250.9
     },
     "67108864": {
       "BLOCK_SIZE": 16384,
-      "num_warps": 32,
-      "time_us": 454.3
+      "num_warps": 16,
+      "use_p2p": true,
+      "time_us": 453.8
     },
     "134217728": {
       "BLOCK_SIZE": 16384,
       "num_warps": 16,
-      "time_us": 842.6
+      "use_p2p": true,
+      "time_us": 841.9
     },
     "268435456": {
       "BLOCK_SIZE": 16384,
       "num_warps": 16,
-      "time_us": 1636.8
+      "use_p2p": true,
+      "time_us": 1636.0
     },
     "536870912": {
       "BLOCK_SIZE": 16384,
       "num_warps": 16,
-      "time_us": 3209.4
+      "use_p2p": true,
+      "time_us": 3209.7
     }
   }
 }
