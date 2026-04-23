@@ -961,15 +961,6 @@ def _expand_flashinfer_variants(
         min_cc = parts[0] if parts else "7"
         trtllm_cc = fi_features["trtllm"]["compute_capability"]
 
-        # Remove KV dtypes handled by dedicated kernels (e.g. nvfp4)
-        exclude = fi_features.get("exclude_kv_dtypes", [])
-        if exclude:
-            backend["kv_cache_dtypes"] = ", ".join(
-                d
-                for d in (d.strip() for d in backend["kv_cache_dtypes"].split(","))
-                if d not in exclude
-            )
-
         # Create native entry (pre-Blackwell GPUs)
         native = backend.copy()
         native["version"] = "Native†"
@@ -977,6 +968,15 @@ def _expand_flashinfer_variants(
         native["_sort_order"] = 0
         native["supports_sink"] = fi_features["native"]["supports_sink"]
         native["compute_capability"] = f"{min_cc}.x-9.x"
+
+        # Remove KV dtypes only supported by SM100 kernels (e.g. nvfp4)
+        exclude = fi_features.get("exclude_kv_dtypes", [])
+        if exclude:
+            native["kv_cache_dtypes"] = ", ".join(
+                d
+                for d in (d.strip() for d in native["kv_cache_dtypes"].split(","))
+                if d not in exclude
+            )
 
         # Create TRTLLM entry
         trtllm = backend.copy()
