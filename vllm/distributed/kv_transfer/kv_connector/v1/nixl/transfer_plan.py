@@ -22,7 +22,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    BlockIds,
+    EngineTransferInfo,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
 )
@@ -311,20 +314,17 @@ def generate_dense_plan(
     is_blocks_first: bool,
     block_len_per_layer: list[int],
     block_size: int,
-    remote_tp_size: int,
-    remote_block_size: int,
-    remote_num_blocks: int,
-    remote_block_lens: list[int],
-    remote_physical_blocks_per_logical: int,
+    remote_info: EngineTransferInfo,
+    remote_meta: NixlAgentMetadata,
     local_physical_blocks_per_logical: int,
 ) -> EngineTransferPlan:
     """Generate transfer plan for dense (FA-only) models."""
-    block_size_ratio = block_size // remote_block_size
+    block_size_ratio = block_size // remote_info.remote_block_size
 
     m = _compute_tp_mapping(
         tp_rank,
         tp_size,
-        remote_tp_size,
+        remote_info.remote_tp_size,
         is_mla,
         total_num_kv_heads,
         group_kinds=(GroupKind.FA,),
@@ -332,12 +332,12 @@ def generate_dense_plan(
 
     fa_regions = _build_fa_regions(
         block_len_per_layer=block_len_per_layer,
-        remote_block_lens=remote_block_lens,
+        remote_block_lens=remote_meta.block_lens,
         is_blocks_first=is_blocks_first,
         block_size_ratio=block_size_ratio,
         num_attn_reads=len(m.source_ranks_per_group[0]),
         rank_offset_factor=m.rank_offset_factor,
-        remote_num_blocks=remote_num_blocks,
+        remote_num_blocks=remote_meta.num_blocks,
     )
 
     return EngineTransferPlan(
@@ -360,18 +360,19 @@ def generate_mamba_plan(
     is_blocks_first: bool,
     block_len_per_layer: list[int],
     block_size: int,
-    remote_tp_size: int,
-    remote_block_size: int,
-    remote_num_blocks: int,
-    remote_block_lens: list[int],
-    remote_physical_blocks_per_logical: int,
+    remote_info: EngineTransferInfo,
+    remote_meta: NixlAgentMetadata,
     group_kinds: tuple[GroupKind, ...],
     conv_decomp: MambaConvSplitInfo,
     ssm_sizes: tuple[int, int],
-    remote_ssm_sizes: tuple[int, int],
 ) -> EngineTransferPlan:
     """Generate transfer plan for hybrid Mamba (SSM + FA) models."""
-    block_size_ratio = block_size // remote_block_size
+    remote_tp_size = remote_info.remote_tp_size
+    remote_phys_ratio = remote_info.remote_physical_blocks_per_logical
+    remote_block_lens = remote_meta.block_lens
+    remote_ssm_sizes = remote_meta.ssm_sizes
+
+    block_size_ratio = block_size // remote_info.remote_block_size
     assert block_size_ratio == 1, (
         "Mamba 3-read transfer with block_size_ratio != 1 "
         f"is not tested. Got {block_size_ratio=}."
@@ -394,15 +395,14 @@ def generate_mamba_plan(
         block_size_ratio=block_size_ratio,
         num_attn_reads=len(m.source_ranks_per_group[0]),
         rank_offset_factor=m.rank_offset_factor,
-        remote_num_blocks=remote_num_blocks,
+        remote_num_blocks=remote_meta.num_blocks,
     )
 
     # ---- SSM regions ----
     effective_ratio = tp_size // remote_tp_size if tp_size >= remote_tp_size else 1
     local_offset = tp_rank % max(effective_ratio, 1)
     conv_size_remote = remote_ssm_sizes[0]
-    remote_ratio = remote_physical_blocks_per_logical
-    ssm_num_blocks = remote_num_blocks // remote_ratio
+    ssm_num_blocks = remote_meta.num_blocks // remote_phys_ratio
 
     if tp_size >= remote_tp_size:
         conv_offsets = conv_decomp.remote_conv_offsets(
@@ -428,7 +428,7 @@ def generate_mamba_plan(
     ]
     ssm_regions: list[RegionPlan] = []
     for i in range(len(remote_block_lens)):
-        page_stride = remote_block_lens[i] * remote_ratio
+        page_stride = remote_block_lens[i] * remote_phys_ratio
 
         for kind, (off, sz) in zip(conv_kinds, conv_offsets):
             ssm_regions.append(
@@ -460,7 +460,7 @@ def generate_mamba_plan(
         source_ranks_per_group=m.source_ranks_per_group,
         all_source_ranks=m.all_source_ranks,
         rank_to_attention_slot=m.rank_to_attention_slot,
-        remote_expansion_stride=remote_physical_blocks_per_logical,
+        remote_expansion_stride=remote_phys_ratio,
     )
 
 

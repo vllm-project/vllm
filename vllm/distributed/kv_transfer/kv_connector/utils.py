@@ -386,46 +386,6 @@ class EngineTransferInfo:
     """Physical blocks per logical block."""
 
 
-@dataclass(frozen=True)
-class MambaEngineTransferInfo(EngineTransferInfo):
-    """Extends ``EngineTransferInfo`` with Mamba-hybrid transfer geometry.
-
-    For hybrid SSM+Attention models, FA and Mamba layers may require
-    different numbers of reads from different remote ranks.  This
-    dataclass captures that per-engine transfer plan.
-    """
-
-    remote_fa_source_ranks: tuple[int, ...]
-    """Remote ranks carrying unique FA heads for this local rank."""
-
-    remote_all_source_ranks: tuple[int, ...]
-    """All remote ranks this local rank reads from (FA + Mamba)."""
-
-    remote_num_fa_reads: int
-    """Number of distinct remote ranks needed for FA data."""
-
-    remote_num_mamba_reads: int
-    """Number of distinct remote ranks needed for Mamba data."""
-
-    remote_fa_descriptor_bytes: int
-    """Byte size of one FA K (or V) descriptor entry."""
-
-    is_remote_replicated: bool
-    """Whether the remote engine has replicated KV heads
-    (remote_tp_size > total_num_kv_heads)."""
-
-    remote_physical_heads: int
-    """Physical KV heads stored per remote rank."""
-
-    @property
-    def fa_source_set(self) -> frozenset[int]:
-        return frozenset(self.remote_fa_source_ranks)
-
-    @property
-    def fa_source_indices(self) -> dict[int, int]:
-        return {r: i for i, r in enumerate(self.remote_fa_source_ranks)}
-
-
 # ---- Transfer topology ----
 
 
@@ -441,7 +401,6 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
-    physical_blocks_per_logical: int
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
@@ -594,14 +553,8 @@ class TransferTopology:
         """Get the remote TP rank(s) that the current local TP rank will
         read from.  When remote tp_size > local tp_size, reads from
         multiple remote ranks.
-
-        For Mamba models, returns the precomputed ``all_source_ranks``
-        (FA + Mamba union).
         """
         info = self._engines[remote_engine_id]
-        if isinstance(info, MambaEngineTransferInfo):
-            return list(info.remote_all_source_ranks)
-
         tp_ratio = self.tp_ratio(info.remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]
@@ -637,21 +590,12 @@ class TransferTopology:
     def describe(self, remote_engine_id: EngineId) -> str:
         """One-line summary of transfer config for logging."""
         info = self._engines[remote_engine_id]
-        base = (
+        return (
+            f"TransferTopology("
             f"tp_ratio={self.tp_ratio(info.remote_tp_size)}, "
             f"K={self.total_num_kv_heads}, "
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"local_rank={self.tp_rank}, "
-            f"remote_block_len={info.remote_block_len}"
+            f"remote_block_len={info.remote_block_len})"
         )
-        if isinstance(info, MambaEngineTransferInfo):
-            return (
-                f"TransferTopology.mamba({base}, "
-                f"fa_reads={info.remote_num_fa_reads}, "
-                f"mamba_reads={info.remote_num_mamba_reads}, "
-                f"fa_sources={list(info.remote_fa_source_ranks)}, "
-                f"all_sources={list(info.remote_all_source_ranks)}, "
-                f"fa_desc_bytes={info.remote_fa_descriptor_bytes})"
-            )
-        return f"TransferTopology({base})"
