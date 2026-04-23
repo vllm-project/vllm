@@ -282,6 +282,7 @@ def chunked_prefill_paged_decode(
     sinks=None,
     is_block_table_ptr: bool = False,
     use_interleaved_v_cache: bool = False,
+    causal: bool = True,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -318,6 +319,7 @@ def chunked_prefill_paged_decode(
             fp8_out_scale=output_scale,
             sinks=sinks,
             interleaved_v_kx=interleaved_v_kx,
+            causal=causal,
         )
 
     block_size = value_cache.shape[3]
