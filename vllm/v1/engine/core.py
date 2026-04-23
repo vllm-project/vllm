@@ -282,11 +282,33 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info_once(
-            "init engine (profile, create kv cache, warmup model) took %.2f seconds",
-            elapsed,
-            scope="local",
-        )
+        compile_time = vllm_config.compilation_config.compilation_time
+        encoder_compile_time = vllm_config.compilation_config.encoder_compilation_time
+        if encoder_compile_time > 0:
+            logger.info_once(
+                "init engine (profile, create kv cache, warmup model) took "
+                "%.2f s (compilation: %.2f s — language_model: %.2f s, "
+                "encoder: %.2f s)",
+                elapsed,
+                compile_time + encoder_compile_time,
+                compile_time,
+                encoder_compile_time,
+                scope="local",
+            )
+        elif compile_time > 0:
+            logger.info_once(
+                "init engine (profile, create kv cache, warmup model) took "
+                "%.2f s (compilation: %.2f s)",
+                elapsed,
+                compile_time,
+                scope="local",
+            )
+        else:
+            logger.info_once(
+                "init engine (profile, create kv cache, warmup model) took %.2f s",
+                elapsed,
+                scope="local",
+            )
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -936,14 +958,20 @@ class EngineCoreProc(EngineCore):
             vllm_config.parallel_config,
         )
         if client_handshake_address is None:
+            # We only need to handshake with one party.
             with handshake as addresses:
                 yield addresses
         else:
+            # We need to handshake with rank 0 front-end and our colocated frontend.
             assert local_client
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, True, False, vllm_config
             )
             with handshake as addresses, local_handshake as client_addresses:
+                # 1. Obtain DP Coordinator zmq address and DP process group address
+                #    (addresses).
+                # 2. Add front-end input/output addresses from colocated front-end
+                #    (client_addresses).
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
                 yield addresses
@@ -977,20 +1005,12 @@ class EngineCoreProc(EngineCore):
             yield addresses
 
             # Send ready message.
-            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
-            # We pass back the coordinator stats update address here for the
-            # external LB case for our colocated front-end to use (coordinator
-            # only runs with rank 0).
-            dp_stats_address = self.frontend_stats_publish_address
-
-            # Include config hash for DP configuration validation
             ready_msg = {
                 "status": "READY",
                 "local": local_client,
                 "headless": headless,
-                "num_gpu_blocks": num_gpu_blocks,
-                "dp_stats_address": dp_stats_address,
             }
+            # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
@@ -1388,6 +1408,8 @@ class EngineCoreProc(EngineCore):
             poller = zmq.Poller()
             ready_response = EngineCoreReadyResponse(
                 max_model_len=self.vllm_config.model_config.max_model_len,
+                num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
+                dp_stats_address=self.frontend_stats_publish_address,
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:

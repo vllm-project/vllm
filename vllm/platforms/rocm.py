@@ -64,7 +64,12 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
     "0x744c": "AMD_Radeon_RX7900XTX",
-    "0x7551": "AMD_Radeon_R9700",
+    # RDNA 3.5 APUs (Strix Point / Strix Halo)
+    "0x150e": "AMD_Radeon_890M",  # gfx1150, Strix Point
+    "0x1586": "AMD_Radeon_8060S",  # gfx1151, Strix Halo
+    # RDNA 4 discrete (Navi 48)
+    "0x7550": "AMD_Radeon_RX9070XT",  # gfx1201
+    "0x7551": "AMD_Radeon_R9700",  # gfx1201
 }
 
 
@@ -377,6 +382,7 @@ def _get_backend_priorities(
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    backends.append(AttentionBackendEnum.TURBOQUANT)
 
     return backends
 
@@ -407,6 +413,7 @@ class RocmPlatform(Platform):
         "gguf",
         "quark",
         "mxfp4",
+        "gpt_oss_mxfp4",
         "torchao",
         "bitsandbytes",
         "modelopt_fp4",
@@ -606,6 +613,10 @@ class RocmPlatform(Platform):
         torch.cuda.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
+
+    @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         cap = _capability_from_gcn_arch(_GCN_ARCH)
@@ -789,7 +800,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        return on_gfx9() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
