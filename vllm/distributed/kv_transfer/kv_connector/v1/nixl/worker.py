@@ -1006,13 +1006,8 @@ class NixlConnectorWorker:
         if self._has_mamba:
             assert self._conv_decomp is not None
             self._transfer_plans[engine_id] = generate_mamba_plan(
-                tp_rank=self.tp_rank,
-                tp_size=self.world_size,
-                is_mla=self.use_mla,
-                total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-                is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+                transfer_topo=transfer_topo,
                 block_len_per_layer=self.block_len_per_layer,
-                block_size=self.block_size,
                 remote_info=transfer_info,
                 remote_meta=nixl_agent_meta,
                 group_kinds=self._group_kinds,
@@ -1021,13 +1016,8 @@ class NixlConnectorWorker:
             )
         else:
             self._transfer_plans[engine_id] = generate_dense_plan(
-                tp_rank=self.tp_rank,
-                tp_size=self.world_size,
-                is_mla=self.use_mla,
-                total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-                is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+                transfer_topo=transfer_topo,
                 block_len_per_layer=self.block_len_per_layer,
-                block_size=self.block_size,
                 remote_info=transfer_info,
                 remote_meta=nixl_agent_meta,
                 local_physical_blocks_per_logical=(
