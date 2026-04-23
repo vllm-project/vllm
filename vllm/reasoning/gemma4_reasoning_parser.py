@@ -260,7 +260,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             return self._apply_prefix_stripping(DeltaMessage(reasoning=delta_text))
 
         # Normal path: <|channel> token present — delegate to base class.
-        result = super().extract_reasoning_streaming(
+        base_result = super().extract_reasoning_streaming(
             previous_text,
             current_text,
             delta_text,
@@ -268,7 +268,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             current_token_ids,
             delta_token_ids,
         )
-        return self._apply_prefix_stripping(result)
+        return self._apply_prefix_stripping(base_result)
 
 
 def _strip_thought_label(text: str) -> str:
