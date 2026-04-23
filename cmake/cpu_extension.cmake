@@ -37,15 +37,18 @@ else()
     # exists and the shim dir is empty; fall back to the system libgomp in that case.
     vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
 
-    find_library(OPEN_MP
-        NAMES gomp
-        HINTS ${VLLM_TORCH_GOMP_SHIM_DIR}
-        REQUIRED
-    )
-    # If the vendored shim was picked, put it on LD_LIBRARY_PATH so the build uses the
-    # same libgomp as PyTorch. Skip this when we fell back to the system libgomp.
-    if (OPEN_MP AND VLLM_TORCH_GOMP_SHIM_DIR AND OPEN_MP MATCHES "^${VLLM_TORCH_GOMP_SHIM_DIR}/")
+    if(VLLM_TORCH_GOMP_SHIM_DIR)
+        find_library(OPEN_MP
+            NAMES gomp
+            PATHS "${VLLM_TORCH_GOMP_SHIM_DIR}"
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        # Use the same libgomp as PyTorch at runtime
         set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+    else()
+        # Fall back to system / toolchain libgomp
+        find_library(OPEN_MP NAMES gomp REQUIRED)
     endif()
 endif()
 
