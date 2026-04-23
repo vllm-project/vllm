@@ -1211,6 +1211,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
+        self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.video_pruning_rate = multimodal_config.video_pruning_rate
