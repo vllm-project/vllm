@@ -38,13 +38,14 @@ def main():
     if "--omni" in sys.argv:
         try:
             from vllm_omni.entrypoints.cli.main import main as omni_main
-
-            logger.info("Delegating entrypoint handling to vllm-omni")
-            omni_main()
         except ImportError:
             logger.error(
                 "--omni flag requires a valid instance of vllm-omni to be installed."
             )
+            sys.exit(1)
+
+        logger.info("Delegating entrypoint handling to vllm-omni")
+        omni_main()
     else:
         # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
         if len(sys.argv) > 1 and sys.argv[1] == "bench":
