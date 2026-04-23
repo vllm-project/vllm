@@ -3,6 +3,9 @@
 from collections import defaultdict
 from collections.abc import Iterable
 
+import torch
+import torch._inductor.config as inductor_config
+import torch._inductor.pattern_matcher as _pm
 from torch import fx
 from torch._inductor.pattern_matcher import (
     CallFunctionVarArgs,
@@ -63,6 +66,8 @@ class VllmIRLoweringPass(VllmInductorPass):
         self.patterns = PatternMatcherPass(self.pass_name)
         self.selected_impls: dict[str, dict[str, str]] = defaultdict(lambda: {})
         self.ops = [ir_op.torch_op for ir_op in IrOp.registry.values()]
+        
+        inductor_config.triton.descriptive_names = "torch"
 
         # Look for any call_function node where the target is a vLLM IR op.
         # Then, lower_matched_op will select, trace, and insert the implementation.
@@ -88,6 +93,10 @@ class VllmIRLoweringPass(VllmInductorPass):
         # replace_by_example wants node args, not the fake tensors
         # TODO(luka): Use aot_export_module to get functionalized graph
         # TODO(luka): Cache the fx_replacement to avoid re-tracing the same impl
+
+        # ``replace_by_example`` transfers metadata from the matched node
+        #  so stamping here is enough to annotate generated kernels.
+        node.meta["source_fn_stack"] = [(node.name, f"vllm_ir_{ir_op.name}_{ir_op_impl.provider}")]
 
         # Defaults not present on node.args but required for replacement tracing
         bound_args = ir_op._py_signature.bind(*node.args)
