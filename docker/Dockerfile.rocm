@@ -528,7 +528,7 @@ RUN pip install amdsmi
 
 # Install amd-aiter and Triton from repo/branch (for gfx1250; base image may not include them)
 ARG AITER_REPO="https://github.com/ROCm/aiter"
-ARG AITER_BRANCH="shared/triton-gfx12"
+ARG AITER_BRANCH="main"
 # TODO: Triton repo requires github.amd.com authentication; re-enable once credentials are configured
 # ARG TRITON_REPO="https://github.amd.com/GFX-IP-Arch/triton"
 # ARG TRITON_BRANCH="shared/gfx1250"
