@@ -176,6 +176,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# On CUDA 13 builds, install `nvidia-cutlass-dsl[cu13]` — it ships the
+# CuTe-DSL libs that FlashInfer's Blackwell SM100 GDN prefill kernel
+# (flashinfer-ai/flashinfer#3001) JIT-requires.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+        uv pip install --python /opt/venv/bin/python3 \
+            "nvidia-cutlass-dsl[cu13]>=4.4.2"; \
+    fi
+
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
 # Otherwise library dependencies can upgrade/downgrade torch incorrectly.
@@ -576,6 +585,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
+
+# On CUDA 13 builds, install `nvidia-cutlass-dsl[cu13]` — it ships the
+# CuTe-DSL libs that FlashInfer's Blackwell SM100 GDN prefill kernel
+# (flashinfer-ai/flashinfer#3001) JIT-requires.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+        uv pip install --system "nvidia-cutlass-dsl[cu13]>=4.4.2"; \
+    fi
 
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html

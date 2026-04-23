@@ -67,6 +67,85 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 logger = init_logger(__name__)
 
 
+def _has_cutlass_dsl_cu13() -> bool:
+    """Whether the CUDA-13 CuTe-DSL shared libs are installed.
+    """
+    try:
+        from importlib.metadata import distribution
+    except ImportError:
+        return False
+    try:
+        distribution("nvidia-cutlass-dsl-libs-cu13")
+    except Exception:
+        return False
+    return True
+
+
+def _should_use_flashinfer_gdn_prefill(
+    backend: str, head_k_dim: int | None
+) -> bool:
+    """Whether to use FlashInfer's GDN prefill kernel instead of the
+    Triton/FLA fallback.
+
+    Requirements:
+    * ``requested in ["flashinfer", "auto"]``;
+    * ``platform == cuda``;
+    * one of the following:
+      - Hopper (SM90) — no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128``,
+        ``nvidia-cutlass-dsl-libs-cu13`` installed, ``cuda_runtime >= 13``.
+    """
+    if backend not in ["flashinfer", "auto"]:
+        return False
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.is_device_capability(90):
+        return True  # Hopper — no further constraints.
+    if not current_platform.is_device_capability_family(100):
+        return False  # Neither Hopper nor Blackwell.
+    if head_k_dim != 128:
+        return False
+    if not _has_cutlass_dsl_cu13():
+        return False
+    return True
+
+
+def _log_gdn_backend_decision(
+    backend: str, head_k_dim: int | None, use_flashinfer: bool
+) -> None:
+    """Dump the inputs to the backend decision and the final choice."""
+    is_cuda = current_platform.is_cuda()
+    platform = "cuda" if is_cuda else current_platform.device_name
+    cuda_runtime = torch.version.cuda or "n/a"
+    device_cap = (
+        str(current_platform.get_device_capability()) if is_cuda else "n/a"
+    )
+    cutlass_dsl_cu13_installed = _has_cutlass_dsl_cu13()
+    logger.info_once(
+        "GDN prefill backend inputs:\n"
+        "  requested=%s\n"
+        "  platform=%s, cuda_runtime=%s, device_capability=%s\n"
+        "  nvidia_cutlass_dsl_libs_cu13_installed=%s\n"
+        "  head_k_dim=%s",
+        backend,
+        platform,
+        cuda_runtime,
+        device_cap,
+        cutlass_dsl_cu13_installed,
+        head_k_dim,
+        scope="local",
+    )
+    if use_flashinfer:
+        logger.info_once("Using FlashInfer GDN prefill kernel")
+        logger.info_once(
+            "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
+            "take a while to compile. Set `--gdn-prefill-backend triton` to "
+            "avoid JIT compile time.",
+        )
+    else:
+        logger.info_once("Using Triton/FLA GDN prefill kernel")
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -118,39 +197,15 @@ def fi_chunk_gated_delta_rule(
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
-    def __init__(self) -> None:
+    def __init__(self, head_k_dim: int | None = None) -> None:
         super().__init__()
         additional_config = get_current_vllm_config().additional_config
         assert isinstance(additional_config, dict)
         backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
 
-        supports_flashinfer = (
-            current_platform.is_cuda() and current_platform.is_device_capability(90)
-        )
-
-        if backend == "flashinfer":
-            use_flashinfer = supports_flashinfer
-            if not use_flashinfer:
-                logger.warning_once(
-                    "GDN prefill backend 'flashinfer' is selected but "
-                    "cannot use this kernel on the current platform. "
-                    "Falling back to Triton/FLA."
-                )
-        elif backend == "triton":
-            use_flashinfer = False
-        else:
-            use_flashinfer = supports_flashinfer
-
-        if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel")
-            logger.info_once(
-                "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
-                "take a while to compile. Set `--gdn-prefill-backend triton` to "
-                "avoid JIT compile time.",
-            )
-        else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel")
+        use_flashinfer = _should_use_flashinfer_gdn_prefill(backend, head_k_dim)
+        _log_gdn_backend_decision(backend, head_k_dim, use_flashinfer)
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -380,7 +435,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             prefix=f"{prefix}.out_proj",
         )
 
-        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
