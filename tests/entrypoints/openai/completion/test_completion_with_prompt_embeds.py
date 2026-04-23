@@ -80,7 +80,7 @@ def example_prompt_embeds(hf_runner):
     with hf_runner(MODEL_NAME) as hf_model:
         example_embeddings = hf_model.get_prompt_embeddings(EXAMPLE_PROMPTS)
 
-    return [_encode_embeds(item) for item in example_embeddings]
+    return [_encode_embeds(item.to(torch.bfloat16)) for item in example_embeddings]
 
 
 @pytest.fixture(scope="module")
