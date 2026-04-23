@@ -119,10 +119,16 @@ class LoRAKernelMeta:
 
         self._reset()
 
-        # Check and record no-lora case.
-        # TODO: avoid this sync by computing no_lora on CPU upstream in
-        # `convert_mapping` where the mapping is still a Python list.
+        # This method has two unavoidable GPU->CPU syncs given the current
+        # design: (1) the `torch.all(... == -1)` no-lora check below, and
+        # (2) `torch.unique(...)` + reading `lora_ids.size(0)` as a Python
+        # int further down. Both ultimately stem from needing facts about
+        # `token_lora_mapping`'s contents on the host (is everything -1?
+        # how many distinct loras?). TODO: compute these on CPU upstream
+        # in `convert_mapping` where the mapping is still a Python list,
+        # then pass the results in.
         with gpu_sync_allowed():
+            # Check and record no-lora case.
             no_lora = torch.all(token_lora_mapping == -1)
             self.no_lora_flag_cpu[0] = no_lora
 
@@ -130,47 +136,47 @@ class LoRAKernelMeta:
                 # Early exit. LoRA kernels will not be run.
                 return
 
-        num_tokens = token_lora_mapping.size(0)
+            num_tokens = token_lora_mapping.size(0)
 
-        # copy token lora mapping
-        self.token_lora_mapping[:num_tokens].copy_(
-            token_lora_mapping, non_blocking=True
-        )
+            # copy token lora mapping
+            self.token_lora_mapping[:num_tokens].copy_(
+                token_lora_mapping, non_blocking=True
+            )
 
-        # token_indices_sorted_by_lora_ids
-        _, token_indices_sorted_by_lora_ids = torch.sort(
-            token_lora_mapping, stable=True
-        )
-        # start gpu transfer
-        self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
-            token_indices_sorted_by_lora_ids, non_blocking=True
-        )
+            # token_indices_sorted_by_lora_ids
+            _, token_indices_sorted_by_lora_ids = torch.sort(
+                token_lora_mapping, stable=True
+            )
+            # start gpu transfer
+            self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
+                token_indices_sorted_by_lora_ids, non_blocking=True
+            )
 
-        # active_lora_ids, num_tokens_per_lora
-        lora_ids, num_tokens_per_lora = torch.unique(
-            token_lora_mapping, sorted=True, return_counts=True
-        )
-        self.active_lora_ids[: lora_ids.size(0)].copy_(lora_ids, non_blocking=True)
-        self.num_tokens_per_lora[: num_tokens_per_lora.size(0)].copy_(
-            num_tokens_per_lora, non_blocking=True
-        )
+            # active_lora_ids, num_tokens_per_lora
+            lora_ids, num_tokens_per_lora = torch.unique(
+                token_lora_mapping, sorted=True, return_counts=True
+            )
+            self.active_lora_ids[: lora_ids.size(0)].copy_(lora_ids, non_blocking=True)
+            self.num_tokens_per_lora[: num_tokens_per_lora.size(0)].copy_(
+                num_tokens_per_lora, non_blocking=True
+            )
 
-        num_active_loras = lora_ids.size(0)
+            num_active_loras = lora_ids.size(0)
 
-        # Round up num_active_loras to match cudagraph capture keys.
-        # This ensures the kernel grid dimension matches the captured graph.
-        if self.captured_lora_counts and num_active_loras > 0:
-            idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
-            if idx < len(self.captured_lora_counts):
-                num_active_loras = self.captured_lora_counts[idx]
+            # Round up num_active_loras to match cudagraph capture keys.
+            # This ensures the kernel grid dimension matches the captured graph.
+            if self.captured_lora_counts and num_active_loras > 0:
+                idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
+                if idx < len(self.captured_lora_counts):
+                    num_active_loras = self.captured_lora_counts[idx]
 
-        self.num_active_loras_cpu[0] = num_active_loras
+            self.num_active_loras_cpu[0] = num_active_loras
 
-        # lora_token_start_loc
-        lora_token_start_loc = torch.cumsum(num_tokens_per_lora, dim=0)
-        self.lora_token_start_loc[1 : 1 + lora_token_start_loc.size(0)].copy_(
-            lora_token_start_loc, non_blocking=True
-        )
+            # lora_token_start_loc
+            lora_token_start_loc = torch.cumsum(num_tokens_per_lora, dim=0)
+            self.lora_token_start_loc[1 : 1 + lora_token_start_loc.size(0)].copy_(
+                lora_token_start_loc, non_blocking=True
+            )
 
     def meta_args(
         self,
