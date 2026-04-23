@@ -310,6 +310,38 @@ def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_granite4_vision(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "ibm-granite/granite-vision-4.1-4b"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "h2oai/h2ovl-mississippi-800m"
 
@@ -1487,6 +1519,7 @@ model_example_map = {
     "deepseek_ocr": load_deepseek_ocr,
     "exaone4_5": load_exaone4_5,
     "gemma3": load_gemma3,
+    "granite4_vision": load_granite4_vision,
     "h2ovl_chat": load_h2ovl,
     "hunyuan_vl": load_hunyuan_vl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,

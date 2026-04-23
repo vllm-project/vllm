@@ -381,7 +381,9 @@ class OffloadingConnectorScheduler:
                 for i in range(self.config.block_size_factor):
                     src_block_ids.append(block_ids[gpu_block_idx + i])
             src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=(len(src_block_ids),)
+                src_block_ids,
+                group_sizes=(len(src_block_ids),),
+                block_indices=(0,),
             )
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
