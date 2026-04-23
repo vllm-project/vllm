@@ -25,7 +25,6 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
@@ -46,12 +45,12 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.vllm_flash_attn.cute.interface import (
+    _flash_attn_fwd as _fa4_fwd,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
-
-logger = init_logger(__name__)
 
 
 class FlashAttentionMLASparseBackend(AttentionBackend):
@@ -289,6 +288,20 @@ class FlashAttentionMLASparseImpl(
         assert indexer is not None, "Indexer required for sparse MLA"
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
 
+        max_tokens = self.topk_indices_buffer.shape[0]
+        device = self.topk_indices_buffer.device
+
+        # Pre-allocate cu_seqlens_k (all zeros) and seqused_k buffers.
+        # cu_seqlens_k=0 means all batches share K at offset 0.
+        # seqused_k=total_k tells the kernel how large K actually is,
+        # preventing seqlen-based masking from zeroing the output.
+        self.cu_seqlens_k_buffer = torch.zeros(
+            max_tokens + 1, dtype=torch.int32, device=device
+        )
+        self.seqused_k_buffer = torch.zeros(
+            max_tokens, dtype=torch.int32, device=device
+        )
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -296,8 +309,6 @@ class FlashAttentionMLASparseImpl(
         attn_metadata: FlashAttentionMLASparseMetadata,
         layer: AttentionLayer,  # noqa: ARG002
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # Split query into rope (q_pe) and nope (q_nope) components.
-        # FA4 MLA absorbed kernel takes them separately as q and qv.
         if isinstance(q, tuple):
             q_nope, q_pe = q
         else:
@@ -312,100 +323,48 @@ class FlashAttentionMLASparseImpl(
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        topk_tokens = topk_indices.shape[1]
 
         total_k = k_pe_cache.shape[0] * k_pe_cache.shape[1]
-
-        # DIAGNOSTIC: check topk_indices from indexer
-        topk_max = topk_indices.max().item()
-        topk_min = topk_indices.min().item()
-        seq_lens = attn_metadata.seq_lens
-        max_seq_len = seq_lens.max().item() if seq_lens.numel() > 0 else 0
-        if topk_max >= max_seq_len:
-            logger.error(
-                "DIAGNOSTIC: topk_indices out of range! "
-                "topk min=%d max=%d, max_seq_len=%d, "
-                "num_actual_toks=%d, num_reqs=%d, "
-                "block_table shape=%s, total_k=%d",
-                topk_min,
-                topk_max,
-                max_seq_len,
-                num_actual_toks,
-                attn_metadata.num_reqs,
-                attn_metadata.block_table.shape,
-                total_k,
-            )
 
         gather_kv_indices = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            NUM_TOPK_TOKENS=topk_tokens,
         )
 
-        # DIAGNOSTIC: check gather_kv_indices before clamp
-        gkv_max = gather_kv_indices.max().item()
-        gkv_min = gather_kv_indices.min().item()
-        if gkv_max >= total_k:
-            bad_mask = gather_kv_indices >= total_k
-            num_bad = bad_mask.sum().item()
-            bad_rows = bad_mask.any(dim=1).nonzero(as_tuple=True)[0]
-            sample_row = bad_rows[0].item() if bad_rows.numel() > 0 else -1
-            sample_req = (
-                attn_metadata.req_id_per_token[sample_row].item()
-                if sample_row >= 0
-                else -1
-            )
-            sample_topk = (
-                topk_indices[sample_row].cpu().tolist() if sample_row >= 0 else []
-            )
-            sample_gather = (
-                gather_kv_indices[sample_row].cpu().tolist() if sample_row >= 0 else []
-            )
-            sample_bad_topk = [
-                sample_topk[i]
-                for i in range(len(sample_topk))
-                if i < len(sample_gather) and sample_gather[i] >= total_k
-            ]
-            logger.error(
-                "DIAGNOSTIC: gather_kv_indices OOB! "
-                "pre-clamp min=%d max=%d, total_k=%d, "
-                "num_bad=%d/%d, sample_row=%d, sample_req=%d, "
-                "bad topk values=%s, "
-                "seq_lens=%s, block_table[req] shape=%s",
-                gkv_min,
-                gkv_max,
-                total_k,
-                num_bad,
-                gather_kv_indices.numel(),
-                sample_row,
-                sample_req,
-                sample_bad_topk[:20],
-                seq_lens[: attn_metadata.num_reqs].cpu().tolist()[:20],
-                attn_metadata.block_table.shape,
-            )
-
-        # FA4's gather_kv_indices does not support -1 sentinel values;
-        # clamp to valid range to prevent out-of-bounds GPU memory reads.
-        gather_kv_indices.clamp_(min=0, max=total_k - 1)
+        k_flat = k_pe_cache.reshape(total_k, 1, self.qk_rope_head_dim)
+        v_flat = kv_c_cache.reshape(total_k, 1, self.kv_lora_rank)
 
         num_reqs = attn_metadata.num_reqs
-        cu_seqlens_k = torch.zeros(num_reqs + 1, dtype=torch.int32, device=q_pe.device)
+        cu_seqlens_k = self.cu_seqlens_k_buffer[: num_reqs + 1]
+        seqused_k = self.seqused_k_buffer[:num_reqs]
+        seqused_k.fill_(total_k)
 
-        attn_out = flash_attn_varlen_func(
-            q=q_pe,
-            k=k_pe_cache.reshape(total_k, 1, self.qk_rope_head_dim),
-            v=kv_c_cache.reshape(total_k, 1, self.kv_lora_rank),
-            q_v=q_nope,
+        # FA4 CuTE kernel launches on a TVM-FFI managed stream (CUDA
+        # default stream 0x0) which differs from PyTorch's current stream.
+        # Sync before to ensure inputs (gather_kv_indices from triton) are
+        # visible, and after to ensure the output is visible to PyTorch.
+        # TODO: eliminate these syncs by making the CuTE kernel use
+        # PyTorch's current stream (tvm_ffi.use_torch_stream doesn't
+        # propagate to the compiled kernel's TVMFFIEnvGetStream).
+        torch.accelerator.synchronize()
+        attn_out, _ = _fa4_fwd(
+            q_pe,
+            k_flat,
+            v_flat,
+            qv=q_nope,
             max_seqlen_q=max(attn_metadata.max_query_len, 1),
             cu_seqlens_q=attn_metadata.query_start_loc,
             max_seqlen_k=total_k,
             cu_seqlens_k=cu_seqlens_k,
+            seqused_k=seqused_k,
             softmax_scale=self.scale,
             causal=False,
-            fa_version=4,
             gather_kv_indices=gather_kv_indices,
-            min_seqlen_k=attn_metadata.topk_tokens,
         )
+        torch.accelerator.synchronize()
 
         return attn_out, None

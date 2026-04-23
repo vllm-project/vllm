@@ -189,3 +189,60 @@ def triton_convert_req_index_to_global_index(
         assert valid_counts is not None
         return out, valid_counts
     return out
+
+
+@triton.jit
+def _cyclic_fill_kernel(
+    data_ptr,
+    valid_counts_ptr,
+    BLOCK_N: tl.constexpr,
+    stride_d0,
+    stride_d1,
+):
+    token_id = tl.program_id(0)
+    tile_id = tl.program_id(1)
+
+    col_ids = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    valid_count = tl.load(valid_counts_ptr + token_id)
+    valid_count = tl.maximum(valid_count, 1)
+
+    needs_fill = col_ids >= valid_count
+    src_col = col_ids % valid_count
+
+    src_ptr = data_ptr + token_id * stride_d0 + src_col * stride_d1
+    vals = tl.load(src_ptr, mask=needs_fill, other=0)
+
+    dst_ptr = data_ptr + token_id * stride_d0 + col_ids * stride_d1
+    tl.store(dst_ptr, vals, mask=needs_fill)
+
+
+def triton_cyclic_fill(
+    data: torch.Tensor,
+    valid_counts: torch.Tensor,
+    topk_tokens: int,
+    BLOCK_N: int = 128,
+) -> None:
+    """Fill invalid positions with cyclically repeated valid indices.
+
+    Valid indices must be compacted at the front of each row.
+    Positions [valid_count, topk_tokens) are filled with
+    data[j % valid_count] from the valid prefix.
+    """
+    assert data.dtype == torch.int32
+    assert valid_counts.dtype == torch.int32
+    assert topk_tokens % BLOCK_N == 0
+
+    num_tokens = data.shape[0]
+    tiles_per_row = topk_tokens // BLOCK_N
+    grid = (num_tokens, tiles_per_row)
+
+    stride_d0, stride_d1 = data.stride()
+
+    _cyclic_fill_kernel[grid](
+        data,
+        valid_counts,
+        BLOCK_N,
+        stride_d0,
+        stride_d1,
+    )
