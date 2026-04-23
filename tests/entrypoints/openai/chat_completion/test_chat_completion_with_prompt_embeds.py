@@ -16,6 +16,9 @@ from tests.utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "facebook/opt-125m"
 CHAT_TEMPLATE = VLLM_PATH / "examples/template_chatml.jinja"
+# Must match `--dtype` in `server_args`, `safe_load_prompt_embeds` rejects
+# embedding tensors whose dtype doesn't match the loaded model.
+SERVER_DTYPE: torch.dtype = torch.bfloat16
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +62,8 @@ def prompt_embeds_b64(hf_runner) -> list[str]:
     prompts = ["Hello, my name is", "What is an LLM?"]
     with hf_runner(MODEL_NAME) as hf_model:
         embeddings = hf_model.get_prompt_embeddings(prompts)
-    return [_encode_embeds(e) for e in embeddings]
+    # Cast to the server's dtype so `safe_load_prompt_embeds` accepts them.
+    return [_encode_embeds(e.to(SERVER_DTYPE)) for e in embeddings]
 
 
 @pytest.mark.asyncio

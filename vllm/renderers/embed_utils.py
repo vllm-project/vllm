@@ -30,15 +30,40 @@ def safe_load_prompt_embeds(
             weights_only=True,
             map_location=torch.device("cpu"),
         )
-        assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
-            torch.float32,
-            torch.bfloat16,
-            torch.float16,
-        )
+        if not isinstance(tensor, torch.Tensor):
+            raise VLLMValidationError(
+                "`prompt_embeds` payload did not deserialize to a torch.Tensor.",
+                parameter="prompt_embeds",
+            )
         tensor = tensor.to_dense()
 
     if tensor.dim() > 2:
         tensor = tensor.squeeze(0)
-        assert tensor.dim() == 2
+    if tensor.dim() != 2:
+        raise VLLMValidationError(
+            "`prompt_embeds` must be a 2D tensor of shape "
+            f"(num_tokens, hidden_size); got shape {tuple(tensor.shape)}.",
+            parameter="prompt_embeds",
+        )
+
+    # Pin each tensor to the model's hidden_size and dtype. Validating here
+    # also transitively guarantees cross-tensor consistency for requests that
+    # include multiple `prompt_embeds` parts, which is required by downstream
+    # concatenation in `_build_mixed_prompt_embeds`.
+    expected_hidden_size = model_config.get_hidden_size()
+    if tensor.shape[1] != expected_hidden_size:
+        raise VLLMValidationError(
+            f"`prompt_embeds` hidden_size {tensor.shape[1]} does not match "
+            f"the model's hidden_size {expected_hidden_size}.",
+            parameter="prompt_embeds",
+        )
+
+    expected_dtype = model_config.dtype
+    if tensor.dtype != expected_dtype:
+        raise VLLMValidationError(
+            f"`prompt_embeds` dtype {tensor.dtype} does not match "
+            f"the model's dtype {expected_dtype}.",
+            parameter="prompt_embeds",
+        )
 
     return tensor

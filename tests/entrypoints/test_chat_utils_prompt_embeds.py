@@ -86,6 +86,10 @@ def _encode_tensor(t: torch.Tensor) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+_MOCK_HIDDEN_SIZE: Final[int] = 8
+_MOCK_DTYPE: Final[torch.dtype] = torch.float32
+
+
 def _make_mock_model_config(*, enable_prompt_embeds: bool = True) -> mock.MagicMock:
     mc = mock.MagicMock()
     mc.enable_prompt_embeds = enable_prompt_embeds
@@ -94,6 +98,10 @@ def _make_mock_model_config(*, enable_prompt_embeds: bool = True) -> mock.MagicM
     mc.allowed_media_domains = None
     # Test text-only code path in `MultiModalItemTracker.resolve_items`.
     mc.is_multimodal_model = False
+    # `safe_load_prompt_embeds` pins each tensor to the model's hidden_size
+    # and dtype, so the mock must return concrete values.
+    mc.get_hidden_size.return_value = _MOCK_HIDDEN_SIZE
+    mc.dtype = _MOCK_DTYPE
     return mc
 
 
@@ -122,8 +130,8 @@ def test_ensure_placeholder_token_is_single_token_and_idempotent(tokenizer):
 
 
 def test_parse_chat_messages_openai_format():
-    B, H = 3, 8
-    t = torch.randn(B, H)
+    NUM_TOKENS = 3
+    t = torch.randn(NUM_TOKENS, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
     b64 = _encode_tensor(t)
     mc = _make_mock_model_config()
 
@@ -209,7 +217,6 @@ def test_parse_chat_messages_openai_format():
 def test_parse_chat_messages_string_format_preserves_position(
     layout, interleave_mm_strings
 ):
-    H = 8
     mc = _make_mock_model_config()
     if interleave_mm_strings is not None:
         mm_cfg = mock.MagicMock()
@@ -225,7 +232,7 @@ def test_parse_chat_messages_string_format_preserves_position(
             expected_parts.append(value)
         else:  # prompt embeds
             num_tokens = value
-            t = torch.randn(num_tokens, H)
+            t = torch.randn(num_tokens, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
             expected_embeds.append(t)
             content.append({"type": "prompt_embeds", "data": _encode_tensor(t)})
             # Parser emits ONE sentinel per part.
@@ -418,10 +425,9 @@ async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
     tokenizer.chat_template = _SIMPLE_CHAT_TEMPLATE
     tid = _ensure_prompt_embeds_placeholder_token(tokenizer)
 
-    H = 8
     LEN_A, LEN_B = 3, 2
-    t_a = torch.randn(LEN_A, H)
-    t_b = torch.randn(LEN_B, H)
+    t_a = torch.randn(LEN_A, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
+    t_b = torch.randn(LEN_B, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
     NUM_TENSORS = 2
 
     mc = _make_mock_model_config()
@@ -459,7 +465,7 @@ async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
     assert positions[1][1] == LEN_B
 
     embeds, mask = _build_mixed_prompt_embeds(expanded, tensors, positions)
-    assert embeds.shape == (len(expanded), H)
+    assert embeds.shape == (len(expanded), _MOCK_HIDDEN_SIZE)
     assert mask.count(False) == LEN_A + LEN_B
     assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_A], t_a)
     assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_B], t_b)
@@ -472,10 +478,9 @@ async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     tokenizer.chat_template = _SIMPLE_CHAT_TEMPLATE
     tid = _ensure_prompt_embeds_placeholder_token(tokenizer)
 
-    H = 8
     LEN_SYS, LEN_USR = 4, 3
-    t_sys = torch.randn(LEN_SYS, H)
-    t_usr = torch.randn(LEN_USR, H)
+    t_sys = torch.randn(LEN_SYS, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
+    t_usr = torch.randn(LEN_USR, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
     NUM_TENSORS = 2  # t_sys and t_usr.
 
     mc = _make_mock_model_config()
@@ -515,7 +520,7 @@ async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     assert positions[0][0] < positions[1][0]
 
     embeds, mask = _build_mixed_prompt_embeds(expanded, tensors, positions)
-    assert embeds.shape == (len(expanded), H)
+    assert embeds.shape == (len(expanded), _MOCK_HIDDEN_SIZE)
     assert mask.count(False) == LEN_SYS + LEN_USR
     assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_SYS], t_sys)
     assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_USR], t_usr)
