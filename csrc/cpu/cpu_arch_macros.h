@@ -55,10 +55,7 @@
         vec_res = _mm512_mul_ps(vec_res, vec_two);                             \
         vec_op::FP32Vec16 res(vec_res);                                        \
         return res;                                                            \
-      };                                                                       \
-      auto fast_exp_16 =                                                       \
-          [&](const vec_op::FP32Vec16& vec)                                    \
-              __attribute__((always_inline)) { return fast_exp(vec); };
+      };
   #endif
 
 #endif
