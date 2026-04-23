@@ -13,7 +13,6 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import multi_gpu_test
 
@@ -21,7 +20,7 @@ from ..utils import multi_gpu_test
 @ray.remote
 class _CUDADeviceCountStatelessTestActor:
     def get_count(self):
-        return cuda_device_count_stateless()
+        return current_platform.device_count()
 
     def set_cuda_visible_devices(self, cuda_visible_devices: str):
         update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -66,7 +65,7 @@ def cpu_worker(rank, WORLD_SIZE, port1, port2):
 
 
 def gpu_worker(rank, WORLD_SIZE, port1, port2):
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     pg1 = StatelessProcessGroup.create(
         host="127.0.0.1", port=port1, rank=rank, world_size=WORLD_SIZE
     )

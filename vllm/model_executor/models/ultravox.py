@@ -23,13 +23,13 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -404,12 +404,14 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
             kwargs["layer_head_mask"] = None
 
         for layer in self.layers:
-            layer_outputs = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=extended_attention_mask,
                 **kwargs,
             )
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.ln_post(hidden_states)
         hidden_states = self.linear_out(hidden_states)
@@ -509,13 +511,14 @@ class ModifiedWhisperEncoder(WhisperEncoder):
             kwargs["layer_head_mask"] = None
 
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
+            hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask,
                 **kwargs,
             )
-
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states

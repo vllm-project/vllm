@@ -299,6 +299,62 @@ def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs
     assert "unknown_param" not in resolved_mock
 
 
+def test_resolve_chat_template_resolves_name():
+    """When chat_template is a name, resolve_chat_template should return
+    the actual Jinja content so that kwargs detection works correctly."""
+    from unittest.mock import MagicMock
+
+    jinja_content = "{{ messages }}{% if tools %}{{ tools }}{% endif %}"
+    tokenizer = MagicMock()
+    tokenizer.get_chat_template.return_value = jinja_content
+
+    model_config = MagicMock()
+
+    result = resolve_chat_template(
+        tokenizer,
+        chat_template="tool_use",
+        tools=None,
+        model_config=model_config,
+    )
+
+    assert result == jinja_content
+    tokenizer.get_chat_template.assert_called_once_with("tool_use", tools=None)
+
+
+def test_resolve_chat_template_kwargs_with_template_name():
+    """Ensures template kwargs are not silently dropped when chat_template
+    was originally a template name that has been resolved to Jinja content."""
+    from unittest.mock import MagicMock
+
+    jinja_content = (
+        "{% for m in messages %}{{ m }}{% endfor %}"
+        "{% if tools %}{{ tools }}{% endif %}"
+        "{% if documents %}{{ documents }}{% endif %}"
+    )
+
+    tokenizer = MagicMock()
+    tokenizer.apply_chat_template = MagicMock()
+
+    kwargs = {
+        "tools": [{"type": "function", "function": {"name": "f"}}],
+        "documents": [{"title": "doc"}],
+        "unknown_param": "should be dropped",
+    }
+
+    resolved = resolve_chat_template_kwargs(
+        tokenizer,
+        chat_template=jinja_content,
+        chat_template_kwargs=kwargs,
+        raise_on_unexpected=False,
+    )
+
+    # template vars "tools" and "documents" should be preserved
+    assert "tools" in resolved
+    assert "documents" in resolved
+    # unknown param should be filtered
+    assert "unknown_param" not in resolved
+
+
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`
 @pytest.mark.parametrize(

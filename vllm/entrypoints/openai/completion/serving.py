@@ -5,7 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from fastapi import Request
 
@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -41,6 +41,9 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 
@@ -51,6 +54,7 @@ class OpenAIServingCompletion(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
+        openai_serving_render: "OpenAIServingRender",
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
@@ -63,6 +67,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -77,13 +82,15 @@ class OpenAIServingCompletion(OpenAIServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
+    ) -> list[EngineInput] | ErrorResponse:
         """
-        render completion request by validating and preprocessing inputs.
+        Validate the model and preprocess a completion request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A list of engine_prompts on success,
-            or an ErrorResponse on failure.
+            A list of engine_inputs on success, or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -95,25 +102,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        # Return error for unsupported features.
-        if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
-
-        if request.echo and request.prompt_embeds is not None:
-            return self.create_error_response("Echo is unsupported with prompt embeds.")
-
-        if request.prompt_logprobs is not None and request.prompt_embeds is not None:
-            return self.create_error_response(
-                "prompt_logprobs is not compatible with prompt embeds."
-            )
-
-        engine_prompts = await self._preprocess_completion(
-            request,
-            prompt_input=request.prompt,
-            prompt_embeds=request.prompt_embeds,
-        )
-
-        return engine_prompts
+        return await self.openai_serving_render.render_completion(request)
 
     async def create_completion(
         self,
@@ -138,7 +127,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if isinstance(result, ErrorResponse):
             return result
 
-        engine_prompts = result
+        engine_inputs = result
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -155,11 +144,11 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for i, engine_input in enumerate(engine_inputs):
             max_tokens = get_max_tokens(
                 max_model_len,
                 request.max_tokens,
-                self._extract_prompt_len(engine_prompt),
+                self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
@@ -179,7 +168,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -192,7 +181,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
-                    prompt=engine_prompt,
+                    prompt=engine_input,
                     request_id=request_id,
                     params=sampling_params,
                     lora_request=lora_request,
@@ -200,7 +189,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
             else:
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_input,
                     sampling_params,
                     request_id_item,
                     lora_request=lora_request,
@@ -214,7 +203,7 @@ class OpenAIServingCompletion(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         model_name = self.models.model_name(lora_request)
-        num_prompts = len(engine_prompts)
+        num_prompts = len(engine_inputs)
 
         # Streaming response
         tokenizer = self.renderer.tokenizer
@@ -222,7 +211,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if request.stream:
             return self.completion_stream_generator(
                 request,
-                engine_prompts,
+                engine_inputs,
                 result_generator,
                 request_id,
                 created_time,
@@ -245,8 +234,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    engine_prompt = engine_prompts[i]
-                    final_res.prompt = self._extract_prompt_text(engine_prompt)
+                    final_res.prompt = self._extract_prompt_text(engine_inputs[i])
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -278,7 +266,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[ProcessorInputs],
+        engine_inputs: list[EngineInput],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -311,8 +299,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 prompt_text = res.prompt
                 if prompt_text is None:
-                    engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_prompt)
+                    engine_input = engine_inputs[prompt_idx]
+                    prompt_text = self._extract_prompt_text(engine_input)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:

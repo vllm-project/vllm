@@ -6,7 +6,7 @@ import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
@@ -14,21 +14,11 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.engine.protocol import (
-        DeltaMessage,
-    )
-    from vllm.entrypoints.openai.responses.protocol import (
-        ResponsesRequest,
-    )
+    from vllm.config import ModelConfig
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
-else:
-    ChatCompletionRequest = Any
-    DeltaMessage = Any
-    ResponsesRequest = Any
-    TokenizerLike = Any
 
 logger = init_logger(__name__)
 
@@ -41,14 +31,31 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+    def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer
+        # Optional vLLM ModelConfig from the server. Use get (not pop) so composite
+        # parsers can forward **kwargs to nested parsers.
+        self._model_config: ModelConfig | None = kwargs.get("model_config")
 
     @cached_property
     def vocab(self) -> dict[str, int]:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
+
+    @property
+    def reasoning_start_str(self) -> str | None:
+        """Set `reasoning_start_str` to the strings that delimit
+        the reasoning block (e.g. `""<seed:think>""` and `"<think>"`).
+        """
+        return None
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        """Set `reasoning_end_str` to the strings that delimit
+        the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
+        """
+        return None
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -127,7 +134,7 @@ class ReasoningParser:
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -136,14 +143,10 @@ class ReasoningParser:
         available before sending to the client.
 
         Parameters:
-        model_output: str
-            The model-generated string to extract reasoning content from.
-
-        request: ChatCompletionRequest
-            The request object that was used to generate the model_output.
+            model_output: The model-generated string to extract reasoning content from.
+            request: The request object that was used to generate the model_output.
 
         Returns:
-        tuple[Optional[str], Optional[str]]
             A tuple containing the reasoning content and the content.
         """
 
@@ -156,7 +159,7 @@ class ReasoningParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
+    ) -> "DeltaMessage | None":
         """
         Instance method that should be implemented for extracting reasoning
         from an incomplete response; for use when handling reasoning calls and
@@ -164,6 +167,12 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
+
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        """Adjust request parameters; override in subclasses as needed."""
+        return request
 
     def prepare_structured_tag(
         self,
@@ -313,7 +322,7 @@ class ReasoningParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                names = cast(list[str], name)
             else:
                 names = [class_name]
 

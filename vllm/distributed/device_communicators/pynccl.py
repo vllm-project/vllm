@@ -108,9 +108,7 @@ class PyNcclCommunicator:
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
-            logger.info_once(
-                "vLLM is using nccl==%s", self.nccl.ncclGetVersion(), scope="local"
-            )
+            logger.info_once("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()
@@ -133,9 +131,7 @@ class PyNcclCommunicator:
         assert isinstance(device, torch.device)
         self.device = device
         # nccl communicator and stream will use this device
-        # `torch.cuda.device` is a context manager that changes the
-        # current cuda device to the specified one
-        with torch.cuda.device(device):
+        with torch.accelerator.device_index(device.index):
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank
             )
@@ -146,6 +142,13 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    def destroy(self):
+        if self.available and not self.disabled:
+            with torch.accelerator.device_index(self.device.index):
+                self.nccl.ncclCommDestroy(self.comm)
+            self.available = False
+            self.disabled = True
 
     def all_reduce(
         self,

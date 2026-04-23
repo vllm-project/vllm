@@ -45,7 +45,6 @@ async def wake_up(raw_request: Request):
 
 @router.get("/is_sleeping")
 async def is_sleeping(raw_request: Request):
-    logger.info("check whether the engine is sleeping")
     is_sleeping = await engine_client(raw_request).is_sleeping()
     return JSONResponse(content={"is_sleeping": is_sleeping})
 

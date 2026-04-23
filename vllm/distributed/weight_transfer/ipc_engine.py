@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
-import base64
 import pickle
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pybase64 as base64
 import requests
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
@@ -169,7 +169,7 @@ class IPCWeightTransferEngine(
             update_info.shapes,
             update_info.ipc_handles,
         ):
-            device_index = torch.cuda.current_device()
+            device_index = torch.accelerator.current_device_index()
             props = torch.cuda.get_device_properties(device_index)
             physical_gpu_id = str(props.uuid)
 
@@ -242,7 +242,7 @@ class IPCWeightTransferEngine(
             args = trainer_args
 
         # Get physical GPU UUID
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         props = torch.cuda.get_device_properties(device_index)
         gpu_uuid = str(props.uuid)
 

@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for Helion kernel management."""
 
-import logging
-
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 # Maps known variant GPU names (after lowercase/underscore normalization)
 # to their canonical form.
@@ -49,7 +48,7 @@ _GPU_NAME_ALIASES: dict[str, str] = {
 
 def get_gpu_name(device_id: int | None = None) -> str:
     if device_id is None:
-        logger.warning(
+        logger.warning_once(
             "get_gpu_name() called without device_id, defaulting to 0. "
             "This may return the wrong device name in multi-node setups."
         )

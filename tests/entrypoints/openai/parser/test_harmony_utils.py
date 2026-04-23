@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
 )
 from vllm.entrypoints.openai.responses.harmony import (
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
 
@@ -841,3 +842,89 @@ class TestGetSystemMessage:
                 assert channel in valid_channels, (
                     f"{channel} missing when with_custom_tools={with_tools}"
                 )
+
+
+class TestResponseInputToHarmonyReasoningItem:
+    """Tests for response_input_to_harmony handling of reasoning input items.
+
+    Per the OpenAI spec, ResponseReasoningItem.content is
+    Optional[List[Content]] = None. Clients like langchain-openai may omit
+    this field when constructing multi-turn input from previous responses.
+
+    Reasoning items with content are converted to Harmony messages on the
+    'analysis' channel. All content items are concatenated. Items without
+    content return None (skipped by the caller).
+    """
+
+    def test_reasoning_with_single_content(self):
+        """Test reasoning item with a single content entry."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [{"type": "reasoning_text", "text": "Thinking step by step"}],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is not None
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == "Thinking step by step"
+        assert msg.channel == "analysis"
+
+    def test_reasoning_with_multiple_content_items(self):
+        """Test reasoning item with multiple content entries concatenated."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [
+                {"type": "reasoning_text", "text": "First, let me analyze"},
+                {"type": "reasoning_text", "text": "Second, I should consider"},
+                {"type": "reasoning_text", "text": "Finally, the answer is"},
+            ],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is not None
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == (
+            "First, let me analyze\nSecond, I should consider\nFinally, the answer is"
+        )
+        assert msg.channel == "analysis"
+
+    def test_reasoning_without_content_returns_none(self):
+        """Test reasoning item without content field returns None."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is None
+
+    def test_reasoning_with_none_content_returns_none(self):
+        """Test reasoning item with content=None returns None."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": None,
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is None
+
+    def test_reasoning_with_empty_content_returns_none(self):
+        """Test reasoning item with empty content list returns None."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is None

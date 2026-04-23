@@ -54,6 +54,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "granite_tool_parser",
         "GraniteToolParser",
     ),
+    "granite4": (
+        "granite4_tool_parser",
+        "Granite4ToolParser",
+    ),
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
@@ -61,6 +65,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "hunyuan_a13b": (
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
+    ),
+    "hy_v3": (
+        "hy_v3_tool_parser",
+        "HYV3ToolParser",
     ),
     "internlm": (
         "internlm2_tool_parser",
@@ -89,6 +97,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "longcat": (
         "longcat_tool_parser",
         "LongcatFlashToolParser",
+    ),
+    "mimo": (
+        "qwen3xml_tool_parser",
+        "Qwen3XMLToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
@@ -149,6 +161,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "functiongemma": (
         "functiongemma_tool_parser",
         "FunctionGemmaToolParser",
+    ),
+    "gemma4": (
+        "gemma4_tool_parser",
+        "Gemma4ToolParser",
     ),
 }
 

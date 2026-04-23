@@ -11,6 +11,7 @@ from typing import Any
 
 import torch._functorch.config
 import torch.fx as fx
+from torch._dynamo.utils import dynamo_timed
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
@@ -34,13 +35,14 @@ def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
 
 
 def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
-    """Create example inputs with symbolic dims replaced by a concrete size.
+    """Create Fake example inputs with symbolic dims replaced by a concrete size.
 
-    Used for single-size eager compilation where we need concrete-shaped
-    inputs but don't have real runtime tensors yet.
+    Used for single-size compilation where we need concrete-shaped inputs.
+    The Dynamo-captured graph gives us example inputs with SymInts in them.
     """
     from torch._prims_common import compute_required_storage_length
-    from torch.fx.experimental.symbolic_shapes import is_symbolic
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
 
     def concretize(sym_val: Any) -> int:
         """Replace all symbolic variables in a SymInt expression with size."""
@@ -49,25 +51,28 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
         expr = sym_val.node.expr
         return int(expr.subs({s: size for s in expr.free_symbols}))
 
+    fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+
     args: list[Any] = []
-    for node in graph.graph.nodes:
-        if node.op != "placeholder":
-            break
-        val = node.meta["example_value"]
-        if isinstance(val, torch.SymInt):
-            args.append(concretize(val))
-        elif isinstance(val, torch.Tensor):
-            new_shape = tuple(concretize(d) for d in val.shape)
-            new_strides = tuple(concretize(s) for s in val.stride())
-            new_storage_offset = concretize(val.storage_offset())
-            needed_size = compute_required_storage_length(
-                new_shape, new_strides, new_storage_offset
-            )
-            t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
-            t = t.as_strided(new_shape, new_strides, new_storage_offset)
-            args.append(t)
-        else:
-            args.append(val)
+    with fake_mode:
+        for node in graph.graph.nodes:
+            if node.op != "placeholder":
+                break
+            val = node.meta["example_value"]
+            if isinstance(val, torch.SymInt):
+                args.append(concretize(val))
+            elif isinstance(val, torch.Tensor):
+                new_shape = tuple(concretize(d) for d in val.shape)
+                new_strides = tuple(concretize(s) for s in val.stride())
+                new_storage_offset = concretize(val.storage_offset())
+                needed_size = compute_required_storage_length(
+                    new_shape, new_strides, new_storage_offset
+                )
+                t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
+                t = t.as_strided(new_shape, new_strides, new_storage_offset)
+                args.append(t)
+            else:
+                args.append(val)
     return args
 
 
@@ -266,10 +271,12 @@ class PiecewiseBackend:
                 compile_range=range_entry.compile_range,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
+                is_encoder=self.vllm_backend.is_encoder,
             )
 
             range_entry.compiled = True
 
+    @dynamo_timed("vllm_log_compile_start_torch_trace_only")
     def _log_compile_start(self, compile_range: Range):
         """Log compilation event for TORCH_TRACE/tlparse."""
         is_cudagraph_size = (
@@ -349,12 +356,22 @@ class PiecewiseBackend:
         return None
 
     def __call__(self, *args: Any) -> Any:
-        runtime_shape = args[self.sym_shape_indices[0]]
-        range_entry = self._find_range_for_shape(runtime_shape)
+        if self.sym_shape_indices:
+            runtime_shape = args[self.sym_shape_indices[0]]
+            range_entry = self._find_range_for_shape(runtime_shape)
+            assert range_entry is not None, (
+                f"Shape: {runtime_shape} out of considered ranges: "
+                f"{self.compile_ranges}"
+            )
+        else:
+            # All inputs have static shapes; use the only compiled range_entry
+            compiled_entries = [re for re in self.range_entries.values() if re.compiled]
+            assert len(compiled_entries) == 1, (
+                f"Expected exactly one compiled range_entry for static shape "
+                f"compilation, but found {len(compiled_entries)}"
+            )
+            range_entry = compiled_entries[0]
 
-        assert range_entry is not None, (
-            f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
-        )
         assert range_entry.compiled, (
             "All ranges should be compiled or loaded up front in "
             "PiecewiseBackend.__init__. "

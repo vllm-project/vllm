@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    UnfusedOAITritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
@@ -27,9 +30,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
-)
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
@@ -48,6 +48,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
+        )
+        assert not self.base_layer.quant_method.is_monolithic, (
+            "Monolithic kernels are not supported for Fused MoE LoRA."
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -109,8 +112,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         else:  # fall back to the default config
             get_config_func = functools.partial(
                 try_get_optimal_moe_lora_config,
-                w1_shape=layer.w13_weight.size(),
-                w2_shape=layer.w2_weight.size(),
+                w1_shape=layer.w13_weight.shape,
+                w2_shape=layer.w2_weight.shape,
                 rank=rank,
                 top_k=top_k,
                 dtype=config_dtype,
@@ -190,9 +193,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     use_int8_w8a16=False,
                     use_int4_w4a16=False,
                 )
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                M = num_tokens
                 max_lora_rank = self.w13_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w13",
@@ -281,9 +283,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     use_int8_w8a16=False,
                     use_int4_w4a16=False,
                 )
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                M = num_tokens
                 max_lora_rank = self.w2_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w2",
@@ -591,13 +592,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
 
-    def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
-        return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
-
-    @property
-    def _shared_experts(self):
-        return self.base_layer._shared_experts
-
     @property
     def quant_method(self):
         return self.base_layer.quant_method
@@ -616,7 +610,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
 
-        # source_layer is FusedMoE or SharedFusedMoE
+        # source_layer is FusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
 
 
@@ -778,5 +772,5 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        # source_layer is FusedMoE or SharedFusedMoE
+        # source_layer is FusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1

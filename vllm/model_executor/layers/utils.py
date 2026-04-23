@@ -122,7 +122,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -169,12 +169,12 @@ def rocm_unquantized_gemm_impl(
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx9()
+        and (on_gfx9() or on_gfx1x())
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )
 
-    if use_skinny is not True:
+    if not use_skinny:
         return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
@@ -212,7 +212,7 @@ direct_register_custom_op(
 
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (
-        torch._C._cpu._is_amx_tile_supported()
+        torch.cpu._is_amx_tile_supported()
         and (dtype in (torch.bfloat16, torch.int8))
         and k % 32 == 0
         and n % 16 == 0
@@ -230,6 +230,30 @@ def dispatch_cpu_unquantized_gemm(
 
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
+
+    # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
+    if current_platform.is_zen_cpu() and hasattr(
+        torch.ops.zentorch, "zentorch_linear_unary"
+    ):
+        zen_weight = layer.weight.detach()
+        is_prepacked = False
+
+        if envs.VLLM_ZENTORCH_WEIGHT_PREPACK and hasattr(
+            torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+        ):
+            zen_weight = torch.ops.zentorch.zentorch_weight_prepack_for_linear(
+                zen_weight
+            )
+            is_prepacked = True
+
+        layer.cpu_linear = lambda x, weight, bias, _p=is_prepacked: (
+            torch.ops.zentorch.zentorch_linear_unary(
+                x, zen_weight, bias, is_weight_prepacked=_p
+            )
+        )
+        if remove_weight:
+            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        return
 
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)

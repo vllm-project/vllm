@@ -71,7 +71,7 @@ def mixer2_gated_norm_tensor_parallel(
     set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
-    TrtLlmFp8Experts,
+    TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 try:
@@ -174,6 +175,7 @@ class TestData:
             routing_method=layer.routing_method_type,
             activation=activation,
             device=w13_quantized.device,
+            max_num_tokens=next_power_of_2(m),
         )
 
         return TestData(
@@ -204,7 +206,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
     if not current_platform.has_device_capability(100):
         pytest.skip("Test is only supported for sm >= 100")
     set_random_seed(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
             m, k, n, e, is_trtllm=True, activation=activation
@@ -247,7 +248,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
                 allow_new_interface=True,
                 use_monolithic=True,
             ),
-            TrtLlmFp8Experts(
+            TrtLlmFp8ExpertsMonolithic(
                 moe_config=td.layer.moe,
                 quant_config=quant_config,
             ),
@@ -289,7 +290,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
     workspace_init,
 ):
     set_random_seed(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
             m, k, n, e, is_trtllm=False, activation=activation
@@ -350,6 +350,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             in_dtype=torch.bfloat16,
             is_act_and_mul=activation.is_gated,
             routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
         )
 
         kernel = mk.FusedMoEKernel(

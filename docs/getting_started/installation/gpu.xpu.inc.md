@@ -7,7 +7,6 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 --8<-- [start:requirements]
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
-- OneAPI requirements: oneAPI 2025.3
 - Dependency: [vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels): a package provide all necessary vllm custom kernel when running vLLM on Intel GPU platform,
 - Python: 3.12
 !!! warning
@@ -26,8 +25,8 @@ Currently, there are no pre-built XPU wheels.
 --8<-- [end:pre-built-wheels]
 --8<-- [start:build-wheel-from-source]
 
-- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.3 or later.
-- Second, install Python packages for vLLM XPU backend building:
+- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers).
+- Second, install Python packages for vLLM XPU backend building (Intel OneAPI dependencies are installed automatically as part of `torch-xpu`, see [PyTorch XPU get started](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)):
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git
@@ -47,7 +46,7 @@ pip install -v -r requirements/xpu.txt
 
     !!! note
         - `triton` (without suffix) is for NVIDIA GPUs only. On XPU, using it instead of `triton-xpu` can cause correctness or runtime issues.
-        - For torch 2.10 (the version used in `requirements/xpu.txt`), the matching package is `triton-xpu==3.6.0`. If you use a different version of torch, check the corresponding `triton-xpu` version in [docker/Dockerfile.xpu](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.xpu).
+        - For torch 2.11 (the version used in `requirements/xpu.txt`), the matching package is `triton-xpu==3.7.0`. If you use a different version of torch, check the corresponding `triton-xpu` version in [docker/Dockerfile.xpu](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.xpu).
 
 - Finally, build and install vLLM XPU backend:
 

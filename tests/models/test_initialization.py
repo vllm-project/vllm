@@ -103,6 +103,12 @@ def can_initialize(
             "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
         )
 
+    if model_arch == "MoonshotKimiaForCausalLM":
+        pytest.skip(
+            "Kimi-Audio requires SpeechToTextConfig "
+            "which is not configured in test environment"
+        )
+
     if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         from vllm.platforms import current_platform
 
@@ -129,6 +135,10 @@ def can_initialize(
         )
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+        kwargs = {}
+        if not model_info.enable_prefix_caching:
+            kwargs["enable_prefix_caching"] = False
 
         LLM(
             model_info.default,
@@ -159,6 +169,7 @@ def can_initialize(
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs,
             attention_config=attention_config,
+            **kwargs,
         )
 
 
