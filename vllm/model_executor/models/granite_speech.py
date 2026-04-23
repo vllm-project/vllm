@@ -26,9 +26,8 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal
+from typing import Annotated
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -36,13 +35,13 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -75,12 +74,14 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
+# https://huggingface.co/ibm-granite/granite-4.0-1b-speech
 # Though this may vary from model to model, and also many langs
 # work pretty well with zero shot.
 ISO639_1_SUPPORTED_LANGS = {
     "en": "English",
     "fr": "French",
     "de": "German",
+    "ja": "Japanese",
     "pt": "Portuguese",
     "es": "Spanish",
 }
@@ -216,11 +217,10 @@ class GraniteSpeechDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -601,6 +601,12 @@ class GraniteSpeechForConditionalGeneration(
         self.quant_config = quant_config
         self.cache_config = cache_config
 
+        # Check for OOV tokens to see if offsets need to be preserved
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.audio_token_index],
+        )
+
         with self._mark_language_model(vllm_config):
             # The language model is typically a Granite LLM
             self.language_model = init_vllm_registered_model(
@@ -794,8 +800,6 @@ class GraniteSpeechForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -805,7 +809,6 @@ class GraniteSpeechForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
@@ -849,15 +852,14 @@ class GraniteSpeechForConditionalGeneration(
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
+
         # Audio placeholders don't use an index, so value doesn't matter
         audio_tok = cls.get_placeholder_str("audio", 0)
 

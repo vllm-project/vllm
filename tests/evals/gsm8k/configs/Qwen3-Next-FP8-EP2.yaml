@@ -7,5 +7,4 @@ server_args: >-
   --tensor-parallel-size 2
   --enable-expert-parallel
   --async-scheduling
-env:
-  VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  --moe-backend=flashinfer_trtllm

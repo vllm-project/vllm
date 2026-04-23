@@ -13,7 +13,7 @@ from vllm.utils.import_utils import PlaceholderModule
 
 logger = init_logger(__name__)
 
-SUPPORTED_SCHEMES = ["s3://", "gs://"]
+SUPPORTED_SCHEMES = ["s3://", "gs://", "az://"]
 
 try:
     from runai_model_streamer import list_safetensors as runai_list_safetensors

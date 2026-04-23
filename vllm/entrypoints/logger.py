@@ -18,6 +18,20 @@ class RequestLogger:
     def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
 
+        if not logger.isEnabledFor(logging.INFO):
+            logger.warning_once(
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than INFO. "
+                "No request information will be logged."
+            )
+        elif not logger.isEnabledFor(logging.DEBUG):
+            logger.info_once(
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than DEBUG. "
+                "Only limited information will be logged to minimize overhead. "
+                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+            )
+
     def log_inputs(
         self,
         request_id: str,

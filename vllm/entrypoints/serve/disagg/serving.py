@@ -18,21 +18,33 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    GenerationError,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
     GenerateResponseChoice,
+    GenerateResponseStreamChoice,
+    GenerateStreamResponse,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.utils import should_include_usage
+from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+)
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
@@ -45,11 +57,11 @@ class ServingTokens(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
     ):
@@ -58,8 +70,8 @@ class ServingTokens(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
+        self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -73,7 +85,7 @@ class ServingTokens(OpenAIServing):
         self,
         request: GenerateRequest,
         raw_request: Request | None = None,
-    ) -> GenerateResponse | ErrorResponse:
+    ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -98,55 +110,87 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        engine_prompts = await self._preprocess_completion(
-            request,
-            prompt_input=request.token_ids,
-            prompt_embeds=None,
-        )
-        assert len(engine_prompts) == 1
-        engine_prompt = engine_prompts[0]
+        engine_input: EngineInput
+        if features := request.features:
+            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
+            mm_placeholders: dict[str, list[PlaceholderRange]] = {
+                modality: [
+                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
+                ]
+                for modality, ranges in features.mm_placeholders.items()
+            }
+
+            # Deserialize tensor data when present; None → cache hit.
+            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
+            if features.kwargs_data is not None:
+                for modality, items in features.kwargs_data.items():
+                    mm_kwargs[modality] = [
+                        decode_mm_kwargs_item(item) if item is not None else None
+                        for item in items
+                    ]
+            else:
+                for modality, hashes in features.mm_hashes.items():
+                    mm_kwargs[modality] = [None] * len(hashes)
+
+            engine_input = mm_input(
+                prompt_token_ids=request.token_ids,
+                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_hashes=features.mm_hashes,
+                mm_placeholders=mm_placeholders,
+                cache_salt=request.cache_salt,
+            )
+        else:
+            (engine_input,) = await self.openai_serving_render.preprocess_completion(
+                request,
+                prompt_input=request.token_ids,
+                prompt_embeds=None,
+                skip_mm_cache=True,
+            )
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        try:
-            sampling_params = request.sampling_params
-            if self.force_no_detokenize:
-                sampling_params.detokenize = False
+        sampling_params = request.sampling_params
+        if self.force_no_detokenize:
+            sampling_params.detokenize = False
+        if request.stream:
+            sampling_params.output_kind = RequestOutputKind.DELTA
 
-            self._log_inputs(
+        self._log_inputs(
+            request_id,
+            engine_input,
+            params=sampling_params,
+            lora_request=lora_request,
+        )
+
+        trace_headers = (
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
+
+        result_generator = self.engine_client.generate(
+            engine_input,
+            sampling_params,
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=request.priority,
+        )
+
+        assert result_generator is not None
+
+        if request.stream:
+            return self.serve_tokens_stream_generator(
+                request,
+                result_generator,
                 request_id,
-                engine_prompt,
-                params=sampling_params,
-                lora_request=lora_request,
+                model_name,
+                request_metadata,
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-
-            result_generator = self.engine_client.generate(
-                engine_prompt,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                priority=request.priority,
-            )
-
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
-        # TODO(NickLucche): Implement streaming response
-
-        try:
-            assert result_generator is not None
-            return await self.serve_tokens_full_generator(
-                request, result_generator, request_id, model_name, request_metadata
-            )
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        return await self.serve_tokens_full_generator(
+            request, result_generator, request_id, model_name, request_metadata
+        )
 
     async def serve_tokens_full_generator(
         self,
@@ -165,8 +209,6 @@ class ServingTokens(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(str(e))
 
         assert final_res is not None
 
@@ -245,6 +287,109 @@ class ServingTokens(OpenAIServing):
                     )
 
         return response
+
+    async def serve_tokens_stream_generator(
+        self,
+        request: GenerateRequest,
+        result_generator: AsyncGenerator[RequestOutput, None],
+        request_id: str,
+        model_name: str,
+        request_metadata: RequestResponseMetadata,
+    ) -> AsyncGenerator[str, None]:
+        num_prompt_tokens = 0
+        num_generated_tokens: list[int] = []
+        first_iteration = True
+        num_cached_tokens = None
+        sampling_params: SamplingParams = request.sampling_params
+
+        include_usage, include_continuous_usage = should_include_usage(
+            request.stream_options, False
+        )
+
+        try:
+            async for res in result_generator:
+                if first_iteration:
+                    if res.prompt_token_ids is not None:
+                        num_prompt_tokens = len(res.prompt_token_ids)
+                    if res.encoder_prompt_token_ids is not None:
+                        num_prompt_tokens += len(res.encoder_prompt_token_ids)
+                    num_cached_tokens = res.num_cached_tokens
+                    num_generated_tokens = [0] * len(res.outputs)
+                    first_iteration = False
+
+                for output in res.outputs:
+                    i = output.index
+                    delta_token_ids = output.token_ids
+                    num_generated_tokens[i] += len(delta_token_ids)
+
+                    finish_reason = output.finish_reason
+                    self._raise_if_error(finish_reason, request_id)
+
+                    if not delta_token_ids:
+                        continue
+
+                    if sampling_params.logprobs is not None:
+                        out_logprobs = output.logprobs
+                        assert out_logprobs is not None, "Did not output logprobs"
+                        logprobs = self._create_tokens_logprobs(
+                            token_ids=delta_token_ids,
+                            top_logprobs=out_logprobs,
+                            num_output_top_logprobs=sampling_params.logprobs,
+                        )
+                    else:
+                        logprobs = None
+
+                    chunk = GenerateStreamResponse(
+                        request_id=request_id,
+                        choices=[
+                            GenerateResponseStreamChoice(
+                                index=i,
+                                logprobs=logprobs,
+                                finish_reason=finish_reason,
+                                token_ids=as_list(delta_token_ids),
+                            )
+                        ],
+                    )
+                    if include_continuous_usage:
+                        chunk.usage = UsageInfo(
+                            prompt_tokens=num_prompt_tokens,
+                            completion_tokens=num_generated_tokens[i],
+                            total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
+                        )
+
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+            total_completion_tokens = sum(num_generated_tokens)
+            final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=num_prompt_tokens + total_completion_tokens,
+            )
+
+            if self.enable_prompt_tokens_details and num_cached_tokens:
+                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
+                    cached_tokens=num_cached_tokens
+                )
+
+            if include_usage:
+                final_chunk = GenerateStreamResponse(
+                    request_id=request_id,
+                    choices=[],
+                    usage=final_usage_info,
+                )
+                yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+
+            request_metadata.final_usage_info = final_usage_info
+
+        except GenerationError as e:
+            yield (
+                f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            )
+        except Exception as e:
+            logger.exception("Error in token generation stream.")
+            data = self.create_streaming_error_response(e)
+            yield f"data: {data}\n\n"
+        yield "data: [DONE]\n\n"
 
     def _create_tokens_logprobs(
         self,

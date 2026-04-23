@@ -9,8 +9,13 @@ https://arxiv.org/abs/2310.18547
 
 import torch
 
+from vllm import envs
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
-from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
+from vllm.lora.ops.triton_ops.utils import (
+    _get_lora_b_ptr,
+    get_lora_op_configs,
+    supports_pdl,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -138,7 +143,7 @@ def _lora_expand(
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
-    num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
@@ -235,11 +240,11 @@ def _lora_expand(
     grid = (
         triton.cdiv(M, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
         NUM_SLICES,
-        num_active_loras,
+        num_active_loras.item(),
     )
-    # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
-    # making PDL invalid and affecting the kernel performance.
-    use_gdc = False  # supports_pdl(inputs.device)
+
+    # PDL only works when dual-stream is being used.
+    use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -289,7 +294,7 @@ def _lora_expand_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:

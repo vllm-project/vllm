@@ -12,8 +12,11 @@ from transformers.models.aria.processing_aria import AriaProcessor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -24,7 +27,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -214,7 +216,7 @@ class AriaProjector(nn.Module):
         return out
 
 
-class AriaFusedMoE(SharedFusedMoE):
+class AriaFusedMoE(FusedMoE):
     def weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:
@@ -283,7 +285,6 @@ class AriaTextMoELayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            reduce_results=True,
             prefix=f"{prefix}.experts",
         )
 
@@ -301,12 +302,7 @@ class AriaTextMoELayer(nn.Module):
 
         router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
-        sparse_expert_output = self.experts(hidden_states, router_output)
-
-        if self.shared_experts is not None:
-            return sparse_expert_output[0] + sparse_expert_output[1]
-        else:
-            return sparse_expert_output
+        return self.experts(hidden_states, router_output)
 
 
 class AriaTextDecoderLayer(LlamaDecoderLayer):
@@ -444,15 +440,14 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         vision_config = self.info.get_vision_config()
 
         max_image_size = vision_config.image_size
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

@@ -6,9 +6,10 @@ from collections.abc import AsyncGenerator, Sequence
 from typing import Generic, TypeVar
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 
 IOProcessorInput = TypeVar("IOProcessorInput")
@@ -18,7 +19,7 @@ IOProcessorOutput = TypeVar("IOProcessorOutput")
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     """Abstract interface for pre/post-processing of engine I/O."""
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
         super().__init__()
 
         self.vllm_config = vllm_config

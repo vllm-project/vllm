@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
+from vllm.env_override import _apply_constrain_to_fx_strides_patch
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -151,6 +152,17 @@ class AlwaysHitShapeEnv:
         return ""
 
 
+def _get_vllm_functorch_config() -> dict[str, Any]:
+    """Return the functorch config overrides that vLLM applies at compile time.
+
+    Used by both set_functorch_config() and get_inductor_factors() to ensure
+    the compile-time config and cache key are always consistent."""
+    cfg: dict[str, Any] = {}
+    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        cfg["bundled_autograd_cache"] = False
+    return cfg
+
+
 def get_inductor_factors() -> list[Any]:
     factors: list[Any] = []
     # summarize system state
@@ -164,6 +176,13 @@ def get_inductor_factors() -> list[Any]:
 
     torch_factors = torch_key()
     factors.append(torch_factors)
+
+    from torch._functorch import config as functorch_config
+    from torch._inductor import config as inductor_config
+
+    factors.append(inductor_config.save_config_portable())
+    with functorch_config.patch(_get_vllm_functorch_config()):
+        factors.append(functorch_config.save_config_portable())
     return factors
 
 
@@ -184,6 +203,47 @@ def is_compile_cache_enabled(
     )
 
 
+def _patch_standalone_compile_atomic_save() -> None:
+    """Backport of pytorch/pytorch#162432 for torch < 2.10.0.
+
+    Patches CompiledArtifact.save() to use write_atomic for binary format,
+    preventing corrupt cache files when multiple processes compile
+    concurrently.
+    """
+    from torch._inductor.codecache import write_atomic
+    from torch._inductor.standalone_compile import CompiledArtifact as cls
+
+    if getattr(cls.save, "_vllm_patched", False):
+        return
+
+    original_save = cls.save
+
+    def _save(
+        self: Any, *, path: str, format: Literal["binary", "unpacked"] = "binary"
+    ) -> None:
+        if format != "binary":
+            return original_save(self, path=path, format=format)
+        from torch._dynamo.utils import dynamo_timed
+        from torch._inductor.codecache import torch_key
+        from torch.utils._appending_byte_serializer import BytesWriter
+
+        with dynamo_timed("CompiledArtifact.save"):
+            assert self._artifacts is not None
+            artifact_bytes, cache_info = self._artifacts
+            assert len(cache_info.aot_autograd_artifacts) == 1, cache_info
+            key = cache_info.aot_autograd_artifacts[0]
+            assert not os.path.isdir(path)
+            writer = BytesWriter()
+            writer.write_bytes(torch_key())
+            writer.write_str(key)
+            writer.write_bytes(artifact_bytes)
+            write_atomic(path, writer.to_bytes())
+
+    _save._vllm_patched = True  # type: ignore[attr-defined]
+    cls.save = _save  # type: ignore[assignment]
+    logger.debug("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
+
+
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -197,6 +257,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
     name = "inductor_standalone"
 
     def __init__(self, save_format: Literal["binary", "unpacked"]) -> None:
+        if not is_torch_equal_or_newer("2.10.0"):
+            _patch_standalone_compile_atomic_save()
         self.save_format = save_format
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -219,6 +281,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
+        _apply_constrain_to_fx_strides_patch()
         compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
@@ -250,6 +313,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
             },
         }
 
+        if is_torch_equal_or_newer("2.13.0.dev"):
+            compile_kwargs["donate_graph_module"] = True  # type: ignore[assignment]
+
         use_aot: bool = supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
@@ -260,16 +326,49 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Inductor's pre-grad passes don't do anything for vLLM.
         # The pre-grad passes get run even on cache-hit and negatively impact
         # vllm cold compile times by O(1s)
-        # Can remove this after the following issue gets fixed
+        # Fixed upstream in PyTorch 2.12:
         # https://github.com/pytorch/pytorch/issues/174502
-        if envs.VLLM_ENABLE_PREGRAD_PASSES:
-            ctx: Any = contextlib.nullcontext()
+        if is_torch_equal_or_newer("2.12.0.dev") or envs.VLLM_ENABLE_PREGRAD_PASSES:
+            pregrad_ctx: Any = contextlib.nullcontext()
         else:
-            ctx = patch(
+            pregrad_ctx = patch(
                 "torch._inductor.compile_fx._recursive_pre_grad_passes",
                 lambda gm, _: gm,
             )
-        with ctx:
+
+        # When inputs are FakeTensors (from create_concrete_args),
+        # standalone_compile("from_example_inputs") would normally create
+        # a fresh FakeTensorMode, causing a mode mismatch assertion.
+        # Patch FakeTensorMode in standalone_compile so it reuses the
+        # mode already attached to our FakeTensors. This gives us both
+        # ignore_shape_env=True (from "from_example_inputs") and mode
+        # consistency (from reusing our mode).
+        # Can remove this after the following issue gets fixed:
+        # https://github.com/pytorch/pytorch/issues/176562
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        input_fake_mode = None
+        for x in example_inputs:
+            if isinstance(x, FakeTensor):
+                input_fake_mode = x.fake_mode
+                break
+
+        if input_fake_mode is not None:
+            # Use patch.object on the actual module from sys.modules
+            # because in Python <=3.10 the string-based patch() resolves
+            # torch._inductor.standalone_compile to the wrapper function
+            # (defined in __init__.py) instead of the module.
+            import sys
+
+            fake_mode_ctx: Any = patch.object(
+                sys.modules["torch._inductor.standalone_compile"],
+                "FakeTensorMode",
+                lambda *a, **kw: input_fake_mode,
+            )
+        else:
+            fake_mode_ctx = contextlib.nullcontext()
+
+        with pregrad_ctx, fake_mode_ctx:
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
@@ -325,6 +424,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
             path=path, format=self.save_format
         )
+        compilation_counter.num_compiled_artifacts_loaded += 1
         from torch._inductor.compile_fx import graph_returns_tuple
 
         returns_tuple = graph_returns_tuple(graph)
@@ -383,6 +483,7 @@ class InductorAdaptor(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
+        _apply_constrain_to_fx_strides_patch()
         compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
 
@@ -512,6 +613,23 @@ class InductorAdaptor(CompilerInterface):
                 torch._functorch.config.patch(enable_remote_autograd_cache=False)
             )
 
+            # Clear the tracing context before calling compile_fx.
+            # vLLM calls compile_fx from within a PiecewiseCompileInterpreter
+            # that runs under Dynamo's tracing context. The tracing context
+            # has a FakeTensorMode from Dynamo, but the example inputs for
+            # this subgraph have fake tensors from a different FakeTensorMode.
+            # compile_fx's _compile_fx_main calls detect_fake_mode() which
+            # asserts all FakeTensorModes match, causing a crash.
+            # Clearing the tracing context lets compile_fx create its own.
+            saved_tracing_context = torch._guards.TracingContext.try_get()
+            if saved_tracing_context is not None:
+                torch._guards._TLS.tracing_context = None
+
+                def _restore_tracing_context():
+                    torch._guards._TLS.tracing_context = saved_tracing_context
+
+                stack.callback(_restore_tracing_context)
+
             compiled_graph = compile_fx(
                 graph,
                 example_inputs,
@@ -639,8 +757,8 @@ def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
 
 
 def set_functorch_config() -> None:
-    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-        torch._functorch.config.bundled_autograd_cache = False
+    for k, v in _get_vllm_functorch_config().items():
+        setattr(torch._functorch.config, k, v)
 
 
 class EagerAdaptor(CompilerInterface):

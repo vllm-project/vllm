@@ -1,0 +1,552 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
+
+import gc
+from unittest.mock import patch
+
+import pytest
+import torch
+
+from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
+
+from .utils import (
+    create_request,
+    create_vllm_config,
+    make_kv_cache_config,
+    make_nixl_scheduler,
+)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "swa_enabled,expected_sw_sizes",
+    [
+        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128)
+        (True, [0, 128 + 1]),
+        # SWA disabled: only FullAttentionSpec (0)
+        (False, [0]),
+    ],
+)
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
+    """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+
+    block_size = 16
+    vllm_config = create_vllm_config(block_size=block_size)
+    # SW 2048 tokens=>128 blocks
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size, swa_enabled=swa_enabled, sw_size=2048
+    )
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    # in number of blocks
+    assert scheduler.blocks_per_sw == expected_sw_sizes, (
+        f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.blocks_per_sw}"
+    )
+
+
+@pytest.mark.cpu_test
+def test_logical_to_kernel_block_ids_with_hma():
+    """Test _logical_to_kernel_block_ids expands blocks when HMA is enabled.
+
+    When HMA is enabled, the logical block size may differ from the kernel
+    block size. Each logical block maps to multiple kernel blocks.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    # Create a mock worker with just the required attributes
+    # (use __new__ to skip __init__)
+    worker = object.__new__(NixlConnectorWorker)
+
+    # Simulate HMA scenario: logical block size = 32, kernel block size = 16
+    # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
+    worker._physical_blocks_per_logical_kv_block = 2
+    # FA + SW groups (neither is MambaSpec, so both get expanded)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
+
+    # Test conversion: FA + SW group
+    logical_block_ids = [[0, 1, 2], [3, 4]]
+    kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
+
+    expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
+    assert kernel_block_ids == expected_kernel_block_ids, (
+        f"Expected {expected_kernel_block_ids}, got {kernel_block_ids}"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "has_mamba,swa_enabled,mamba_enabled,remote_ratio,"
+    "remote_block_ids,expected_remote_block_ids",
+    [
+        # Non-mamba (FA+SWA): both groups expanded via _logical_to_kernel_block_ids.
+        # Regression for https://github.com/vllm-project/vllm/pull/39724
+        (
+            False,
+            True,
+            False,
+            1,
+            ([0, 1, 2], [3, 4]),
+            [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
+        ),
+        # Mamba (FA+Mamba): FA expanded via _logical_to_remote_kernel_block_ids,
+        # Mamba passed through unchanged.
+        # remote_ratio=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
+        # the wrong conversion method produces different FA results.
+        (
+            True,
+            False,
+            True,
+            261,
+            ([0, 1, 2], [10, 11]),
+            [[0, 1, 261, 262, 522, 523], [10, 11]],
+        ),
+    ],
+    ids=["non_mamba_fa_swa", "mamba_fa_ssm"],
+)
+def test_read_blocks_for_req_expands_remote_ids(
+    has_mamba,
+    swa_enabled,
+    mamba_enabled,
+    remote_ratio,
+    remote_block_ids,
+    expected_remote_block_ids,
+):
+    """_read_blocks_for_req must expand remote logical block IDs to kernel
+    block IDs when kernel block size != logical block size.
+
+    Non-mamba path uses _logical_to_kernel_block_ids (all groups expanded).
+    Mamba path uses _logical_to_remote_kernel_block_ids (FA expanded, Mamba
+    passed through).
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker._physical_blocks_per_logical_kv_block = 2
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16, swa_enabled=swa_enabled, mamba_enabled=mamba_enabled
+    )
+
+    remote_engine_id = "remote-engine"
+    if has_mamba:
+        worker._physical_blocks_per_logical = {remote_engine_id: remote_ratio}
+
+    # Mock transfer_topo: empty remote ranks skips the transfer machinery
+    # entirely, isolating the block-ID expansion logic.
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.target_remote_ranks.return_value = []
+    worker.transfer_topo.get_engine_info.return_value = MagicMock(remote_tp_size=1)
+    worker.transfer_topo.tp_ratio.return_value = 1
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="test-req",
+        local_block_ids=([0, 1], [2, 3]),
+        kv_transfer_params={
+            "remote_block_ids": remote_block_ids,
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": "prefill-test-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+
+    meta = metadata.reqs_to_recv["test-req"]
+    worker._read_blocks_for_req("test-req", meta)
+
+    assert meta.remote.block_ids == expected_remote_block_ids, (
+        f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
+    )
+
+
+@pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])
+def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
+    """Test that a prefill instance returns fewer "remote blocks" for the SWA groups
+    when sequence exceeds the sliding window.
+    """
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+    )
+    block_size = 16
+    llm_kwargs = {
+        "model": model_name,
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.3,
+        "kv_transfer_config": kv_transfer_config,
+        "max_model_len": 2048,
+        "max_num_seqs": 1,
+        # NOTE: Make sure HMA is enabled
+        "disable_hybrid_kv_cache_manager": False,
+        "max_num_batched_tokens": 2048,
+        "enable_prefix_caching": False,
+        "block_size": block_size,
+    }
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def run_hma_test(llm: LLM):
+        remote_prefill_opts = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+        # Simulate sidecar request
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            extra_args={"kv_transfer_params": remote_prefill_opts},
+        )
+        scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+        kv_managers = scheduler.kv_cache_manager.coordinator.single_type_managers
+        # HMA enabled with FA + SWA groups
+        assert len(kv_managers) > 2
+        for kv_manager in kv_managers:
+            assert isinstance(kv_manager, (SlidingWindowManager, FullAttentionManager))
+        req_to_blocks = kv_managers[0].req_to_blocks
+        assert len(req_to_blocks) == 0
+
+        # Process some request with length exceeding the sliding window
+        outputs = llm.generate(["hi" * 1401], sampling_params)
+        kv_params = outputs[0].kv_transfer_params
+
+        # +1 to account for overlapping window across blocks.
+        expected_num_remote_blocks = sw_size // block_size + 1
+        remote_block_ids = kv_params["remote_block_ids"]
+        assert (
+            len(remote_block_ids[0])
+            == expected_num_remote_blocks
+            < len(remote_block_ids[-1])
+        )
+        for group_block_ids in remote_block_ids[:-1]:
+            assert len(group_block_ids) == expected_num_remote_blocks
+
+    def run_test_and_cleanup():
+        gc.collect()
+        torch.accelerator.empty_cache()
+        llm = LLM(**llm_kwargs)
+        try:
+            run_hma_test(llm)
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+
+    run_test_and_cleanup()
+
+
+@pytest.mark.cpu_test
+def test_nixl_metadata_hma_block_ids_structure():
+    """
+    Test that NixlConnectorMetadata correctly stores block IDs for multiple
+    KV cache groups when HMA is enabled.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    metadata = NixlConnectorMetadata()
+
+    # Add request with block IDs for 2 groups (FA + SW)
+    fa_blocks = [0, 1, 2, 3, 4, 5, 6, 7]  # 8 blocks for FA
+    sw_blocks = [8, 9, 10, 11]  # 4 blocks for SW (clipped)
+
+    metadata.add_new_req_to_recv(
+        request_id="test-req-hma",
+        local_block_ids=(fa_blocks, sw_blocks),
+        kv_transfer_params={
+            "remote_block_ids": ([10, 11, 12, 13, 14, 15, 16, 17], [18, 19, 20, 21]),
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-test-req-hma",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+
+    assert "test-req-hma" in metadata.reqs_to_recv
+    req_meta = metadata.reqs_to_recv["test-req-hma"]
+
+    # Verify local block IDs structure
+    assert len(req_meta.local_block_ids) == 2
+    assert list(req_meta.local_block_ids[0]) == fa_blocks
+    assert list(req_meta.local_block_ids[1]) == sw_blocks
+
+    # Verify remote block IDs structure
+    assert req_meta.remote is not None
+    assert len(req_meta.remote.block_ids) == 2
+    assert list(req_meta.remote.block_ids[0]) == [10, 11, 12, 13, 14, 15, 16, 17]
+    assert list(req_meta.remote.block_ids[1]) == [18, 19, 20, 21]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_hybrid_ssm():
+    """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
+    when ratio=1 (no kernel block size mismatch)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+
+    num_blocks = 100
+    engine_id = "test-engine"
+    worker.num_regions = 2
+    worker.dst_num_blocks = {engine_id: num_blocks}
+    worker._has_mamba = True
+    worker._is_mamba_group = [False, True]
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._physical_blocks_per_logical = {engine_id: 1}
+    worker.block_len_per_layer = [100]
+    # num_descs = num_regions * num_blocks (no blocks_first doubling)
+    worker.num_descs = 2 * num_blocks
+
+    fa_blocks = [3, 5]
+    ssm_blocks = [1, 2]
+    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+
+    # FA group: stride=num_blocks=100, offset=0
+    #   region0: [3, 5],  region1: [103, 105]
+    # SSM group: stride=logical_blocks=100 (=num_blocks/ratio=100/1),
+    #   offset=num_fa_descs=200, 4 regions per Mamba layer (x, B, C, ssm)
+    #   region0: [201, 202], region1: [301, 302],
+    #   region2: [401, 402], region3: [501, 502]
+    expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
+    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_kernel_block_mismatch():
+    """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
+    vs SSM (logical blocks) when ratio > 1."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+
+    ratio = 4
+    logical_blocks = 100
+    num_blocks = logical_blocks * ratio  # 400 kernel blocks
+    engine_id = "test-engine"
+    worker.num_regions = 2
+    worker.dst_num_blocks = {engine_id: num_blocks}
+    worker._has_mamba = True
+    worker._is_mamba_group = [False, True]
+    worker._physical_blocks_per_logical_kv_block = ratio
+    worker._physical_blocks_per_logical = {engine_id: ratio}
+    worker.block_len_per_layer = [100]
+    worker.num_descs = 2 * num_blocks  # 800
+
+    fa_blocks = [3, 7]  # kernel-level block IDs
+    ssm_blocks = [1, 2]  # logical block IDs
+    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+
+    # FA group: stride=num_blocks=400, offset=0
+    #   region0: [3, 7],  region1: [403, 407]
+    # SSM group: stride=logical_blocks=400//4=100, offset=num_fa_descs=800,
+    #   4 regions per Mamba layer (x, B, C, ssm)
+    #   region0: [801, 802], region1: [901, 902],
+    #   region2: [1001, 1002], region3: [1101, 1102]
+    expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
+    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
+
+
+@pytest.mark.cpu_test
+def test_nixl_metadata_hybrid_ssm_block_ids():
+    """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
+    groups with different block counts (kernel mismatch active)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    metadata = NixlConnectorMetadata()
+
+    # FA: 8 kernel blocks (2 logical * ratio=4), SSM: 2 logical blocks
+    fa_blocks = [0, 1, 2, 3, 4, 5, 6, 7]
+    ssm_blocks = [0, 1]
+
+    metadata.add_new_req_to_recv(
+        request_id="test-req-hybrid",
+        local_block_ids=(fa_blocks, ssm_blocks),
+        kv_transfer_params={
+            "remote_block_ids": ([10, 11, 12, 13, 14, 15, 16, 17], [20, 21]),
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-test-req-hybrid",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+
+    assert "test-req-hybrid" in metadata.reqs_to_recv
+    req_meta = metadata.reqs_to_recv["test-req-hybrid"]
+
+    # Verify local block IDs: different lengths per group
+    assert len(req_meta.local_block_ids) == 2
+    assert list(req_meta.local_block_ids[0]) == fa_blocks
+    assert list(req_meta.local_block_ids[1]) == ssm_blocks
+    assert len(req_meta.local_block_ids[0]) != len(req_meta.local_block_ids[1])
+
+    # Verify remote block IDs: same asymmetry preserved
+    assert req_meta.remote is not None
+    assert len(req_meta.remote.block_ids) == 2
+    assert list(req_meta.remote.block_ids[0]) == [10, 11, 12, 13, 14, 15, 16, 17]
+    assert list(req_meta.remote.block_ids[1]) == [20, 21]
+    assert len(req_meta.remote.block_ids[0]) != len(req_meta.remote.block_ids[1])
+
+
+# ── Mamba N-1 prefill tests ──────────────────────────────────────────────
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "has_mamba,is_hma_required,expected_count",
+    [
+        (True, True, 9),
+        (False, False, 10),
+        (False, True, 10),
+    ],
+    ids=["mamba", "fa_only", "swa_only"],
+)
+def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
+    """D-side: Mamba gets N-1 matched tokens, non-Mamba gets N."""
+    sched = make_nixl_scheduler(has_mamba=has_mamba, is_hma_required=is_hma_required)
+    req = create_request(num_tokens=10, do_remote_prefill=True)
+
+    count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert count == expected_count
+    assert is_async is True
+
+
+@pytest.mark.cpu_test
+def test_mamba_n1_p_side_truncation():
+    """P-side: Mamba truncates prompt to N-1, sets max_tokens=1.
+
+    Also verifies idempotency (calling again is a no-op) which is
+    needed for preemption safety via the _p_side_truncated guard,
+    and that non-Mamba models skip truncation entirely.
+    """
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    req = create_request(num_tokens=10, do_remote_decode=True)
+    req.max_tokens = 128
+    original_len = len(req.prompt_token_ids)
+
+    count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+
+    assert count == 0
+    assert is_async is False
+    assert len(req.prompt_token_ids) == original_len - 1
+    assert req.num_prompt_tokens == original_len - 1
+    assert req.max_tokens == 1
+    assert req.kv_transfer_params["_p_side_truncated"] is True
+
+    # Idempotency: second call must not truncate further
+    sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert len(req.prompt_token_ids) == original_len - 1
+
+    # Non-Mamba: truncation is skipped
+    fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
+    fa_req = create_request(num_tokens=10, do_remote_decode=True)
+    fa_original = len(fa_req.prompt_token_ids)
+
+    fa_sched.get_num_new_matched_tokens(fa_req, num_computed_tokens=0)
+    assert len(fa_req.prompt_token_ids) == fa_original
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "swa_enabled,mamba_enabled,expected_has_mamba,expected_is_hma",
+    [
+        (True, True, True, True),
+        (True, False, False, True),
+        (False, False, False, False),
+    ],
+    ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
+)
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+def test_has_mamba_init(
+    mock_platform,
+    swa_enabled,
+    mamba_enabled,
+    expected_has_mamba,
+    expected_is_hma,
+):
+    """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+
+    block_size = 16
+    vllm_config = create_vllm_config(block_size=block_size)
+    # VllmConfig.__post_init__ auto-disables HMA when kv_transfer_config
+    # is set; override so we can test the scheduler's own derivation.
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size,
+        swa_enabled=swa_enabled,
+        mamba_enabled=mamba_enabled,
+    )
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler._has_mamba is expected_has_mamba
+    assert scheduler._is_hma_required is expected_is_hma
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "ssm_sizes,block_len,expected_ratio",
+    [
+        # Nemotron 30B TP=1: ceil((36864 + 2097152) / 8192) = 261
+        ((36864, 2097152), 8192, 261),
+        # Nemotron 30B TP=2: ceil((18432 + 1048576) / 4096) = 261
+        ((18432, 1048576), 4096, 261),
+        # Nemotron 30B TP=4: ceil((9216 + 524288) / 4096) = 131
+        ((9216, 524288), 4096, 131),
+    ],
+)
+def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_ratio):
+    """Verify that compute_physical_blocks_per_logical is TP-dependent.
+
+    With dimension-sharded Mamba state, the ratio differs across TP sizes
+    (e.g. TP=1 → 261, TP=4 → 131 for Nemotron 30B). This is why
+    _physical_blocks_per_logical must be stored per-engine.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        compute_physical_blocks_per_logical,
+    )
+
+    assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio

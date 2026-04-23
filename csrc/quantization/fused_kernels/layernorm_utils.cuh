@@ -4,7 +4,7 @@
  * __device__ layernorm utilities.
  */
 
-#include "quantization/vectorization.cuh"
+#include "libtorch_stable/quantization/vectorization.cuh"
 #include "quantization/utils.cuh"
 #include "quant_conversions.cuh"
 
@@ -16,14 +16,17 @@ namespace vllm {
 // has_residual must be true, if residual is not a nullptr
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
-                            int32_t const hidden_size, float const epsilon,
+                            int32_t const hidden_size,
+                            int32_t const input_stride, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   // sum of squares
   float ss = 0.0f;
 
   for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    float x = static_cast<float>(input[token_offset + i]);
+    float x = static_cast<float>(input[input_token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
     }
@@ -73,15 +76,20 @@ __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    int32_t const hidden_size, scalar_t const* __restrict__ residual = nullptr,
+    int32_t const hidden_size, int32_t const input_stride,
+    scalar_t const* __restrict__ residual = nullptr,
     int32_t const group_size = 0, int64_t outer_scale_stride = 1) {
   float block_absmax_val_maybe = 0.0f;
   constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
   __syncthreads();
+
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+
   if (group_size > 0) {
-    __shared__ float s_max_vals[1024];
-    int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
     int64_t num_groups = hidden_size / group_size;
+    __shared__ float s_max_vals[1024];
     int64_t const threads_per_group = blockDim.x / num_groups;
     int64_t const thread_in_group = threadIdx.x % threads_per_group;
     int64_t const group_offset = threadIdx.x / threads_per_group * group_size;
@@ -89,7 +97,7 @@ __device__ void compute_dynamic_per_token_scales(
     int64_t const thread_end =
         min(group_offset + group_size, static_cast<int64_t>(hidden_size));
     for (auto i = thread_offset; i < thread_end; i += threads_per_group) {
-      float x = static_cast<float>(input[token_offset + i]);
+      float x = static_cast<float>(input[input_token_offset + i]);
       if constexpr (has_residual) {
         x += static_cast<float>(residual[token_offset + i]);
       }
@@ -144,10 +152,8 @@ __device__ void compute_dynamic_per_token_scales(
     }
     __syncthreads();
   } else {
-    int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-
     for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-      float x = static_cast<float>(input[token_offset + i]);
+      float x = static_cast<float>(input[input_token_offset + i]);
       if constexpr (has_residual) {
         x += static_cast<float>(residual[token_offset + i]);
       }
@@ -185,12 +191,15 @@ template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
 __device__ void norm_and_quant(
     scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
     scalar_t const* __restrict__ weight, float const rms, float* const scale,
-    int32_t const hidden_size, scalar_t* __restrict__ residual = nullptr,
-    int32_t const group_size = 0, int64_t outer_scale_stride = 1) {
+    int32_t const hidden_size, int32_t const input_stride,
+    scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0,
+    int64_t outer_scale_stride = 1) {
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    float x = static_cast<float>(input[token_offset + i]);
+    float x = static_cast<float>(input[input_token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
       residual[token_offset + i] = static_cast<scalar_t>(x);
@@ -224,13 +233,16 @@ namespace vectorized {
 // hidden_size must be a multiple of 4
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
-                            int32_t const hidden_size, float const epsilon,
+                            int32_t const hidden_size,
+                            int32_t const input_stride, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
-      reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
+      reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
   vec4_t<scalar_t> const* vec_residual = nullptr;
   if constexpr (has_residual) {
     vec_residual =
@@ -288,7 +300,8 @@ __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    int32_t const hidden_size, scalar_t const* __restrict__ residual = nullptr,
+    int32_t const hidden_size, int32_t const input_stride,
+    scalar_t const* __restrict__ residual = nullptr,
     int64_t outer_scale_stride = 1) {
   constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
 
@@ -300,10 +313,13 @@ __device__ void compute_dynamic_per_token_scales(
   vec4_t<scalar_t> const* vec_weight = nullptr;
   vec4_t<scalar_t> const* vec_residual = nullptr;
 
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+
   if constexpr (group_size > 0) {
     __shared__ float s_max_vals[1024];
 
-    int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
     int64_t const num_groups = hidden_size / group_size;
     int64_t const threads_per_group = blockDim.x / num_groups;
     int64_t const thread_in_group = threadIdx.x % threads_per_group;
@@ -312,7 +328,8 @@ __device__ void compute_dynamic_per_token_scales(
     int64_t const thread_offset = group_offset + thread_in_group;
     int64_t const thread_end = min(group_offset + (group_size >> 2),
                                    static_cast<int64_t>(hidden_size >> 2));
-    vec_input = reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
+    vec_input =
+        reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
     vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
     if constexpr (has_residual) {
       vec_residual =
@@ -396,8 +413,8 @@ __device__ void compute_dynamic_per_token_scales(
     __syncthreads();
 
   } else {
-    int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-    vec_input = reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
+    vec_input =
+        reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
     vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
     if constexpr (has_residual) {
       vec_residual =
@@ -462,18 +479,18 @@ __device__ void compute_dynamic_per_token_scales(
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false, bool is_scale_transposed = false,
           int32_t group_size = 0>
-__device__ void norm_and_quant(scalar_out_t* __restrict__ output,
-                               scalar_t const* __restrict__ input,
-                               scalar_t const* __restrict__ weight,
-                               float const rms, float* const scale,
-                               int32_t const hidden_size,
-                               scalar_t* __restrict__ residual = nullptr,
-                               int64_t outer_scale_stride = 1) {
+__device__ void norm_and_quant(
+    scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
+    scalar_t const* __restrict__ weight, float const rms, float* const scale,
+    int32_t const hidden_size, int32_t const input_stride,
+    scalar_t* __restrict__ residual = nullptr, int64_t outer_scale_stride = 1) {
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
-      reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
+      reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
   vec4_t<scalar_t> const* vec_weight =
       reinterpret_cast<vec4_t<scalar_t> const*>(weight);
   q8x4_t<scalar_out_t>* vec_output =

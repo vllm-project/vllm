@@ -57,7 +57,7 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        # Certain information about the the model and classifier can only be
+        # Certain information about the model and classifier can only be
         # inferred from the `ForSequenceClassification` class. Therefore, we
         # instantiate it on the "meta" device to avoid allocating GPU memory.
         with torch.device("meta"):

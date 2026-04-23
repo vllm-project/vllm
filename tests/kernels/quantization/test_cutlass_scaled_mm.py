@@ -40,7 +40,9 @@ MNK_FACTORS = [
     (512, 24576, 128),
 ]
 
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 # -1 means full extent in that dimension
 TENSORWISE_GROUP_SHAPE = (-1, -1)

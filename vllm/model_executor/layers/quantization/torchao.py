@@ -199,7 +199,7 @@ class TorchAOConfig(QuantizationConfig):
 
     @classmethod
     def from_config_dict_json(cls, config_dict_json: str) -> "TorchAOConfig":
-        """Iniitalize class from a config_dict json string, got from
+        """Initialize class from a config_dict json string, got from
         torchao_config_object = some AOBaseConfig object
         json.dumps(config_to_dict(torchao_config_object))
         """

@@ -18,13 +18,13 @@ Requirements: websockets, numpy, gradio
 
 import argparse
 import asyncio
-import base64
 import json
 import queue
 import threading
 
 import gradio as gr
 import numpy as np
+import pybase64 as base64
 import websockets
 
 SAMPLE_RATE = 16_000

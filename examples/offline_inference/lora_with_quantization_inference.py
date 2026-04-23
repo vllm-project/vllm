@@ -120,7 +120,7 @@ def main():
         # Clean up the GPU memory for the next test
         del engine
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
 
 if __name__ == "__main__":

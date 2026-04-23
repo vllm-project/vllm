@@ -15,9 +15,9 @@ Then run this script:
     python colqwen3_rerank_online.py
 """
 
-import base64
 from io import BytesIO
 
+import pybase64 as base64
 import requests
 from PIL import Image
 

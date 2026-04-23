@@ -74,7 +74,7 @@ def layer_norm_ref(
     return out.to(dtype)
 
 
-DTYPES = [torch.bfloat16, torch.float32]
+DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 # Test various M sizes to ensure rows_per_block logic works correctly
 NUM_TOKENS = [
     1,
@@ -377,6 +377,68 @@ def test_multidimensional_input(
 
     # Check outputs
     assert out.shape == x.shape
+    torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [64, 256, 1024])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("has_gate", [True, False])
+@pytest.mark.parametrize("group_size", [None, 64])
+@pytest.mark.parametrize("norm_before_gate", [True, False])
+@torch.inference_mode()
+def test_rmsnorm_gated_forward_native_dtype(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    has_gate: bool,
+    group_size: int | None,
+    norm_before_gate: bool,
+):
+    """Test that RMSNormGated.forward_native preserves input dtype."""
+    if group_size is not None and hidden_size % group_size != 0:
+        pytest.skip(
+            f"hidden_size {hidden_size} not divisible by group_size {group_size}"
+        )
+
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+
+    device = torch.device("cuda:0")
+    set_random_seed(42)
+
+    layer = RMSNormGated(
+        hidden_size,
+        eps=1e-5,
+        group_size=group_size,
+        norm_before_gate=norm_before_gate,
+        device=device,
+        dtype=dtype,
+    )
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    z = (
+        torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+        if has_gate
+        else None
+    )
+
+    out = layer.forward_native(x, z)
+
+    # Verify dtype preservation
+    assert out.dtype == dtype, f"Expected {dtype}, got {out.dtype}"
+
+    # Verify numerical correctness against reference
+    ref_out = rms_norm_ref(
+        x,
+        layer.weight,
+        layer.bias,
+        z=z,
+        eps=1e-5,
+        group_size=group_size,
+        norm_before_gate=norm_before_gate,
+        upcast=True,
+    )
     torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
 

@@ -47,6 +47,14 @@ class RadioConfig(PretrainedConfig):
         teachers: A list of teacher model configurations. Each teacher configuration is
             a dict with keys like "name" and some may have "use_summary".
         cls_token_per_teacher: Whether to use a separate CLS token for each teacher.
+        video_temporal_patch_size: Number of consecutive video frames grouped into
+            a single tubelet for temporal compression. Default 1 (no compression).
+            When > 1, a dedicated video_embedder (3*T*P*P -> hidden) is created
+            alongside the image embedder (3*P*P -> hidden).
+        separate_video_embedder: When True and video_temporal_patch_size > 1, use a
+            dedicated video patch embedder (3*T*P*P -> hidden) separate from the
+            image embedder (3*P*P -> hidden). When False, a single embedder with
+            input size 3*T*P*P is used for both (images are duplicated T times).
     """
 
     model_type = "radio"
@@ -68,6 +76,8 @@ class RadioConfig(PretrainedConfig):
         register_multiple: int | None = None,
         teachers: list[dict[str, Any]] | None = None,
         cls_token_per_teacher: bool = False,
+        video_temporal_patch_size: int = 1,
+        separate_video_embedder: bool = True,
         **kwargs,
     ):
         self.model_name = model_name
@@ -95,4 +105,6 @@ class RadioConfig(PretrainedConfig):
         self.register_multiple = register_multiple
         self.teachers = teachers if teachers is not None else []
         self.cls_token_per_teacher = cls_token_per_teacher
+        self.video_temporal_patch_size = video_temporal_patch_size
+        self.separate_video_embedder = separate_video_embedder
         super().__init__(**kwargs)

@@ -11,7 +11,7 @@ from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_lora_id,
-    is_base_embeddding_weights,
+    is_base_embedding_weights,
     parse_fine_tuned_lora_name,
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -86,7 +86,7 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            if is_base_embeddding_weights(tensor_name):
+            if is_base_embedding_weights(tensor_name):
                 continue
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
@@ -162,7 +162,7 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
-                if is_base_embeddding_weights(lora_module):
+                if is_base_embedding_weights(lora_module):
                     continue
                 # Handle PEFT file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj

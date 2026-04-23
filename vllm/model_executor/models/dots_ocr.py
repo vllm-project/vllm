@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
@@ -54,7 +55,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -106,17 +106,13 @@ class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        mm_processor_kwargs = mm_processor_kwargs or {}
-        target_width, target_height = self.info.get_image_size_with_most_features(  # noqa: E501
-            mm_processor_kwargs.get("max_pixels", None)
-        )
+        target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

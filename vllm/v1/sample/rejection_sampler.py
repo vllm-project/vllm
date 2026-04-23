@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
+from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -270,7 +271,7 @@ class RejectionSampler(nn.Module):
 
         # Calculate indices of target logits.
         if sampling_metadata.allowed_token_ids_mask is not None or has_penalties:
-            num_requests = len(sampling_metadata.output_token_ids)
+            num_requests = len(metadata.num_draft_tokens)
             num_draft_tokens = torch.tensor(metadata.num_draft_tokens, device="cpu")
             original_indices = torch.arange(num_requests, device="cpu")
             repeat_indices_cpu = original_indices.repeat_interleave(num_draft_tokens)
@@ -291,6 +292,12 @@ class RejectionSampler(nn.Module):
             apply_bad_words_with_drafts(
                 logits, bad_words_token_ids, output_token_ids, metadata.num_draft_tokens
             )
+
+        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+            if isinstance(processor, MinTokensLogitsProcessor):
+                logits = processor.apply_with_spec_decode(
+                    logits, metadata.num_draft_tokens
+                )
 
         return logits
 

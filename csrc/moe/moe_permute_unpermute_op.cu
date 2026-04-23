@@ -73,10 +73,9 @@ void moe_permute(
   MOE_DISPATCH(input.scalar_type(), [&] {
     expandInputRowsKernelLauncher<scalar_t>(
         get_ptr<scalar_t>(input), get_ptr<scalar_t>(permuted_input),
-        get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
-        get_ptr<int>(inv_permuted_idx), get_ptr<int>(permuted_idx),
-        get_ptr<int64_t>(expert_first_token_offset), n_token, valid_num_ptr,
-        n_hidden, topk, n_local_expert, stream);
+        get_ptr<int>(sorted_row_idx), get_ptr<int>(inv_permuted_idx),
+        get_ptr<int>(permuted_idx), get_ptr<int64_t>(expert_first_token_offset),
+        n_token, valid_num_ptr, n_hidden, topk, n_local_expert, stream);
   });
 }
 

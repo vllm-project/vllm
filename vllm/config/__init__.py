@@ -16,6 +16,7 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.mamba import MambaConfig
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
@@ -24,12 +25,19 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
+from vllm.config.offload import (
+    OffloadBackend,
+    OffloadConfig,
+    PrefetchOffloadConfig,
+    UVAOffloadConfig,
+)
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
+from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.config.speech_to_text import SpeechToTextConfig
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import (
     ConfigType,
@@ -76,6 +84,8 @@ __all__ = [
     "LoadConfig",
     # From vllm.config.lora
     "LoRAConfig",
+    # From vllm.config.mamba
+    "MambaConfig",
     # From vllm.config.model
     "ModelConfig",
     "iter_architecture_defaults",
@@ -85,17 +95,25 @@ __all__ = [
     "MultiModalConfig",
     # From vllm.config.observability
     "ObservabilityConfig",
+    # From vllm.config.offload
+    "OffloadBackend",
+    "OffloadConfig",
+    "PrefetchOffloadConfig",
+    "UVAOffloadConfig",
     # From vllm.config.parallel
     "EPLBConfig",
     "ParallelConfig",
     # From vllm.config.pooler
     "PoolerConfig",
+    # From vllm.config.reasoning
+    "ReasoningConfig",
     # From vllm.config.scheduler
     "SchedulerConfig",
     # From vllm.config.speculative
     "SpeculativeConfig",
     # From vllm.config.speech_to_text
     "SpeechToTextConfig",
+    "SpeechToTextParams",
     # From vllm.config.structured_outputs
     "StructuredOutputsConfig",
     # From vllm.config.profiler

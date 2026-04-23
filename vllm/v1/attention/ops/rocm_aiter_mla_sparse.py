@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
+from importlib.util import find_spec
 
 import torch
 
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
@@ -273,6 +275,23 @@ def fp8_paged_mqa_logits_torch(
     return logits
 
 
+@functools.lru_cache
+def paged_mqa_logits_module():
+    paged_mqa_logits_module_path = None
+    if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
+        paged_mqa_logits_module_path = "aiter.ops.triton.pa_mqa_logits"
+    elif find_spec("aiter.ops.triton.attention.pa_mqa_logits") is not None:
+        paged_mqa_logits_module_path = "aiter.ops.triton.attention.pa_mqa_logits"
+
+    if paged_mqa_logits_module_path is not None:
+        try:
+            module = importlib.import_module(paged_mqa_logits_module_path)
+            return module
+        except ImportError:
+            return None
+    return None
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -305,31 +324,9 @@ def rocm_fp8_paged_mqa_logits(
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
-    @functools.lru_cache
-    def paged_mqa_logits_module():
-        paged_mqa_logits_module_path = None
-        if importlib.util.find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
-            paged_mqa_logits_module_path = "aiter.ops.triton.pa_mqa_logits"
-        elif (
-            importlib.util.find_spec("aiter.ops.triton.attention.pa_mqa_logits")
-            is not None
-        ):
-            paged_mqa_logits_module_path = "aiter.ops.triton.attention.pa_mqa_logits"
-
-        if paged_mqa_logits_module_path is not None:
-            try:
-                module = importlib.import_module(paged_mqa_logits_module_path)
-                return module
-            except ImportError:
-                return None
-        return None
-
     aiter_paged_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
-    # FIXME(ganyi): Temporarily disable the aiter path until nightly docker
-    # update aiter to the fix PR.
-    aiter_paged_mqa_logits_module = None
 
     if aiter_paged_mqa_logits_module is not None:
         deepgemm_fp8_paged_mqa_logits_stage1 = (
@@ -383,9 +380,9 @@ def fp8_mqa_logits_torch(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
-    kv, scale = kv
-    seq_len_kv = kv.shape[0]
-    k = kv.to(torch.bfloat16)
+    k_fp8, scale = kv
+    seq_len_kv = k_fp8.shape[0]
+    k = k_fp8.to(torch.bfloat16)
     q = q.to(torch.bfloat16)
 
     mask_lo = (
@@ -401,6 +398,23 @@ def fp8_mqa_logits_torch(
     logits = logits.masked_fill(~mask, float("-inf"))
 
     return logits
+
+
+@functools.lru_cache
+def mqa_logits_module():
+    mqa_logits_module_path = None
+    if find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
+        mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
+    elif find_spec("aiter.ops.triton.attention.fp8_mqa_logits") is not None:
+        mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
+
+    if mqa_logits_module_path is not None:
+        try:
+            module = importlib.import_module(mqa_logits_module_path)
+            return module
+        except ImportError:
+            return None
+    return None
 
 
 def rocm_fp8_mqa_logits(
@@ -432,40 +446,21 @@ def rocm_fp8_mqa_logits(
     # path after aiter merge this kernel into main
     from vllm._aiter_ops import rocm_aiter_ops
 
-    @functools.lru_cache
-    def mqa_logits_module():
-        mqa_logits_module_path = None
-        if importlib.util.find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
-            mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
-        elif (
-            importlib.util.find_spec("aiter.ops.triton.attention.fp8_mqa_logits")
-            is not None
-        ):
-            mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
-
-        if mqa_logits_module_path is not None:
-            try:
-                module = importlib.import_module(mqa_logits_module_path)
-                return module
-            except ImportError:
-                return None
-        return None
-
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
         aiter_mqa_logits_module = mqa_logits_module()
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
-        kv, scale = kv
-        return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+        k_fp8, scale = kv
+        return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -492,7 +487,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
 
 def rocm_aiter_sparse_attn_indexer(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -508,6 +503,9 @@ def rocm_aiter_sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+    from vllm.utils.torch_utils import _resolve_layer_name
+
+    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         return rocm_aiter_sparse_attn_indexer_fake(
@@ -525,12 +523,19 @@ def rocm_aiter_sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
         )
-    attn_metadata = attn_metadata[k_cache_prefix]
-    assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
-    slot_mapping = attn_metadata.slot_mapping
-    has_decode = attn_metadata.num_decodes > 0
-    has_prefill = attn_metadata.num_prefills > 0
-    num_decode_tokens = attn_metadata.num_decode_tokens
+    layer_attn_metadata = attn_metadata[k_cache_prefix]
+    assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
+    assert topk_indices_buffer is not None
+    assert scale_fmt is not None
+    slot_mapping = layer_attn_metadata.slot_mapping
+    has_decode = layer_attn_metadata.num_decodes > 0
+    has_prefill = layer_attn_metadata.num_prefills > 0
+    num_decode_tokens = layer_attn_metadata.num_decode_tokens
+
+    # during speculative decoding, k may be padded to the CUDA graph batch
+    # size while slot_mapping only covers actual tokens.
+    num_tokens = slot_mapping.shape[0]
+    k = k[:num_tokens]
 
     ops.indexer_k_quant_and_cache(
         k,
@@ -542,7 +547,8 @@ def rocm_aiter_sparse_attn_indexer(
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
-        prefill_metadata = attn_metadata.prefill
+        prefill_metadata = layer_attn_metadata.prefill
+        assert prefill_metadata is not None
         for chunk in prefill_metadata.chunks:
             k_fp8 = torch.empty(
                 [chunk.total_seq_lens, head_dim],
@@ -587,7 +593,8 @@ def rocm_aiter_sparse_attn_indexer(
             )
 
     if has_decode:
-        decode_metadata = attn_metadata.decode
+        decode_metadata = layer_attn_metadata.decode
+        assert decode_metadata is not None
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
         # we only have [num_block, block_size, head_dim],
         kv_cache = kv_cache.unsqueeze(-2)

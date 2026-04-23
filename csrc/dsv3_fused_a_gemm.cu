@@ -745,3 +745,7 @@ void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
         stream);
   }
 }
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("dsv3_fused_a_gemm", &dsv3_fused_a_gemm);
+}

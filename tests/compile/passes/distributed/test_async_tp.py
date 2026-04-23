@@ -31,6 +31,7 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
 FP8_DTYPE = current_platform.fp8_dtype()
 
 prompts = [
@@ -299,8 +300,8 @@ def async_tp_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -316,7 +317,6 @@ def async_tp_pass_on_test_model(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
@@ -325,7 +325,7 @@ def async_tp_pass_on_test_model(
             fuse_gemm_comms=True,
         ),
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
@@ -334,11 +334,10 @@ def async_tp_pass_on_test_model(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
 
-    async_tp_pass = AsyncTPPass(vllm_config)
-
-    # Set the global vllm_config for TestBackend which calls
-    # get_current_vllm_config()
     with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        async_tp_pass = AsyncTPPass(vllm_config)
         backend = TestBackend(async_tp_pass)
 
         assert (
