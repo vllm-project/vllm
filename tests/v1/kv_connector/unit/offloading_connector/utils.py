@@ -19,6 +19,7 @@ from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -386,6 +387,10 @@ class RequestRunner:
             finished_sending, finished_recving = self.worker_connector.get_finished(
                 scheduler_output.finished_req_ids
             )
+            worker_meta = (
+                self.worker_connector.build_connector_worker_meta()
+                or OffloadingWorkerMetadata()
+            )
 
             self.worker_connector.clear_connector_metadata()
 
@@ -394,6 +399,7 @@ class RequestRunner:
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
                 token_id=token_id or 0,
+                kv_connector_worker_meta=worker_meta,
             )
 
             prev_token_id = token_id
@@ -439,12 +445,17 @@ class RequestRunner:
                 finished_sending, finished_recving = self.worker_connector.get_finished(
                     scheduler_output.finished_req_ids
                 )
+                worker_meta = (
+                    self.worker_connector.build_connector_worker_meta()
+                    or OffloadingWorkerMetadata()
+                )
 
                 assert not finished_recving
 
                 model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
                 model_runner_output.kv_connector_output = KVConnectorOutput(
-                    finished_sending=finished_sending
+                    finished_sending=finished_sending,
+                    kv_connector_worker_meta=worker_meta,
                 )
 
                 self.scheduler.update_from_output(scheduler_output, model_runner_output)
