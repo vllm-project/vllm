@@ -47,17 +47,15 @@ class AllPool(TokenPoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        split_sizes = pooling_cursor.num_scheduled_tokens_cpu.tolist()
-        if split_sizes:
-            # DispatchPooler passes the full hidden_states tensor.
-            # slice out the subgroup once, then split it by
-            # per-request token counts
-            group_start = int(pooling_cursor.first_token_indices_gpu[0].item())
-            group_end = int(pooling_cursor.last_token_indices_gpu[-1].item()) + 1
-            hidden_states_group = hidden_states[group_start:group_end]
-            hidden_states_lst = list(hidden_states_group.split(split_sizes))
-        else:
-            hidden_states_lst = []
+        # Use the already-CPU num_scheduled_tokens tensor so `.tolist()`
+        # doesn't trigger a GPU->CPU sync. torch.split produces the same
+        # consecutive slices as indexing with first/last per-sequence indices.
+        hidden_states_lst = list(
+            torch.split(
+                hidden_states,
+                pooling_cursor.num_scheduled_tokens_cpu.tolist(),
+            )
+        )
 
         if not self.enable_chunked_prefill:
             return hidden_states_lst
