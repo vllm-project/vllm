@@ -1023,6 +1023,9 @@ class NixlConnectorWorker:
         else:
             self._transfer_plans[engine_id] = generate_dense_plan(
                 **plan_common,
+                local_physical_blocks_per_logical=(
+                    self._physical_blocks_per_logical_kv_block
+                ),
             )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -1627,15 +1630,10 @@ class NixlConnectorWorker:
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         plan = self._transfer_plans[engine_id]
-        if self._has_mamba:
-            meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
-                meta.remote.block_ids,
-                plan.remote_physical_blocks_per_logical,
-            )
-        else:
-            meta.remote.block_ids = self._logical_to_kernel_block_ids(
-                meta.remote.block_ids
-            )
+        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+            meta.remote.block_ids,
+            plan.remote_expansion_stride,
+        )
         remote_block_ids = meta.remote.block_ids
         read_specs = self.transfer_policy.compute_read_specs(
             local_block_ids=meta.local_physical_block_ids,

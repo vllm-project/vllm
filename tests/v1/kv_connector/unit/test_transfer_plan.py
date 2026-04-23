@@ -122,6 +122,7 @@ def _common_plan_params(
     remote_num_blocks: int = 256,
     remote_block_lens: list[int] | None = None,
     remote_physical_blocks_per_logical: int = 1,
+    local_physical_blocks_per_logical: int = 1,
 ) -> dict:
     """Build common kwargs for plan generators."""
     if block_len_per_layer is None:
@@ -142,6 +143,7 @@ def _common_plan_params(
         remote_num_blocks=remote_num_blocks,
         remote_block_lens=remote_block_lens,
         remote_physical_blocks_per_logical=remote_physical_blocks_per_logical,
+        local_physical_blocks_per_logical=local_physical_blocks_per_logical,
     )
 
 
@@ -602,6 +604,7 @@ def _make_mamba_plan_for_desc_ids(
         remote_block_size=16,
         remote_block_len=0,
         remote_physical_blocks_per_logical=1,
+        remote_expansion_stride=1,
     )
 
 
@@ -679,6 +682,7 @@ class TestMambaPlanReadSpecs:
             remote_block_size=16,
             remote_block_len=0,
             remote_physical_blocks_per_logical=1,
+            remote_expansion_stride=1,
         )
 
         local_ids = ([1, 2], [3, 4])
@@ -707,6 +711,7 @@ class TestMambaPlanReadSpecs:
             remote_block_size=16,
             remote_block_len=0,
             remote_physical_blocks_per_logical=1,
+            remote_expansion_stride=1,
         )
 
         local_ids = ([1, 2], [3, 4])
@@ -758,6 +763,7 @@ class TestMambaPlanSplitHandles:
             remote_block_size=16,
             remote_block_len=0,
             remote_physical_blocks_per_logical=1,
+            remote_expansion_stride=1,
         )
 
         # 2 FA descs + 1 SSM desc
