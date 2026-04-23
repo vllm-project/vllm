@@ -8,6 +8,8 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 
 - `disagg_epd_proxy.py` - Proxy script that demonstrates the XeYpZd setup (X encode instances, Y prefill instances, Z decode instances). Currently stable for the 1e1p1d configuration.
 
+- `baseline_1pd_example.sh` - Starts one regular vLLM OpenAI server with no encoder, prefill, or decode disaggregation, then runs the same random multimodal benchmark and a local-image request for baseline comparison.
+
 - `example_ec_connector/disagg_1e1p1d_example.sh` - Sets up the 1e1p1d configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
 - `example_ec_connector/disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
@@ -17,6 +19,9 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 ```bash
 # Use specific GPUs
 GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash example_ec_connector/disagg_1e1p1d_example.sh
+
+# Run the single-server baseline
+GPU_BASELINE=0 bash baseline_1pd_example.sh
 
 # Use specific ports
 PROXY_PORT=10001 bash example_ec_connector/disagg_1e1p1d_example.sh
@@ -32,6 +37,11 @@ DEVICE_PLATFORM=xpu GPU_E=0 GPU_PD=1 bash example_ec_connector/disagg_1e1pd_exam
 ```
 
 `DEVICE_PLATFORM` defaults to `cuda`. Set `DEVICE_PLATFORM=xpu` when running these examples on Intel GPUs so the scripts use `ZE_AFFINITY_MASK` instead of `CUDA_VISIBLE_DEVICES` for device selection.
+
+When comparing benchmark numbers, run the encoder and prefill/decode stages on
+different devices. Running `GPU_E` and `GPU_PD` on the same GPU is useful as a
+smoke test, but the request must complete the encoder stage before it can enter
+decode, so TTFT includes both stages serially.
 
 ## Encoder Instances
 
