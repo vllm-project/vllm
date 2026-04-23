@@ -1133,14 +1133,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # audio encoder
-            # "audio_encoder.audio_projection.": "audio_encoder.projection.",
-            # "audio_encoder.audio_input_local_transformer.": (
-            #     "audio_encoder.input_local_transformer."
-            # ),
-            # "audio_projection.": "audio_encoder.projection.",
-            # "audio_input_local_transformer.": (
-            #     "audio_encoder.input_local_transformer."
-            # ),
             "speech_embeddings.": "audio_encoder.speech_embeddings.",
             # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
