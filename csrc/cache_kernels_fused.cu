@@ -251,7 +251,7 @@ void concat_and_cache_mla_rope_fused(
   TORCH_CHECK_EQ(k_pe.scalar_type(), q_pe.scalar_type());
 
   TORCH_CHECK_EQ(kv_c.dim(), 2);
-  TORCH_CHECK_EQ(kv_c.size(0), );
+  TORCH_CHECK_EQ(kv_c.size(0), num_padded_tokens);
   TORCH_CHECK_EQ(kv_c.size(1), kv_lora_rank);
   TORCH_CHECK_EQ(kv_c.scalar_type(), q_pe.scalar_type());
   TORCH_CHECK_EQ(kv_c.dtype(), q_pe.dtype());
