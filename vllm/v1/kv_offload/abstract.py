@@ -234,12 +234,13 @@ class SecondaryTierManager(ABC):
     """
 
     @abstractmethod
-    def lookup(self, key: OffloadKey) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
         Check whether a block exists in this secondary tier.
 
         Args:
             key: Offload key to look up.
+            req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
             True if the block is present and ready,

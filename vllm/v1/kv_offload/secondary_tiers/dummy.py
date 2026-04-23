@@ -19,6 +19,7 @@ from vllm.v1.kv_offload.abstract import (
     JobResult,
     LoadStoreSpec,
     OffloadKey,
+    ReqContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
@@ -94,7 +95,7 @@ class DummySecondaryTier(SecondaryTierManager):
     def set_primary_view(self, view: memoryview) -> None:
         self._primary_view = view
 
-    def lookup(self, key: OffloadKey) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
         Check whether a block exists in this secondary tier.
 

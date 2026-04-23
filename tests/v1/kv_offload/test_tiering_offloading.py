@@ -63,18 +63,18 @@ class TestDummySecondaryTier:
 
         # Initially empty
         blocks = to_keys(range(3))
-        assert tier.lookup(blocks[0]) is False
+        assert tier.lookup(blocks[0], _CTX) is False
 
         # Store blocks (simulate with direct insertion for testing)
         tier.blocks[blocks[0]] = True
         tier.blocks[blocks[1]] = True
 
         # Lookup should find first two blocks
-        assert tier.lookup(blocks[0]) is True
-        assert tier.lookup(blocks[1]) is True
+        assert tier.lookup(blocks[0], _CTX) is True
+        assert tier.lookup(blocks[1], _CTX) is True
 
         # Third block not present
-        assert tier.lookup(blocks[2]) is False
+        assert tier.lookup(blocks[2], _CTX) is False
 
     def test_in_flight_blocks_return_none(self):
         """Test that in-flight blocks cause lookup to return None."""
@@ -86,8 +86,8 @@ class TestDummySecondaryTier:
         tier.in_flight[blocks[0]] = 1
 
         # Lookup should return None (retry later)
-        assert tier.lookup(blocks[0]) is None
-        assert tier.lookup(blocks[1]) is False  # not in-flight, just absent
+        assert tier.lookup(blocks[0], _CTX) is None
+        assert tier.lookup(blocks[1], _CTX) is False  # not in-flight, just absent
 
     def test_lru_eviction(self):
         """Test LRU eviction policy."""
@@ -215,8 +215,8 @@ class TestTieringOffloadingManager:
         assert self.secondary_tier2.get_num_blocks() == 3
 
         # Verify blocks are present
-        assert all(self.secondary_tier1.lookup(b) for b in blocks)
-        assert all(self.secondary_tier2.lookup(b) for b in blocks)
+        assert all(self.secondary_tier1.lookup(b, _CTX) for b in blocks)
+        assert all(self.secondary_tier2.lookup(b, _CTX) for b in blocks)
 
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects blocks during cascade."""

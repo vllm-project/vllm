@@ -219,7 +219,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Step 2: Check secondary tiers
         for tier in self.secondary_tiers:
-            secondary_hit = tier.lookup(key)
+            secondary_hit = tier.lookup(key, req_context)
             if secondary_hit is None:
                 # Tier is busy with this block
                 return None
