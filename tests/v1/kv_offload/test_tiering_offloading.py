@@ -18,13 +18,13 @@ import pytest
 import torch
 
 from vllm.v1.kv_offload.abstract import (
-    JobMetadata,
     OffloadKey,
     ReqContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
-from vllm.v1.kv_offload.secondary_tiers.dummy import DummySecondaryTier
+from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.dummy import DummySecondaryTier
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,

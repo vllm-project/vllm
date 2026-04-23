@@ -24,18 +24,20 @@ from collections.abc import Iterable
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import (
-    JobId,
-    JobMetadata,
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
-    SecondaryTierManager,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.tiering.base import (
+    JobId,
+    JobMetadata,
+    SecondaryTierManager,
+)
 
 logger = init_logger(__name__)
 

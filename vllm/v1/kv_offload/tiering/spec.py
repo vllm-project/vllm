@@ -43,8 +43,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.secondary_tiers.dummy import DummySecondaryTier
 from vllm.v1.kv_offload.spec import CanonicalKVCaches
+from vllm.v1.kv_offload.tiering.factory import create_secondary_tier
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -79,45 +79,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
-
-    def _create_secondary_tier(self, tier_config: dict):
-        """
-        Create a secondary tier from configuration.
-
-        Args:
-            tier_config: Dictionary with tier configuration containing:
-                - type (required): Type of secondary tier (e.g., "dummy")
-                - tier_name (required): Name for this tier
-                - Additional tier-specific parameters are passed directly
-                  to the tier constructor
-
-        Returns:
-            SecondaryTierManager instance
-
-        Raises:
-            ValueError: If tier type is unknown or configuration is invalid
-        """
-        # Make a copy to avoid modifying the original config
-        config = tier_config.copy()
-
-        # Extract common parameters
-        tier_type = config.pop("type", None)
-        if not tier_type:
-            raise ValueError("Secondary tier configuration must include 'type'")
-
-        tier_name = config.pop("tier_name", None)
-        if not tier_name:
-            raise ValueError("Secondary tier configuration must include 'tier_name'")
-
-        # Remaining parameters in config are tier-specific
-        if tier_type == "dummy":
-            # DummySecondaryTier for testing
-            # Pass tier_name and tier-specific params to constructor
-            return DummySecondaryTier(tier_name=tier_name, **config)
-        else:
-            raise ValueError(
-                f"Unknown secondary tier type: {tier_type}. Supported types: dummy"
-            )
 
     def get_manager(self) -> OffloadingManager:
         """
@@ -166,7 +127,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             secondary_tiers = []
             for tier_config in self.secondary_tier_configs:
                 try:
-                    tier = self._create_secondary_tier(tier_config)
+                    tier = create_secondary_tier(tier_config)
                     secondary_tiers.append(tier)
                     logger.info(
                         "Created secondary tier: %s (type: %s)",

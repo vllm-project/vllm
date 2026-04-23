@@ -13,16 +13,14 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadKey, ReqContext
+from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
+from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
     JobResult,
-    LoadStoreSpec,
-    OffloadKey,
-    ReqContext,
     SecondaryTierManager,
 )
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
 
 @dataclass
