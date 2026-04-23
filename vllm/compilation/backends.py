@@ -23,6 +23,10 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
+from vllm.compilation.codegen import (
+    compile_execution_fn,
+    generate_execution_code,
+)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -1242,11 +1246,6 @@ class VllmBackend:
         self._called = True
         graph_to_serialize = (
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
-        )
-
-        from vllm.compilation.codegen import (
-            compile_execution_fn,
-            generate_execution_code,
         )
 
         execution_code, submod_names = generate_execution_code(self.split_gm)
