@@ -13,6 +13,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel
@@ -26,6 +27,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
+from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -130,6 +132,135 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     )
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class CustomReplicatedLinear(ReplicatedLinear):
+        pass
+
+    model = dummy_model
+    model.add_module("custom_gate", CustomReplicatedLinear(10, 10, bias=False))
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("custom_gate"), ReplicatedLinearWithLoRA
+    )
+
+
+def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
+    model = dummy_model
+    model.add_module("router_gate", GateLinear(10, 4, bias=False))
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("router_gate"), ReplicatedLinearWithLoRA
+    )
+
+
+def test_skip_unsupported_matched_modules(default_vllm_config, dist_init, dummy_model):
+    class UnsupportedContainer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # This name matches a supported target suffix ("dense1"),
+            # but nn.Linear is not currently a LoRA-wrappable layer type.
+            self.dense1 = nn.Linear(10, 10, bias=False)
+
+    model = dummy_model
+    model.add_module("unsupported", UnsupportedContainer())
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    # Should not crash and should keep unsupported matched modules unchanged.
+    assert isinstance(manager.model.get_submodule("unsupported.dense1"), nn.Linear)
+    assert "unsupported.dense1" not in manager.modules
+
+
+def test_target_modules_fail_closed_on_unsupported_matched_modules(
+    default_vllm_config, dist_init, dummy_model
+):
+    class UnsupportedContainer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense1 = nn.Linear(10, 10, bias=False)
+
+    model = dummy_model
+    model.add_module("unsupported", UnsupportedContainer())
+
+    with pytest.raises(ValueError, match="unsupported.dense1"):
+        LoRAModelManager(
+            model,
+            1,
+            1,
+            1,
+            LoRAConfig(
+                max_lora_rank=8,
+                max_cpu_loras=8,
+                max_loras=8,
+                lora_dtype=DEFAULT_DTYPE,
+                target_modules=["dense1"],
+            ),
+            torch.device(DEVICES[0]),
+        )
+
+
+def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(
+        max_lora_rank=64,
+        max_cpu_loras=1,
+        max_loras=1,
+        lora_dtype=DEFAULT_DTYPE,
+        fully_sharded_loras=True,
+    )
+
+    class DummyModule:
+        def __init__(self, tp_size: int, fully_sharded: bool):
+            self.tp_size = tp_size
+            self.fully_sharded = fully_sharded
+
+    manager.modules = {
+        "model.layers.0.self_attn.q_proj": DummyModule(
+            tp_size=32,
+            fully_sharded=True,
+        ),
+        "model.layers.0.mlp.experts": DummyModule(
+            tp_size=32,
+            fully_sharded=True,
+        ),
+    }
+
+    assert manager.get_dummy_lora_warmup_rank(8) == 32
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -792,6 +923,25 @@ def test_target_modules_none_uses_all(
             ("layer1.dense2", RowParallelLinearWithLoRA),
         ],
         expected_no_lora=[],
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_match_packed_runtime_modules(
+    default_vllm_config, dist_init, dummy_model_gate_up, device
+):
+    """Packed runtime modules should be selected by their adapter-visible names."""
+    _test_target_modules(
+        dummy_model_gate_up,
+        ["gate_proj"],
+        device,
+        expected_lora=[("gate_up_proj", MergedColumnParallelLinearWithLoRA)],
+        expected_no_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("dense2", RowParallelLinearWithLoRA),
+            ("layer1.dense1", ColumnParallelLinearWithLoRA),
+            ("layer1.dense2", RowParallelLinearWithLoRA),
+        ],
     )
 
 
