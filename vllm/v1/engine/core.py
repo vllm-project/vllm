@@ -282,11 +282,30 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info_once(
-            "init engine (profile, create kv cache, warmup model) took %.2f seconds",
-            elapsed,
-            scope="local",
-        )
+        compile_time = vllm_config.compilation_config.compilation_time
+        encoder_compile_time = vllm_config.compilation_config.encoder_compilation_time
+        if encoder_compile_time > 0:
+            logger.info_once(
+                "init engine (profile, create kv cache, warmup model) took "
+                "%.2f s (compilation: %.2f s — language_model: %.2f s, "
+                "encoder: %.2f s)",
+                elapsed,
+                compile_time + encoder_compile_time,
+                compile_time,
+                encoder_compile_time,
+            )
+        elif compile_time > 0:
+            logger.info_once(
+                "init engine (profile, create kv cache, warmup model) took "
+                "%.2f s (compilation: %.2f s)",
+                elapsed,
+                compile_time,
+            )
+        else:
+            logger.info_once(
+                "init engine (profile, create kv cache, warmup model) took %.2f s",
+                elapsed,
+            )
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
