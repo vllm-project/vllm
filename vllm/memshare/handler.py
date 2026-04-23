@@ -50,13 +50,15 @@ _BOUNDARY_RE = re.compile(
 )
 
 MIN_STEP_CHARS = 40
+MAX_BUFFER_CHARS = 4096
 
 
 class RequestMemShareState:
     """Per-request state for MemShare step detection and similarity."""
 
-    def __init__(self, request_id: str):
+    def __init__(self, request_id: str, threshold: float = 0.8):
         self.request_id = request_id
+        self.threshold = threshold
         self.text_buffer: str = ""
         self.completed_steps: List[str] = []
         self.step_vectors: List[Counter] = []
@@ -84,8 +86,13 @@ class RequestMemShareState:
         """
         self.text_buffer += new_text
 
-        # Check if the buffer tail contains a boundary pattern
-        match = _BOUNDARY_RE.search(self.text_buffer)
+        # Check if the buffer contains a boundary pattern after the minimum
+        # step length. The non-capturing prefix (?:^|\n|[.!?]\s) is at most
+        # 2 chars, so we back up by 2 to avoid missing a boundary whose
+        # prefix straddles the pos cutoff. The start(1) check ensures the
+        # actual capture group (the boundary phrase) is past MIN_STEP_CHARS.
+        search_pos = max(0, MIN_STEP_CHARS - 2)
+        match = _BOUNDARY_RE.search(self.text_buffer, pos=search_pos)
         if match and match.start(1) >= MIN_STEP_CHARS:
             split_pos = match.start(1)
             completed = self.text_buffer[:split_pos].strip()
@@ -95,6 +102,10 @@ class RequestMemShareState:
 
             # Keep the boundary phrase in the buffer as the start of the next step
             self.text_buffer = self.text_buffer[split_pos:]
+
+        # Prevent unbounded buffer growth when no boundaries are found.
+        if len(self.text_buffer) > MAX_BUFFER_CHARS:
+            self.text_buffer = self.text_buffer[-MAX_BUFFER_CHARS:]
 
     def _complete_step(self, step_text: str, threshold: float) -> None:
         """Register a completed step and compare against previous steps."""
@@ -118,7 +129,7 @@ class RequestMemShareState:
         """Called when the request finishes. Completes the final step."""
         remaining = self.text_buffer.strip()
         if remaining:
-            self._complete_step(remaining, threshold=0.8)
+            self._complete_step(remaining, threshold=self.threshold)
             self.text_buffer = ""
 
 
@@ -136,9 +147,14 @@ class MemShareHandler:
             return
 
         if request_id not in self._states:
-            self._states[request_id] = RequestMemShareState(request_id)
+            self._states[request_id] = RequestMemShareState(
+                request_id, self.threshold)
 
         self._states[request_id].on_new_text(new_text, self.threshold)
+
+    def on_request_aborted(self, request_id: str) -> None:
+        """Called when a request is aborted. Discards state without finalizing."""
+        self._states.pop(request_id, None)
 
     def on_request_finished(self, request_id: str) -> Optional[RequestMemShareState]:
         """Called when a request completes. Returns the final state."""

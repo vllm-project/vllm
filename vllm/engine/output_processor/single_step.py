@@ -10,8 +10,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sequence import (CompletionSequenceGroupOutput, SequenceGroup,
                            SequenceGroupOutput)
-from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.memshare.handler import MemShareHandler
+from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -129,7 +129,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         else:
             new_char_count = 0
 
-        # MemShare: feed newly decoded text to step detector
+        # MemShare: feed newly decoded text to step detector.
+        # Note: only tracks first_seq. Beam search (best_of > n) would
+        # need per-sequence state, but beam search + reasoning is uncommon.
         if self.memshare_handler and new_char_count > 0:
             new_text = seq.output_text[-new_char_count:]
             self.memshare_handler.on_token(
@@ -142,8 +144,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             lora_req=seq_group.lora_request,
         )
         if seq.is_finished():
-            # MemShare: finalize state for this request
-            if self.memshare_handler:
+            # MemShare: finalize state only when all sequences in the
+            # group are done (beam search may have multiple active seqs).
+            if self.memshare_handler and seq_group.is_finished():
                 self.memshare_handler.on_request_finished(
                     seq_group.request_id)
             for scheduler in self.scheduler:

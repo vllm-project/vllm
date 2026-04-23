@@ -918,6 +918,14 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
+        # MemShare: clean up state for aborted requests
+        if self.memshare_handler:
+            if isinstance(request_id, str):
+                self.memshare_handler.on_request_aborted(request_id)
+            else:
+                for rid in request_id:
+                    self.memshare_handler.on_request_aborted(rid)
+
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
