@@ -85,7 +85,6 @@ class DbrxExperts(FusedMoE):
             hidden_size=config.d_model,
             intermediate_size=config.ffn_config.ffn_hidden_size,
             params_dtype=params_dtype,
-            reduce_results=True,
             renormalize=True,
             quant_config=quant_config,
             tp_size=get_tensor_model_parallel_world_size(),

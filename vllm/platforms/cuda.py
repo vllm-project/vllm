@@ -369,7 +369,6 @@ class CudaPlatformBase(Platform):
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
             "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
         )
 
         return selected_backend.get_path()
@@ -423,7 +422,6 @@ class CudaPlatformBase(Platform):
                 if is_backend_supported:
                     logger.info_once(
                         f"Using backend {vit_attn_backend} for vit attention",
-                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
