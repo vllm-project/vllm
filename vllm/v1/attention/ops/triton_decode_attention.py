@@ -401,10 +401,21 @@ def _fwd_grouped_kernel_stage1(
                 if v.dtype.is_fp8():
                     v = (v.to(tl.float32) * vs).to(q.dtype)
             else:
-                # MLA uses a single c_kv.
-                # loading the same c_kv to interpret it as v is not necessary.
-                # transpose the existing c_kv (aka k) for the dot product.
-                v = tl.trans(k)
+                # MLA: logits use full K (c_kv [+ k_pe]). V is only the c_kv
+                # prefix (Lv). tl.trans(k) when Lk > Lv includes k_pe and breaks
+                # tl.dot vs acc (#33529 fast-path). Triton does not support
+                # k[:Lv, :] style slices on block tensors; load V from buffer.
+                if Lk == Lv:
+                    v = tl.trans(k)
+                else:
+                    offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
+                    v = tl.load(
+                        V_Buffer + offs_buf_v,
+                        mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
+                        other=0.0,
+                    )
+                    if v.dtype.is_fp8():
+                        v = (v.to(tl.float32) * vs).to(q.dtype)
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
