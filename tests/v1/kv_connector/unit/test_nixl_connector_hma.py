@@ -62,24 +62,25 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
 
 @pytest.mark.cpu_test
 def test_logical_to_kernel_block_ids_with_hma():
-    """Test logical_to_kernel_block_ids expands blocks when HMA is enabled.
+    """Test _logical_to_kernel_block_ids expands blocks when HMA is enabled.
 
     When HMA is enabled, the logical block size may differ from the kernel
     block size. Each logical block maps to multiple kernel blocks.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
-        logical_to_kernel_block_ids,
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
     )
+
+    worker = object.__new__(NixlConnectorWorker)
 
     # Simulate HMA scenario: logical block size = 32, kernel block size = 16
     # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
+    worker._physical_blocks_per_logical_kv_block = 2
     # FA + SW groups (neither is MambaSpec, so both get expanded)
-    logical_block_ids = [[0, 1, 2], [3, 4]]
-    physical_per_logical = (2, 2)
+    worker._is_mamba_group = [False, False]
 
-    kernel_block_ids = logical_to_kernel_block_ids(
-        logical_block_ids, physical_per_logical
-    )
+    logical_block_ids = [[0, 1, 2], [3, 4]]
+    kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
 
     expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
     assert kernel_block_ids == expected_kernel_block_ids, (
@@ -89,34 +90,44 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "physical_per_logical,remote_block_ids,expected_remote_block_ids",
+    "has_mamba,is_mamba_group,remote_ratio,remote_block_ids,expected_remote_block_ids",
     [
-        # Non-mamba (FA+SWA): both groups expanded by ratio 2.
+        # Non-mamba (FA+SWA): both groups expanded via _logical_to_kernel_block_ids.
         # Regression for https://github.com/vllm-project/vllm/pull/39724
         (
-            (2, 2),
+            False,
+            [False, False],
+            1,
             ([0, 1, 2], [3, 4]),
             [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
         ),
-        # Mamba (FA+Mamba): FA expanded by ratio 261, Mamba (ratio=1) passthrough.
+        # Mamba (FA+Mamba): FA expanded via _logical_to_remote_kernel_block_ids,
+        # Mamba passed through unchanged.
+        # remote_ratio=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
+        # the wrong conversion method produces different FA results.
         (
-            (261, 1),
+            True,
+            [False, True],
+            261,
             ([0, 1, 2], [10, 11]),
-            [
-                list(range(0, 261)) + list(range(261, 522)) + list(range(522, 783)),
-                [10, 11],
-            ],
+            [[0, 1, 261, 262, 522, 523], [10, 11]],
         ),
     ],
     ids=["non_mamba_fa_swa", "mamba_fa_ssm"],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    physical_per_logical,
+    has_mamba,
+    is_mamba_group,
+    remote_ratio,
     remote_block_ids,
     expected_remote_block_ids,
 ):
     """_read_blocks_for_req must expand remote logical block IDs to kernel
-    block IDs via plan.physical_per_logical (model-agnostic).
+    block IDs when kernel block size != logical block size.
+
+    Non-mamba path uses _logical_to_kernel_block_ids (all groups expanded).
+    Mamba path uses _logical_to_remote_kernel_block_ids (FA expanded, Mamba
+    passed through).
     """
     from unittest.mock import MagicMock
 
@@ -131,6 +142,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
 
     worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker._physical_blocks_per_logical_kv_block = 2
+    worker._is_mamba_group = is_mamba_group
 
     remote_engine_id = "remote-engine"
 
@@ -146,9 +160,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker.transfer_policy.compute_read_specs.return_value = []
     worker.use_mla = False
 
-    # Mock the plan with the physical_per_logical tuple
+    # Mock the plan with the remote physical blocks ratio
     mock_plan = MagicMock(spec=EngineTransferPlan)
-    mock_plan.physical_per_logical = physical_per_logical
+    mock_plan.remote_physical_blocks_per_logical = remote_ratio
     worker._transfer_plans = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()
