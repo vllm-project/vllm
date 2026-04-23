@@ -160,21 +160,19 @@ class MultiModalConfig:
     using vision transformers. Accepts any value from
     `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     mm_encoder_attn_dtype: Literal["fp8"] | None = None
-    """Optional dtype override for ViT encoder attention. Set to ``"fp8"`` to
-    enable FP8 quantization via the FlashInfer cuDNN backend (requires
-    cuDNN >= 9.17.1). When set to ``"fp8"`` without a scale file, dynamic
-    scaling is used automatically. See
-    [FP8 ViT Encoder Attention](../features/quantization/fp8_vit_attn.md)
-    for details."""
+    """Optional dtype override for ViT encoder attention. Set to `"fp8"` to
+    enable FP8 quantization via the FlashInfer cuDNN backend. When set to
+    `"fp8"` without a scale file, dynamic scaling is used automatically.
+    See docs/features/quantization/fp8_vit_attn.md for details."""
     mm_encoder_fp8_scale_path: str | None = None
     """Path to a JSON file containing per-layer FP8 Q/K/V scales for ViT
-    encoder attention. When provided (with ``mm_encoder_attn_dtype="fp8"``),
+    encoder attention. When provided (with `mm_encoder_attn_dtype="fp8"`),
     static scaling is used. When omitted, dynamic scaling is used."""
     mm_encoder_fp8_scale_save_path: str | None = None
-    """When set with dynamic FP8 scaling (``mm_encoder_attn_dtype="fp8"``
-    and no ``mm_encoder_fp8_scale_path``), saves the calibrated scales to
+    """When set with dynamic FP8 scaling (`mm_encoder_attn_dtype="fp8"`
+    and no `mm_encoder_fp8_scale_path`), saves the calibrated scales to
     this file after the amax history buffer is full. The saved file can
-    then be used as ``mm_encoder_fp8_scale_path`` in subsequent runs."""
+    then be used as `mm_encoder_fp8_scale_path` in subsequent runs."""
     mm_encoder_fp8_scale_save_margin: float = Field(default=1.5, gt=0.0)
     """Safety margin multiplied onto scales when auto-saving. A value > 1
     leaves headroom so that inputs with larger activations than the

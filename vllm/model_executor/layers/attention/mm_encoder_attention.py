@@ -381,8 +381,8 @@ class MMEncoderAttention(CustomOp):
         No-op if FP8 is not requested. Raises ``ValueError`` if FP8 is
         requested but the platform does not support it.
         """
-        # Defaults so ``_forward_flashinfer`` can check ``self.fp8_enabled``
-        # and friends without worrying about attribute presence.
+        # Populate defaults so ``_forward_flashinfer`` can
+        # check ``self.fp8_enabled`` and others without AttributeError.
         self.fp8_enabled = False
         self._fp8_dynamic_scale = False
         self.fp8_quant: QuantFP8 | None = None
@@ -393,6 +393,8 @@ class MMEncoderAttention(CustomOp):
         mm_cfg = get_multimodal_config()
         if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
             return
+
+        # FP8 path
         if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
             raise ValueError(
                 "mm_encoder_attn_dtype='fp8' requires the FlashInfer "

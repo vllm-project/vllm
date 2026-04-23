@@ -41,8 +41,7 @@ def _fp8_attention():
     from vllm.config.multimodal import MultiModalConfig
 
     if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
-        yield
-        return
+        pytest.skip("FlashInfer cuDNN FP8 prefill attention not supported")
 
     mm_config = MultiModalConfig(mm_encoder_attn_dtype="fp8")
     vllm_config = VllmConfig()
