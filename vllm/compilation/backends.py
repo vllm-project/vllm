@@ -1163,12 +1163,22 @@ class VllmBackend:
         lazy_format_graph_code("before split", self.graph)
         lazy_format_graph_code("after split", self.split_gm)
 
-        # Log the piecewise split graph for TORCH_TRACE/tlparse
-        trace_structured(
-            "graph_dump",
-            metadata_fn=lambda: {"name": "vllm_piecewise_split_graph"},
-            payload_fn=lambda: self.split_gm.print_readable(print_output=False),
+        # Dump graphs with both raw print_readable and hierarchical
+        # module trace via the standard utility.
+        from vllm.compilation.graph_trace_dump import (
+            dump_graph_hierarchy_to_file,
+            trace_graph_structured,
         )
+
+        trace_graph_structured("vllm_graph_before_split", self.graph)
+        trace_graph_structured("vllm_piecewise_split_graph", self.split_gm)
+
+        debug_dump_path = self.vllm_config.compile_debug_dump_path()
+        if debug_dump_path is not None:
+            debug_dump_path.mkdir(parents=True, exist_ok=True)
+            filename = f"{self.prefix}_module_trace.txt"
+            trace_path = str(debug_dump_path / filename)
+            dump_graph_hierarchy_to_file(self.graph, trace_path)
 
         compilation_counter.num_piecewise_graphs_seen += len(self.piecewise_graphs)
         submod_names_to_compile = [

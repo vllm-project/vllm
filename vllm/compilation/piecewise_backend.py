@@ -308,13 +308,11 @@ class PiecewiseBackend:
         if not self._graph_logged:
             self._graph_logged = True
             assert self.graph is not None
-            trace_structured(
-                "graph_dump",
-                metadata_fn=lambda: {
-                    "name": f"vllm_{submod_name}",
-                },
-                payload_fn=lambda: self.graph.print_readable(print_output=False),
+            from vllm.compilation.graph_trace_dump import (
+                trace_graph_structured,
             )
+
+            trace_graph_structured(f"vllm_{submod_name}", self.graph)
 
     def load_all_ranges(self) -> None:
         """Load all pre-compiled runnables for this piecewise subgraph.
