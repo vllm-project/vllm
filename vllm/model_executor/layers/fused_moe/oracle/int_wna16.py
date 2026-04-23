@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
 )
