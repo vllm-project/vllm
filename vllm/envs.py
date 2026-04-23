@@ -1418,11 +1418,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPUTE_NANS_IN_LOGITS": lambda: bool(
         int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))
     ),
-    # If set to 1, the V2 sampler's Gumbel-max kernel will promote logits
-    # to fp64 and draw a full 64-bit uniform before the double-log transform.
-    # Default 0 (fp32) matches V1's behaviour and is 16-32x faster on H100
-    # without any observable accuracy regression. Intended for statistical
-    # validation only.
+    # Optimization for Gumbel sampler.
     "VLLM_SAMPLER_FP64_GUMBEL": lambda: bool(
         int(os.getenv("VLLM_SAMPLER_FP64_GUMBEL", "0"))
     ),

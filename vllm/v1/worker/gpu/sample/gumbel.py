@@ -6,8 +6,7 @@ import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 # Smallest positive normal fp32 value. Used to clamp the uniform draw so that
-# `log(u)` cannot produce -inf (and thus `-log(-log(u))` stays finite). fp32
-# normal min is 2**-126 ≈ 1.1754944e-38; `-log(-log(2**-126)) ≈ -4.47`.
+# `log(u)` cannot produce -inf (and thus `-log(-log(u))` stays finite).
 _FP32_TINY = tl.constexpr(float.fromhex("0x1p-126"))
 
 
