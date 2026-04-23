@@ -779,15 +779,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         *,
         max_batch_size: int | None = None,
         max_frames_per_batch: int | None = None,
+        max_seqlen_override: int | None = None,
         device: torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute encoder metadata from grid_thw.
-        
+
         Shared by the eager forward path, CUDA graph capture, and
         CUDA graph replay to avoid duplicated implementation.
 
         Args:
-            seq_len: Sequence length.
             grid_thw: Grid configurations as list of [t, h, w].
             max_batch_size: If set, pad cu_seqlens to this size
                 (needed for CUDA graph capture/replay).
@@ -861,16 +861,24 @@ class Qwen2_5_VisionTransformer(nn.Module):
         if pad_to is not None:
             num_seqs = len(cu_seqlens) - 1
             if num_seqs < pad_to:
-                cu_seqlens = np.concatenate(
-                    [
+                cu_seqlens = torch.cat(
+                    (
                         cu_seqlens,
-                        np.full(pad_to - num_seqs, cu_seqlens[-1], dtype=np.int32),
-                    ]
+                        torch.full(
+                            (pad_to - num_seqs,),
+                            cu_seqlens[-1],
+                            dtype=cu_seqlens.dtype,
+                            device=cu_seqlens.device,
+                        ),
+                    )
                 )
 
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        if max_seqlen_override is None:
+            max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        else:
+            max_seqlen_full = torch.tensor(max_seqlen_override, dtype=torch.int32)
         max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
 
         cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
@@ -907,9 +915,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
-        
-        #### change from here ####
-        seq_len, _ = x.shape
+
+        seq_len = hidden_states.shape[0]
         if encoder_metadata is None:
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
 
@@ -921,8 +928,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens = encoder_metadata["cu_window_seqlens"]
         max_seqlen_full = encoder_metadata["max_seqlen_full"]
         max_seqlen_window = encoder_metadata["max_seqlen_window"]
-
-        #### change to here ####
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
@@ -1742,6 +1747,7 @@ class Qwen2_5_VLForConditionalGeneration(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
             device=device,
         )
 
