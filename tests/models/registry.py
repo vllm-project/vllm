@@ -324,6 +324,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HYV3ForCausalLM": _HfExamplesInfo(
+        "tencent/Hy3-preview", trust_remote_code=True, is_available_online=False
+    ),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
