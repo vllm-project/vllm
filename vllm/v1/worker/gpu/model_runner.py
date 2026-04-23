@@ -216,6 +216,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.rejection_sampler = RejectionSampler(
                     self.sampler,
                     self.speculative_config,
+                    self.device,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
             self.structured_outputs_worker = StructuredOutputsWorker(

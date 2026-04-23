@@ -1309,12 +1309,9 @@ def test_dflash_acceptance_rates(dflash_config):
 @single_gpu_only
 def test_synthetic_acceptance_rate():
     """Verify that synthetic rejection sampling produces an acceptance
-    length close to the theoretically expected value."""
-    per_pos_rate = 0.5
+    length close to the requested mean acceptance length."""
     num_spec_tokens = 3
-    expected_acceptance_len = 1 + per_pos_rate * (1 - per_pos_rate**num_spec_tokens) / (
-        1 - per_pos_rate
-    )
+    expected_acceptance_len = 1.875
     tolerance = 0.15
 
     spec_llm = LLM(
@@ -1326,7 +1323,7 @@ def test_synthetic_acceptance_rate():
             "num_speculative_tokens": num_spec_tokens,
             "max_model_len": 2048,
             "rejection_sample_method": "synthetic",
-            "synthetic_acceptance_rate": per_pos_rate,
+            "synthetic_acceptance_length": expected_acceptance_len,
         },
         max_model_len=2048,
         enforce_eager=True,

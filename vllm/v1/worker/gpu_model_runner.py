@@ -575,7 +575,7 @@ class GPUModelRunner(
                     f"{self.speculative_config.method}"
                 )
             self.rejection_sampler = RejectionSampler(
-                self.sampler, self.speculative_config
+                self.sampler, self.speculative_config, self.device
             )
 
         self.num_spec_tokens = 0
