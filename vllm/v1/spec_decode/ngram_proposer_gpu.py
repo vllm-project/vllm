@@ -569,8 +569,14 @@ def update_ngram_gpu_tensors_incremental(
             reorder_dst.append(curr_idx)
 
     if reorder_src:
-        src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
-        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
+        # Pinned CPU + non_blocking H2D avoids the synchronous copy that
+        # `torch.tensor(list, device=cuda)` would otherwise force.
+        src_tensor = torch.tensor(reorder_src, dtype=torch.long, pin_memory=True).to(
+            device, non_blocking=True
+        )
+        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, pin_memory=True).to(
+            device, non_blocking=True
+        )
 
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()
