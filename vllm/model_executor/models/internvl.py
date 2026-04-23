@@ -249,7 +249,12 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             ),
             image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.shared("image", num_images),
+            # Scalar metadata consumed only as a Python int (via .item()) by
+            # `_parse_and_validate_image_input`; keep on CPU to avoid a
+            # pointless H2D and the downstream `.item()` sync on GPU.
+            image_token_id=MultiModalFieldConfig.shared(
+                "image", num_images, keep_on_cpu=True
+            ),
         )
 
     def _get_mm_fields_config(
