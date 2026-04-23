@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, NamedTuple
@@ -14,11 +14,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
+    ReqContext,
     get_offload_block_hash,
     make_offload_key,
 )
@@ -74,6 +76,7 @@ class RequestOffloadState:
     config: SchedulerOffloadConfig
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
+    req_context: ReqContext = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
 
@@ -81,6 +84,7 @@ class RequestOffloadState:
         self.group_states = tuple(
             RequestGroupState() for _ in self.config.kv_group_configs
         )
+        self.req_context = ReqContext(kv_transfer_params=self.req.kv_transfer_params)
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -128,6 +132,49 @@ class OffloadingConnectorScheduler:
         # request ID -> set(offload keys being stored/loaded)
         self._reqs_being_stored = defaultdict[ReqId, set[OffloadKey]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[OffloadKey]](set)
+
+    def _maximal_prefix_lookup(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> int | None:
+        """Find the length of the maximal prefix of offloaded blocks."""
+        hit_count = 0
+        defer_lookup = False
+        for key in keys:
+            result = self.manager.lookup(key, req_context)
+            if result is None:
+                defer_lookup = True
+                # continue lookup to allow manager to kick-off async lookups
+                # for all blocks (until a miss is detected)
+                result = True
+            if not result:
+                break
+            hit_count += 1
+        return hit_count if not defer_lookup else None
+
+    def _sliding_window_lookup(
+        self,
+        keys: Sequence[OffloadKey],
+        sliding_window_size: int,
+        req_context: ReqContext,
+    ) -> int | None:
+        """Find the maximal ending position of consecutive offloaded blocks
+        within a sliding window."""
+        defer_lookup = False
+        consecutive_hits = 0
+        for idx in range(len(keys) - 1, -1, -1):
+            result = self.manager.lookup(keys[idx], req_context)
+            if result is None:
+                defer_lookup = True
+                # continue lookup to allow manager to kick-off async lookups
+                # for all blocks (until a hit is detected)
+                result = False
+            if not result:
+                consecutive_hits = 0
+            else:
+                consecutive_hits += 1
+                if consecutive_hits == sliding_window_size:
+                    return idx + sliding_window_size if not defer_lookup else None
+        return consecutive_hits if not defer_lookup else None
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -181,7 +228,11 @@ class OffloadingConnectorScheduler:
             return 0, False
 
         start_block_idx = num_computed_tokens // group_config.offloaded_block_size
-        hits = self.manager.lookup(offload_keys[start_block_idx:])
+        # Full attention relays on all previous KV cache blocks.
+        # Thus, we search for a maximal prefix of KV cache which are all cached.
+        hits = self._maximal_prefix_lookup(
+            offload_keys[start_block_idx:], req_status.req_context
+        )
         if hits is None:
             # indicates a lookup that should be tried later
             return None, False
@@ -221,45 +272,66 @@ class OffloadingConnectorScheduler:
             return
 
         req_status = self._req_status[request.request_id]
-        block_groups = blocks.get_block_ids()
 
-        # Below assertions will be removed once this function supports HMA
-        assert len(self.config.kv_group_configs) == 1
-        assert len(req_status.group_states) == 1
-        assert len(block_groups) == 1
-        block_ids = block_groups[0]
-        group_config = self.config.kv_group_configs[0]
-        group_state = req_status.group_states[0]
+        num_locally_computed_tokens = req_status.num_locally_computed_tokens
+        num_cached_tokens = num_locally_computed_tokens + num_external_tokens
 
-        num_computed_gpu_blocks = sum(
-            block.block_hash is not None for block in blocks.blocks[0]
-        )
-        num_computed_tokens = num_computed_gpu_blocks * group_config.gpu_block_size
-        full_block_tokens = num_computed_tokens + num_external_tokens
-        assert full_block_tokens % group_config.offloaded_block_size == 0
+        keys_to_load: list[OffloadKey] = []
+        dst_block_ids: list[int] = []
+        # per group
+        group_sizes: list[int] = []
+        block_indices: list[int] = []
+        for group_config, group_state, group_blocks in zip(
+            self.config.kv_group_configs,
+            req_status.group_states,
+            blocks.blocks,
+        ):
+            gpu_block_size = group_config.gpu_block_size
+            offloaded_block_size = group_config.offloaded_block_size
+            offload_keys = group_state.offload_keys
+            num_gpu_blocks = cdiv(num_cached_tokens, gpu_block_size)
 
-        num_pending_gpu_blocks = len(block_ids) - num_computed_gpu_blocks
-        assert (
-            num_external_tokens == num_pending_gpu_blocks * group_config.gpu_block_size
-        )
+            assert len(group_blocks) >= num_gpu_blocks
+            num_locally_computed_gpu_blocks = num_gpu_blocks
+            # Skip null placeholder blocks (used for sliding window or mamba padding).
+            for i, block in enumerate(group_blocks[:num_gpu_blocks]):
+                if not block.is_null and block.block_hash is None:
+                    num_locally_computed_gpu_blocks = i
+                    break
 
-        start_block_idx = num_computed_tokens // group_config.offloaded_block_size
-        num_blocks = full_block_tokens // group_config.offloaded_block_size
+            assert (
+                num_locally_computed_tokens
+                <= num_locally_computed_gpu_blocks * gpu_block_size
+            )
+            num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
 
-        assert len(request.block_hashes) // self.config.block_size_factor >= num_blocks
-        offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
+            num_blocks = cdiv(num_cached_tokens, offloaded_block_size)
+            assert len(offload_keys) >= num_blocks
+            if num_pending_gpu_blocks:
+                start_block_idx = (
+                    num_locally_computed_gpu_blocks // self.config.block_size_factor
+                )
+                keys_to_load.extend(offload_keys[start_block_idx:num_blocks])
 
-        src_spec = self.manager.prepare_load(offload_keys)
+            dst_block_ids.extend(
+                block.block_id
+                for block in group_blocks[
+                    num_locally_computed_gpu_blocks:num_gpu_blocks
+                ]
+            )
+            group_sizes.append(num_pending_gpu_blocks)
+            block_indices.append(num_locally_computed_gpu_blocks)
+
+            group_state.next_stored_block_idx = num_blocks
+
+        src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
-            block_ids[num_computed_gpu_blocks:],
-            group_sizes=(num_pending_gpu_blocks,),
-            block_indices=(num_computed_gpu_blocks,),
+            dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
         )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
         req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
-        req_blocks_being_loaded.update(offload_keys)
-        group_state.next_stored_block_idx = num_blocks
+        req_blocks_being_loaded.update(keys_to_load)
 
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(req_blocks_being_loaded)
@@ -304,7 +376,9 @@ class OffloadingConnectorScheduler:
             assert len(req.block_hashes) >= num_gpu_blocks
 
             new_offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
-            store_output = self.manager.prepare_store(new_offload_keys)
+            store_output = self.manager.prepare_store(
+                new_offload_keys, req_status.req_context
+            )
             if store_output is None:
                 logger.warning(
                     "Request %s: cannot store %s blocks", req_id, num_new_blocks
@@ -329,7 +403,9 @@ class OffloadingConnectorScheduler:
                 for i in range(self.config.block_size_factor):
                     src_block_ids.append(block_ids[gpu_block_idx + i])
             src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=(len(src_block_ids),)
+                src_block_ids,
+                group_sizes=(len(src_block_ids),),
+                block_indices=(0,),
             )
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
