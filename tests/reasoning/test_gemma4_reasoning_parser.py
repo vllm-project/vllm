@@ -361,3 +361,110 @@ def test_is_reasoning_end_mock(mock_parser, input_ids, expected, description):
     assert result == expected, (
         f"is_reasoning_end({input_ids}) expected {expected} for case: {description}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for no-start-token fallback in extract_reasoning_streaming
+# Exercises the MoE A4B scenario: <|channel> never emitted, model outputs
+# "thought\n...reasoning...<channel|>answer" directly. (#39885)
+# ---------------------------------------------------------------------------
+
+
+def _run_streaming_no_start_token(
+    mock_parser,
+    chunks: list[tuple[list[int], str]],
+) -> tuple[str | None, str | None]:
+    """Feed token/text chunks through extract_reasoning_streaming.
+
+    Returns (accumulated_reasoning, accumulated_content).
+    """
+    from tests.reasoning.utils import StreamingReasoningReconstructor
+
+    rec = StreamingReasoningReconstructor()
+    previous_token_ids: list[int] = []
+    previous_text = ""
+
+    for delta_token_ids, delta_text in chunks:
+        current_token_ids = previous_token_ids + delta_token_ids
+        current_text = previous_text + delta_text
+        result = mock_parser.extract_reasoning_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=previous_token_ids,
+            current_token_ids=current_token_ids,
+            delta_token_ids=delta_token_ids,
+        )
+        if result is not None:
+            rec.append_delta(result)
+        previous_token_ids = current_token_ids
+        previous_text = current_text
+
+    return rec.reasoning, rec.other_content
+
+
+@pytest.fixture
+def fresh_mock_parser(mock_gemma4_tokenizer):
+    """Return a fresh parser instance for each test (resets streaming state)."""
+    cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    return cls(mock_gemma4_tokenizer)
+
+
+def test_no_start_token_reasoning_routed_correctly(fresh_mock_parser):
+    """With no <|channel>, reasoning must not leak into content (#39885 A4B case)."""
+    # Simulate: thought\nActual reasoning<channel|>Final answer
+    # No _CHANNEL_START token ever appears in the stream.
+    chunks = [
+        ([_TEXT_A], "thought\n"),
+        ([_TEXT_B], "Actual reasoning"),
+        ([_CHANNEL_END], ""),  # <channel|> as special token (text empty)
+        ([_TEXT_A], "Final answer"),
+    ]
+    reasoning, content = _run_streaming_no_start_token(fresh_mock_parser, chunks)
+    assert "thought" not in (content or ""), (
+        f"reasoning leaked into content: {content!r}"
+    )
+    assert "Actual reasoning" in (reasoning or ""), (
+        f"reasoning not found in reasoning field: {reasoning!r}"
+    )
+    assert "Final answer" in (content or ""), (
+        f"post-reasoning content missing: {content!r}"
+    )
+
+
+def test_no_start_token_thought_prefix_stripped(fresh_mock_parser):
+    """The thought\\n role label is stripped from reasoning in the fallback path."""
+    chunks = [
+        ([_TEXT_A], "thought\n"),
+        ([_TEXT_B], "My actual thought"),
+        ([_CHANNEL_END], ""),
+    ]
+    reasoning, content = _run_streaming_no_start_token(fresh_mock_parser, chunks)
+    assert reasoning == "My actual thought", f"got: {reasoning!r}"
+    assert not (content or ""), f"unexpected content: {content!r}"
+
+
+def test_no_start_token_thought_prefix_split_across_chunks(fresh_mock_parser):
+    """thought\\n split across deltas is still stripped correctly."""
+    chunks = [
+        ([_TEXT_A], "tho"),
+        ([_TEXT_B], "ught\n"),
+        ([_TEXT_A], "Deep insight"),
+        ([_CHANNEL_END], ""),
+    ]
+    reasoning, content = _run_streaming_no_start_token(fresh_mock_parser, chunks)
+    assert reasoning == "Deep insight", f"got: {reasoning!r}"
+
+
+def test_with_start_token_still_works(fresh_mock_parser):
+    """Normal path (with <|channel>) is unaffected by the fallback."""
+    chunks = [
+        ([_CHANNEL_START], ""),  # <|channel>
+        ([_TEXT_A], "thought\n"),
+        ([_TEXT_B], "Some reasoning"),
+        ([_CHANNEL_END], ""),  # <channel|>
+        ([_TEXT_A], "Answer"),
+    ]
+    reasoning, content = _run_streaming_no_start_token(fresh_mock_parser, chunks)
+    assert "Some reasoning" in (reasoning or ""), f"got: {reasoning!r}"
+    assert "Answer" in (content or ""), f"got: {content!r}"
