@@ -935,10 +935,6 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self.model_arch_config.quantization_config
 
-        if self.quantization == "humming":
-            os.environ["VLLM_USE_HUMMING"] = "1"
-            envs.VLLM_USE_HUMMING = True
-
         if quant_cfg is not None:
             quant_method = quant_cfg["quant_method"]
             # Quantization methods which are overrides (i.e. they have a
@@ -961,6 +957,8 @@ class ModelConfig:
                 "humming",
                 "gguf",
             ]
+            if self.quantization == "humming":
+                overrides = ["humming"] + overrides
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]

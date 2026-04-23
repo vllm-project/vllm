@@ -41,6 +41,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     PerTensorScaleParameter,
     RowvLLMParameter,
+    BasevLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -93,7 +94,7 @@ def prepare_param(tensor, name, extra_attrs):
         "input_scale": PerTensorScaleParameter,
     }
 
-    param_cls: type[torch.nn.Parameter]
+    param_cls: type[BasevLLMParameter]
     if "packed_dim" in extra_attrs:
         param_cls = PackedvLLMParameter
     elif scale_type in param_cls_name_map:
@@ -105,26 +106,23 @@ def prepare_param(tensor, name, extra_attrs):
     elif "output_dim" in extra_attrs:
         param_cls = ChannelQuantScaleParameter
     else:
-        param_cls = torch.nn.Parameter
+        param_cls = BasevLLMParameter
 
-    if param_cls == torch.nn.Parameter:
-        param = torch.nn.Parameter(tensor, requires_grad=False)
-        set_weight_attrs(param, extra_attrs)
-    else:
-        kwargs_keys = [
-            "input_dim",
-            "output_dim",
-            "packed_dim",
-            "packed_factor",
-            "weight_loader",
-        ]
-        cls_kwargs = {}
-        for key in extra_attrs.copy():
-            if key in kwargs_keys:
-                cls_kwargs[key] = extra_attrs.pop(key)
+    kwargs_keys = [
+        "input_dim",
+        "output_dim",
+        "packed_dim",
+        "packed_factor",
+        "weight_loader",
+    ]
+    cls_kwargs = {}
+    for key in extra_attrs.copy():
+        if key in kwargs_keys:
+            cls_kwargs[key] = extra_attrs.pop(key)
 
-        param = param_cls(data=tensor, **cls_kwargs)
-        set_weight_attrs(param, extra_attrs)
+    param = param_cls(data=tensor, **cls_kwargs)
+    set_weight_attrs(param, extra_attrs)
+
     param.param_name = name
     param.ignore_warning = True
     if scale_type in ["tensor", "input_scale"]:
@@ -288,6 +286,8 @@ class HummingConfig(QuantizationConfig):
 
         if self.full_config:
             weight_schema = self.get_layer_weight_schema(self.full_config, prefix)
+            if weight_schema is not None and weight_schema.quant_method == "mxfp4":
+                weight_schema.quant_method = "gpt_oss_mxfp4"
 
         is_online_quant = False
         online_quant_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
@@ -301,7 +301,7 @@ class HummingConfig(QuantizationConfig):
                 force_weight_schema = schema
 
         if weight_schema is not None:
-            if weight_schema.quant_method == "mxfp4" and layer_type != "moe":
+            if weight_schema.quant_method == "gpt_oss_mxfp4" and layer_type != "moe":
                 return None
             input_schema = None
             force_input_schema = None
@@ -439,12 +439,12 @@ class HummingLinearMethod(LinearMethodBase):
                         device=param.device,
                     )
                     extra_weight_attrs = layer.extra_weight_attrs.copy()
-                    weight_loader = extra_weight_attrs.pop("weight_loader")
+                    orig_weight_loader = extra_weight_attrs.pop("weight_loader")
                     layer.weight = ModelWeightParameter(
                         data=tensor,
                         input_dim=1,
                         output_dim=0,
-                        weight_loader=weight_loader,
+                        weight_loader=orig_weight_loader,
                     )
                     layer.weight.tp_size = layer.tp_size
                     layer.weight.tp_rank = layer.tp_rank

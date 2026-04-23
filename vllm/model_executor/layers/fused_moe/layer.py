@@ -786,20 +786,18 @@ class FusedMoE(PluggableLayer):
         shard_id: str,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
-        expert_id: int | None,
+        expert_id: int,
     ):
-        expert_data = param.data if expert_id is None else param.data[expert_id]
-        if expert_data.ndim == 0:
-            expert_data = expert_data.view(1)
+        param_data = param.data
         # for per tensor weight quantization
         if shard_id in ("w1", "w3"):
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             idx = 0 if shard_id == "w1" else 1
-            expert_data[idx] = loaded_weight
+            param_data[expert_id][idx] = loaded_weight
         # If we are in the row parallel case (down_proj)
-        elif shard_id in ("w13", "w2"):
-            expert_data.copy_(loaded_weight)
+        elif shard_id == "w2":
+            param_data[expert_id] = loaded_weight
 
     def _load_combined_w13_weight_scale(
         self,
@@ -846,7 +844,7 @@ class FusedMoE(PluggableLayer):
                 tp_rank=tp_rank,
                 load_full=load_full_w2,
             )
-        elif shard_id in ("w1", "w3", "w13"):
+        elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
@@ -873,7 +871,7 @@ class FusedMoE(PluggableLayer):
                 shard_dim=shard_dim,
             )
             expert_data.copy_(loaded_weight)
-        elif shard_id in ("w1", "w3", "w13"):
+        elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
@@ -950,7 +948,7 @@ class FusedMoE(PluggableLayer):
     ):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        if self.moe_config.is_act_and_mul and shard_id != "w13":
+        if self.moe_config.is_act_and_mul:
             shard_size = expert_data.shape[shard_dim] // 2
         else:
             shard_size = expert_data.shape[shard_dim]
@@ -973,11 +971,9 @@ class FusedMoE(PluggableLayer):
         if shard_id == "w1":
             expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
-        elif shard_id == "w3":
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         else:
-            assert shard_id == "w13"
-
+            assert shard_id == "w3"
+            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
             expert_data,
@@ -1024,10 +1020,7 @@ class FusedMoE(PluggableLayer):
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        expert_id: int | None,
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
     ):
         param_data = param.data
 
@@ -1050,12 +1043,10 @@ class FusedMoE(PluggableLayer):
                 tp_rank=tp_rank,
             )
         else:
-            assert shard_id in ("w1", "w3", "w13")
+            assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
 
-    def _map_global_expert_id_to_local_expert_id(
-        self, expert_id: int | None
-    ) -> int | None:
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         if self._expert_map is None:
             return expert_id
         return self._expert_map[expert_id].item()
@@ -1105,10 +1096,13 @@ class FusedMoE(PluggableLayer):
         loaded_weight: torch.Tensor,
         weight_name: str,
         shard_id: str,
-        expert_id: int | None,
+        expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "gpt_oss_mxfp4":
+        quant_config_name = self.quant_config and self.quant_config.get_name()
+        if quant_config_name == "humming":
+            quant_config_name = self.quant_method.weight_schema.quant_method
+        if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
@@ -1121,8 +1115,7 @@ class FusedMoE(PluggableLayer):
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
-        if expert_id is not None:
-            expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
             getattr(self.quant_method, "use_global_sf", False)
@@ -1146,19 +1139,18 @@ class FusedMoE(PluggableLayer):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
-            if is_transposed and expert_id is not None:
+            if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
-            elif is_transposed and loaded_weight.ndim >= 3:
-                loaded_weight = loaded_weight.transpose(-1, -2).contiguous()
+            else:
+                loaded_weight = loaded_weight
 
-        if shard_id not in ("w1", "w2", "w3", "w13"):
-            err_msg = f"shard_id must be ['w1','w2','w3', 'w13'] but got {shard_id}."
-            raise ValueError(err_msg)
+        if shard_id not in ("w1", "w2", "w3"):
+            raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
 
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
-        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0, "w13": 0}
+        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -1170,9 +1162,9 @@ class FusedMoE(PluggableLayer):
         # Case for BitsAndBytes
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         if use_bitsandbytes_4bit:
-            shard_dim = 1 if expert_id is None else 0
+            shard_dim = 0
 
-            expert_data = param.data if expert_id is None else param.data[expert_id]
+            expert_data = param.data[expert_id]
             if shard_id == "w2":
                 # BnB params are stored as flat packed tensors (e.g.
                 # (packed_size, 1)), not in the logical weight layout.
@@ -1186,7 +1178,7 @@ class FusedMoE(PluggableLayer):
                         f"checkpoint shape {tuple(loaded_weight.shape)}"
                     )
                 expert_data.copy_(loaded_weight)
-            elif shard_id in ("w1", "w3", "w13"):
+            elif shard_id in ("w1", "w3"):
                 # BnB stores weights as flat packed tensors.  _load_w13 is
                 # still used to split the w1/w3 portions along shard_dim.
                 # _narrow_expert_data_for_padding will be a no-op since
@@ -1208,15 +1200,15 @@ class FusedMoE(PluggableLayer):
         if is_transposed:
             shard_dim = int(not shard_dim)
 
-        load_all_experts = expert_id is None
-        if load_all_experts:
+        full_load = len(loaded_weight.shape) == 3
+        if full_load:
             shard_dim += 1
 
         # Materialize GGUF UninitializedParameter accounting merged weights
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             # To materialize a tensor, we must have full shape including
             # number of experts, making this portion to require `full_load`.
-            assert load_all_experts
+            assert full_load
             final_shape = list(loaded_weight.shape)
             # w1 and w3 are merged per expert.
             if shard_id in {"w1", "w3"}:
@@ -1224,7 +1216,7 @@ class FusedMoE(PluggableLayer):
             final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
-        expert_data = param.data if load_all_experts else param.data[expert_id]
+        expert_data = param.data if full_load else param.data[expert_id]
 
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
@@ -1324,16 +1316,13 @@ class FusedMoE(PluggableLayer):
             return True if return_success else None
 
         # Case weight scales, zero_points and offset, weight/input global scales
-        if any(x in weight_name for x in ["scale", "zero", "offset", "bias"]):
+        if "scale" in weight_name or "zero" in weight_name or "offset" in weight_name:
             # load the weight scales and zp based on the quantization scheme
             # supported weight scales/zp can be found in
             # FusedMoeWeightScaleSupported
             # TODO @dsikka: once hardened, refactor to use vLLM Parameters
             # specific to each case
             quant_method = getattr(param, "quant_method", None)
-            if "bias" in weight_name:
-                shard_dim = 1 if load_all_experts else 0
-                quant_method = FusedMoeWeightScaleSupported.CHANNEL.value
             if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
                 self._load_per_channel_weight_scale(
                     shard_id=shard_id,
