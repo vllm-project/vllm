@@ -408,8 +408,11 @@ class OffloadingConnectorScheduler:
         jobs_to_flush: set[int] = set()
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
-            if req_status is not None:
-                jobs_to_flush.update(req_status.transfer_jobs)
+            if req_status is None or not req_status.transfer_jobs:
+                continue
+            any_jid = next(iter(req_status.transfer_jobs))
+            assert self._jobs[any_jid].is_store
+            jobs_to_flush.update(req_status.transfer_jobs)
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
