@@ -67,20 +67,6 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 logger = init_logger(__name__)
 
 
-def _has_cutlass_dsl_cu13() -> bool:
-    """Whether the CUDA-13 CuTe-DSL shared libs are installed.
-    """
-    try:
-        from importlib.metadata import distribution
-    except ImportError:
-        return False
-    try:
-        distribution("nvidia-cutlass-dsl-libs-cu13")
-    except Exception:
-        return False
-    return True
-
-
 def _should_use_flashinfer_gdn_prefill(
     backend: str, head_k_dim: int | None
 ) -> bool:
@@ -105,7 +91,9 @@ def _should_use_flashinfer_gdn_prefill(
         return False  # Neither Hopper nor Blackwell.
     if head_k_dim != 128:
         return False
-    if not _has_cutlass_dsl_cu13():
+    if current_platform.get_cuda_runtime_major() < 13:
+        return False
+    if not current_platform.has_cutlass_dsl_cu13():
         return False
     return True
 
@@ -120,7 +108,7 @@ def _log_gdn_backend_decision(
     device_cap = (
         str(current_platform.get_device_capability()) if is_cuda else "n/a"
     )
-    cutlass_dsl_cu13_installed = _has_cutlass_dsl_cu13()
+    cutlass_dsl_cu13_installed = current_platform.has_cutlass_dsl_cu13()
     logger.info_once(
         "GDN prefill backend inputs:\n"
         "  requested=%s\n"
@@ -205,6 +193,12 @@ class ChunkGatedDeltaRule(CustomOp):
         backend = str(backend_cfg).strip().lower()
 
         use_flashinfer = _should_use_flashinfer_gdn_prefill(backend, head_k_dim)
+        if backend == "flashinfer" and not use_flashinfer:
+            logger.warning_once(
+                "GDN prefill backend 'flashinfer' is selected but "
+                "cannot use this kernel on the current platform. "
+                "Falling back to Triton/FLA."
+            )
         _log_gdn_backend_decision(backend, head_k_dim, use_flashinfer)
 
         self._forward_method = (

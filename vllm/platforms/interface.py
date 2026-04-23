@@ -360,6 +360,25 @@ class Platform:
         return (current_capability.to_int() // 10) == (capability // 10)
 
     @classmethod
+    def get_cuda_runtime_major(cls) -> int:
+        """Major ``torch.version.cuda`` version, or ``0`` if undetermined."""
+        major = (torch.version.cuda or "0").split(".", 1)[0]
+        return int(major) if major.isdigit() else 0
+
+    @classmethod
+    def has_cutlass_dsl_cu13(cls) -> bool:
+        """Whether ``nvidia-cutlass-dsl-libs-cu13`` is installed."""
+        try:
+            from importlib.metadata import distribution
+        except ImportError:
+            return False
+        try:
+            distribution("nvidia-cutlass-dsl-libs-cu13")
+        except Exception:
+            return False
+        return True
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
         raise NotImplementedError
