@@ -720,12 +720,12 @@ def rejection_greedy_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
+            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos).to(tl.int32)
             if SYNTHETIC_MODE:
                 uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                 rate = tl.load(synthetic_conditional_rates_ptr + pos)
                 accepted = uniform_prob < rate
-                token_id = draft_token_id if accepted else target_argmax_id.to(tl.int32)
+                token_id = draft_token_id if accepted else target_argmax_id
                 rejected = not accepted
             else:
                 token_id = target_argmax_id
