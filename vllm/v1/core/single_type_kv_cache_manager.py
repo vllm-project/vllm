@@ -24,6 +24,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     TQFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec
 )
 from vllm.v1.request import Request
 
@@ -1197,6 +1199,20 @@ class SinkFullAttentionManager(FullAttentionManager):
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
+class SinkSlidingWindowManager(SlidingWindowManager):
+    def __init__(
+        self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool, **kwargs
+    ) -> None:
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
+        self.sliding_window = kv_cache_spec.sliding_window
+        self._null_block = block_pool.null_block
+
+        sink_len = kv_cache_spec.sink_len
+        assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
+        num_sink_block = sink_len // self.block_size
+        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
+
+
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     TQFullAttentionSpec: FullAttentionManager,
@@ -1208,6 +1224,8 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
     SinkFullAttentionSpec: SinkFullAttentionManager,
+    SinkMLAAttentionSpec: SinkFullAttentionManager,
+    SinkMLASlidingWindowSpec: SinkSlidingWindowManager,
 }
 
 

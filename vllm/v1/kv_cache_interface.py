@@ -664,6 +664,135 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
 
 @dataclass(frozen=True)
+class SinkMLAAttentionSpec(MLAAttentionSpec):
+    sink_len: int = 0
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be MLAAttentionSpec."
+        )
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "quantization method."
+        )
+        assert all(spec.sliding_window is None for spec in specs), (
+            "All attention layers in the same KV cache group must use the same "
+            "sliding window."
+        )
+        sink_len_set = set(spec.sink_len for spec in specs)
+        assert len(sink_len_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "sink length."
+        )
+        head_size_set = set(spec.head_size for spec in specs)
+        assert len(head_size_set) == 1, (
+            "All attention layers in the same KV cache group must use the same head_size."
+        )
+        return cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            dtype=specs[0].dtype,
+            # page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=cache_dtype_str_set.pop(),
+            sink_len=sink_len_set.pop(),
+        )
+
+
+@dataclass(frozen=True)
+class MLASlidingWindowSpec(SlidingWindowSpec):
+    sliding_window: int | None = None
+    cache_dtype_str: str | None = None
+    head_size_v: int | None = None
+
+    def __post_init__(self):
+        if self.head_size_v is None:
+            object.__setattr__(self, "head_size_v", self.head_size)
+    
+    @property
+    def page_size_bytes(self) -> int:
+        if self.cache_dtype_str == "fp8_ds_mla":
+            return self.block_size * 656
+        return(
+            self.block_size
+            * self.num_kv_heads
+            * self.head_size
+            * get_dtype_size(self.dtype)
+        )
+    
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, MLASlidingWindowSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be MLASlidingWindowSpec."
+        )
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "quantization method."
+        )
+        sliding_window_set = set(spec.sliding_window for spec in specs)
+        assert len(sliding_window_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "sliding window."
+        )
+        head_size_set = set(spec.head_size for spec in specs)
+        assert len(head_size_set) == 1, (
+            "All attention layers in the same KV cache group must use the same head_size."
+        )
+        return cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            dtype=specs[0].dtype,
+            # page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=cache_dtype_str_set.pop(),
+            sliding_window=sliding_window_set.pop(),
+        )
+        
+
+@dataclass(frozen=True)
+class SinkMLASlidingWindowSpec(MLASlidingWindowSpec):
+    sink_len: int = 0
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, MLASlidingWindowSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be MLASlidingWindowSpec."
+        )
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "quantization method."
+        )
+        sliding_window_set = set(spec.sliding_window for spec in specs)
+        assert len(sliding_window_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "sliding window."
+        )
+        sink_len_set = set(spec.sink_len for spec in specs)
+        assert len(sink_len_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "sink length."
+        )
+        head_size_set = set(spec.head_size for spec in specs)
+        assert len(head_size_set) == 1, (
+            "All attention layers in the same KV cache group must use the same head_size."
+        )
+        return cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            dtype=specs[0].dtype,
+            # page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=cache_dtype_str_set.pop(),
+            sliding_window=sliding_window_set.pop(),
+            sink_len=sink_len_set.pop(),
+        )
+
+
+@dataclass(frozen=True)
 class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
     A KV cache spec for multiple layers with the same type of attention. Here,
@@ -707,7 +836,9 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             )
         elif isinstance(one_spec, FullAttentionSpec):
             return all(
-                isinstance(spec, FullAttentionSpec) for spec in kv_cache_specs.values()
+                isinstance(spec, FullAttentionSpec)
+                and spec.sliding_window == one_spec.sliding_window
+                for spec in kv_cache_specs.values()
             )
         elif isinstance(one_spec, CrossAttentionSpec):
             return all(
