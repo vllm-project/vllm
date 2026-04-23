@@ -846,15 +846,16 @@ class SpecDecodeBaseProposer:
                 )
 
             # Populate mrope_positions for draft models that use M-RoPE.
-            self._populate_mrope_positions_after_copy_expand_inputs(
-                cad,
-                batch_size,
-                total_num_input_tokens,
-                total_num_output_tokens,
-                target_positions,
-                query_end_loc,
-                token_indices_to_sample,
-            )
+            if self.uses_mrope:
+                self._populate_mrope_positions_after_copy_expand_inputs(
+                    cad,
+                    batch_size,
+                    total_num_input_tokens,
+                    total_num_output_tokens,
+                    target_positions,
+                    query_end_loc,
+                    token_indices_to_sample,
+                )
 
             # 2.
             # Recompute the slot mapping based on the new positions and
