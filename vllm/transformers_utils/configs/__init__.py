@@ -36,6 +36,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "HYV3Config": "vllm.transformers_utils.configs.hy_v3",
     "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
@@ -97,6 +98,7 @@ __all__ = [
     "HunYuanVLConfig",
     "HunYuanVLTextConfig",
     "HunYuanVLVisionConfig",
+    "HYV3Config",
     "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
