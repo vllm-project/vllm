@@ -611,9 +611,7 @@ class CoreEngineActorManager:
                         continue
 
                     control_node_ip = get_bundle_node_ip(collected_bundles[0])
-                    bundles = collected_bundles + [
-                        make_control_bundle(control_node_ip)
-                    ]
+                    bundles = collected_bundles + [make_control_bundle(control_node_ip)]
                     collected_bundles = []
                 else:
                     bundles = device_bundle * world_size + [
