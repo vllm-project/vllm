@@ -103,7 +103,7 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         self.strategy = weight_quant.strategy
         # channelwise is not supported by this kernel
         assert weight_quant.strategy == "group"
-        assert weight_quant.group_size in (-1, 32)
+        assert weight_quant.group_size == 32
         self.group_size = weight_quant.group_size
         # grouped actorder isn't supported by this kernel
         assert weight_quant.actorder != "group"
@@ -119,12 +119,12 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
-    ):
+    ):  
+        self.num_experts = num_experts
+        self.inter_dim = intermediate_size_per_partition
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
-        self.num_experts = num_experts
-        self.inter_dim = intermediate_size_per_partition
         extra_weight_attrs.update(
             {"is_transposed": True, "quant_method": self.strategy}
         )
@@ -329,7 +329,7 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
+        from vllm.vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
         return fused_flydsl_moe(
             x,
             layer.w13_weight_packed,

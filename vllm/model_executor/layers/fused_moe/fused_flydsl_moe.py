@@ -5,50 +5,11 @@
 import functools
 import json
 import os
-from collections.abc import Callable
-from typing import Any
 
 import torch
 
-import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import (
-    MoEActivation,
-    apply_moe_activation,
-)
-from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
-    _get_config_dtype_str,
-)
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
-)
-from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceNoOP,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-    disable_inplace,
-    moe_kernel_quantize_input,
-)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
-from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kFp8Dynamic128Sym,
-    kFp8DynamicTensorSym,
-    kFp8DynamicTokenSym,
-    kFp8Static128BlockSym,
-    kFp8StaticChannelSym,
-    kFp8StaticTensorSym,
-)
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 import flydsl.compiler as flyc
@@ -63,27 +24,27 @@ logger = init_logger(__name__)
 _FLYDSL_MOE_GEMM1_CACHE = {}
 _FLYDSL_MOE_GEMM2_CACHE = {}
 
-FLYDSL_MOE_TUNED_CONFIGS = {
+_FLYDSL_MOE_DEFAULT_CONFIG = {
     1: {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 512,
+        "tile_n2": 256,
+        "tile_k2": 256
+    },
+    2: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 512,
         "tile_n2": 256,
         "tile_k2": 128
     },
-    2: {
-        "tile_m": 16,
-        "tile_n": 64,
-        "tile_k": 512,
-        "tile_n2": 512,
-        "tile_k2": 256
-    },
     4: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 512,
         "tile_n2": 256,
-        "tile_k2": 256
+        "tile_k2": 128
     },
     8: {
         "tile_m": 16,
@@ -95,28 +56,28 @@ FLYDSL_MOE_TUNED_CONFIGS = {
     16: {
         "tile_m": 16,
         "tile_n": 64,
-        "tile_k": 256,
+        "tile_k": 128,
         "tile_n2": 128,
         "tile_k2": 256
     },
     24: {
         "tile_m": 16,
         "tile_n": 64,
-        "tile_k": 256,
-        "tile_n2": 128,
+        "tile_k": 128,
+        "tile_n2": 256,
         "tile_k2": 256
     },
     32: {
         "tile_m": 16,
         "tile_n": 64,
-        "tile_k": 256,
+        "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
     48: {
         "tile_m": 16,
-        "tile_n": 128,
-        "tile_k": 256,
+        "tile_n": 64,
+        "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
@@ -124,25 +85,25 @@ FLYDSL_MOE_TUNED_CONFIGS = {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 128,
-        "tile_n2": 256,
-        "tile_k2": 256
+        "tile_n2": 128,
+        "tile_k2": 128
     },
     128: {
         "tile_m": 16,
         "tile_n": 64,
-        "tile_k": 256,
-        "tile_n2": 128,
+        "tile_k": 128,
+        "tile_n2": 256,
         "tile_k2": 256
     },
     256: {
         "tile_m": 16,
-        "tile_n": 64,
-        "tile_k": 256,
+        "tile_n": 128,
+        "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
     512: {
-        "tile_m": 32,
+        "tile_m": 16,
         "tile_n": 64,
         "tile_k": 128,
         "tile_n2": 256,
@@ -159,8 +120,8 @@ FLYDSL_MOE_TUNED_CONFIGS = {
         "tile_m": 64,
         "tile_n": 64,
         "tile_k": 64,
-        "tile_n2": 512,
-        "tile_k2": 256
+        "tile_n2": 256,
+        "tile_k2": 64
     },
     4096: {
         "tile_m": 32,
@@ -174,7 +135,7 @@ FLYDSL_MOE_TUNED_CONFIGS = {
         "tile_n": 64,
         "tile_k": 64,
         "tile_n2": 256,
-        "tile_k2": 128
+        "tile_k2": 64
     }
 }
 
@@ -196,7 +157,6 @@ def _maybe_aiter_moe_sorting(
         torch.float16,
         block_m,
     )
-    # `num_valid_ids` is documented as [1]; some builds allocate [2]. Keep the first element.
     if num_valid_ids.numel() > 1:
         num_valid_ids = num_valid_ids[:1].contiguous()
     return sorted_ids, sorted_w, sorted_expert_ids, num_valid_ids
@@ -205,14 +165,14 @@ def build_routing_buffers(
     *,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
-    experts: int,
+    num_experts: int,
     model_dim: int,
     tile_m: int,
 ):
     res = _maybe_aiter_moe_sorting(
         topk_ids,
         topk_weights,
-        num_experts=experts,
+        num_experts=num_experts,
         model_dim=model_dim,
         block_m=tile_m,
     )
@@ -220,7 +180,6 @@ def build_routing_buffers(
         raise RuntimeError("aiter moe_sorting failed/unavailable; cannot build routing buffers.")
     sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids = res
 
-    # Keep moe_sorting outputs as-is (no host trim/pad). Launch full expert-block range.
     sorted_token_ids = sorted_token_ids.contiguous()
     sorted_weights = sorted_weights.contiguous()
     sorted_expert_ids = sorted_expert_ids.contiguous()
@@ -236,29 +195,51 @@ def build_routing_buffers(
     )
 
 @functools.lru_cache
-def get_flydsl_config(M):
-    return FLYDSL_MOE_TUNED_CONFIGS[min(FLYDSL_MOE_TUNED_CONFIGS.keys(), key=lambda x: abs(x - M))]
+def try_get_optimal_config(num_experts, inter_dim):
+    device_name = current_platform.get_device_name().replace(" ", "_")
+    json_file_name = f"E={num_experts},N={inter_dim},device_name={device_name},dtype=int4_w4a16,backend=flydsl.json"
+    config_file_path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
+    )
+    if os.path.exists(config_file_path):
+        with open(config_file_path) as f:
+            logger.info_once(
+                "Using tuned FlyDSL MoE config from %s",
+                config_file_path,
+                scope="global",
+            )
+            tuned_config = json.load(f)
+            return {int(key): val for key, val in tuned_config.items()}
 
-def _fused_flydsl_moe(
-    hidden_states,
-    w1,
-    w2,
-    experts,
-    inter_dim,
-    topk_weights,
-    topk_ids,
-    w1_scale=None,
-    w2_scale=None,
-    topk = 8,
-    group_size=32,
-    doweight_stage1=False,
-    in_dtype="int4_bf16",
-    out_dtype="bf16",
-    scale_is_bf16=True
-):  
+    logger.warning_once(
+        "Using default FlyDSL MoE config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        config_file_path,
+        scope="local",
+    )
+    return _FLYDSL_MOE_DEFAULT_CONFIG
+
+def fused_flydsl_moe_impl(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    num_experts: int,
+    inter_dim: int,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    topk: int = 8,
+    group_size: int = 32,
+    doweight_stage1: bool = False,
+    in_dtype: str = "int4_bf16",
+    out_dtype: str = "bf16",
+    scale_is_bf16: bool = True,
+) -> torch.Tensor:
     device = hidden_states.device
     tokens = hidden_states.shape[0]
-    tuned_config = get_flydsl_config(tokens)
+    tuned_config = try_get_optimal_config(num_experts, inter_dim)
+    tuned_config = tuned_config[min(tuned_config.keys(), key=lambda x: abs(x - tokens))]
     model_dim = hidden_states.shape[1]
     out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
@@ -271,7 +252,7 @@ def _fused_flydsl_moe(
     routing = build_routing_buffers(
         topk_ids=topk_ids,
         topk_weights=topk_weights,
-        experts=experts,
+        num_experts=num_experts,
         model_dim=model_dim,
         tile_m=tile_m,
     )
@@ -292,7 +273,7 @@ def _fused_flydsl_moe(
 
     key1 = (model_dim,
         inter_dim,
-        experts,
+        num_experts,
         topk,
         in_dtype,
         out_dtype,
@@ -308,7 +289,7 @@ def _fused_flydsl_moe(
         exe1 = compile_moe_gemm1(
             model_dim=model_dim,
             inter_dim=inter_dim,
-            experts=experts,
+            experts=num_experts,
             topk=topk,
             in_dtype=in_dtype,
             out_dtype=out_dtype,
@@ -363,7 +344,7 @@ def _fused_flydsl_moe(
 
     if model_dim % tile_n2 != 0:
         raise ValueError(
-            f"Invalid stage2 tiling: model_dim ({model_dim}) must be divisible by tile_n2 ({tile_n})."
+            f"Invalid stage2 tiling: model_dim ({model_dim}) must be divisible by tile_n2 ({tile_n2})."
         )
     if inter_dim % tile_k2 != 0:
         raise ValueError(
@@ -387,7 +368,7 @@ def _fused_flydsl_moe(
     key2 = (
         model_dim,
         inter_dim,
-        experts,
+        num_experts,
         topk,
         in_dtype,
         out_dtype,
@@ -403,7 +384,7 @@ def _fused_flydsl_moe(
         exe2 = compile_moe_gemm2(
             model_dim=model_dim,
             inter_dim=inter_dim,
-            experts=experts,
+            experts=num_experts,
             topk=topk,
             in_dtype=in_dtype,
             out_dtype=out_dtype,
@@ -452,31 +433,56 @@ def _fused_flydsl_moe(
     )
     return out_stage2
 
+def fused_flydsl_moe_impl_fake(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    num_experts: int,
+    inter_dim: int,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    topk: int = 8,
+    group_size: int = 32,
+    doweight_stage1: bool = False,
+    in_dtype: str = "int4_bf16",
+    out_dtype: str = "bf16",
+    scale_is_bf16: bool = True,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+direct_register_custom_op(
+    op_name="fused_flydsl_moe_impl",
+    op_func=fused_flydsl_moe_impl,
+    fake_impl=fused_flydsl_moe_impl_fake,
+)
+
 def fused_flydsl_moe(
-    hidden_states,
-    w1,
-    w2,
-    num_experts,
-    inter_dim,
-    topk_weights,
-    topk_ids,
-    w1_scale=None,
-    w2_scale=None,
-    topk = 8,
-    group_size=32,
-    doweight_stage1=False,
-    in_dtype="int4_bf16",
-    out_dtype="bf16",
-    scale_is_bf16=True,
-):  
-    return _fused_flydsl_moe(
-        hidden_states,
-        w1,
-        w2,
-        num_experts,
-        inter_dim,
-        topk_weights,
-        topk_ids,
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    num_experts: int,
+    inter_dim: int,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    topk: int = 8,
+    group_size: int = 32,
+    doweight_stage1: bool = False,
+    in_dtype: str = "int4_bf16",
+    out_dtype: str = "bf16",
+    scale_is_bf16: bool = True,
+) -> torch.Tensor:  
+    return torch.ops.vllm.fused_flydsl_moe_impl(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        num_experts=num_experts,
+        inter_dim=inter_dim,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         topk=topk,

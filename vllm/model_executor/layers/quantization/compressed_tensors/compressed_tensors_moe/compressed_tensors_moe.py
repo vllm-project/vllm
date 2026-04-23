@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 logger = init_logger(__name__)
 
@@ -116,7 +117,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
-                    and group_size in (-1, 32) and weight_quant.num_bits == 4
+                    and group_size == 32 and weight_quant.num_bits == 4 and on_gfx950()
                 ):
                     logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
                     return CompressedTensorsW4A16FlydslMoEMethod(
