@@ -1358,6 +1358,9 @@ class OpenAIServingResponses(OpenAIServing):
         current_item_id = ""
         current_tool_call_index: int | None = None
         parser = self.parser(tokenizer, request.tools) if self.parser else None
+        first_reasoning_sent = False
+        first_tool_call_sent = False
+        first_content_sent = False
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
@@ -1384,98 +1387,105 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 if not delta_message:
                     continue
+                print(f"Delta message:-------------------- {delta_message}")
                 tool_call_item_started = False
-                if not first_delta_sent:
-                    current_item_id = random_uuid()
-                    if delta_message.tool_calls:
-                        current_tool_call_id = f"call_{random_uuid()}"
-                        assert len(delta_message.tool_calls) == 1, (
-                            "Multiple tool calls in one delta is not supported"
+                if delta_message.tool_calls and not first_tool_call_sent:
+                    first_tool_call_sent = True
+                    tool_call_id = f"call_{random_uuid()}"
+                    assert len(delta_message.tool_calls) == 1, (
+                        "Multiple tool calls in one delta is not supported"
+                    )
+                    assert delta_message.tool_calls[0].function is not None, (
+                        "Tool call without function is not supported"
+                    )
+                    assert delta_message.tool_calls[0].function.name is not None, (
+                        "Tool call without function name is not supported"
+                    )
+                    current_tool_call_name = delta_message.tool_calls[0].function.name
+                    current_tool_call_index = delta_message.tool_calls[0].index
+                    current_tool_call_id = (
+                        delta_message.tool_calls[0].id or tool_call_id
+                    )
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemAddedEvent(
+                            type="response.output_item.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=ResponseFunctionToolCallItem(
+                                type="function_call",
+                                id=current_item_id,
+                                call_id=tool_call_id,
+                                name=current_tool_call_name,
+                                arguments="",
+                                status="in_progress",
+                            ),
                         )
-                        assert delta_message.tool_calls[0].function is not None, (
-                            "Tool call without function is not supported"
+                    )
+                    tool_call_item_started = True
+                elif delta_message.reasoning and not first_reasoning_sent:
+                    first_reasoning_sent = True
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemAddedEvent(
+                            type="response.output_item.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=ResponseReasoningItem(
+                                type="reasoning",
+                                id=current_item_id,
+                                summary=[],
+                                status="in_progress",
+                            ),
                         )
-                        assert delta_message.tool_calls[0].function.name is not None, (
-                            "Tool call without function name is not supported"
+                    )
+                    yield _increment_sequence_number_and_return(
+                        ResponseReasoningPartAddedEvent(
+                            type="response.reasoning_part.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item_id=current_item_id,
+                            content_index=current_content_index,
+                            part=ResponseReasoningTextContent(
+                                text="",
+                                type="reasoning_text",
+                            ),
                         )
-                        current_tool_call_name = delta_message.tool_calls[
-                            0
-                        ].function.name
-                        current_tool_call_index = delta_message.tool_calls[0].index
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseFunctionToolCallItem(
-                                    type="function_call",
-                                    id=current_item_id,
-                                    call_id=current_tool_call_id,
-                                    name=current_tool_call_name,
-                                    arguments="",
-                                    status="in_progress",
-                                ),
-                            )
+                    )
+                elif (
+                    not delta_message.tool_calls
+                    and not first_content_sent
+                    and not first_tool_call_sent
+                    and not first_reasoning_sent
+                ):
+                    first_content_sent = True
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemAddedEvent(
+                            type="response.output_item.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=ResponseOutputMessage(
+                                id=current_item_id,
+                                type="message",
+                                role="assistant",
+                                content=[],
+                                status="in_progress",
+                            ),
                         )
-                        tool_call_item_started = True
-                    elif delta_message.reasoning:
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseReasoningItem(
-                                    type="reasoning",
-                                    id=current_item_id,
-                                    summary=[],
-                                    status="in_progress",
-                                ),
-                            )
+                    )
+                    yield _increment_sequence_number_and_return(
+                        ResponseContentPartAddedEvent(
+                            type="response.content_part.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item_id=current_item_id,
+                            content_index=current_content_index,
+                            part=ResponseOutputText(
+                                type="output_text",
+                                text="",
+                                annotations=[],
+                                logprobs=[],
+                            ),
                         )
-                        yield _increment_sequence_number_and_return(
-                            ResponseReasoningPartAddedEvent(
-                                type="response.reasoning_part.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                content_index=current_content_index,
-                                part=ResponseReasoningTextContent(
-                                    text="",
-                                    type="reasoning_text",
-                                ),
-                            )
-                        )
-                    elif not delta_message.tool_calls:
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseOutputMessage(
-                                    id=current_item_id,
-                                    type="message",
-                                    role="assistant",
-                                    content=[],
-                                    status="in_progress",
-                                ),
-                            )
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseContentPartAddedEvent(
-                                type="response.content_part.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                content_index=current_content_index,
-                                part=ResponseOutputText(
-                                    type="output_text",
-                                    text="",
-                                    annotations=[],
-                                    logprobs=[],
-                                ),
-                            )
-                        )
-                    first_delta_sent = True
+                    )
 
                 # check delta message and previous delta message are
                 # same as content or reasoning content

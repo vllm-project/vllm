@@ -6,7 +6,8 @@ import json
 import openai  # use the official client for correctness check
 import pytest
 
-MODEL_NAME = "Qwen/Qwen3-1.7B"
+MODEL_NAME = "/mnt/data4/models/Qwen/Qwen3-8B"
+MODEL_NAME = "/mnt/data4/models/Qwen/Qwen3-8B"
 tools = [
     {
         "type": "function",
@@ -321,8 +322,12 @@ async def test_function_calling_with_streaming_expected_arguments(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "tool_choice",
+    [ "auto"],
+)
 async def test_function_calling_with_streaming_types(
-    client: openai.AsyncOpenAI, model_name: str
+    client: openai.AsyncOpenAI, model_name: str, tool_choice
 ):
     # this links the "done" type with the "start" type
     # so every "done" type should have a corresponding "start" type
@@ -347,14 +352,19 @@ async def test_function_calling_with_streaming_types(
         model=model_name,
         input=input_list,
         tools=tools,
+        tool_choice=tool_choice,
         stream=True,
     )
 
     stack_of_event_types = []
     async for event in stream_response:
+        print(f"Received event type: -----------------------------------{event.type}")
         if event.type == "response.created":
             stack_of_event_types.append(event.type)
         elif event.type == "response.completed":
+            print(
+                f"\nEvent type {event.type} closed by {pairs_of_event_types[event.type]} stack_of_event_types: {stack_of_event_types} {stack_of_event_types[-1] == pairs_of_event_types[event.type]}\n"
+            )
             assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
             stack_of_event_types.pop()
         if event.type.endswith("added"):
@@ -364,6 +374,75 @@ async def test_function_calling_with_streaming_types(
                 continue
             stack_of_event_types.append(event.type)
         elif event.type.endswith("done"):
+            print(
+                f"\nEvent type {event.type} closed by {pairs_of_event_types[event.type]} stack_of_event_types: {stack_of_event_types} {stack_of_event_types[-1] == pairs_of_event_types[event.type]}\n"
+            )
             assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
             stack_of_event_types.pop()
     assert len(stack_of_event_types) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", "auto"],
+)
+async def test_function_calling_with_streaming_forced_tool_choice(
+    client: openai.AsyncOpenAI, model_name: str, tool_choice
+):
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided location in celsius.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+
+    stream_response = await client.responses.create(
+        model=model_name,
+        input="Call the get_weather function for Berlin and do not answer directly.",
+        tools=tools,
+        tool_choice=tool_choice,
+        stream=True,
+    )
+
+    tool_call_item = None
+    completed_event = None
+    text_deltas = []
+    async for event in stream_response:
+        if (
+            event.type == "response.output_item.added"
+            and event.item.type == "function_call"
+        ):
+            tool_call_item = event.item
+        elif event.type == "response.output_text.delta":
+            text_deltas.append(event.delta)
+        elif event.type == "response.function_call_arguments.delta" and tool_call_item:
+            tool_call_item.arguments += event.delta
+        elif (
+            event.type == "response.output_item.done"
+            and event.item.type == "function_call"
+        ):
+            completed_event = event
+
+    assert tool_call_item is not None
+    assert tool_call_item.type == "function_call"
+    assert tool_call_item.name == "get_weather"
+    assert completed_event is not None
+    assert tool_call_item.arguments == completed_event.item.arguments
+    assert tool_call_item.name == completed_event.item.name
+    args = json.loads(tool_call_item.arguments)
+    assert "location" in args
+    assert args["location"] is not None
+    # Forced tool choice should not leak tool-call JSON via output_text delta.
+    assert "".join(text_deltas).strip() == ""
