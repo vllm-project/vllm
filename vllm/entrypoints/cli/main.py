@@ -7,6 +7,7 @@ to avoid certain eager import breakage."""
 
 import importlib.metadata
 import sys
+from importlib.util import find_spec
 
 from vllm.logger import init_logger
 
@@ -36,13 +37,16 @@ def main():
 
     # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
     if "--omni" in sys.argv:
-        try:
-            from vllm_omni.entrypoints.cli.main import main as omni_main
-        except ImportError:
+        # NOTE: Check the spec instead of importing directly here, since things could
+        # fail with ImportError due to mismatched versions if things are moved around.
+        spec = find_spec("vllm_omni")
+        if spec is None:
             logger.error(
                 "--omni flag requires a valid instance of vllm-omni to be installed."
             )
             sys.exit(1)
+
+        from vllm_omni.entrypoints.cli.main import main as omni_main
 
         logger.info("Delegating entrypoint handling to vllm-omni")
         omni_main()
