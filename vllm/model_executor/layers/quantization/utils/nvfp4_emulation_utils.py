@@ -23,6 +23,31 @@ kE2M1ToFloat_handle = SimpleNamespace(
 
 
 @triton.jit
+def _e2m1_inline(magnitude):
+    """Inline E2M1 lookup using binary tree - 3 levels instead of 7 sequential.
+
+    Maps 3-bit magnitude to float: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+    Uses bit decomposition for fewer comparisons.
+    """
+    # Bit 2 (MSB): separates 0-3 from 4-7
+    # Bit 1: separates within groups
+    # Bit 0 (LSB): separates within pairs
+    b2 = (magnitude >> 2) & 1  # 0 for mag 0-3, 1 for mag 4-7
+    b1 = (magnitude >> 1) & 1  # middle bit
+    b0 = magnitude & 1  # LSB
+
+    # For mag 0-3: [0.0, 0.5, 1.0, 1.5]
+    low_group = tl.where(b1 == 1,
+                         tl.where(b0 == 1, 1.5, 1.0),
+                         tl.where(b0 == 1, 0.5, 0.0))
+    # For mag 4-7: [2.0, 3.0, 4.0, 6.0]
+    high_group = tl.where(b1 == 1,
+                          tl.where(b0 == 1, 6.0, 4.0),
+                          tl.where(b0 == 1, 3.0, 2.0))
+    return tl.where(b2 == 1, high_group, low_group)
+
+
+@triton.jit
 def _dequantize_nvfp4_kernel(
     fp4_ptr,
     scale_ptr,
@@ -37,9 +62,7 @@ def _dequantize_nvfp4_kernel(
 ):
     """Triton kernel for NVFP4 dequantization (swizzle=False).
 
-    Uses a 2D grid (rows x tiles) to parallelize across both rows
-    and quantization groups within a row. Each program handles
-    TILE_BLOCKS groups at once using vectorized 2D operations.
+    Optimized with 2D tile processing + interleave for coalesced stores.
     """
     BLOCK_PACKED: tl.constexpr = BLOCK_SIZE // 2
 
@@ -57,6 +80,8 @@ def _dequantize_nvfp4_kernel(
     output_row_offset = row_idx * num_blocks * BLOCK_SIZE
 
     start_block = tile_idx * TILE_BLOCKS
+
+    # Load scales for this tile: [TILE_BLOCKS]
     block_offsets = tl.arange(0, TILE_BLOCKS)
     block_mask = (start_block + block_offsets) < num_blocks
 
@@ -65,12 +90,10 @@ def _dequantize_nvfp4_kernel(
         mask=block_mask,
         other=0,
     )
-    # Bitcast uint8 → float8_e4m3fn to decode scales
     scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
     scale_values = (scale_f32 * global_scale)[:, None]
 
-    # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes (each byte holds
-    # two FP4 values), then unpack both nibbles in registers.
+    # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes
     packed_offsets = tl.arange(0, BLOCK_PACKED)[None, :]
     byte_indices = (
         fp4_row_offset
@@ -83,16 +106,18 @@ def _dequantize_nvfp4_kernel(
     low_nibble = raw_bytes & 0x0F
     high_nibble = (raw_bytes >> 4) & 0x0F
 
+    # Binary tree E2M1 decode
+    low_mag = low_nibble & 0x07
+    low_val = _e2m1_inline(low_mag)
     low_sign = (low_nibble >> 3) & 1
-    low_val = tl.load(e2m1_lut_ptr + (low_nibble & 0x07))
     low_result = tl.where(low_sign == 1, -low_val, low_val) * scale_values
 
+    high_mag = high_nibble & 0x07
+    high_val = _e2m1_inline(high_mag)
     high_sign = (high_nibble >> 3) & 1
-    high_val = tl.load(e2m1_lut_ptr + (high_nibble & 0x07))
     high_result = tl.where(high_sign == 1, -high_val, high_val) * scale_values
 
-    # Interleave low/high into [TILE_BLOCKS, BLOCK_SIZE] for a single
-    # contiguous store: [l0, h0, l1, h1, ...].
+    # Interleave for coalesced contiguous store
     result = tl.interleave(low_result, high_result)
 
     elem_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
@@ -254,7 +279,25 @@ def _triton_dequantize_nvfp4(
     # View as uint8 so Triton can load raw bytes and bitcast to float8_e4m3fn
     scale_raw = tensor_sf_2d.contiguous().view(torch.uint8)
 
-    tile_blocks = min(32, triton.next_power_of_2(num_blocks))
+    # Shape-adaptive tile sizing: for large row counts (3D), process
+    # entire row in one tile. For small row counts (2D), use smaller
+    # tiles to increase parallelism across CUs.
+    np2 = triton.next_power_of_2(num_blocks)
+    if total_rows_flat >= 4096:
+        # Many rows: maximize work per CTA, one tile per row
+        tile_blocks = np2
+        nw = 1
+        ns = 2
+    elif total_rows_flat >= 2048:
+        # Medium-many rows: full row, 2 warps
+        tile_blocks = np2
+        nw = 2
+        ns = 2
+    else:
+        # Few rows: use moderate tiles for CU utilization
+        tile_blocks = min(64, np2)
+        nw = 4
+        ns = 2
     num_tiles = (num_blocks + tile_blocks - 1) // tile_blocks
     grid = (total_rows_flat, num_tiles)
     _dequantize_nvfp4_kernel[grid](
@@ -268,6 +311,8 @@ def _triton_dequantize_nvfp4(
         block_size,
         is_3d,
         tile_blocks,
+        num_warps=nw,
+        num_stages=ns,
     )
 
     if is_3d:
