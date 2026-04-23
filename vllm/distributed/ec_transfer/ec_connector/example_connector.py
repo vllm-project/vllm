@@ -250,7 +250,7 @@ class ECExampleConnector(ECConnectorBase):
             if hasattr(req, "mm_features") and req.mm_features:
                 for feature in req.mm_features:
                     mm_hash = feature.identifier
-                    num_tokens = feature.mm_position.get_num_embeds
+                    num_tokens = feature.mm_position.get_num_embeds()
                     mm_hashes[mm_hash] = num_tokens
 
         return mm_hashes

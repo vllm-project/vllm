@@ -333,6 +333,37 @@ class TestStateManagement:
         metadata2 = connector.build_connector_meta(scheduler_output)
         assert len(metadata2.mm_datas) == 0
 
+    def test_collect_scheduled_mm_hashes_stores_int_tokens(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
+        """Producer collects scheduled mm_hashes with integer token counts."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_producer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        encoder_cache_manager = Mock()
+        encoder_cache_manager.has_cache.return_value = True
+
+        scheduler_output = Mock(spec=SchedulerOutput)
+        scheduler_output.scheduled_new_reqs = [mock_request_with_3_mm]
+
+        metadata = connector.build_connector_meta(
+            scheduler_output=scheduler_output,
+            encoder_cache_manager=encoder_cache_manager,
+        )
+
+        assert len(metadata.mm_datas) == 3
+        assert metadata.mm_datas[0].mm_hash == "img_hash_1"
+        assert metadata.mm_datas[0].num_token == 100
+        assert isinstance(metadata.mm_datas[0].num_token, int)
+        assert metadata.mm_datas[1].mm_hash == "img_hash_2"
+        assert metadata.mm_datas[1].num_token == 150
+        assert isinstance(metadata.mm_datas[1].num_token, int)
+        assert metadata.mm_datas[2].mm_hash == "img_hash_3"
+        assert metadata.mm_datas[2].num_token == 200
+        assert isinstance(metadata.mm_datas[2].num_token, int)
+
 
 class TestCacheSaving:
     """Test encoder cache saving (producer only)."""
