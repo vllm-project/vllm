@@ -186,9 +186,11 @@ Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all
 
 The input format is the same as [Embeddings API](embed.md#openai-compatible-embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Please use one of the more specific APIs or set the task directly when using the Pooling API, refer to the [table above](#offline-apis-corresponding-to-pooling-tasks).
+Please use one of the more specific APIs or set the task directly when using the Pooling API, refer to the [table above](#offline-apis-corresponding-to-pooling-usages).
 
-Code example: [examples/pooling/pooling/pooling_online.py](../../../examples/pooling/pooling/pooling_online.py)
+Code example: 
+- [online](../../../examples/pooling/reward/token_reward_online.py)
+- [offline](../../../examples/pooling/reward/token_reward_offline.py)
 
 ### Examples
 
