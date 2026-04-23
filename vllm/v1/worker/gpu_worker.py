@@ -712,6 +712,22 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+        # Eagerly trigger inductor's once-per-process lazy inits (SFDP
+        # pattern matcher, pad_mm, misc patterns). These normally fire on
+        # the first torch.compile invocation and include CUDA syncs. If
+        # warmup hits the on-disk compile cache, no compile actually runs
+        # so these never fire during warmup, and they'd blow up on the
+        # first real-request cache miss once the sync-check gate is on.
+        # Private torch API; best-effort.
+        try:
+            from torch._inductor.fx_passes.joint_graph import (
+                lazy_init as _inductor_lazy_init,
+            )
+
+            _inductor_lazy_init()
+        except Exception as e:  # noqa: BLE001
+            logger.info("Skipping inductor lazy_init pre-trigger: %s", e)
+
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         from vllm.utils.gpu_sync_debug import enable_gpu_sync_check
