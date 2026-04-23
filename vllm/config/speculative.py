@@ -106,10 +106,9 @@ class SpeculativeConfig:
     drafter and generator require different MoE kernels (e.g. quantized
     generator with unquantized drafter)."""
     attention_backend: AttentionBackendEnum | None = None
-    """Attention backend to use for the draft model. When `None`, the draft
-    model inherits the target model's `--attention-backend` setting. Useful
-    when the drafter requires a different attention backend (e.g. DFlash
-    drafters need a non-causal-capable backend like FLASH_ATTN)."""
+    """Attention backend to use for the draft model. When `None`, the backend is
+    automatically selected. Useful when the drafter requires a different attention
+    backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
