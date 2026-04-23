@@ -867,7 +867,6 @@ class MooncakeConnectorWorker:
             is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=[backend],
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
         )
 
         self.async_zmq_ctx = zmq.asyncio.Context()
