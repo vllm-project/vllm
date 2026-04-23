@@ -94,31 +94,21 @@ class DummySecondaryTier(SecondaryTierManager):
     def set_primary_view(self, view: memoryview) -> None:
         self._primary_view = view
 
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+    def lookup(self, key: OffloadKey) -> bool | None:
         """
-        Check which blocks exist in this secondary tier.
+        Check whether a block exists in this secondary tier.
 
         Args:
-            keys: Block hashes to look up.
+            key: Offload key to look up.
 
         Returns:
-            Number of consecutive blocks (from start) that are present and ready,
-            or None if blocks are being transferred (retry later).
+            True if the block is present and ready,
+            False if not found,
+            or None if the block is being transferred (retry later).
         """
-        hit_count = 0
-        for key in keys:
-            # Check if block is in-flight
-            if key in self.in_flight:
-                # Block is being transferred, return None (retry later)
-                return None
-
-            # Check if block exists in this tier
-            if key not in self.blocks:
-                break
-
-            hit_count += 1
-
-        return hit_count
+        if key in self.in_flight:
+            return None
+        return key in self.blocks
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         """

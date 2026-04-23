@@ -234,16 +234,17 @@ class SecondaryTierManager(ABC):
     """
 
     @abstractmethod
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+    def lookup(self, key: OffloadKey) -> bool | None:
         """
-        Check which blocks exist in this secondary tier.
+        Check whether a block exists in this secondary tier.
 
         Args:
-            keys: Offload keys to look up.
+            key: Offload key to look up.
 
         Returns:
-            Number of consecutive blocks (from start) that are present and ready,
-            or None if blocks are being transferred (retry later).
+            True if the block is present and ready,
+            False if not found,
+            or None if the block is being transferred (retry later).
         """
         pass
 

@@ -219,11 +219,11 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Step 2: Check secondary tiers
         for tier in self.secondary_tiers:
-            secondary_hits = tier.lookup([key])
-            if secondary_hits is None:
+            secondary_hit = tier.lookup(key)
+            if secondary_hit is None:
                 # Tier is busy with this block
                 return None
-            if secondary_hits > 0:
+            if secondary_hit:
                 # Found in secondary — initiate promotion and signal retry
                 self._initiate_promotion(tier, [key], req_context)
                 return None
