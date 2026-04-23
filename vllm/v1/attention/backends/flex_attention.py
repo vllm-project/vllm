@@ -289,11 +289,13 @@ def unique_static_unsorted(
     keep = (x_flat != ignored_val) & (idx == first_idx.gather(1, x_flat))  # [B, N]
 
     # ── left-pack uniques into a fresh tensor ───────────────────────────
+    # Route non-kept entries to a garbage slot at column N so we can do a
+    # single scatter rather than using torch.nonzero (which would force a
+    # GPU->CPU sync to enumerate kept positions).
     dest_pos = torch.cumsum(keep.to(torch.long), dim=1) - 1  # where to go
-    packed_flat = torch.full_like(x_flat, pad_val)
-
-    rows, src_cols = torch.nonzero(keep, as_tuple=True)
-    packed_flat[rows, dest_pos[rows, src_cols]] = x_flat[rows, src_cols]
+    dest_pos = torch.where(keep, dest_pos, N)
+    packed_extended = torch.full((B, N + 1), pad_val, device=device, dtype=x_flat.dtype)
+    packed_flat = packed_extended.scatter_(1, dest_pos, x_flat)[:, :N]
 
     # ── restore original layout ─────────────────────────────────────────
     packed = packed_flat.reshape(x_perm.shape).movedim(-1, dim)
