@@ -5185,6 +5185,7 @@ class GPUModelRunner(
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
                     use_spec_decode=self.speculative_config is not None,
+                    num_dycp_reqs=num_dycp_reqs,
                 )
 
         with self.maybe_dummy_run_with_lora(

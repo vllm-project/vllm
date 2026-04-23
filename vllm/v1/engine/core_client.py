@@ -604,7 +604,7 @@ class MPClient(EngineCoreClient):
             domain_local_size = dp_local_size // parallel_config.dp_per_domain
 
             engine_count = dp_size // parallel_config.dp_per_domain
-            engien_rank = dp_rank // parallel_config.dp_per_domain
+            engine_rank = dp_rank // parallel_config.dp_per_domain
             local_engine_count = dp_local_size // parallel_config.dp_per_domain
 
             offline_mode = parallel_config.data_parallel_rank_local is not None
@@ -612,7 +612,7 @@ class MPClient(EngineCoreClient):
             # Client manages local EngineCores in hybrid and external LB case.
             num_ranks = local_engine_count if parallel_config.local_engines_only else engine_count
             self.engine_ranks_managed = (
-                [engien_rank] if offline_mode else list(range(engien_rank, engien_rank + num_ranks))
+                [engine_rank] if offline_mode else list(range(engine_rank, engine_rank + num_ranks))
             )
 
             assert local_engine_count <= len(

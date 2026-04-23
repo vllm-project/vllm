@@ -74,7 +74,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         self.use_eagle = use_eagle
         self.block_size = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
 
-        self.corss_dp_single_type_managers = [
+        self.cross_dp_single_type_managers = [
             tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -191,10 +191,10 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         results = self._avg_distribute_tokens_to_ranks(len(cp_ranks), num_tokens)
 
         for id, rank in enumerate(cp_ranks):
-            if rank >= len(self.corss_dp_single_type_managers):
+            if rank >= len(self.cross_dp_single_type_managers):
                 raise ValueError(f"rank {rank} is out of range")
 
-            rank_manager = self.corss_dp_single_type_managers[rank]
+            rank_manager = self.cross_dp_single_type_managers[rank]
 
             for i in range(num_kv_cache_groups):
 
@@ -212,7 +212,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         num_local_computed_tokens: int,      # ← 新增
         num_external_computed_tokens: int,   # ← 新增
     ) -> None:
-        for rank_managers in self.corss_dp_single_type_managers:
+        for rank_managers in self.cross_dp_single_type_managers:
             for i, manager in enumerate(rank_managers):
                 assert len(new_computed_blocks[i]) == 0
 
@@ -232,7 +232,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
                         request_id,
                         results[idx],
                         num_tokens_main_model
-                    ) for manager in self.corss_dp_single_type_managers[rank]
+                    ) for manager in self.cross_dp_single_type_managers[rank]
                 )
             )
         return blocks
@@ -250,15 +250,15 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         request_id = request.request_id
         request_ranks = request.cp_ranks
         for request_rank in request_ranks:
-            for manager in self.corss_dp_single_type_managers[request_rank]:
+            for manager in self.cross_dp_single_type_managers[request_rank]:
                 manager.free(request_id)
 
     def remove_skipped_blocks(self, cp_ranks: list[int], request_id: str, total_computed_tokens: int) -> None:
         for rank in cp_ranks:
-            if rank >= len(self.corss_dp_single_type_managers):
+            if rank >= len(self.cross_dp_single_type_managers):
                 raise ValueError(f"rank {rank} is out of range")
 
-            rank_managers = self.corss_dp_single_type_managers[rank]
+            rank_managers = self.cross_dp_single_type_managers[rank]
 
             for manager in rank_managers:
                 manager.remove_skipped_blocks(request_id, total_computed_tokens)
@@ -276,7 +276,7 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         """
         blocks_by_rank = []
 
-        for rank_managers in self.corss_dp_single_type_managers:
+        for rank_managers in self.cross_dp_single_type_managers:
             rank_blocks = []
 
             for manager in rank_managers:
@@ -291,6 +291,19 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         return [0] * self.num_single_type_manager
+
+    def take_new_block_ids(self, cp_rank: int) -> list[int]:
+        """Drain and return new attention block IDs for zeroing on a cp_rank."""
+        ids: list[int] = []
+        for manager in self.cross_dp_single_type_managers[cp_rank]:
+            ids.extend(manager.take_new_block_ids())
+        return ids
+
+    def new_step_starts(self) -> None:
+        """Called when a new step is started."""
+        for rank_managers in self.cross_dp_single_type_managers:
+            for manager in rank_managers:
+                manager.new_step_starts()
 
     def find_longest_cache_hit(
         self,
@@ -376,6 +389,16 @@ class CrossDPKVCacheManager:
 
         if not self.enable_caching or request.skip_reading_prefix_cache:
             return self.empty_kv_cache_blocks, 0
+
+        # Delegate to per-rank managers and aggregate computed blocks
+        all_blocks = []
+        total_computed = 0
+        for rank_managers in self.cross_dp_single_type_managers:
+            for manager in rank_managers:
+                blocks, num_computed = manager.get_computed_blocks(request)
+                all_blocks.append(blocks)
+                total_computed = max(total_computed, num_computed)
+        return all_blocks[0] if all_blocks else self.empty_kv_cache_blocks, total_computed
 
     def allocate_slots(
         self,
@@ -539,3 +562,11 @@ class CrossDPKVCacheManager:
         self.coordinator.remove_skipped_blocks(
             cp_ranks, request_id, total_computed_tokens
         )
+
+    def take_new_block_ids(self, cp_rank: int) -> list[int]:
+        """Drain and return new attention block IDs for zeroing on a cp_rank."""
+        return self.coordinator.take_new_block_ids(cp_rank)
+
+    def new_step_starts(self) -> None:
+        """Called when a new step is started."""
+        self.coordinator.new_step_starts()

@@ -560,6 +560,9 @@ class DomainMultiprocExecutor(MultiprocExecutor):
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
+        inherited_fds: list[int] | None = (
+            [] if context.get_start_method() == "fork" else None
+        )
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
 

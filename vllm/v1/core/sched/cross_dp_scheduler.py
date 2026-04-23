@@ -720,6 +720,8 @@ class CrossDPScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        self.kv_cache_manager.new_step_starts()
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and max(rank_budgets) > 0:
@@ -1206,12 +1208,18 @@ class CrossDPScheduler(Scheduler):
         none_tokens_in_peer_sched = all([sum(num_scheduled_tokens[idx].values()) == 0 for idx in range(self.cp_world_size)])
 
         for idx in range(self.cp_world_size):
+            new_block_ids_to_zero = (
+                (self.kv_cache_manager.take_new_block_ids(idx) or None)
+                if self.needs_kv_cache_zeroing
+                else None
+            )
 
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 scheduler_output = SchedulerOutput.make_empty()
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
                 scheduler_output.req_id_to_cp_size = req_id_to_cp_size
                 scheduler_output.cp_rank_to_req_id = cp_rank_to_req_id[idx]    # revised
+                scheduler_output.new_block_ids_to_zero = new_block_ids_to_zero
                 total_scheduler_output.append(scheduler_output)
             else:
                 total_scheduler_output.append(
@@ -1230,6 +1238,7 @@ class CrossDPScheduler(Scheduler):
                         # the previous and the current steps.
                         finished_req_ids=self.finished_req_ids[idx],
                         free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+                        new_block_ids_to_zero=new_block_ids_to_zero,
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
