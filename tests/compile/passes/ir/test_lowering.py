@@ -18,21 +18,7 @@ from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
 from ...backend import TestBackend
-
-
-def _get_op_provider_pairs() -> list[tuple[str, str]]:
-    """Get all (op_name, provider) pairs for parametrization.
-
-    Only includes ops that have an input generator registered (i.e. real vLLM IR ops,
-    not test ops from other test files).
-    """
-    pairs: list[tuple[str, str]] = []
-    for op_name, op in IrOp.registry.items():
-        if not op.has_input_generator:
-            continue
-        for provider in op.supported_providers():
-            pairs.append((op_name, provider))
-    return pairs
+from tests.ir.ir_test_utils import assert_close, supported_providers
 
 
 def _make_simple_model(op: IrOp, real_args: tuple) -> nn.Module:
@@ -67,67 +53,7 @@ def _register_test_op(
 
 
 # ============================================================
-# 1. Per-op Lowering tests (parametrized across all ops)
-# ============================================================
-
-
-class TestPerOpLowering:
-    """
-    Per-op lowering tests: verify all op implementations are lowered correctly
-    through the VllmIRLoweringPass.
-
-    These tests ensure:
-    1. supports_args is properly executable by Dynamo during lowering
-    2. supports_args does not specialize on the batch size (unbacked symint)
-    3. The op is replaced by the implementation in the graph
-    """
-
-    @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_op_lowering(self, op_name, provider, default_vllm_config):
-        """
-        Test that each op implementation can be lowered through the pass.
-
-        Verifies:
-        1. supports_args does not crash on unbacked symint (batch-agnostic)
-        2. The op is replaced by the implementation in the graph
-        3. selected_impls records the correct provider
-        """
-        op = IrOp.registry[op_name]
-        if not op.impls[provider].supported:
-            pytest.skip(f"Provider {provider} not supported")
-
-        # Step 1: Verify supports_args works with unbacked symint
-        fake_args = op.generate_symbolic_inputs()
-        impl = op.impls[provider]
-        supports_result = impl.supports_args(*fake_args)
-        assert isinstance(supports_result, bool), (
-            f"supports_args should return bool, got {type(supports_result)}"
-        )
-
-        # Step 2: Perform lowering test
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-        torch.set_default_device(current_platform.device_type)
-
-        with (
-            op.set_priority([provider, "native"]),
-            ir.enable_torch_wrap(True),
-        ):
-            real_args = op.generate_inputs()
-            model = _make_simple_model(op, real_args)
-            x = torch.randn(8, 16, dtype=torch.bfloat16)
-            compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-            output = compiled_model(x)
-
-        # Verify lowering succeeded
-        assert op_name in lowering_pass.selected_impls, f"Op {op_name} was not lowered"
-        selected = lowering_pass.selected_impls[op_name]
-        assert len(selected) > 0, f"No instances of {op_name} were lowered"
-        assert isinstance(output, torch.Tensor)
-
-
-# ============================================================
-# 2. Lowering unit tests with fake ops
+# Lowering unit tests with fake ops
 # ============================================================
 
 
@@ -259,8 +185,19 @@ class TestFakeOpLowering:
 
 
 # ============================================================
-# 3. E2E correctness tests
+# E2E correctness tests
 # ============================================================
+
+
+def _get_op_provider_pairs() -> list[tuple[str, str]]:
+    """Get all (op_name, provider) pairs for parametrization."""
+    pairs: list[tuple[str, str]] = []
+    for op_name, op in IrOp.registry.items():
+        if not op.has_input_generator:
+            continue
+        for provider in supported_providers(op) + ["native"]:
+            pairs.append((op_name, provider))
+    return pairs
 
 
 class TestE2ELowering:
