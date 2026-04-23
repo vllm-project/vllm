@@ -195,14 +195,26 @@ def test_parse_chat_messages_openai_format():
         "long-mixed-run",
     ],
 )
-def test_parse_chat_messages_string_format_interleaved(layout):
+@pytest.mark.parametrize(
+    "interleave_mm_strings",
+    # `None`: text-only path where `multimodal_config` is absent.
+    # `False`: non-interleave multimodal path (the common default).
+    # `True`: sentinel-substitution interleave path.
+    # All three must preserve the request ordering of prompt_embeds
+    # relative to surrounding text because prompt_embeds are spliced at the
+    # token offset during rendering.
+    [None, False, True],
+    ids=["text-only", "interleave-off", "interleave-on"],
+)
+def test_parse_chat_messages_string_format_preserves_position(
+    layout, interleave_mm_strings
+):
     H = 8
     mc = _make_mock_model_config()
-    mm_cfg = mock.MagicMock()
-    # An interleaving-enabled multimodal config substitutes the sentinel
-    # in-place so position is preserved.
-    mm_cfg.interleave_mm_strings = True
-    mc.multimodal_config = mm_cfg
+    if interleave_mm_strings is not None:
+        mm_cfg = mock.MagicMock()
+        mm_cfg.interleave_mm_strings = interleave_mm_strings
+        mc.multimodal_config = mm_cfg
 
     content: list[dict] = []
     expected_parts: list[str] = []

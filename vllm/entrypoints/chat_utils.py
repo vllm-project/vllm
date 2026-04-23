@@ -1694,6 +1694,12 @@ def _parse_chat_message_content_part(
             # it inline. The renderer later expands it to N tokens post-tokenize.
             return {"type": "text", "text": PROMPT_EMBEDS_PLACEHOLDER_TOKEN}
         return {"type": modality}
+    if modality == "prompt_embeds":
+        # Emit the renderer token inline regardless of `interleave_strings`,
+        # prompt_embeds are spliced at the token offset so position matters.
+        # Falling back to front-padding via `missing_placeholders` would
+        # reorder them relative to surrounding text.
+        return PROMPT_EMBEDS_PLACEHOLDER_TOKEN
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
