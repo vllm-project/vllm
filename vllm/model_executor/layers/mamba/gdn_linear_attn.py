@@ -67,9 +67,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 logger = init_logger(__name__)
 
 
-def _should_use_flashinfer_gdn_prefill(
-    backend: str, head_k_dim: int | None
-) -> bool:
+def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
     """Whether to use FlashInfer's GDN prefill kernel instead of the
     Triton/FLA fallback.
 
@@ -93,9 +91,7 @@ def _should_use_flashinfer_gdn_prefill(
         return False
     if current_platform.get_cuda_runtime_major() < 13:
         return False
-    if not current_platform.has_cutlass_dsl_cu13():
-        return False
-    return True
+    return current_platform.has_cutlass_dsl_cu13()
 
 
 def _log_gdn_backend_decision(
@@ -105,9 +101,7 @@ def _log_gdn_backend_decision(
     is_cuda = current_platform.is_cuda()
     platform = "cuda" if is_cuda else current_platform.device_name
     cuda_runtime = torch.version.cuda or "n/a"
-    device_cap = (
-        str(current_platform.get_device_capability()) if is_cuda else "n/a"
-    )
+    device_cap = str(current_platform.get_device_capability()) if is_cuda else "n/a"
     cutlass_dsl_cu13_installed = current_platform.has_cutlass_dsl_cu13()
     logger.info_once(
         "GDN prefill backend inputs:\n"
