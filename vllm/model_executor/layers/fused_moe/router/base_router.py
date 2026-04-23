@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -143,11 +143,7 @@ class BaseRouter(FusedMoERouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
-        enable_eplb: bool = False,
-        # TODO(bnell): Once the MK is constructed at layer init time, we
-        # can make this a plain value instead of a callback.
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        eplb_manager: EplbManager | None = None,
     ):
         """
         Note: the indices dtype might not be available at router construction
@@ -158,52 +154,50 @@ class BaseRouter(FusedMoERouter):
         super().__init__()
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self.eplb_state = eplb_state
-        self.enable_eplb = enable_eplb
-        self.indices_type_getter = indices_type_getter
+        self._eplb_manager = eplb_manager
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+
+    @property
+    def eplb_manager(self) -> EplbManager | None:
+        return self._eplb_manager
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
         self.capture_fn = capture_fn
 
     def _validate_eplb_state(self) -> None:
-        """Validate that EPLB state is properly initialized if EPLB is enabled."""
-        if self.enable_eplb:
-            if self.eplb_state.expert_load_view is None:
+        if self.eplb_manager is not None:
+            eplb_state = self.eplb_manager.state
+            """Validate that EPLB state is properly initialized if EPLB is enabled."""
+            if eplb_state.expert_load_view is None:
                 raise ValueError("enable_eplb=True requires expert_load_view != None")
-            if self.eplb_state.logical_to_physical_map is None:
+            if eplb_state.logical_to_physical_map is None:
                 raise ValueError(
                     "enable_eplb=True requires logical_to_physical_map != None"
                 )
-            if self.eplb_state.logical_replica_count is None:
+            if eplb_state.logical_replica_count is None:
                 raise ValueError(
                     "enable_eplb=True requires logical_replica_count != None"
                 )
-            if self.eplb_state.should_record_tensor is None:
+            if eplb_state.should_record_tensor is None:
                 raise ValueError(
                     "enable_eplb=True requires should_record_tensor != None"
                 )
 
-    def _get_indices_type(self) -> torch.dtype | None:
-        """Get the desired indices dtype from the getter function."""
-        return (
-            self.indices_type_getter() if self.indices_type_getter is not None else None
-        )
-
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
-        if self.enable_eplb:
-            assert self.eplb_state.expert_load_view is not None
-            assert self.eplb_state.logical_to_physical_map is not None
-            assert self.eplb_state.logical_replica_count is not None
-            assert self.eplb_state.should_record_tensor is not None
+        if self.eplb_manager is not None:
+            eplb_state = self.eplb_manager.state
+            assert eplb_state.expert_load_view is not None
+            assert eplb_state.logical_to_physical_map is not None
+            assert eplb_state.logical_replica_count is not None
+            assert eplb_state.should_record_tensor is not None
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
-                logical_to_physical_map=self.eplb_state.logical_to_physical_map,
-                logical_replica_count=self.eplb_state.logical_replica_count,
-                expert_load_view=self.eplb_state.expert_load_view,
-                record_enabled=self.eplb_state.should_record_tensor,
+                logical_to_physical_map=eplb_state.logical_to_physical_map,
+                logical_replica_count=eplb_state.logical_replica_count,
+                expert_load_view=eplb_state.expert_load_view,
+                record_enabled=eplb_state.should_record_tensor,
             )
         return topk_ids
 
@@ -244,6 +238,7 @@ class BaseRouter(FusedMoERouter):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -251,10 +246,9 @@ class BaseRouter(FusedMoERouter):
 
         This method implements the template method pattern:
         1. Validates EPLB state
-        2. Gets indices type
-        3. Calls _compute_routing() to get topk_weights and topk_ids
-        4. Applies EPLB mapping if enabled
-        5. Converts indices dtype if needed
+        2. Calls _compute_routing() to get topk_weights and topk_ids
+        3. Applies EPLB mapping if enabled
+        4. Converts indices dtype if needed
 
         Returns:
             (topk_weights, topk_ids)
@@ -268,12 +262,9 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 2: Get indices type.
-        indices_type = self._get_indices_type()
-
         # Step 3: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
-            hidden_states, router_logits, indices_type
+            hidden_states, router_logits, topk_indices_dtype
         )
 
         # Capture logical ids before EPLB mapping.
@@ -284,6 +275,6 @@ class BaseRouter(FusedMoERouter):
         topk_ids = self._apply_eplb_mapping(topk_ids)
 
         # Step 5: Convert indices dtype
-        topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
+        topk_ids = self._convert_indices_dtype(topk_ids, topk_indices_dtype)
 
         return topk_weights, topk_ids

@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 
 
 class FusedMoERouter(ABC):
@@ -26,11 +27,17 @@ class FusedMoERouter(ABC):
     def routing_method_type(self) -> RoutingMethodType:
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def eplb_manager(self) -> EplbManager | None:
+        raise NotImplementedError
+
     @abstractmethod
     def select_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the

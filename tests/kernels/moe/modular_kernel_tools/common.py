@@ -618,7 +618,7 @@ def make_modular_kernel(
         num_experts=config.E,
         experts_per_token=config.topk,
         hidden_dim=config.K,
-        intermediate_size_per_partition=config.N,
+        intermediate_size=config.N,
         num_local_experts=config.num_local_experts,
         num_logical_experts=config.E,
         moe_parallel_config=moe_parallel_config,

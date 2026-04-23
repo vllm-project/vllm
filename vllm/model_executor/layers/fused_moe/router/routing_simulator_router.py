@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from typing import Any
 
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 logger = init_logger(__name__)
@@ -313,16 +312,12 @@ class RoutingSimulatorRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        eplb_manager: EplbManager | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
+            eplb_manager=eplb_manager,
         )
 
     @property

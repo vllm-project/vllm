@@ -216,7 +216,16 @@ class AriaProjector(nn.Module):
         return out
 
 
-class AriaFusedMoE(FusedMoE):
+# XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXx
+class AriaFusedMoE(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        self.moe = FusedMoE(*args, **kwargs)
+
+    def forward(
+        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+    ) -> torch.Tensor:
+        return self.moe(hidden_states, router_logits)
+
     def weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:

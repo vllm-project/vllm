@@ -116,6 +116,7 @@ def _worker_parallel_launch(
         traceback.print_exc()
         raise
     finally:
+        torch.accelerator.synchronize()
         if vllm_config is not None:
             cleanup_dist_env_and_memory()
         else:

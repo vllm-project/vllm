@@ -226,7 +226,6 @@ class NemotronHMoE(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             activation=activation_without_mul(config.mlp_hidden_act),
-            is_act_and_mul=False,  # non-gated MoE
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,

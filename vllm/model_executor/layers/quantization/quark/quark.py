@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -160,7 +160,7 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
         return None
 

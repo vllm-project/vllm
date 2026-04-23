@@ -27,6 +27,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 
 # --8<-- [start:transformers_fused_moe]
 @PluggableLayer.register("transformers_fused_moe")
-class TransformersFusedMoE(FusedMoE):
+class TransformersFusedMoE(MoERunner):
     """Custom FusedMoE for the Transformers modeling backend."""
 
     # --8<-- [end:transformers_fused_moe]
@@ -66,7 +67,12 @@ class TransformersFusedMoE(FusedMoE):
             return topk_weights, topk_ids
 
         kwargs["custom_routing_function"] = custom_routing_function
-        super().__init__(*args, **kwargs)
+        self.runner = FusedMoE(*args, **kwargs)
+
+    def __getattr__(self, name):
+        # Delegate attribute access to the originalr runner. This is only
+        # called when normal lookup (instance __dict__, class MRO) fails,
+        return getattr(self.runner, name)
 
     def forward(
         self,

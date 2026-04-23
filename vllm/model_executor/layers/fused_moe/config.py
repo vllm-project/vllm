@@ -1174,7 +1174,7 @@ class FusedMoEConfig:
     num_experts: int
     experts_per_token: int
     hidden_dim: int
-    intermediate_size_per_partition: int
+    intermediate_size: int
     num_local_experts: int
     num_logical_experts: int
     activation: MoEActivation
@@ -1196,7 +1196,6 @@ class FusedMoEConfig:
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
-    is_act_and_mul: bool = True
     is_lora_enabled: bool = False
 
     # This flag is used to disable the inplace optimization
@@ -1205,7 +1204,18 @@ class FusedMoEConfig:
     # kernel is free to use inplace or not.
     disable_inplace: bool = True
 
+    # Set by __post_init__
+    intermediate_size_per_partition: int = -1
+    rocm_aiter_fmoe_enabled: bool = False
+    aiter_fmoe_shared_expert_enabled: bool = False
+
     def __post_init__(self):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        tp_size = self.moe_parallel_config.tp_size
+        assert self.intermediate_size % tp_size == 0
+        self.intermediate_size_per_partition = self.intermediate_size // tp_size
+
         if self.dp_size > 1:
             logger.debug_once(
                 "Using FusedMoEConfig::max_num_tokens=%d", self.max_num_tokens
@@ -1222,6 +1232,30 @@ class FusedMoEConfig:
             self.intermediate_size_per_partition_unpadded = (
                 self.intermediate_size_per_partition
             )
+
+        if self.is_act_and_mul:
+            self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+            self.aiter_fmoe_shared_expert_enabled = (
+                rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            )
+
+        if self.use_mori_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "Mori needs to be used with aiter fused_moe for now."
+            )
+            assert not self.aiter_fmoe_shared_expert_enabled, (
+                "Mori does not support fusion shared expert now. "
+                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+            )
+
+        if not self.is_act_and_mul and not current_platform.is_cuda_alike():
+            raise NotImplementedError(
+                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+            )
+
+    @property
+    def is_act_and_mul(self) -> bool:
+        return self.activation.is_gated
 
     @property
     def tp_size(self):

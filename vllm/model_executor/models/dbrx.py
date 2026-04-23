@@ -73,7 +73,8 @@ class DbrxRouter(nn.Module):
         return router_logits
 
 
-class DbrxExperts(FusedMoE):
+# XXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+class DbrxExperts(torch.nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
@@ -81,7 +82,7 @@ class DbrxExperts(FusedMoE):
         params_dtype: torch.dtype | None = None,
         prefix: str = "",
     ):
-        super().__init__(
+        self.moe = FusedMoE(
             num_experts=config.ffn_config.moe_num_experts,
             top_k=config.ffn_config.moe_top_k,
             hidden_size=config.d_model,
@@ -95,6 +96,9 @@ class DbrxExperts(FusedMoE):
         self.config = config
         self.d_model = config.d_model
         self.intermediate_size = self.config.ffn_config.ffn_hidden_size // self.tp_size
+
+    def forward(self, router_logits, hidden_states) -> torch.Tensor:
+        return self.moe(hidden_states, router_logits)
 
     # Define custom weight loader for dbrx model
     def weight_loader(

@@ -4,8 +4,8 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -16,18 +16,14 @@ class CustomRoutingRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         custom_routing_function: Callable,
+        eplb_manager: EplbManager | None = None,
         renormalize: bool = True,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
+            eplb_manager=eplb_manager,
         )
         self.custom_routing_function = custom_routing_function
         self.renormalize = renormalize

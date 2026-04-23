@@ -47,7 +47,7 @@ def make_dummy_moe_config(
     num_experts: int = 1,
     experts_per_token: int = 1,
     hidden_dim: int = 1,
-    intermediate_size_per_partition: int = 1,
+    intermediate_size: int = 1,
     in_dtype: torch.dtype = torch.bfloat16,
 ) -> FusedMoEConfig:
     """
@@ -61,7 +61,7 @@ def make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_dim,
-        intermediate_size_per_partition=intermediate_size_per_partition,
+        intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),

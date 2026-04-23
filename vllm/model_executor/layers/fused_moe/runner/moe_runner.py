@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
@@ -17,11 +18,19 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
+from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+    FusedMoEModularMethod,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts import (
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -43,8 +52,10 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
+logger = init_logger(__name__)
 
-def get_layer_from_name(layer_name: str) -> torch.nn.Module:
+
+def get_layer_from_name(layer_name: str) -> MoERunnerInterface:
     forward_context: ForwardContext = get_forward_context()
     if not _USE_LAYERNAME and layer_name == "from_forward_context":
         all_moe_layers = forward_context.all_moe_layers
@@ -58,7 +69,9 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
             )
         layer_name = all_moe_layers[moe_layer_index]
         forward_context.moe_layer_index += 1
-    return forward_context.no_compile_layers[layer_name]
+    layer = forward_context.no_compile_layers[layer_name]
+    assert isinstance(layer, MoERunnerInterface)
+    return layer
 
 
 # On torch >= 2.11, layer_name is a hoisted LayerName opaque object;
@@ -94,8 +107,7 @@ def _moe_forward(
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner._forward_impl(
-        layer,
+    return layer._forward_impl(
         hidden_states,
         router_logits,
         shared_experts_input,
@@ -118,8 +130,7 @@ def _moe_forward_shared(
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner._forward_impl(
-        layer,
+    return layer._forward_impl(
         hidden_states,
         router_logits,
         shared_experts_input,
@@ -202,7 +213,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
         shared_experts: torch.nn.Module | None,
-        quant_method: FusedMoEMethodBase,
+        routed_experts: RoutedExperts,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
@@ -214,7 +225,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
-        self.quant_method = quant_method
+        self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
 
         self._shared_experts: SharedExperts | None = None
@@ -222,16 +233,11 @@ class MoERunner(MoERunnerInterface):
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
-                # Note: For now we must pass quant_method along to SharedExperts so it
-                # can property determine where the shared experts are supposed to be
-                # called, i.e. by a MK or by the MoERunner.
-                # Once the MK can be created upfront, we can just pass in the proper
-                # flags derived from the quant_method's MK.
-                quant_method=quant_method,
                 enable_dbo=enable_dbo,
+                mk_can_overlap_shared_experts=routed_experts.quant_method.mk_can_overlap_shared_experts,
             )
 
-        # Needed for string -> FusedMoE layer lookup in custom ops.
+        # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
 
         self._forward_entry = self._select_forward()
@@ -253,14 +259,21 @@ class MoERunner(MoERunnerInterface):
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
 
-    # TODO(bnell): temporary hack, do not call this method.
+    # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        if self._shared_experts is not None:
-            self._shared_experts._quant_method = quant_method
-        self.quant_method = quant_method
+        self.routed_experts.quant_method = quant_method
+        if self.shared_experts is not None:
+            self.shared_experts._mk_can_overlap_shared_experts = (
+                quant_method.mk_can_overlap_shared_experts
+            )
 
+    @property
     def is_internal_router(self) -> bool:
         return self.gate is not None
+
+    @property
+    def _quant_method(self) -> FusedMoEMethodBase:
+        return self.routed_experts.quant_method
 
     def apply_routed_input_transform(
         self, hidden_states: torch.Tensor
@@ -324,8 +337,8 @@ class MoERunner(MoERunnerInterface):
     @property
     def _fused_output_is_reduced(self) -> bool:
         return (
-            self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
+            self._quant_method.moe_kernel is not None
+            and self._quant_method.moe_kernel.output_is_reduced()
         )
 
     def _maybe_reduce_shared_expert_output(
@@ -396,7 +409,7 @@ class MoERunner(MoERunnerInterface):
         )
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
-            not self.quant_method.skip_forward_padding
+            not self._quant_method.skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
             hidden_states = F.pad(
@@ -420,11 +433,10 @@ class MoERunner(MoERunnerInterface):
     ):
         if self._shared_experts is not None:
             assert shared_experts_input is not None
-            self._shared_experts.apply(shared_experts_input, order)
+            self._shared_experts(shared_experts_input, order)
 
     def _apply_quant_method(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
@@ -439,25 +451,25 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.quant_method.is_monolithic:
-            fused_out = self.quant_method.apply_monolithic(
-                layer=layer,
+        if self.routed_experts.quant_method.is_monolithic:
+            # Monolithic kernels: pass router_logits to routed_experts
+            fused_out = self.routed_experts(
                 x=hidden_states,
                 router_logits=router_logits,
             )
         else:
+            # Modular kernels: select experts first, then call routed_experts
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
+                topk_indices_dtype=self._quant_method.topk_indices_dtype,
             )
 
-            # Passing shared_experts_input in case SharedExpertsOrder is
-            # MK_INTERNAL_OVERLAPPED.
-            fused_out = self.quant_method.apply(
-                layer=layer,
+            fused_out = self.routed_experts(
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
 
@@ -592,12 +604,11 @@ class MoERunner(MoERunnerInterface):
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
+            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
         )
 
     def _maybe_dispatch(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -633,7 +644,7 @@ class MoERunner(MoERunnerInterface):
         self,
         shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor | tuple[torch.Tensor | None, torch.Tensor]:
         if self.do_naive_dispatch_combine:
             hidden_states = get_ep_group().combine(
                 hidden_states, self.moe_config.is_sequence_parallel
@@ -653,7 +664,6 @@ class MoERunner(MoERunnerInterface):
 
     def _forward_impl(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
@@ -671,7 +681,7 @@ class MoERunner(MoERunnerInterface):
         Returns a single tensor of combined fused and shared output (if present).
         """
         # TODO(bnell): this can be removed after MK migration is complete.
-        layer.ensure_moe_quant_config_init()
+        self.routed_experts._ensure_moe_quant_config_init()
 
         # Sync aux and main stream for shared expert multi-stream overlap.
         self._maybe_sync_shared_experts_stream(shared_experts_input)
@@ -687,13 +697,11 @@ class MoERunner(MoERunnerInterface):
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
             hidden_states, router_logits = self._maybe_dispatch(
-                layer,
                 hidden_states,
                 router_logits,
             )
 
             shared_output, hidden_states = self._apply_quant_method(
-                layer=layer,
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
@@ -702,4 +710,146 @@ class MoERunner(MoERunnerInterface):
             return self._maybe_combine(
                 shared_output,
                 hidden_states,
+            )
+
+    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    #
+    # Old methods from FusedMoE layer
+    #
+    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+    # Note: maybe_init_modular_kernel should only be called by
+    # prepare_communication_buffer_for_model.
+    # This is called after all weight loading and post-processing, so it
+    # should be safe to swap out the quant_method.
+    def maybe_init_modular_kernel(self) -> None:
+        # NOTE(rob): WIP refactor. For quant methods that own the MK
+        # we create the MK during process_weights_after_loading.
+        if (
+            self.routed_experts.quant_method.supports_internal_mk
+            or self.routed_experts.quant_method.is_monolithic
+        ):
+            return None
+
+        self.routed_experts._ensure_moe_quant_config_init()
+        # routing_tables only needed for round-robin expert placement with
+        # DeepEP all2all backend.
+        routing_tables = self._maybe_init_expert_routing_tables()
+
+        if isinstance(self.routed_experts.quant_method, FusedMoEModularMethod):
+            base_quant_method = self.routed_experts.quant_method.old_quant_method
+        else:
+            base_quant_method = self.routed_experts.quant_method
+
+        prepare_finalize = base_quant_method.maybe_make_prepare_finalize(
+            routing_tables=routing_tables
+        )
+        if prepare_finalize is not None:
+            logger.debug(
+                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
+            )
+            self._replace_quant_method(
+                FusedMoEModularMethod.make(
+                    self,
+                    base_quant_method,
+                    prepare_finalize,
+                    self.shared_experts,
+                    inplace=not base_quant_method.moe.disable_inplace,
+                )
+            )
+
+    #
+    # Properties
+    #
+
+    @property
+    def layer_id(self):
+        # Delayed import to avoid circular dependency
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        return extract_layer_index(self.layer_name)
+
+    #
+    # Attributes still needed by models
+    #
+
+    @property
+    def is_monolithic(self) -> bool:
+        return self.routed_experts.quant_method.is_monolithic
+
+    @property
+    def activation(self) -> MoEActivation:
+        return self.routed_experts.activation
+
+    #
+    # Expert maps
+    #
+
+    @property
+    def expert_placement_strategy(self) -> ExpertPlacementStrategy:
+        return self.expert_map_manager.placement_strategy
+
+    @property
+    def expert_global_to_physical(self) -> torch.Tensor | None:
+        tables = self.expert_map_manager.routing_tables
+        return tables[0] if tables else None
+
+    @property
+    def expert_physical_to_global(self) -> torch.Tensor | None:
+        """Routing table: physical expert ID to global expert ID."""
+        tables = self.expert_map_manager.routing_tables
+        return tables[1] if tables else None
+
+    @property
+    def expert_local_to_global(self) -> torch.Tensor | None:
+        """Routing table: local expert ID to global expert ID."""
+        tables = self.expert_map_manager.routing_tables
+        return tables[2] if tables else None
+
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return self.routed_experts.expert_map
+
+    def _maybe_init_expert_routing_tables(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        return self.routed_experts._maybe_init_expert_routing_tables()
+
+    def update_expert_map(self):
+        self.routed_experts.update_expert_map()
+
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        """Map global expert ID to local expert ID."""
+        return self.routed_experts._map_global_expert_id_to_local_expert_id(expert_id)
+
+    #
+    # EPLB
+    #
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        """Delegate to EPLB manager."""
+        if self.router.eplb_manager is not None:
+            return self.router.eplb_manager.get_expert_weights(self.routed_experts)
+        else:
+            return []
+
+    def set_eplb_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        """
+        Register the EPLB state in this layer.
+
+        This is used later in forward pass, where we get the expert mapping
+        and record the load metrics in `expert_load_view`.
+        """
+        if self.router.eplb_manager is not None:
+            self.router.eplb_manager.set_state(
+                moe_layer_idx,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
             )

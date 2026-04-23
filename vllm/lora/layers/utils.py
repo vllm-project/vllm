@@ -32,6 +32,9 @@ class LoRAMapping:
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # code borrowed from https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/vllm/lora/layers.py#L34
     """Returns the device for where to place the LoRA tensors."""
+    if hasattr(base_layer, "routed_experts"):
+        base_layer = base_layer.routed_experts
+
     # unquantizedLinear
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device

@@ -25,6 +25,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -896,7 +897,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
             experts = layer.experts
-            assert isinstance(experts, FusedMoE)
+            assert isinstance(experts, MoERunner)
             # Register the expert weights.
             self.expert_weights.append(experts.get_expert_weights())
             experts.set_eplb_state(
