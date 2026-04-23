@@ -22,16 +22,29 @@ from ..utils import check_logprobs_close
     reason="Per-token-head KV cache requires CUDA or ROCm GPU.",
 )
 @pytest.mark.parametrize(
-    "base_model,test_model",
+    "base_model,test_model,kv_cache_dtype",
     [
+        (
+            "meta-llama/Meta-Llama-3-8B",
+            "meta-llama/Meta-Llama-3-8B",
+            "int2_per_token_head",
+        ),
+        (
+            "meta-llama/Meta-Llama-3-8B",
+            "meta-llama/Meta-Llama-3-8B",
+            "int4_per_token_head",
+        ),
         (
             "meta-llama/Llama-3.2-1B-Instruct",
             "meta-llama/Llama-3.2-1B-Instruct",
+            "int8_per_token_head",
+        ),
+        (
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "fp8_per_token_head",
         ),
     ],
-)
-@pytest.mark.parametrize(
-    "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]
 )
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])

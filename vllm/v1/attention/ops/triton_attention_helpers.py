@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared ``@triton.jit`` helpers used by the unified attention kernel
-and ``reduce_segments``.
+"""Shared ``@triton.jit`` helpers used by the unified attention kernel,
+``reduce_segments`` and the sub-byte packed KV backends.
 
 These are plain attention-loop helpers — mask building, ALiBi / QQ-bias
 score post-processing, online-softmax bookkeeping, tile-loop bounds,
 sequence lookup — extracted so the 2D and 3D paths of the unified
-kernel (and any future consumer) share a single implementation.
+kernel and the packed INT4 / INT2 kernel share a single implementation.
 """
 
 from __future__ import annotations
@@ -34,6 +34,29 @@ def apply_softcap(S, x):
     p1 = tl.exp(Sdiv)
     p2 = tl.exp(-Sdiv)
     return x * (p1 - p2) / (p1 + p2)
+
+
+@triton.jit
+def cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
+    """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
+
+    Modes handled inside the core kernel:
+
+    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
+      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+      their scales separately on S/P inside the loop.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
+      tensor-wide scale.
+
+    Sub-byte packed modes (INT4 / INT2) are dispatched to their own
+    factories in :mod:`vllm.v1.attention.ops.triton_quant_kv` and never
+    reach the common kernel that uses this helper.
+    """
+    if KV_QUANT_MODE == 1:
+        if Q.dtype.is_fp8():
+            return data.to(Q.dtype)
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+    return data.to(Q.dtype)
 
 
 # ===========================================================================

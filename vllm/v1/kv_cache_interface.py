@@ -38,7 +38,9 @@ class KVQuantMode(IntEnum):
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
-    NVFP4 = 4  # packed fp4 data + fp8 block scales
+    INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
+    INT2_PER_TOKEN_HEAD = 5  # Hadamard + Lloyd-Max 4 centroids, 4×int2/byte
+    NVFP4 = 6  # packed fp4 data + fp8 block scales
 
     @property
     def is_per_token_head(self) -> bool:
@@ -46,6 +48,8 @@ class KVQuantMode(IntEnum):
         return self in (
             KVQuantMode.INT8_PER_TOKEN_HEAD,
             KVQuantMode.FP8_PER_TOKEN_HEAD,
+            KVQuantMode.INT4_PER_TOKEN_HEAD,
+            KVQuantMode.INT2_PER_TOKEN_HEAD,
         )
 
     @property
@@ -53,9 +57,31 @@ class KVQuantMode(IntEnum):
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
 
+    @property
+    def packing_factor(self) -> int:
+        """Number of quantized values stored per cache byte (1 unless packed)."""
+        if self == KVQuantMode.INT2_PER_TOKEN_HEAD:
+            return 4
+        if self == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            return 2
+        return 1
+
+    def packed_head_size(self, head_size: int) -> int:
+        """Storage head size after packing: ``head_size // packing_factor``."""
+        factor = self.packing_factor
+        assert head_size % factor == 0, (
+            f"head_size={head_size} is not divisible by packing factor "
+            f"{factor} required by {self.name}"
+        )
+        return head_size // factor
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    if kv_cache_dtype == "int2_per_token_head":
+        return KVQuantMode.INT2_PER_TOKEN_HEAD
+    if kv_cache_dtype == "int4_per_token_head":
+        return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
@@ -150,7 +176,7 @@ class AttentionSpec(KVCacheSpec):
             2
             * self.block_size
             * self.num_kv_heads
-            * self.head_size
+            * self.kv_quant_mode.packed_head_size(self.head_size)
             * get_dtype_size(self.dtype)
         )
 
@@ -264,7 +290,10 @@ class FullAttentionSpec(AttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
+            * (
+                self.kv_quant_mode.packed_head_size(self.head_size)
+                + self.kv_quant_mode.packed_head_size(self.head_size_v)
+            )
             * get_dtype_size(self.dtype)
         )
 
@@ -309,7 +338,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * self.head_size
+            * self.kv_quant_mode.packed_head_size(self.head_size)
             * get_dtype_size(self.dtype)
         )
 
