@@ -270,15 +270,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_prefills = common.num_prefills
         num_decode_tokens = common.num_decode_tokens
 
-        num_computed_tokens_cpu = (
-            common_attn_metadata.compute_num_computed_tokens().cpu()
-        )
-        num_computed_tokens_p_cpu = num_computed_tokens_cpu[
-            num_reqs - num_prefills : num_reqs
-        ]
+        # Derive prefill context lengths from CPU data only.
+        # `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
+        # (including async spec decode), so this avoids the D2H sync that
+        # `compute_num_computed_tokens().cpu()` would force.
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        assert seq_lens_cpu is not None
         query_start_loc_p_cpu = (
             common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
             - num_decode_tokens
+        )
+        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
+        num_computed_tokens_p_cpu = (
+            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
