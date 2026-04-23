@@ -49,7 +49,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
     generate_dense_plan,
     generate_mamba_plan,
-    logical_to_kernel_block_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
@@ -1628,9 +1627,15 @@ class NixlConnectorWorker:
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         plan = self._transfer_plans[engine_id]
-        meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids, plan.physical_per_logical
-        )
+        if self._has_mamba:
+            meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+                meta.remote.block_ids,
+                plan.remote_physical_blocks_per_logical,
+            )
+        else:
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids
+            )
         remote_block_ids = meta.remote.block_ids
         read_specs = self.transfer_policy.compute_read_specs(
             local_block_ids=meta.local_physical_block_ids,
@@ -1870,25 +1875,50 @@ class NixlConnectorWorker:
 
         return mapped_2d.flatten().astype(np.int64)
 
-    def _logical_to_kernel_block_ids(
-        self,
-        block_ids: BlockIds,
-        physical_per_logical: tuple[int, ...] | None = None,
-    ) -> BlockIds:
+    def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
         """Convert logical block IDs to kernel physical block IDs.
+
+        Required when the logical block size (set by the user) does not match
+        the one required by the attention backend.
+        """
+        if self._physical_blocks_per_logical_kv_block == 1:
+            return block_ids
+        ratio = self._physical_blocks_per_logical_kv_block
+        arange = np.arange(ratio).reshape(1, -1)
+        return [
+            (np.array(group).reshape(-1, 1) * ratio + arange).flatten().tolist()
+            if not self._is_mamba_group[i]
+            else group
+            for i, group in enumerate(block_ids)
+        ]
+
+    def _logical_to_remote_kernel_block_ids(
+        self, block_ids: BlockIds, remote_ratio: int
+    ) -> BlockIds:
+        """Map logical block IDs to physical kernel block IDs on the remote.
 
         Args:
             block_ids: per-group lists of logical block IDs.
-            physical_per_logical: per-group expansion ratios. When *None*
-                (local expansion), FA groups use the local kernel ratio
-                and Mamba groups are 1:1.
+            remote_ratio: remote engine's physical blocks per logical block.
+
+        Returns:
+            Same structure with FA groups expanded (each logical block L
+            becomes kernel blocks [L*remote_ratio .. L*remote_ratio +
+            local_ratio - 1]).  Mamba groups are passed through unchanged.
         """
-        if physical_per_logical is None:
-            blk_ratio = self._physical_blocks_per_logical_kv_block
-            physical_per_logical = tuple(
-                1 if m else blk_ratio for m in self._is_mamba_group
-            )
-        return logical_to_kernel_block_ids(block_ids, physical_per_logical)
+        local_ratio = self._physical_blocks_per_logical_kv_block
+        if remote_ratio == 1:
+            return block_ids
+        local_arange = np.arange(local_ratio).reshape(1, -1)
+        result: list[list[int]] = []
+        for i, group in enumerate(block_ids):
+            if not self._is_mamba_group[i]:
+                arr = np.array(group).reshape(-1, 1)
+                expanded = (arr * remote_ratio + local_arange).flatten()
+                result.append(expanded.tolist())
+            else:
+                result.append(group)
+        return result
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
