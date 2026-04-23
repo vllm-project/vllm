@@ -823,8 +823,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # for the packing.
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                shard_size = int(shard_size // param.packed_factor)
-                shard_offset = int(shard_offset // param.packed_factor)
+                shard_size = round(shard_size // param.packed_factor)
+                shard_offset = round(shard_offset // param.packed_factor)
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset
@@ -1258,8 +1258,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                     )
 
                 if packed_dim == output_dim:
-                    shard_size = int(shard_size // param.packed_factor)
-                    shard_offset = int(shard_offset // param.packed_factor)
+                    shard_size = round(shard_size // param.packed_factor)
+                    shard_offset = round(shard_offset // param.packed_factor)
 
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
@@ -1321,8 +1321,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             # for the packing.
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                shard_size = int(shard_size // param.packed_factor)
-                shard_offset = int(shard_offset // param.packed_factor)
+                shard_size = round(shard_size // param.packed_factor)
+                shard_offset = round(shard_offset // param.packed_factor)
 
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
