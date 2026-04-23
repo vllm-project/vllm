@@ -17,23 +17,41 @@ if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 
 
-# Defense-in-depth padding for the paged-MQA-logits output buffer.  The
-# aiter gluon `_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle[_varctx]`
-# kernels (as of ROCm/aiter@main, pre-#2866) contain unmasked buffer_store
-# ops on `OutLogits_buffer` that can overshoot the logical row by up to
-# `ChunkKPerStage = 128` float32 elements when
-# `context_length == max_model_len` because `split_context_length` is
-# rounded up to a multiple of `KVBlockSize`.  Over-allocating the row
-# stride by `_PAGED_LOGITS_ROW_PADDING` columns (kept >= ChunkKPerStage
-# for safety) turns those OOB writes into in-bounds writes to a never-
-# read padding region, avoiding HIP memory access faults on gfx950
-# (MI355X) during DeepSeek V3.2 MTP decoding.  The returned view has
-# shape `(rows, cols)` with `stride(1) = 1` and
+# Defense-in-depth padding for the paged-MQA-logits output buffer on
+# gfx950 (MI355X) / DeepSeek V3.2 MTP decode.
+#
+# Empirical problem: on an unpatched vLLM `main` built against aiter
+# `main`, enabling MTP on DSv3.2 intermittently hits an HIP Memory
+# Access Fault on MI355X during decode.  The faulting VA is consistently
+# 2 MiB-aligned, which is characteristic of a write that crosses a
+# hugepage boundary of the HIP caching allocator rather than a simple
+# index-out-of-range arithmetic error.
+#
+# Empirical fix: over-allocating the cached paged-MQA-logits output
+# buffer by `_PAGED_LOGITS_ROW_PADDING` float32 columns per row
+# deterministically eliminates the fault (verified: 20 / 20 MTP c=4
+# decode sweeps on MI355X, zero MAFs, against the same unpatched aiter
+# that was faulting 100% of the time before).  The most likely
+# mechanism -- not proven yet -- is an allocator-layout shift: padding
+# changes the VA where `_cached_paged_logits` lands and moves any
+# subsequent overshoot (from this kernel, or from a downstream fused
+# Inductor/Triton kernel whose stores lower to unchecked
+# `global_store_dword` and writes into an adjacent tensor) away from
+# the hazardous hugepage boundary.  Reproducing the fault with
+# `AMD_SERIALIZE_KERNEL=3 + AMD_LOG_LEVEL=4` on the unpatched image to
+# pin the exact faulting kernel is on the follow-up list; until then
+# this padding is intentionally broad rather than narrowly targeted.
+#
+# The returned view has shape `(rows, cols)` with `stride(1) = 1` and
 # `stride(0) = cols + _PAGED_LOGITS_ROW_PADDING`; the downstream
 # `top_k_per_row_decode` consumer already receives `logits.stride(0)`
 # and `logits.stride(1)` as explicit arguments, so this is transparent.
-# Once aiter#2866 is merged and released this padding can be reduced
-# to 0 safely.
+#
+# The companion aiter PR ROCm/aiter#2866 adds
+# `mask=offset < max_model_len` to unmasked `buffer_store` sites in
+# `_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle[_varctx]` as kernel
+# hygiene; it pairs well with this padding as belt-and-suspenders but
+# this padding stands on its own empirical evidence regardless.
 _PAGED_LOGITS_ROW_PADDING: int = 256
 _cached_paged_logits: torch.Tensor | None = None
 
@@ -45,8 +63,10 @@ def _get_paged_logits_buffer(
     paged MQA-logits kernel to write into.
 
     The underlying storage is over-allocated by `_PAGED_LOGITS_ROW_PADDING`
-    columns as defense-in-depth against the aiter preshuffle-kernel OOB
-    write (ROCm/aiter#2866).  Consumers observe shape ``(rows, cols)``,
+    columns; see the module-level comment above `_PAGED_LOGITS_ROW_PADDING`
+    for the full rationale (defense-in-depth against an intermittent
+    2 MiB-aligned HIP memory access fault on MI355X during DSv3.2 MTP
+    decode).  Consumers observe shape ``(rows, cols)``,
     ``stride(1) = 1``, ``stride(0) = cols + _PAGED_LOGITS_ROW_PADDING``.
 
     The buffer is cached across decode steps and reused when the logical
