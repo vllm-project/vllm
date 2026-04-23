@@ -42,7 +42,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.processors.mimo_omni import (
+from vllm.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
+from vllm.transformers_utils.processors.mimo_v2_omni import (
     MiMoOmniProcessor,
     VideoAudioInput,
     _format_timestamp,
@@ -69,66 +70,6 @@ from .qwen2_5_vl import (
 )
 from .qwen2_vl import _create_qwen2vl_field_factory
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
-
-
-class Mimo_VLVisionConfig(PretrainedConfig):
-    model_type = "mimovl"
-    base_config_key = "vision_config"
-
-    def __init__(
-        self,
-        depth=28,
-        hidden_size=1280,
-        hidden_act="silu",
-        intermediate_size=4608,
-        num_heads=32,
-        in_channels=3,
-        patch_size=16,
-        spatial_merge_size=2,
-        temporal_patch_size=2,
-        tokens_per_second=2,
-        window_size=128,
-        out_hidden_size=2048,
-        fullatt_block_indexes=None,
-        initializer_range=0.02,
-        kv_channels=64,  # HACK
-        qk_channels=64,
-        num_query_groups=4,
-        num_key_value_heads=8,
-        vit_window_attn_types=None,
-        visual_token_window_size=64,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        self.depth = depth
-        self.hidden_size = hidden_size
-        self.hidden_act = hidden_act
-        self.intermediate_size = intermediate_size
-        self.num_heads = num_heads
-        # Support GQA: if num_key_value_heads is not provided,
-        # default to num_heads (MHA)
-        if num_key_value_heads is None:
-            num_key_value_heads = num_heads
-        self.num_key_value_heads = num_key_value_heads
-        self.in_channels = in_channels
-        self.patch_size = patch_size
-        self.spatial_merge_size = spatial_merge_size
-        self.temporal_patch_size = temporal_patch_size
-        self.tokens_per_second = tokens_per_second
-        self.window_size = window_size
-        self.fullatt_block_indexes = (
-            fullatt_block_indexes
-            if fullatt_block_indexes is not None
-            else [7, 15, 23, 31]
-        )
-        self.out_hidden_size = out_hidden_size
-        self.initializer_range = initializer_range
-        self.kv_channels = kv_channels
-        self.qk_channels = qk_channels
-        self.num_query_groups = num_query_groups
-        self.vit_window_attn_types = vit_window_attn_types or [-1] * depth
-        self.visual_token_window_size = visual_token_window_size
 
 
 class MiMoVisionMLP(Qwen2_5_VisionMLP):
@@ -217,7 +158,7 @@ class MiMoVisionAttention(nn.Module):
         self.use_sink = use_sink
         if use_sink:
             self.sinks = nn.Parameter(
-                torch.zeros(num_heads, dtype=torch.bfloat16),
+                torch.empty(num_heads),
                 requires_grad=False,
             )
         else:
@@ -245,7 +186,6 @@ class MiMoVisionAttention(nn.Module):
             cu_seqlens_k=cu_seqlens,
             max_seqlen_q=max_seqlen,
             max_seqlen_k=max_seqlen,
-            dropout_p=0.0,
             softmax_scale=self.scale,
             causal=False,
             window_size=[w, w],
@@ -1040,23 +980,8 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
-            T = int(grid_thw[0])
-            H = int(grid_thw[1])
-            W = int(grid_thw[2])
-            n_tokens = T * H * W // (merge_size * merge_size)
-            full = (
-                [vision_start_id]
-                + [image_pad_id] * n_tokens
-                + [vision_end_id]
-            )
-            embed_mask = (
-                [False] + [True] * n_tokens + [False]
-            )
-            embed_t = torch.tensor(embed_mask)
-            return PromptUpdateDetails(
-                full=full,
-                is_embed=lambda _tok, _seq: embed_t,
-            )
+            n_tokens = int(grid_thw.prod()) // merge_size ** 2
+            return [image_pad_id] * n_tokens
 
         def get_video_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["video"][item_idx]
@@ -1064,9 +989,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             spt = float(out_item["second_per_grid_ts"].data)
             start = float(out_item["video_start_times"].data)
 
-            T = int(grid_thw[0])
-            H = int(grid_thw[1])
-            W = int(grid_thw[2])
+            T, H, W = map(int, grid_thw)
             n_per_grid = H * W // (merge_size * merge_size)
 
             # Check if this is a video_audio item
@@ -1134,13 +1057,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["audio"][item_idx]
             tok_len = int(out_item["audio_token_lens"].data)
-            full = [audio_pad_id] * tok_len
-            embed_mask = [True] * tok_len
-            embed_t = torch.tensor(embed_mask)
-            return PromptUpdateDetails(
-                full=full,
-                is_embed=lambda _tok, _seq: embed_t,
-            )
+            return [audio_pad_id] * tok_len
 
         updates: list[PromptUpdate] = [
             PromptReplacement(
@@ -1327,12 +1244,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            # if self.use_data_parallel:
-            #     return run_dp_sharded_vision_model(
-            #         self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
-            #     )
-            # else:
-            #     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
@@ -1351,17 +1262,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            # if self.use_data_parallel:
-            #     return run_dp_sharded_vision_model(
-            #         self.visual,
-            #         pixel_values_videos,
-            #         grid_thw_list,
-            #         rope_type="rope_3d",
-            #     )
-            # else:
-            #     video_embeds = self.visual(
-            #         pixel_values_videos, grid_thw=grid_thw_list
-            #     )
             video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.

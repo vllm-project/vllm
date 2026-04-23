@@ -56,7 +56,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "IsaacProcessor": "vllm.transformers_utils.processors.isaac",
     "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
     "KimiK25Processor": "vllm.transformers_utils.processors.kimi_k25",
-    "MiMoOmniProcessor": "vllm.transformers_utils.processors.mimo_omni",
+    "MiMoOmniProcessor": "vllm.transformers_utils.processors.mimo_v2_omni",
     "MistralCommonPixtralProcessor": "vllm.transformers_utils.processors.pixtral",
     "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
     "NanoNemotronVLProcessor": "vllm.transformers_utils.processors.nano_nemotron_vl",
