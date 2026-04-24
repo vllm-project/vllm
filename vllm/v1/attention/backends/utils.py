@@ -410,7 +410,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         num_reqs + 1, device=query_start_loc.device, dtype=query_start_loc.dtype
     )
 
-    decode_query_start_loc[0] = 0
+    decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
     # `.item()` reductions here are unavoidable — the CommonAttentionMetadata
     # fields below need Python ints. Feature is opt-in (kv_sharing_fast_prefill).
