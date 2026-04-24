@@ -1,0 +1,24 @@
+---
+description: Core coding guide for reliability, explicit failure handling, and code reuse
+alwaysApply: true
+---
+
+# Coding Guide
+
+Write code that fails clearly and early when required inputs, configuration, or dependencies are missing. Avoid patterns that hide real problems and make bugs harder to diagnose. Before adding new code, first look for existing helpers you can reuse, extend, or compose so shared behavior stays centralized.
+
+## Error Handling and Defaults
+
+- **No synthetic defaults**: If a value is required, make it a required parameter. When a lookup returns no result, propagate the absence (`None`, raise, or skip) rather than substituting a made-up fallback.
+- **Let real errors surface**: Do not swallow exceptions you cannot meaningfully handle. Prefer raising or propagating errors so the source issue gets fixed.
+- **Use optional types intentionally**: Only use `Optional[T]` / `T | None` when "no value" is a valid domain state, not as a convenience default.
+- **Keep config explicit**: Missing env vars or config should fail at startup or first use, not degrade to empty strings, zeros, or placeholder values.
+
+## Code Reuse
+
+- **Search before writing**: Check whether an existing helper or pattern already covers the need before adding new code.
+- **Extract shared logic**: Factor common patterns from two or more call sites into a shared function.
+- **Extend, don't fork**: Add a parameter or compose on top of an existing function instead of copying and modifying it.
+- **Keep reusable code discoverable**: Place shared helpers in well-known modules (`vllm/utils.py`, common test fixtures, etc.). Document reusable patterns and conventions in `docs/cohere/code_notes/`.
+- **Consolidate on sight**: When you encounter duplication during a task, refactor it into a shared function if the scope is reasonable.
+- **Simplify relentlessly**: Prefer fewer moving parts — remove indirection, drop trivial wrappers that only forward arguments, flatten unnecessary abstractions, and delete dead code instead of working around it.

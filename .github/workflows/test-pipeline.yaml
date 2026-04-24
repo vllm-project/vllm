@@ -1,0 +1,290 @@
+# Represents one test job instance <test_group, runner>.
+# NOTE: we don't call this workflow directly; it is called by the dispatcher.
+name: vLLM Tests
+
+on:
+  workflow_call:
+    secrets:
+      HF_TOKEN:
+        required: true
+      SLACK_WEBHOOK:
+        required: true
+      CO_API_KEY_STAGING:
+        required: true
+      BEE_DEPLOY_KEY:
+        required: false
+    inputs:
+      git_ref:
+        description: 'Branch to checkout'
+        required: true
+        type: string
+      test_group:
+        description: 'which tests to run (cpu_check, fast_check, model_arch_reward, model_arch_c5_3a30t, quantization_32bit_logits, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, performance, speculative_decoding, vision)'
+        type: string
+        required: true
+      result_upload_branch:
+        required: false
+        type: string
+        description: 'Branch to upload reporting results to'
+        default: 'ci_dump'
+      runner_labels:
+        description: 'Runner labels as JSON array'
+        required: true
+        type: string
+      device:
+        required: true
+        type: string
+      tp_size:
+        required: true
+        type: string
+        description: 'Tensor parallel size for performance tests'
+      models:
+        required: true
+        type: string
+        description: 'Models to run eval on (comma-separated)'
+      benchmark_output_len:
+        required: false
+        type: string
+        default: ''
+        description: 'Output length override for performance benchmarks'
+      hardware_profiles_override:
+        required: false
+        type: string
+        default: ''
+        description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      docker_commit:
+        required: false
+        type: string
+        description: 'Docker commit SHA to use for tests (defaults to current commit)'
+      model_path:
+        required: true
+        type: string
+        description: 'GCS prefix for model checkpoints (prefix + model_name)'
+
+jobs:
+  test:
+    # Although eval tests typically take ~5 hours (see README), we set an 12-hour timeout to accommodate rare cases such as hardware issues, large test groups, or unexpected delays.
+    timeout-minutes: ${{ inputs.test_group == 'bee_eval' && 720 || 480 }}
+    name: Run ${{ inputs.test_group }} Tests
+    permissions:
+      contents: write
+      id-token: write
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+
+    steps:
+    # To clone apiary(bee), we need to set up SSH for the deployment key.
+    - name: Set up SSH for apiary clone
+      if: ${{ inputs.test_group == 'bee_eval' }}
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.BEE_DEPLOY_KEY }}
+
+    - name: Add GitHub to SSH known hosts
+      if: ${{ inputs.test_group == 'bee_eval' }}
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: true
+        ref: ${{ inputs.git_ref }}
+
+    - name: Shared Test Setup
+      uses: ./.github/actions/setup
+      with:
+        git_ref: ${{ inputs.git_ref }}
+        gpu: ${{ inputs.device }}
+        docker_commit: ${{ inputs.docker_commit }}
+
+    - name: Clone apiary for Bee Eval
+      if: ${{ inputs.test_group == 'bee_eval' }}
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 10
+        max_attempts: 3
+        retry_on: error
+        on_retry_command: rm -rf ${{ github.workspace }}/apiary
+        command: |
+          set -eo pipefail
+          git clone git@github.com:cohere-ai/apiary.git ${{ github.workspace }}/apiary
+          cd ${{ github.workspace }}/apiary
+          # tag v0.29.14 + vllm_ci tasks
+          git checkout 1b828642abe3d4fd40988a80a882257561c4ceef
+
+    - name: Download Model Artifacts
+      if: ${{ inputs.test_group != 'cpu_check' }}
+      run: |
+        MODEL_PATH_PREFIX="${{ inputs.model_path }}" \
+          bash ./tests/cohere/scripts/download_checkpoints.sh ${{ inputs.test_group }} "${{ inputs.models }}"
+
+    - name: Override Hardware Profiles
+      if: ${{ inputs.hardware_profiles_override != '' && inputs.test_group != 'cpu_check' }}
+      run: |
+        cat > tests/cohere/configs/hardware_profiles.yaml << 'EOF'
+        ${{ inputs.hardware_profiles_override }}
+        EOF
+
+    - name: Run CPU tests (Docker)
+      if: ${{ inputs.test_group == 'cpu_check' }}
+      run: |
+        docker run --rm \
+          -v ${{ runner.temp }}:/root/output \
+          -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+          -e TEST_GROUP=cpu_check \
+          us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-cpu:${{ inputs.docker_commit || env.COMMIT_SHA }} \
+          bash -c "cd tests && bash cohere/scripts/run_tests.sh"
+
+    - name: Run tests in Docker container (NVIDIA)
+      if: ${{ inputs.device == 'h100' || inputs.device == 'a100' || inputs.device == 'b200' || inputs.device == 'gb200' }}
+      run: |
+        docker run --rm \
+          --device nvidia.com/gpu=all \
+          -v ${{ runner.temp }}:/root/output \
+          -v ${{ github.workspace }}:/vllm-workspace \
+          -v /home/runner/_work/engines:/root/engines \
+          -v /home/runner/_work/hf_cache:/root/.cache/huggingface \
+          --shm-size=256g \
+          --ulimit memlock=-1 \
+          --ulimit stack=67108864 \
+          -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+          -e HF_HOME=/root/.cache/huggingface \
+          -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+          -e GCLOUD_PROJECT=valued-sight-253418 \
+          -e "GOOGLE_APPLICATION_CREDENTIALS=/vllm-workspace/$(basename "$GOOGLE_APPLICATION_CREDENTIALS")" \
+          -e CO_API_KEY_STAGING=${{ secrets.CO_API_KEY_STAGING }} \
+          -e TEST_GROUP=${{ inputs.test_group }} \
+          -e TP_SIZE=${{ inputs.tp_size }} \
+          -e MODELS=${{ inputs.models }} \
+          -e BENCHMARK_OUTPUT_LEN=${{ inputs.benchmark_output_len }} \
+          -e GPU_TYPE=${{ inputs.device }} \
+          -e MODEL_PATH_PREFIX=${{ inputs.model_path }} \
+          -e BEE_DIR=/vllm-workspace/apiary/bee \
+          --entrypoint /bin/bash \
+          us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-nvidia:${{ inputs.docker_commit || env.COMMIT_SHA }} \
+          -c "
+            cd /vllm-workspace
+            source ./tests/cohere/scripts/setup_tests.sh
+            df -h /dev/shm
+            bash ./cohere/scripts/run_tests.sh
+          "
+
+    - name: Run tests in Docker container (AMD)
+      if: ${{ inputs.device == 'mi300x' }}
+      # TODO(czhu): change this command when we figure out the <8x gpu visibility issue
+      run: |
+        docker run --rm \
+          --device=/dev/kfd --device=/dev/dri \
+          -v ${{ runner.temp }}:/root/output \
+          -v ${{ github.workspace }}:/vllm-workspace \
+          -v /home/runner/_work/engines:/root/engines \
+          -v /home/runner/_work/hf_cache:/root/.cache/huggingface \
+          --shm-size=256g \
+          --ulimit memlock=-1 \
+          --ulimit stack=67108864 \
+          -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+          -e HF_HOME=/root/.cache/huggingface \
+          -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+          -e GCLOUD_PROJECT=valued-sight-253418 \
+          -e "GOOGLE_APPLICATION_CREDENTIALS=/vllm-workspace/$(basename "$GOOGLE_APPLICATION_CREDENTIALS")" \
+          -e CO_API_KEY_STAGING=${{ secrets.CO_API_KEY_STAGING }} \
+          -e TEST_GROUP=${{ inputs.test_group }} \
+          -e TP_SIZE=${{ inputs.tp_size }} \
+          -e MODELS=${{ inputs.models }} \
+          -e BENCHMARK_OUTPUT_LEN=${{ inputs.benchmark_output_len }} \
+          -e GPU_TYPE=${{ inputs.device }} \
+          -e MODEL_PATH_PREFIX=${{ inputs.model_path }} \
+          -e BEE_DIR=/vllm-workspace/apiary/bee \
+          --entrypoint /bin/bash \
+          us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-rocm:${{ inputs.docker_commit || env.COMMIT_SHA }} \
+          -c "
+            cd /vllm-workspace
+            source ./tests/cohere/scripts/setup_tests.sh
+            df -h /dev/shm
+            bash ./cohere/scripts/run_tests.sh
+          "
+    
+    # The CI runners don't have persistent storage, so as a one-time setup we run tests once and then
+    # tar + upload the entire HF cache to GCP storage. Subsequent runs will pre-download the tar
+    # from GCP storage and populate the hf cache directory.
+    # The reason we use tar is because it handles symlinks better.
+    # - name: Upload HF cache to GCP
+    #   run: |
+    #     set -x
+    #     cd /home/runner/_work/hf_cache
+    #     # tar the entire hub directory
+    #     tar -cf hf_hub.tar -C hub .
+    #     gsutil -m cp -r hf_hub.tar gs://cohere-model-efficiency-ci/hf_cache/hub_${{ inputs.test_group }}.tar
+    #     rm hf_hub.tar
+
+    # Only run test reporting for pytest-based tests.
+    - name: Test Report
+      uses: dorny/test-reporter@v2
+      if: always() && (inputs.test_group == 'fast_check' || inputs.test_group == 'cpu_check' || inputs.test_group == 'quantization_32bit_logits' || inputs.test_group == 'model_arch_c5_3a30t' || inputs.test_group == 'bee_sample_tb_check')
+      with:
+        name: "${{ inputs.test_group }} Test Report"
+        path: "${{ runner.temp }}/*.xml"
+        reporter: java-junit
+        badge-title: ${{ inputs.test_group }}
+
+    # Upload bee eval results
+    - name: Upload eval results
+      if: ${{ inputs.test_group == 'bee_eval' && inputs.result_upload_branch != 'None' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: ./.github/actions/upload-results
+      with:
+        new_file: "${{ runner.temp }}/eval_results_summary.json"
+        file_path: "eval_data/summary"
+        commit_message: "Append eval results to JSON list"
+        gpu: ${{ inputs.device }}
+        target_branch: ${{ inputs.result_upload_branch }}
+
+    # Upload bee eval results to co-bench
+    - name: Upload eval results to co-bench
+      if: ${{ inputs.test_group == 'bee_eval' }}
+      run: |
+        if [ -f "${{ runner.temp }}/co-bench/gcp_upload.sh" ]; then
+          bash ${{ runner.temp }}/co-bench/gcp_upload.sh
+        fi
+
+    # Upload performance benchmarks
+    - name: Upload benchmark results
+      if: ${{ inputs.test_group == 'performance' && inputs.result_upload_branch != 'None' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: ./.github/actions/upload-results
+      with:
+        new_file: "${{ runner.temp }}/benchmark_results_summary.json"
+        file_path: "data/summary"
+        commit_message: "Append benchmark result to JSON list"
+        gpu: ${{ inputs.device }}
+        annotate: true
+        target_branch: ${{ inputs.result_upload_branch }}
+
+    - name: Upload model architecture results
+      if: ${{ inputs.test_group == 'quantization_32bit_logits' && inputs.result_upload_branch != 'None' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: ./.github/actions/upload-results
+      with:
+        new_file: "${{ runner.temp }}/unit_results_summary.json"
+        file_path: "unit_data/summary"
+        commit_message: "Append model architecture result to JSON list"
+        gpu: ${{ inputs.device }}
+        annotate: true
+        target_branch: ${{ inputs.result_upload_branch }}
+
+    - name: Upload bee samples summary
+      if: ${{ (inputs.test_group == 'model_arch_c5_3a30t' || inputs.test_group == 'bee_sample_tb_check') && inputs.result_upload_branch != 'None' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: ./.github/actions/upload-results
+      with:
+        new_file: "${{ runner.temp }}/bee_samples_c5-3a30t_fp8.json"
+        file_path: "bee_samples_data/${{ inputs.test_group }}"
+        commit_message: "Append ${{ inputs.test_group }} bee samples summary"
+        gpu: ${{ inputs.device }}
+        annotate: true
+        target_branch: ${{ inputs.result_upload_branch }}

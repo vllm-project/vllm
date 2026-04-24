@@ -90,6 +90,7 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Cohere2MoeForCausalLM": ("commandr", "Cohere2MoeForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
@@ -217,6 +218,14 @@ _EMBEDDING_MODELS = {
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "ErnieModel": ("ernie", "ErnieEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
+    # COHERE START
+    "HF_ColBERT": ("colbert", "ColBERTModel"),
+    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
+    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "Cohere2ForRewardModel": ("commandr", "Cohere2ForRewardModel"),
+    "CohereForRewardModel": ("cohere_reward", "CohereForRewardModel"),
+    "Cohere2VisionForRewardModel": ("cohere_reward", "Cohere2VisionForRewardModel"),
+    # COHERE END
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
@@ -545,6 +554,10 @@ _MULTIMODAL_MODELS = {
 _SPECULATIVE_DECODING_MODELS = {
     "ExtractHiddenStatesModel": ("extract_hidden_states", "ExtractHiddenStatesModel"),
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
+    # COHERE START
+    "EagleCohereForCausalLM": ("commandr_eagle", "EagleCohereForCausalLM"),
+    "EagleCohere2ForCausalLM": ("commandr_eagle", "EagleCohereForCausalLM"),
+    # COHERE END
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),

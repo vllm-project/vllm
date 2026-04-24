@@ -129,7 +129,12 @@ def test_models(
     )
 
 
-@multi_gpu_test(num_gpus=2)
+# cohere start
+### COHERE START
+# we need to force spawn or it will error out with cuda initialization error
+@multi_gpu_test(num_gpus=2, method="spawn")
+### COHERE END
+# cohere end
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, test_suite, extra_env",
     [

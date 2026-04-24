@@ -1,0 +1,147 @@
+name: Upload Results to Branch
+description: 'Uploads test results to a target branch for reporting'
+
+inputs:
+  new_file:
+    description: 'Path to the new JSON file to upload'
+    required: true
+  file_path:
+    description: 'Path to the existing JSON file in the target branch'
+    required: true
+  target_branch:
+    description: 'Branch to upload results to'
+    required: false
+    default: ci_dump
+  commit_message:
+    description: 'Commit message for the upload'
+    required: true
+  gpu:
+    required: true
+    type: string
+  annotate:
+    description: 'Whether to annotate the JSON file with metadata'
+    required: false
+    default: false
+runs:
+  using: composite
+  steps:
+    - name: Set up Git
+      shell: bash
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Checkout target branch
+      shell: bash
+      run: |
+        TARGET_BRANCH="${{ inputs.target_branch }}"
+        git stash
+        ORIGINAL_SHA=$(git rev-parse HEAD)
+        ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        echo "ORIGINAL_SHA=$ORIGINAL_SHA" >> "$GITHUB_ENV"
+        echo "ORIGINAL_BRANCH=$ORIGINAL_BRANCH" >> "$GITHUB_ENV"
+        git fetch origin "$TARGET_BRANCH"
+        git switch "$TARGET_BRANCH"
+        git reset --hard "origin/$TARGET_BRANCH"
+
+    - name: Annotate JSON file (if needed)
+      if: ${{ inputs.annotate == 'true' }}
+      shell: bash
+      run: |
+        COMMIT_SHA="${{ env.COMMIT_SHA }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        BRANCH=$([[ "${{ inputs.target_branch }}" == "gh-pages" ]] && echo "cohere" || echo "feature")
+        CI_RUN_ID="${{ github.run_id }}"
+        CI_RUN_ATTEMPT="${{ github.run_attempt }}"
+        CI_RUN_NUMBER="${{ github.run_number }}"
+        CI_WORKFLOW="${{ github.workflow }}"
+        CI_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+        jq --arg commit "$COMMIT_SHA" \
+          --arg timestamp "$TIMESTAMP" \
+          --arg branch "$BRANCH" \
+          --arg ci_run_id "$CI_RUN_ID" \
+          --arg ci_run_attempt "$CI_RUN_ATTEMPT" \
+          --arg ci_run_number "$CI_RUN_NUMBER" \
+          --arg ci_workflow "$CI_WORKFLOW" \
+          --arg ci_run_url "$CI_RUN_URL" \
+          '.commit = $commit
+          | .timestamp = $timestamp
+          | .branch = $branch
+          | .ci_run_id = $ci_run_id
+          | .ci_run_attempt = $ci_run_attempt
+          | .ci_run_number = $ci_run_number
+          | .ci_workflow = $ci_workflow
+          | .ci_run_url = $ci_run_url' \
+          "${{ inputs.new_file }}" > temp.json && mv temp.json "${{ inputs.new_file }}"
+
+    - name: Append new entry to JSON list and push
+      shell: bash
+      run: |
+        TARGET_BRANCH="${{ inputs.target_branch }}"
+        NEW_FILE="${{ inputs.new_file }}"
+        COMMIT_MSG="${{ inputs.commit_message }}"
+        GPU="${{ inputs.gpu }}"
+        if [ "$GPU" = "h100" ]; then
+          SUFFIX=""
+        else
+          SUFFIX="_$GPU"
+        fi
+        FILE="${{ inputs.file_path }}$SUFFIX.json"
+        FILE_DIR="$(dirname "$FILE")"
+        MAX_ATTEMPTS=3
+
+        switch_back() {
+          if [ "$ORIGINAL_BRANCH" = "HEAD" ]; then
+            git switch --detach "$ORIGINAL_SHA"
+          else
+            git switch "$ORIGINAL_BRANCH"
+          fi
+        }
+
+        append_and_commit() {
+          mkdir -p "$FILE_DIR"
+          if [ ! -s "$FILE" ]; then
+            echo "[]" > "$FILE"
+          fi
+          if [[ $(head -c 1 "$NEW_FILE") == "[" ]]; then
+            jq ". += $(cat "$NEW_FILE")" "$FILE" > temp.json && mv temp.json "$FILE"
+          else
+            jq ". += [$(cat "$NEW_FILE")]" "$FILE" > temp.json && mv temp.json "$FILE"
+          fi
+          git add "$FILE"
+          git commit -m "$COMMIT_MSG"
+        }
+
+        # First attempt: append, commit, pull --rebase, push (no race in common case)
+        append_and_commit
+        if git pull --rebase origin "$TARGET_BRANCH" && git push origin "$TARGET_BRANCH"; then
+          switch_back
+          exit 0
+        fi
+        # Push failed or rebase failed; reset so retry loop starts from clean state
+        git reset --hard "origin/$TARGET_BRANCH"
+
+        # Push was rejected (remote changed). Retry: fetch, reset, re-apply append, commit, push.
+        attempt=1
+        while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+          echo "Attempt $attempt of $MAX_ATTEMPTS (fetch, re-apply, push)"
+          git fetch origin "$TARGET_BRANCH"
+          git reset --hard "origin/$TARGET_BRANCH"
+          append_and_commit
+          if git push origin "$TARGET_BRANCH"; then
+            echo "Push succeeded."
+            break
+          fi
+          attempt=$((attempt + 1))
+          if [ "$attempt" -le "$MAX_ATTEMPTS" ]; then
+            echo "Push rejected, retrying after fetching latest..."
+          fi
+        done
+
+        if [ "$attempt" -gt "$MAX_ATTEMPTS" ]; then
+          echo "Failed to push after $MAX_ATTEMPTS retries."
+          exit 1
+        fi
+
+        switch_back

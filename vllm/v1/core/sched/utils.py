@@ -3,8 +3,12 @@
 import contextlib
 from collections.abc import Sequence
 
+import vllm.envs as envs  # cohere
+from vllm.logger import init_logger  # cohere
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
+
+logger = init_logger(__name__)  # cohere
 
 
 def _has_repeating_pattern(
@@ -91,6 +95,72 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     return [item for item in lst if item not in items_to_remove]
 
 
+# cohere start
+def _has_hit_token_repetition_limit(
+    request: Request,
+    repetition_limit: int,
+    max_sequence_length: int,
+) -> bool:
+    """Check if output tokens contain a repeating pattern.
+
+    Uses incremental streak tracking stored on the request object.
+    For each sequence length k (1 to max_sequence_length), tracks
+    how many consecutive positions ending at the latest token
+    satisfy tokens[i] == tokens[i - k]. When the streak reaches
+    (repetition_limit - 1) * k, a repeating pattern is detected.
+
+    On first call, bootstraps by scanning backwards. Subsequent
+    calls process only the latest token in O(max_sequence_length).
+    """
+    tokens = request.output_token_ids
+    num_tokens = len(tokens)
+    if num_tokens < repetition_limit:
+        return False
+
+    max_possible = num_tokens // repetition_limit
+    if max_sequence_length > max_possible:
+        max_sequence_length = max_possible
+
+    last_idx = num_tokens - 1
+    streaks = request._repetition_streaks
+
+    if streaks is None:
+        streaks = []
+        for k in range(1, max_sequence_length + 1):
+            streak = 0
+            i = last_idx
+            while i >= k and tokens[i] == tokens[i - k]:
+                streak += 1
+                i -= 1
+            streaks.append(streak)
+        request._repetition_streaks = streaks
+    else:
+        while len(streaks) < max_sequence_length:
+            k = len(streaks) + 1
+            streak = 0
+            i = last_idx - 1
+            while i >= k and tokens[i] == tokens[i - k]:
+                streak += 1
+                i -= 1
+            streaks.append(streak)
+        for k_idx in range(min(max_sequence_length, last_idx)):
+            k = k_idx + 1
+            if tokens[last_idx] == tokens[last_idx - k]:
+                streaks[k_idx] += 1
+            else:
+                streaks[k_idx] = 0
+
+    for k_idx in range(max_sequence_length):
+        k = k_idx + 1
+        if streaks[k_idx] >= (repetition_limit - 1) * k:
+            return True
+
+    return False
+
+
+# cohere end
+
+
 def check_stop(request: Request, max_model_len: int) -> bool:
     assert not request.pooling_params
 
@@ -109,6 +179,30 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
+
+    # cohere start
+    if (
+        envs.VLLM_REPETITION_LIMIT > 0
+        and envs.VLLM_REPETITION_MAX_SEQUENCE_LENGTH > 0
+        and _has_hit_token_repetition_limit(
+            request,
+            envs.VLLM_REPETITION_LIMIT,
+            envs.VLLM_REPETITION_MAX_SEQUENCE_LENGTH,
+        )
+    ):
+        logger.error(
+            "Request %s hit token repetition limit "
+            "(repetition_limit=%d, max_sequence_length=%d, "
+            "num_output_tokens=%d). Stopping generation.",
+            request.request_id,
+            envs.VLLM_REPETITION_LIMIT,
+            envs.VLLM_REPETITION_MAX_SEQUENCE_LENGTH,
+            request.num_output_tokens,
+        )
+        request.status = RequestStatus.FINISHED_REPETITION
+        return True
+    # cohere end
+
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens

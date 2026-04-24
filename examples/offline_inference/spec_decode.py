@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 
 from transformers import AutoTokenizer
 
@@ -43,21 +44,24 @@ def get_custom_mm_prompts(num_prompts):
 def parse_args():
     parser = FlexibleArgumentParser()
     add_dataset_parser(parser)
-    parser.add_argument("--test", action="store_true")
     parser.add_argument(
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model", "ngram-eagle"],
     )
     parser.add_argument("--backend", type=str, default="openai")
     parser.add_argument("--num-spec-tokens", type=int, default=2)
+    parser.add_argument(
+        "--num-speculative-tokens-per-method",
+        type=str,
+        default='{"ngram": 2, "eagle": 2}',
+    )
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-chunked-prefill", action="store_true")
-    parser.add_argument("--max-model-len", type=int, default=16384)
     parser.add_argument("--temp", type=float, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
@@ -66,12 +70,13 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--draft-model", type=str, default=None)
+    parser.add_argument("--allowed-local-media-path", type=str, default="")
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--disable-padded-drafter-batch", action="store_true")
     parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--parallel-drafting", action="store_true")
-    parser.add_argument("--allowed-local-media-path", type=str, default="")
+    parser.add_argument("--test", action="store_true")
     return parser.parse_args()
 
 
@@ -136,6 +141,24 @@ def main(args):
             "max_model_len": args.max_model_len,
             "parallel_drafting": args.parallel_drafting,
         }
+    elif args.method == "ngram-eagle":  # cohere
+        num_speculative_tokens_per_method = json.loads(
+            args.num_speculative_tokens_per_method
+        )
+        eagle_dir = args.eagle_dir
+        if eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+        args.num_spec_tokens = max(
+            num_speculative_tokens_per_method["ngram"],
+            num_speculative_tokens_per_method["eagle"],
+        )
+        speculative_config = {
+            "method": "ngram-eagle",
+            "model": eagle_dir,
+            "num_speculative_tokens_per_method": num_speculative_tokens_per_method,
+            "prompt_lookup_max": args.prompt_lookup_max,
+            "prompt_lookup_min": args.prompt_lookup_min,
+        }
     elif args.method == "mtp":
         speculative_config = {
             "method": "mtp",
@@ -144,24 +167,48 @@ def main(args):
     else:
         raise ValueError(f"unknown method: {args.method}")
 
+    # COHERE STARTS
+    # Pick up hardware-specific overrides (e.g. mm_encoder_attn_backend for B200)
+    # from VLLM_HARDWARE_PROFILE_ARGS set by setup_tests.sh.
+    # Only extract keys that are hardware-specific; serving-oriented defaults
+    # (max_num_batched_tokens, max_num_seqs, etc.) are left to the LLM() call.
+    import os
+
+    from tests.cohere.test_utils_engine_args import parse_engine_args_to_dict
+
+    _HARDWARE_PROFILE_KEYS = {"mm_encoder_attn_backend"}
+    _hw_args = os.environ.get("VLLM_HARDWARE_PROFILE_ARGS", "")
+    _parsed = parse_engine_args_to_dict(_hw_args) if _hw_args else {}
+    cohere_overrides = {k: _parsed[k] for k in _HARDWARE_PROFILE_KEYS if k in _parsed}
+    # COHERE ENDS
+
     llm = LLM(
         model=model_dir,
         trust_remote_code=True,
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
+        enable_prefix_caching=True,  # cohere
         enforce_eager=args.enforce_eager,
         gpu_memory_utilization=args.gpu_memory_utilization,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=args.max_model_len,
+        max_model_len=16384,  # cohere
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
-        max_num_seqs=args.max_num_seqs,
+        max_num_seqs=args.max_num_seqs if args.max_num_seqs is not None else 16,
         allowed_local_media_path=args.allowed_local_media_path,
+        **cohere_overrides,  # cohere
     )
 
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
-    if args.backend == "openai-chat":
+    sampling_params = SamplingParams(
+        temperature=args.temp,
+        max_tokens=args.output_len,
+    )
+    if (
+        args.backend == "openai-chat"
+        or args.custom_mm_prompts
+        or args.dataset_name == "custom_mm"
+    ):
         outputs = llm.chat(llm_prompts, sampling_params=sampling_params)
     else:
         outputs = llm.generate(
@@ -178,6 +225,7 @@ def main(args):
             else:
                 print(f"prompt: {prompts[i]}")
             print(f"generated text: {output.outputs[0].text}")
+            print(f"num of generated tokens: {len(output.outputs[0].token_ids)}")
             print("-" * 50)
 
     metrics = llm.get_metrics()
@@ -203,6 +251,10 @@ def main(args):
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        elif metric.name == "vllm:generation_tokens":
+            assert isinstance(metric, Counter)
+            print(f"num generation tokens: {metric.value}")
+            total_tokens_generated = metric.value
 
     print("-" * 50)
     print(f"total_num_output_tokens: {total_num_output_tokens}")
@@ -211,6 +263,14 @@ def main(args):
     print(f"num_accepted_tokens: {num_accepted_tokens}")
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     print(f"mean acceptance length: {acceptance_length:.2f}")
+    num_tokens_generated_without_sd = total_tokens_generated - (
+        num_drafts + num_accepted_tokens
+    )
+    seq_normalized_acceptance_length = (total_tokens_generated) / (
+        num_drafts + num_tokens_generated_without_sd
+    )
+    print(f"num_tokens_generated_without_sd: {num_tokens_generated_without_sd}")
+    print(f"seq normalized acceptance length: {seq_normalized_acceptance_length:.2f}")
     print("-" * 50)
 
     # print acceptance at each token position

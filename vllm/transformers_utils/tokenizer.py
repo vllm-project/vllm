@@ -18,4 +18,19 @@ def __getattr__(name: str):
 
         return get_tokenizer
 
+    # cohere start
+    if name == "init_tokenizer_from_configs":
+        from vllm.tokenizers import cached_tokenizer_from_config
+
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.init_tokenizer_from_configs` "
+            "has been moved to `vllm.tokenizers.cached_tokenizer_from_config`. "
+            "The old name will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return cached_tokenizer_from_config
+    # cohere end
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

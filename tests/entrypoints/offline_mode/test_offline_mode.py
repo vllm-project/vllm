@@ -11,6 +11,7 @@ import urllib3
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform  # cohere
 
 MODEL_CONFIGS = [
     {
@@ -53,6 +54,15 @@ MODEL_CONFIGS = [
     #     "tensor_parallel_size": 1,
     # },
 ]
+
+# cohere start
+# COHERE start
+# temporarily disable encoder models on rocm
+if current_platform.is_rocm():
+    MODEL_CONFIGS.pop()
+# COHERE end
+
+# cohere end
 
 
 @pytest.fixture(scope="module")

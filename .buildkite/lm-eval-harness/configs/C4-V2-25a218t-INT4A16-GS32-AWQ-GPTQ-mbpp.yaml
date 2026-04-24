@@ -1,0 +1,9 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m nm-testing/Meta-Llama-3-8B-Instruct-W8-Channel-A8-Dynamic-Per-Token-Test -b "auto" -l 250 -f 5 -t 1
+model_name: "/root/engines/c4-v2-25a218t_int4a16_gs32_awq_gptq"
+tasks:
+- name: "mbpp"
+  metrics:
+  - name: "pass_at_1,none"
+    value: 0.70
+limit: null
+max_num_batched_tokens: 128

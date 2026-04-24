@@ -1,0 +1,13 @@
+name: slack-notify
+description: "Post a Slack message when the step/job before me fails"
+inputs:
+  title:
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - uses: rtCamp/action-slack-notify@v2
+      env:
+        SLACK_USERNAME: vLLM Cohere CI Bot
+        SLACK_TITLE: ${{ inputs.title }}
+        SLACK_WEBHOOK: ${{ env.SLACK_WEBHOOK }}

@@ -1,0 +1,121 @@
+name: Auto-squash cohere branch
+
+on:
+  push:
+    branches:
+      - cohere
+
+  # Allow manual trigger with custom base commit
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Branch to squash (defaults to current branch)'
+        required: false
+        type: string
+      base_commit:
+        description: 'Base commit to squash onto (optional, defaults to merge-base)'
+        required: false
+        type: string
+
+jobs:
+  squash:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for merge-base
+          ref: ${{ inputs.source_branch || github.ref_name }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch all branches
+        run: |
+          git fetch --all
+
+      - name: Create squashed branch
+        env:
+          # CONFIGURE THIS: Set to the upstream vLLM commit where cohere branch diverged
+          # Find it with: git merge-base origin/cohere vllm-upstream/main
+          # Or set to a specific commit SHA / tag from upstream vLLM
+          UPSTREAM_BASE: ${{ vars.SQUASH_BASE_COMMIT || 'vllm-upstream/main' }}
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+        run: |
+          # Determine base commit
+          if [ -n "${{ github.event.inputs.base_commit }}" ]; then
+            BASE_COMMIT="${{ github.event.inputs.base_commit }}"
+            echo "Using manually specified base: $BASE_COMMIT"
+          else
+            # Add upstream vLLM as remote if not exists
+            if ! git remote | grep -q "^vllm-upstream$"; then
+              git remote add vllm-upstream https://github.com/vllm-project/vllm.git
+            fi
+            git fetch vllm-upstream
+
+            # Find merge base between source branch and upstream
+            BASE_COMMIT=$(git merge-base "$SOURCE_BRANCH" vllm-upstream/main 2>/dev/null || \
+                         git merge-base "$SOURCE_BRANCH" vllm-upstream/master 2>/dev/null || \
+                         echo "")
+
+            # Fallback to configured base or environment variable
+            if [ -z "$BASE_COMMIT" ] && [ -n "$UPSTREAM_BASE" ]; then
+              echo "Using configured base: $UPSTREAM_BASE"
+              BASE_COMMIT="$UPSTREAM_BASE"
+            fi
+
+            # Final fallback
+            if [ -z "$BASE_COMMIT" ]; then
+              echo "ERROR: Could not determine base commit"
+              echo "Please set SQUASH_BASE_COMMIT repository variable or specify manually"
+              exit 1
+            fi
+
+            echo "Detected base commit: $BASE_COMMIT"
+          fi
+
+          # Get commit count for the squash message
+          COMMIT_COUNT=$(git rev-list --count "${BASE_COMMIT}..${SOURCE_BRANCH}")
+          echo "Squashing $COMMIT_COUNT commits from $SOURCE_BRANCH"
+
+          # Determine target branch name (source-squashed)
+          TARGET_BRANCH="${SOURCE_BRANCH}-squashed"
+          echo "Target branch: $TARGET_BRANCH"
+
+          # Create/reset squashed branch to base commit
+          git checkout -B "$TARGET_BRANCH" "$BASE_COMMIT"
+
+          # Squash all commits from source branch
+          git merge --squash "$SOURCE_BRANCH"
+
+          # Create commit message with list of original commits
+          cat > /tmp/commit-msg <<EOF
+          Squashed $COMMIT_COUNT commits from $SOURCE_BRANCH branch
+
+          This is an auto-generated squashed version of the $SOURCE_BRANCH branch.
+          Base commit: $BASE_COMMIT
+
+          Original commits:
+          $(git log --oneline "${BASE_COMMIT}..${SOURCE_BRANCH}")
+          EOF
+
+          # Commit the squashed changes
+          git commit -F /tmp/commit-msg
+
+          echo "Squashed branch created successfully"
+          git log --oneline -5
+
+          # Export TARGET_BRANCH for subsequent steps
+          echo "TARGET_BRANCH=$TARGET_BRANCH" >> "$GITHUB_ENV"
+
+      - name: Push squashed branch
+        run: |
+          git push -f origin "$TARGET_BRANCH"
+
+      - name: Summary
+        run: |
+          echo "✅ Successfully updated $TARGET_BRANCH branch"
+          echo "View at: ${{ github.server_url }}/${{ github.repository }}/tree/$TARGET_BRANCH"

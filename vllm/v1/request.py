@@ -156,6 +156,10 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        # cohere start
+        self._repetition_streaks: list[int] | None = None
+        # cohere end
+
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 

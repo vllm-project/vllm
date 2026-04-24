@@ -362,6 +362,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             local_expert_offset=layer.ep_rank * layer.local_num_experts,
             local_num_experts=layer.local_num_experts,
             routing_method_type=layer.routing_method_type,
+            norm_topk_prob=layer.renormalize,  # cohere
         )
 
     def forward_monolithic_cpu(

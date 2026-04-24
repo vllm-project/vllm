@@ -1,0 +1,8 @@
+# Configuration for actionlint
+# https://github.com/rhysd/actionlint/blob/main/docs/config.md
+
+self-hosted-runner:
+  # Custom runner labels used in this repository
+  labels:
+    - depot-ubuntu-24.04  # Depot.dev remote build runner
+    - large               # GitHub larger runner (16-core, 64 GB RAM)

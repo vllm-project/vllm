@@ -1,0 +1,166 @@
+# Run the image build and feature-test workflow
+# Can be triggered manually or via workflow_call for feature coverage only.
+# For eval suites (lm_eval, bee_eval) use build-and-eval.yaml.
+name: build-and-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_image_tag:
+        required: false
+        type: string
+        default: ''
+        description: 'Docker image tag to use for tests (defaults to current commit SHA)'
+      model_path:
+        required: false
+        type: string
+        default: 'gs://cohere-model-efficiency-ci/engines/'
+        description: 'GCS prefix for model checkpoints (prefix + model_name)'
+      device:
+        type: choice
+        description: 'Device type'
+        required: true
+        default: all
+        options:
+          - all
+          - cpu
+          - h100
+          - mi300x
+          - a100
+          - b200
+          - gb200
+      features:
+        required: false
+        type: choice
+        default: 'all'
+        description: 'Feature tests to run (all excludes fast_check). cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+        options:
+          - cpu_check
+          - fast_check
+          - model_arch
+          - quantization
+          - GG_TB
+          - speculative_decoding
+          - vision
+          - all
+      hardware_profiles_override:
+        required: false
+        type: string
+        default: ''
+        description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      result_upload_branch:
+        type: choice
+        default: None
+        required: false
+        description: 'Branch to upload reporting results to (`None` disables result uploads)'
+        options:
+          - None
+          - ci_dump
+          - gh-pages
+  workflow_call:
+    inputs:
+      docker_image_tag:
+        required: false
+        type: string
+        default: ''
+        description: 'Docker image tag to use for tests (defaults to current commit SHA)'
+      model_path:
+        required: false
+        type: string
+        default: 'gs://cohere-model-efficiency-ci/engines/'
+        description: 'GCS prefix for model checkpoints (prefix + model_name)'
+      device:
+        required: false
+        type: string
+        default: all
+      features:
+        required: false
+        type: string
+        default: 'all'
+        description: 'Feature tests to run (none, cpu_check, fast_check, model_arch, quantization, GG_TB, speculative_decoding, vision, all). Note: all excludes fast_check. cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+      hardware_profiles_override:
+        required: false
+        type: string
+        default: ''
+        description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      result_upload_branch:
+        required: false
+        type: string
+        default: 'None'
+        description: 'Branch to upload reporting results to (`None` disables result uploads)'
+    secrets:
+      HF_TOKEN:
+        required: true
+      SLACK_WEBHOOK:
+        required: true
+      CO_API_KEY_STAGING:
+        required: true
+      BEE_DEPLOY_KEY:
+        required: false
+
+jobs:
+  # Pin the branch to a commit SHA so that a push mid-run cannot cause the
+  # build and test steps to diverge on different commits.
+  resolve-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - id: resolve
+        run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: resolve-commit
+    if: ${{ inputs.docker_image_tag == '' }}
+    uses: ./.github/workflows/build-and-push.yaml
+    secrets: inherit
+    with:
+        git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+        incremental_build: true
+        providers: ${{ inputs.features == 'cpu_check' && '["cpu"]' || '["nvidia","amd","cpu"]' }}
+
+  determine-devices:
+    needs: resolve-commit
+    runs-on: ubuntu-latest
+    outputs:
+      devices: ${{ steps.set-devices.outputs.devices }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+
+      - id: set-devices
+        run: |
+          if [ "${{ inputs.device }}" == "all" ]; then
+            # Derive the full device list from runner_map.json (single source of truth)
+            devices=$(jq -r 'keys | map(select(. != "_comment")) | @json' tests/cohere/configs/runner_map.json)
+            echo "devices=$devices" >> "$GITHUB_OUTPUT"
+          else
+            echo "devices=[\"${{ inputs.device }}\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  dispatcher:
+    needs: [resolve-commit, build-and-push, determine-devices]
+    if: ${{ always() && !cancelled() && (needs.build-and-push.result == 'success' || needs.build-and-push.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJson(needs.determine-devices.outputs.devices) }}
+    uses: ./.github/workflows/dispatcher.yaml
+    secrets:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+        BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
+    with:
+        git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+        result_upload_branch: ${{ inputs.result_upload_branch }}
+        features: ${{ inputs.features }}
+        benchmarks: none
+        device: ${{ matrix.device }}
+        hardware_profiles_override: ${{ inputs.hardware_profiles_override }}
+        docker_commit: ${{ inputs.docker_image_tag }}
+        model_path: ${{ inputs.model_path }}

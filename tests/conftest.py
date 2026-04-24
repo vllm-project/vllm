@@ -1631,3 +1631,30 @@ def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+# cohere start
+# When run in CI, generate XML reports for visualization.
+def pytest_configure(config):
+    from datetime import datetime
+
+    output_dir = os.getenv("OUTPUT_DIR")
+    if output_dir is None:
+        return
+
+    # Generate a timestamped report name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Use TEST_DATA_FILE name if available, otherwise use generic name
+    test_data_file = os.getenv("TEST_DATA_FILE")
+    if test_data_file:
+        base_name = pathlib.Path(test_data_file).stem
+        report_file = f"{output_dir}/report_{base_name}_{timestamp}.xml"
+    else:
+        report_file = f"{output_dir}/report_{timestamp}.xml"
+
+    # Set the `--junit-xml` path dynamically
+    config.option.xmlpath = report_file
+
+
+# cohere end

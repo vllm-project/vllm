@@ -7,9 +7,6 @@
     "PYTHON_VERSION": {
       "default": "3.12"
     },
-    "UBUNTU_VERSION": {
-      "default": "22.04"
-    },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
     },
@@ -40,15 +37,6 @@
     "NVCC_THREADS": {
       "default": "8"
     },
-    "SCCACHE_BUCKET_NAME": {
-      "default": "vllm-build-sccache"
-    },
-    "SCCACHE_REGION_NAME": {
-      "default": "us-west-2"
-    },
-    "SCCACHE_S3_NO_CREDENTIALS": {
-      "default": "0"
-    },
     "vllm_target_device": {
       "default": "cuda"
     },
@@ -68,7 +56,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.6"
+      "default": "0.6.7.dev20260406"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
@@ -86,7 +74,7 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.7"
+      "default": ">=0.15.3"
     }
   }
 }

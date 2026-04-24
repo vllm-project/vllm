@@ -105,6 +105,33 @@ class GPTQMarlinState(Enum):
     READY = enum.auto()
 
 
+# cohere start
+def _normalize_weight_actorder(sd: dict | None) -> dict | None:
+    """Map ``actorder="weight"``/``"static"`` to ``None``. They produce
+    byte-identical on-disk tensor layouts (llm-compressor inverse-permutes
+    weights back to natural order at save time and emits no ``weight_g_idx``),
+    so schemes differing only in this field are equivalent for MoE dispatch.
+    """
+    if sd is None:
+        return sd
+    w = sd.get("weights")
+    if w is None or not w.actorder:
+        return sd
+    # Coerce plain-string values (stored via `use_enum_values=True`) back to
+    # the enum so Aliasable ``__eq__`` handles the static↔weight alias.
+    # NOTE: use ``==`` (not ``!=``). ``Aliasable`` overrides ``__eq__`` but
+    # not ``__ne__``, so ``!=`` falls through to ``str.__ne__`` and would
+    # incorrectly report ``"static" != "weight"`` as ``True``.
+    if ActivationOrdering(w.actorder) == ActivationOrdering.WEIGHT:
+        # Shallow-copied dict with "weights" replaced by a new QuantizationArgs
+        # whose actorder is None. `sd` and the original `w` are left untouched
+        # because both may be cached / shared by other layers.
+        return {**sd, "weights": w.model_copy(update={"actorder": None})}
+    return sd
+
+
+# cohere end
+
 __all__ = [
     "CompressedTensorsMoEMethod",
     "CompressedTensorsW8A8Fp8MoEMethod",
@@ -130,10 +157,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             layer_name + proj_name
             for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
         ]
+
+        # cohere start
         # TODO: refactor this to use expert_mapping and check all layer numbers
+        # cohere: normalize actorder="weight"/"static" -> None (layout-equivalent
+        # on disk) so mixed-scheme MoE ckpts (e.g. up=AWQ/down=GPTQ-static) pass
+        # the equality check below. See _normalize_weight_actorder for details.
         all_scheme_dicts = [
-            quant_config.get_scheme_dict(layer, name) for name in unfused_names
+            _normalize_weight_actorder(quant_config.get_scheme_dict(layer, name))
+            for name in unfused_names
         ]
+        # cohere end
+
         scheme_dict = all_scheme_dicts.pop()
 
         # multiple schemes found
@@ -156,6 +191,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
+            assert (
+                weight_quant is not None
+            )  # cohere, narrowed by _is_wNa16_group_channel
+
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
 
@@ -1300,16 +1339,20 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # In the case where we have actorder/g_idx,
-        # we do not partition the w2 scales
-        load_full_w2 = self.actorder and self.group_size != -1
+        # cohere start
+
+        # Only actorder="group" requires runtime g_idx permutation and
+        # therefore full-K w2 scales. "weight" reorders statically at quant
+        # time, so TP sharding of scales and is_k_full work normally.
+        load_full_w2 = (self.actorder == "group") and self.group_size != -1
         w2_scales_size = (
             intermediate_size_full if load_full_w2 else intermediate_size_per_partition
         )
 
-        self.is_k_full = (not self.actorder) or (
+        self.is_k_full = (self.actorder != "group") or (
             intermediate_size_per_partition == intermediate_size_full
         )
+        # cohere end
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
@@ -2396,11 +2439,13 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # encode and reorder weight tensors, and get the layout to pass to
         # the grouped gemm kernel. `b_strides1/2` specifies the entire layout
         convert_packed_uint4b8_to_signed_int4_inplace(layer.w13_weight_packed)
+        torch.cuda.synchronize()
         w13_weight_shuffled, self.b_strides1 = (
             ops.cutlass_encode_and_reorder_int4b_grouped(layer.w13_weight_packed)
         )
         replace_parameter(layer, "w13_weight_packed", w13_weight_shuffled)
         convert_packed_uint4b8_to_signed_int4_inplace(layer.w2_weight_packed)
+        torch.cuda.synchronize()
         w2_weight_shuffled, self.b_strides2 = (
             ops.cutlass_encode_and_reorder_int4b_grouped(layer.w2_weight_packed)
         )

@@ -187,6 +187,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
+# cohere start
+# Persist the built wheel so it can be extracted for upload to Artifact Registry
+COPY --from=vllm-build /vllm-workspace/dist /app/cohere/dist
+# cohere end
+
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/

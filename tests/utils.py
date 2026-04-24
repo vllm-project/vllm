@@ -1504,14 +1504,18 @@ def multi_gpu_marks(*, num_gpus: int):
     return [test_selector, test_skipif]
 
 
-def multi_gpu_test(*, num_gpus: int):
+# cohere start
+### COHERE
+# plumb through method to choose how to create new process for each test.
+def multi_gpu_test(*, num_gpus: int, method: Literal["spawn", "fork"] | None = None):
+    # cohere end
     """
     Decorate a test to be run only when multiple GPUs are available.
     """
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = create_new_process_for_each_test()(f)
+        func = create_new_process_for_each_test(method=method)(f)  # cohere
         for mark in reversed(marks):
             func = mark(func)
 

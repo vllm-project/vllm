@@ -50,7 +50,13 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def update_state(self, batch_update: BatchUpdate | None):
+    # cohere start
+    def update_state(
+        self,
+        batch_update: BatchUpdate | None,
+        spec_token_ids: Sequence[Sequence[int]] | None = None,
+    ) -> None:
+        # cohere end
         if not batch_update:
             return
 
@@ -98,7 +104,9 @@ class MinPLogitsProcessor(LogitsProcessor):
                 self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
             self.min_p.unsqueeze_(1)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+    def apply(
+        self, logits: torch.Tensor, predict_bonus_token: bool
+    ) -> torch.Tensor:  # cohere
         if not self.min_p_count:
             return logits
 
@@ -132,7 +140,13 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         outcome of argmax in greedy sampling."""
         return False
 
-    def update_state(self, batch_update: BatchUpdate | None):
+    # cohere start
+    def update_state(
+        self,
+        batch_update: BatchUpdate | None,
+        spec_token_ids: Sequence[Sequence[int]] | None = None,
+    ) -> None:
+        # cohere end
         needs_update = process_dict_updates(
             self.biases, batch_update, lambda params, _, __: params.logit_bias or None
         )
@@ -158,7 +172,9 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
         ).to(device=self.device, non_blocking=True)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+    def apply(
+        self, logits: torch.Tensor, predict_bonus_token: bool
+    ) -> torch.Tensor:  # cohere
         if self.biases:
             logits[self.logits_slice] += self.bias_tensor
         return logits
@@ -197,7 +213,13 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             return None
         return min_tokens, output_tok_ids, params.all_stop_token_ids
 
-    def update_state(self, batch_update: BatchUpdate | None):
+    # cohere start
+    def update_state(
+        self,
+        batch_update: BatchUpdate | None,
+        spec_token_ids: Sequence[Sequence[int]] | None = None,
+    ) -> None:
+        # cohere end
         needs_update = process_dict_updates(
             self.min_toks, batch_update, self.add_request
         )
@@ -231,7 +253,9 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
         ).to(device=self.device, non_blocking=True)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+    def apply(
+        self, logits: torch.Tensor, predict_bonus_token: bool
+    ) -> torch.Tensor:  # cohere
         if self.min_toks:
             # Inhibit EOS token for requests which have not reached min length
             logits.index_put_(self.logits_slice, self.neg_inf_tensor)
@@ -291,6 +315,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return logits
 
 
+# cohere start
 class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     """Limits the number of tokens allowed inside a 'thinking' section."""
 
@@ -299,6 +324,12 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     ):
         reasoning_config = vllm_config.reasoning_config
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.in_spec_mode = False
+        if vllm_config.speculative_config:
+            self.in_spec_mode = True
+            self.num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
+        else:
+            self.num_spec_tokens = 0
 
         # Check if thinking is enabled
         self.is_enabled = reasoning_config is not None
@@ -326,11 +357,31 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         #                               incremental processing
         self._state: dict[int, dict[str, Any]] = {}
 
+        self.cu_num_tokens: dict[int, int] = {}
+
+        self.spec_token_ids: list[list[int]] = []
+
         # Preallocate reusable tensors
-        self.mask = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
-        self.force_token_ids = torch.full(
-            (max_num_reqs,), -1, dtype=torch.long, device=device
-        )
+        if self.num_spec_tokens > 0:
+            self.mask = torch.zeros(
+                max_num_reqs * (self.num_spec_tokens + 1),
+                dtype=torch.bool,
+                device=device,
+            )
+        else:
+            self.mask = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+
+        if self.num_spec_tokens > 0:
+            self.force_token_ids = torch.full(
+                (max_num_reqs * (self.num_spec_tokens + 1),),
+                -1,
+                dtype=torch.long,
+                device=device,
+            )
+        else:
+            self.force_token_ids = torch.full(
+                (max_num_reqs,), -1, dtype=torch.long, device=device
+            )
 
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
@@ -357,7 +408,13 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             last_end = -1
             in_think = False
             think_count = 0
+            start_thinking = -1
+            countdown = thinking_token_budget
+            continue_thinking = False
         else:
+            start_thinking = -1
+            countdown = thinking_token_budget
+            continue_thinking = False
             last_start = self._find_last_sequence_index(
                 prompt_tok_ids, self.reasoning_start_token_ids
             )
@@ -369,30 +426,94 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 think_count = len(prompt_tok_ids) - (
                     last_start + len(self.reasoning_start_token_ids)
                 )
+                start_thinking = len(prompt_tok_ids) - think_count - 1
+                countdown -= think_count
+                continue_thinking = True
             else:
                 think_count = 0
 
         return {
             "in_think": in_think,  # Currently in thinking mode
             "in_end": in_think and thinking_token_budget == 0,
-            "check_count_down": thinking_token_budget,
+            "check_count_down": countdown,  # Steps until next think start/end parsing
             "think_count": think_count,  # Number of tokens in thinking section
             "end_count": 0,  # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "thinking_token_budget": thinking_token_budget,
             "prev_output_length": 0,
+            "spec_token_ids": [],
+            "force_index": [],
+            "start_thinking": start_thinking,
+            "end_thinking": -1,
+            "in_spec_mode": False,
+            "bonus_token_forced": False,
+            "continue_thinking": continue_thinking,
             # Track previous output length for incremental updates
         }
 
     def _update_think_state(self, state: dict[str, Any]):
         """Updates the state based on newly generated output tokens."""
-        if not state.get("in_end", False) and state.get("check_count_down", 0) > 0:
-            state["check_count_down"] -= 1
+        # Skip if no thinking budget (missing key can happen for moved/empty state)
+        if state.get("thinking_token_budget", -1) == -1:
+            return
+        if len(self.reasoning_end_token_ids) == 0:
+            state["thinking_token_budget"] = -1
+            state["in_end"] = False
+            state["force_index"] = []
             return
 
+        if state["start_thinking"] == -1:
+            start_thinking = self._find_last_sequence_index(
+                state.get("output_tok_ids", []), self.reasoning_start_token_ids
+            )
+            state["start_thinking"] = start_thinking
+
+        if state["end_thinking"] == -1:
+            end_thinking = self._find_last_sequence_index(
+                state.get("output_tok_ids", []), self.reasoning_end_token_ids
+            )
+            state["end_thinking"] = end_thinking
+
+        if state["start_thinking"] == -1:
+            return
+
+        if state["continue_thinking"]:
+            sampled_tokens_from_previous_step = len(
+                state.get("output_tok_ids", [])
+            ) - state.get("prev_output_length", 0)
+        else:
+            if state["prev_output_length"] == 0:
+                sampled_tokens_from_previous_step = len(
+                    state.get("output_tok_ids", [])
+                ) - len(self.reasoning_start_token_ids)
+            else:
+                sampled_tokens_from_previous_step = (
+                    len(state.get("output_tok_ids", [])) - state["prev_output_length"]
+                )
+        current_step_countdown = (
+            state["check_count_down"] - sampled_tokens_from_previous_step
+        )
+        predicted_countdown = current_step_countdown - len(state["spec_token_ids"]) - 1
+
+        # We only proceed further if we have counted down the thinking budget
+        # to 0 or less and when we are in the "in think" mode.
+        if (
+            not state.get("in_end", False)
+            and predicted_countdown >= 0
+            and state["start_thinking"] > -1
+        ):
+            state["check_count_down"] = current_step_countdown
+            state["prev_output_length"] = len(state.get("output_tok_ids", []))
+            return
         output = state.get("output_tok_ids", [])
         if not output:
+            # When in_end was set at init (budget=0, prompt already in think),
+            # we must force the first generated token to be the end token;
+            # otherwise apply() sees in_end=True but force_index=[] and
+            # allows an extra thinking token.
+            if state.get("in_end", False):
+                state["force_index"] = [0]
             return
 
         # Track previous output length for incremental processing
@@ -400,35 +521,52 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         current_length = len(output)
 
         if current_length <= prev_length:
+            if state.get("in_end", False):
+                remaining_budget = state["thinking_token_budget"] - state["think_count"]
+                spec_len = len(state["spec_token_ids"])
+                if spec_len > 0:
+                    if 0 < remaining_budget < spec_len:
+                        state["force_index"].extend(range(remaining_budget, spec_len))
+                    elif remaining_budget <= 0:
+                        state["force_index"].extend(range(spec_len))
+                    else:
+                        state["force_index"] = [spec_len]
+                else:
+                    state["force_index"] = [0]
             return
 
         # Process only newly added tokens
-        new_tokens = output[prev_length:]
         state["prev_output_length"] = current_length
 
         # Check if new tokens contain think start or end sequences
         start_len = len(self.reasoning_start_token_ids)
-        end_len = len(self.reasoning_end_token_ids)
+        absolute_start_pos = state["start_thinking"]
 
-        # Look for think sequences in recent tokens (including boundary)
-        # Check overlapping regions where sequences might span boundaries
-        check_start_idx = max(0, prev_length - max(start_len, end_len) + 1)
-        recent_tokens = output[check_start_idx:]
-
-        # Find any think start/end sequences in recent tokens
-        recent_start_pos = self._find_last_sequence_index(
-            recent_tokens, self.reasoning_start_token_ids
-        )
-        recent_end_pos = self._find_last_sequence_index(
-            recent_tokens, self.reasoning_end_token_ids
-        )
+        if state["continue_thinking"] and state["end_thinking"] > -1:
+            absolute_end_pos = state["end_thinking"] + len(
+                state.get("prompt_tok_ids") or []
+            )
+        else:
+            absolute_end_pos = state["end_thinking"]
 
         # Update state based on recent sequences
+        # This is the case where we are in end mode, but the rejection sampler
+        # rejected a token before the end token,
+        # so we need to go back to think mode and wait for the next end token
+        # eg with 999: [2,4,5,999] -> [3,-1,-1,-1]
+        if state["in_end"]:
+            new_tokens = output[prev_length:]
+            stopping_thinking = self.reasoning_end_token_ids[0] in new_tokens
+            if not stopping_thinking:
+                state["in_think"] = True
+                state["in_end"] = False
+                state["end_count"] = 0
+                state["bonus_token_forced"] = False
+
         if not state["in_end"]:
-            if recent_start_pos >= 0 and recent_end_pos >= 0:
-                if recent_start_pos > recent_end_pos:
+            if absolute_start_pos >= 0 and absolute_end_pos >= 0:
+                if absolute_start_pos > absolute_end_pos:
                     # Case: ...<end>...<start>... - entering think mode
-                    absolute_start_pos = check_start_idx + recent_start_pos
                     new_think_count = current_length - (absolute_start_pos + start_len)
                     state["in_think"] = True
                     state["think_count"] = new_think_count
@@ -436,41 +574,87 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     # Case: ...<start>...<end>... - exiting think mode
                     state["in_think"] = False
                     state["think_count"] = 0
-            elif recent_start_pos >= 0:
+
+            elif absolute_start_pos >= 0 and not state["continue_thinking"]:
                 # Found think start - entering think mode
-                absolute_start_pos = check_start_idx + recent_start_pos
                 new_think_count = current_length - (absolute_start_pos + start_len)
                 state["in_think"] = True
                 state["think_count"] = new_think_count
-            elif recent_end_pos >= 0:
+
+            elif absolute_end_pos >= 0:
                 # Found think end - exiting think mode
                 state["in_think"] = False
                 state["think_count"] = 0
+
             elif state["in_think"]:
                 # Continue thinking mode, increment count by new tokens
-                state["think_count"] += len(new_tokens)
-
+                prompt_tok_ids = state.get("prompt_tok_ids") or []
+                think_tokens_in_prompt = len(prompt_tok_ids) - (
+                    absolute_start_pos + start_len
+                )
+                state["think_count"] = (
+                    len(state["output_tok_ids"]) + think_tokens_in_prompt
+                )
             # Set countdown based on current state
             if state["in_think"]:
                 remaining_budget = max(
                     0, state["thinking_token_budget"] - state["think_count"]
                 )
-                state["check_count_down"] = max(0, remaining_budget - 1)
+                state["check_count_down"] = remaining_budget
             else:
                 state["check_count_down"] = state["thinking_token_budget"]
 
             # Check if need to transition to end mode
+            total_thinking_tokens = (
+                state["think_count"] + len(state["spec_token_ids"]) + 1
+            )
             if (
                 state["in_think"]
-                and state["think_count"] >= state["thinking_token_budget"]
+                and total_thinking_tokens > state["thinking_token_budget"]
             ):
                 state["in_think"] = False
                 state["in_end"] = True
                 state["end_count"] = 0
                 state["check_count_down"] = state["thinking_token_budget"]
+
+                # Calculate force_index: position within spec_token_ids where
+                # forcing starts. If we're already over budget without spec
+                # tokens, force from position 0. Force from the position
+                # where budget is exceeded.
+                remaining_budget = state["thinking_token_budget"] - state["think_count"]
+                spec_len = len(state["spec_token_ids"])
+                if 0 < remaining_budget < spec_len:
+                    state["force_index"].extend(range(remaining_budget, spec_len))
+
+                elif remaining_budget <= 0:
+                    if len(state["spec_token_ids"]) > 0:
+                        state["force_index"].extend(range(len(state["spec_token_ids"])))
+                    else:
+                        state["force_index"] = [
+                            0
+                        ]  # Force the next token after thinking tokens
+
+                else:
+                    # remaining_budget >= spec_len: all spec tokens are within
+                    # budget; force the bonus token position
+                    state["force_index"] = [len(state["spec_token_ids"])]
+
         else:
             # In end mode
-            state["end_count"] += 1
+            end_count = 1
+            new_tokens = output[prev_length:]
+            if state["end_thinking"] < 0:
+                if self.reasoning_end_token_ids[0] in new_tokens:
+                    stop_index = new_tokens.index(self.reasoning_end_token_ids[0])
+                    state["end_thinking"] = prev_length + stop_index
+                    end_count = len(new_tokens) - (stop_index + 1)
+            else:
+                end_count = len(new_tokens)
+            state["end_count"] += end_count
+            if len(state["spec_token_ids"]) > 0:
+                state["force_index"].extend(range(len(state["spec_token_ids"])))
+            else:
+                state["force_index"] = [0]
             if state["end_count"] >= len(self.reasoning_end_token_ids):
                 state.update(
                     {
@@ -486,9 +670,17 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         ends after a certain number of tokens."""
         return False
 
-    def update_state(self, batch_update: BatchUpdate | None):
+    def update_state(
+        self,
+        batch_update: BatchUpdate | None,
+        spec_token_ids: Sequence[Sequence[int]] | None = None,
+    ) -> None:
         if not self.is_enabled:
             return
+        self.spec_token_ids = (
+            [list(s) for s in spec_token_ids] if spec_token_ids else []
+        )
+        # Store the spec token IDs for use in apply()
         if batch_update:
             for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
                 thinking_token_budget = params.thinking_token_budget
@@ -498,6 +690,14 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                         prompt_tok_ids, thinking_token_budget
                     )
                     self._state[index]["output_tok_ids"] = output_tok_ids
+
+                    # Set spec_token_ids if available, otherwise use empty list
+                    if self.spec_token_ids and index < len(self.spec_token_ids):
+                        self._state[index]["spec_token_ids"] = self.spec_token_ids[
+                            index
+                        ]
+                    else:
+                        self._state[index]["spec_token_ids"] = []
                 else:
                     # Remove state if no thinking budget
                     self._state.pop(index, None)
@@ -507,34 +707,87 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
             for i1, i2, direction in batch_update.moved:
                 if direction == MoveDirectionality.SWAP:
-                    state1 = self._state.pop(i1, None)
-                    state2 = self._state.pop(i2, None)
-                    if state1 is not None:
-                        self._state[i2] = state1
-                    if state2 is not None:
+                    state1 = self._state.get(i1, {})
+                    state2 = self._state.get(i2, {})
+                    if state1 or state2:
                         self._state[i1] = state2
+                        self._state[i2] = state1
                 else:
-                    state = self._state.pop(i1, None)
-                    if state is not None:
-                        self._state[i2] = state
+                    self._state[i2] = self._state.pop(i1, {})
 
-        for state in self._state.values():
+        for index, state in self._state.items():
+            if self.spec_token_ids and index < len(self.spec_token_ids):
+                state["spec_token_ids"] = self.spec_token_ids[index]
+            else:
+                state["spec_token_ids"] = []
+            state["in_spec_mode"] = self.in_spec_mode
+            state["force_index"] = []
             self._update_think_state(state)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+    def apply(self, logits: torch.Tensor, predict_bonus_token: bool) -> torch.Tensor:
         if not self.is_enabled or not self._state:
             return logits
+        # Reset mask
+        self.mask[:] = False
+        cumulative_total = 0
+        self.cu_num_tokens.clear()
 
-        batch_size = logits.size(0)
-        self.mask[:batch_size] = False
+        for index, spec_tokens in enumerate(self.spec_token_ids):
+            # Store the starting position for this request
+            self.cu_num_tokens[index] = cumulative_total
+            # Add this request's token count to cumulative total
+            if self.in_spec_mode:
+                cumulative_total += len(spec_tokens) if not predict_bonus_token else 1
 
-        for i in range(batch_size):
-            state = self._state.get(i)
-            if state and state["in_end"]:
-                self.mask[i] = True
-                self.force_token_ids[i] = self.reasoning_end_token_ids[
-                    state["end_count"]
-                ]
+            else:
+                # for non-spec mode
+                cumulative_total += 1
+
+        for seq_idx in sorted(self._state.keys()):
+            if seq_idx not in self.cu_num_tokens:
+                continue
+            state = self._state[seq_idx]
+            # State may be incomplete (e.g. from swap with a slot that had no thinking
+            # budget); treat missing "in_end" as False.
+            if state.get("in_end", False):
+                # logits processor in spec mode are called twice
+                # once for bonus token logits and
+                # second time for the target logits
+                # in case the force index is bonus token index
+                # we change the force index to 0
+                if predict_bonus_token:
+                    if state.get("force_index") and state["force_index"][0] < len(
+                        state["spec_token_ids"]
+                    ):
+                        if len(self.reasoning_end_token_ids) > (
+                            state["end_count"] + len(state["spec_token_ids"]) + 1
+                        ):
+                            bonus_end_count = (
+                                state["end_count"] + len(state["spec_token_ids"]) + 1
+                            )
+                        else:
+                            continue
+                    else:
+                        state["force_index"] = [0]
+                        bonus_end_count = state["end_count"]
+
+                if state and not state["bonus_token_forced"]:
+                    force_index = state.get("force_index", [])
+                    end_count = state.get("end_count", 0)
+                    for force_idx in force_index:
+                        if predict_bonus_token:
+                            end_count = bonus_end_count
+
+                        if end_count < len(self.reasoning_end_token_ids):
+                            if predict_bonus_token:
+                                state["bonus_token_forced"] = True
+                            mask_idx = self.cu_num_tokens[seq_idx] + force_idx
+                            if mask_idx < len(self.mask) and mask_idx < logits.shape[0]:
+                                self.mask[mask_idx] = True
+                                self.force_token_ids[mask_idx] = (
+                                    self.reasoning_end_token_ids[end_count]
+                                )
+                                end_count += 1
 
         # Check in CPU first not to sync with GPU
         has_active_thinking = any(
@@ -542,8 +795,9 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         )
 
         if has_active_thinking:
-            current_mask = self.mask[:batch_size]
+            current_mask = self.mask
             active_indices = current_mask.nonzero(as_tuple=False).view(-1)
+
             if len(active_indices) > 0:
                 force_tokens = self.force_token_ids[active_indices]
                 # Apply a large value for the end thinking token id index
@@ -552,6 +806,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         return logits
 
 
+# cohere end
 def process_dict_updates(
     req_entries: dict[int, T],
     batch_update: BatchUpdate | None,

@@ -1,0 +1,171 @@
+{
+  "_comment": "Maps each GPU to per-model TP constraints. minimum_tp is the smallest supported TP size. recommended_tp is the default used when tp_size=default.",
+  "h100": {
+    "command-r7b_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "command-a_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "command-a-vision_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "command-a-reasoning_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "c4-25a218t_int4a16": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "c4-v2-25a218t_int4a16_gs32_gptq": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "c4-v2-25a218t_int4a16_gs32_awq_gptq": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "c4-25a218t_w4a8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    },
+    "c4-25a218t_fp8": {
+      "minimum_tp": 4,
+      "recommended_tp": 4
+    },
+    "c4-25a218t_fp8_eagle_l5": {
+      "minimum_tp": 4,
+      "recommended_tp": 4
+    },
+    "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-8a133t_fp8": {
+      "minimum_tp": 4,
+      "recommended_tp": 4
+    }
+  },
+  "gb200": {
+    "command-r7b_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "command-a_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "command-a-vision_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "command-a-reasoning_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "c4-25a218t_int4a16": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c4-25a218t_fp8_eagle_l5": {
+      "minimum_tp": 2,
+      "recommended_tp": 4
+    },
+    "c4-25a218t_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 4
+    },
+    "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-8a133t_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    }
+  },
+  "mi300x": {
+    "command-r7b_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "command-a_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "command-a-vision_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "command-a-reasoning_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "c4-25a218t_fp8_eagle_l5": {
+      "minimum_tp": 2,
+      "recommended_tp": 4
+    },
+    "c4-25a218t_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 4
+    },
+    "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-8a133t_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    }
+  },
+  "b200": {
+    "command-r7b_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "command-a_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "command-a-vision_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "command-a-reasoning_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 2
+    },
+    "c4-25a218t_int4a16": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c4-v2-25a218t_int4a16_gs32_gptq": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c4-v2-25a218t_int4a16_gs32_awq_gptq": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c4-25a218t_fp8_eagle_l5": {
+      "minimum_tp": 2,
+      "recommended_tp": 4
+    },
+    "c4-25a218t_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 4
+    },
+    "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-8a133t_fp8": {
+      "minimum_tp": 2,
+      "recommended_tp": 2
+    }
+  }
+}

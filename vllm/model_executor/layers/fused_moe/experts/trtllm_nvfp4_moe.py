@@ -42,6 +42,7 @@ class TrtLlmNvFp4ExpertsBase:
         self.quant_config = quant_config
 
         self.routing_method_type = self.moe_config.routing_method
+        self.norm_topk_prob = moe_config.norm_topk_prob  # cohere
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
@@ -256,6 +257,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
             RoutingMethodType.Simulated,
+            RoutingMethodType.SigmoidRenorm,  # cohere
         ]
 
     @staticmethod
@@ -344,6 +346,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
+            norm_topk_prob=self.norm_topk_prob,  # cohere
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
         )[0]

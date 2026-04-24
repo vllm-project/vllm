@@ -149,11 +149,9 @@ kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
 kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
 
-kMxfp8StaticScale = ScaleDesc(torch.uint8, True, GroupShape(1, 32))
+kMxfp8StaticScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))  # cohere
 kMxfp8Static = QuantKey(FP8_DTYPE, kMxfp8StaticScale, symmetric=True)
 
-kMxfp8DynamicScale = ScaleDesc(torch.uint8, False, GroupShape(1, 32))
-kMxfp8Dynamic = QuantKey(FP8_DTYPE, kMxfp8DynamicScale, symmetric=True)
 
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
@@ -808,7 +806,7 @@ def convert_bf16_scales_to_fp8(
 
     # restore original shape
     fp8_scales = fp8_scales.view(orig_shape)
-    chan_scales = chan_scales.view(orig_shape[:-1], -1)
+    chan_scales = chan_scales.view(*orig_shape[:-1], -1)
 
     return fp8_scales, chan_scales
 

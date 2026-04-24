@@ -1,0 +1,146 @@
+name: "Shared Test Setup"
+description: "Common setup steps for running tests"
+
+inputs:
+  git_ref:
+    description: "Git reference to checkout"
+    required: true
+    default: "cohere"
+  gpu:
+    description: "GPU type (h100, mi300x, b200, a100, gb200) or 'cpu'"
+    required: false
+    default: "h100"
+  docker_commit:
+    description: "Docker commit SHA to use for tests (defaults to current commit)"
+    required: false
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set COMMIT_SHA
+      shell: bash
+      run: |
+        COMMIT_SHA=$(git rev-parse HEAD)
+        echo "COMMIT_SHA=$COMMIT_SHA"
+        echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
+
+    - name: GCP Auth for Docker
+      uses: google-github-actions/auth@v2
+      with:
+        token_format: access_token
+        workload_identity_provider: projects/751739702614/locations/global/workloadIdentityPools/githubdocker/providers/githubactions
+        service_account: dockerbuild@cohere-artifacts.iam.gserviceaccount.com
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        version: ">= 363.0.0"
+
+    - name: 🔒 Authenticate Docker
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 5
+        max_attempts: 3
+        retry_on: error
+        command: gcloud auth configure-docker --quiet us-central1-docker.pkg.dev
+
+    - name: Pull Docker image
+      uses: nick-fields/retry@v3
+      env:
+        IMG_SUFFIX: ${{ inputs.gpu == 'cpu' && 'cpu' || (inputs.gpu == 'mi300x' && 'rocm' || 'nvidia') }}
+      with:
+        timeout_minutes: 10
+        max_attempts: 3
+        retry_on: error
+        command: |
+          set -eo pipefail
+          docker pull us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-$IMG_SUFFIX:${{ inputs.docker_commit || env.COMMIT_SHA }}
+
+    # Unfortunately B200s on GKE need a slightly different setup. It MAY be possible to unify below
+    # However, we don't have a workaround for <8x runners.
+    - name: GPU setup (GKE B200)
+      if: ${{ inputs.gpu == 'b200' }}
+      shell: bash
+      run: |
+        sudo nvidia-ctk cdi generate --mode=auto --library-search-path="${LD_LIBRARY_PATH}" --output=/var/run/cdi/nvidia.yaml
+        docker info | grep -i nvidia
+        docker info | grep -i runtime
+        nvidia-smi
+
+    # This step ensures that only the allocated GPUs are visible inside the docker-in-docker environment.
+    # Without this step, all GPUs on the runner would be visible to the docker container, causing resource contention.
+    # See this Linear ticket for more details: https://linear.app/cohereai/issue/IINF-2674
+    - name: GPU setup (NVIDIA)
+      if: ${{ inputs.gpu == 'h100' || inputs.gpu == 'a100' || inputs.gpu == 'gb200' }}
+      shell: bash
+      run: |
+        set -x
+        nvidia-smi
+
+        # 1. Get list of GPUs that Kubernetes has allocated to this runner
+        VISIBLE_GPUS=""
+        if [ "$NVIDIA_VISIBLE_DEVICES" = "/var/run/nvidia-container-devices" ]; then
+            VISIBLE_GPUS=$(ls /var/run/nvidia-container-devices/ | xargs -- printf '%s\n' | paste -sd'|')
+        elif [ -n "$NVIDIA_VISIBLE_DEVICES" ]; then
+            VISIBLE_GPUS=$(echo $NVIDIA_VISIBLE_DEVICES | tr ',' '|')
+        fi
+
+        # 2. Unmount and remove devices that are not in the VISIBLE_GPUS list
+        for idx in $(nvidia-smi -L | egrep -v "($VISIBLE_GPUS)" | cut -d ' ' -f2 | cut -d':' -f1); do
+            echo "Device $idx is not in use"
+            while sudo umount /dev/nvidia${idx}; do :; done || true
+            sudo rm -rf /dev/nvidia${idx}
+        done
+
+        # 3. Generate CDI device config using constrained visible devices
+        sudo rm /etc/docker/daemon.json || true
+        sudo nvidia-ctk cdi generate --mode=auto --output=/var/run/cdi/nvidia.yaml
+
+        # 4. Show debug infos
+        nvidia-smi
+        docker info | grep -i nvidia
+        docker info | grep -i runtime
+        cat /etc/docker/daemon.json || true
+        which nvidia-container-runtime
+        ls -l /var/run/cdi/nvidia.yaml || true
+
+    # TODO(czhu) the fix for dind GPU visibility should go here.
+    # this doesn't work due to privileged gha sees all GPUs
+    - name: GPU setup (AMD)
+      id: amd-setup
+      if: ${{ inputs.gpu == 'mi300x' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        DEV_FLAGS="--device /dev/kfd"
+        found=0
+        for r in $(ls -1 /dev/dri/renderD* 2>/dev/null | sort -V); do
+          dev="/sys/class/drm/$(basename "$r")/device"
+          if [[ -L "$dev/driver" && "$(basename "$(readlink -f "$dev/driver")")" == "amdgpu" ]]; then
+            DEV_FLAGS+=" --device $r"
+            found=1
+          fi
+        done
+        if [[ $found -eq 0 ]]; then
+          echo "No AMD renderD* devices found!" >&2
+          exit 1
+        fi
+        echo "devflags=$DEV_FLAGS" >> "$GITHUB_OUTPUT"
+        echo "devflags=$DEV_FLAGS"
+        # temp for debug
+
+    - name: GCP Auth for Model Artifacts
+      if: ${{ inputs.gpu != 'cpu' }}
+      uses: google-github-actions/auth@v2
+      with:
+        token_format: access_token
+        workload_identity_provider: projects/751739702614/locations/global/workloadIdentityPools/githubdocker/providers/githubactions
+        service_account: model-efficiency-ci@cohere-artifacts.iam.gserviceaccount.com
+
+    - name: Install gcloud CLI
+      if: ${{ inputs.gpu != 'cpu' }}
+      uses: google-github-actions/setup-gcloud@v1
+outputs:
+  devflags:
+    value: ${{ steps.amd-build.outputs.devflags }}

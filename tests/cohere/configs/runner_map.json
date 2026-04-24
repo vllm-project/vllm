@@ -1,0 +1,73 @@
+{
+  "cpu": {
+    "cpu_check":             ["large"]
+  },
+  "h100": {
+    "fast_check":                  ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "quantization_32bit_logits":   ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "model_arch_c5_3a30t":   ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "bee_sample_tb_check":   ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "guided_generation":     ["cohere-ubuntu-cw-h100-4-model-efficiency"],
+    "eval_tp1":              ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "eval_tp2":              ["cohere-ubuntu-cw-h100-2-model-efficiency"],
+    "eval_tp4":              ["cohere-ubuntu-cw-h100-4-model-efficiency"],
+    "performance_tp1":       ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "performance_tp2":       ["cohere-ubuntu-cw-h100-2-model-efficiency"],
+    "performance_tp4":       ["cohere-ubuntu-cw-h100-4-model-efficiency"],
+    "speculative_decoding":  ["cohere-ubuntu-cw-h100-4-model-efficiency"],
+    "vision":                ["cohere-ubuntu-cw-h100-2-model-efficiency"]
+  },
+  "gb200": {
+    "fast_check":                  ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
+    "quantization_32bit_logits":   ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
+    "model_arch_reward":     ["cohere-ubuntu-cw-gb200-2-model-efficiency"],
+    "model_arch_c5_3a30t":   ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
+    "bee_sample_tb_check":   ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
+    "guided_generation":     ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
+    "eval_tp1":              ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
+    "eval_tp2":              ["cohere-ubuntu-cw-gb200-2-model-efficiency"],
+    "eval_tp4":              ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
+    "performance_tp1":       ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
+    "performance_tp2":       ["cohere-ubuntu-cw-gb200-2-model-efficiency"],
+    "performance_tp4":       ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
+    "speculative_decoding":  ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
+    "vision":                ["cohere-ubuntu-cw-gb200-2-model-efficiency"]
+  },
+  "mi300x": {
+    "fast_check":            ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "model_arch_reward":     ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "model_arch_c5_3a30t":   ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "bee_sample_tb_check":   ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "guided_generation":     ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "eval_tp1":              ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "eval_tp2":              ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "eval_tp4":              ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "eval_tp8":              ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "performance_tp1":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "performance_tp2":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "performance_tp4":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "performance_tp8":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "speculative_decoding":  ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "vision":                ["cohere-ubuntu-oke-mi300-8-model-efficiency"]
+  },
+  "a100": {
+    "fast_check": ["cohere-ubuntu-cw-a100-1-model-efficiency"]
+  },
+  "b200": {
+    "_comment":              "Due to docker gpu visibility reasons in GKE, we can only run 8xB200 for now",
+    "fast_check":                  ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "quantization_32bit_logits":   ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "model_arch_reward":     ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "model_arch_c5_3a30t":   ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "bee_sample_tb_check":   ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "guided_generation":     ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "eval_tp1":              ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "eval_tp2":              ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "eval_tp4":              ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "performance_tp1":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "performance_tp2":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "performance_tp4":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "speculative_decoding":  ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "vision":                ["cohere-ubuntu-gke-b200-8-model-efficiency"]
+  }
+}

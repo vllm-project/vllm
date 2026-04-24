@@ -1,0 +1,64 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+RUN pip3 install pandas==2.2.3 aiohttp==3.13.0 pre-commit==4.0.1
+
+ENV PYTHONPATH=/app/cohere/vllm-src:${PYTHONPATH}
+
+# xgrammar is provided by the base image (from requirements/common.txt).
+
+# Install cohere-transformers (cloned by workflow)
+COPY cohere-transformers /app/cohere/transformers
+WORKDIR /app/cohere/transformers
+RUN rm -rf examples
+# use version x.x.x for vulnerability scanning
+RUN sed -i 's/\(version="[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.[^"]*\)\?"/\1"/' setup.py
+RUN pip3 install -e .
+
+# Reinstall vLLM in editable mode using prebuilt wheels for extensions,
+# and rebuild the distributable wheel so that /app/cohere/dist contains the
+# current Python sources (important for wheel uploads to Artifact Registry).
+# C++ compilation is skipped because VLLM_PRECOMPILED_WHEEL_LOCATION is set.
+COPY . /app/cohere/vllm-src
+WORKDIR /app/cohere/vllm-src
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends git openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && WHEEL_PATH="$(ls /app/cohere/dist/*.whl 2>/dev/null | head -n1)" \
+    && if [ -z "$WHEEL_PATH" ]; then \
+           echo "Error: No precompiled vLLM wheel found in /app/cohere/dist." >&2; \
+           exit 1; \
+       fi \
+    && pip3 install setuptools-scm wheel \
+    && TMP_DIST_DIR="$(mktemp -d)" \
+    && VLLM_PRECOMPILED_WHEEL_LOCATION="$WHEEL_PATH" \
+       python3 setup.py bdist_wheel --dist-dir="$TMP_DIST_DIR" \
+    && NEW_WHEEL_PATH="$(ls "$TMP_DIST_DIR"/*.whl 2>/dev/null | head -n1)" \
+    && if [ -z "$NEW_WHEEL_PATH" ]; then \
+           echo "Error: Failed to build a new vLLM wheel." >&2; \
+           rm -rf "$TMP_DIST_DIR"; \
+           exit 1; \
+       fi \
+    && rm -f "$WHEEL_PATH" \
+    && mv "$NEW_WHEEL_PATH" /app/cohere/dist/ \
+    && rm -rf "$TMP_DIST_DIR" \
+    && NEW_WHEEL_PATH="$(ls /app/cohere/dist/*.whl 2>/dev/null | head -n1)" \
+    && VLLM_PRECOMPILED_WHEEL_LOCATION="$NEW_WHEEL_PATH" \
+       python3 -m pip install -e . --no-deps
+
+WORKDIR /app/cohere
+
+ENV NUMBA_CACHE_DIR=/tmp
+RUN chmod -R a+rwx /tmp/
+
+# These are deleted to address CVEs
+RUN rm -rf /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs
+RUN rm -rf /usr/local/lib/python3.12/dist-packages/cv2
+RUN rm -rf /usr/local/lib/python3.12/dist-packages/cmake/data/bin
+# multi-node requires ray
+# RUN rm -rf /usr/local/lib/python3.12/dist-packages/ray/jars
+# RUN rm -rf /usr/local/lib/python3.12/dist-packages/ray
+
+WORKDIR /app/cohere
+
+ENTRYPOINT ["vllm", "serve"]

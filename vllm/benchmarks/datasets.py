@@ -1802,7 +1802,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
-
     elif args.dataset_name == "custom_mm":
         dataset = CustomMMDataset(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
@@ -1812,10 +1811,10 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
+            skip_chat_template=args.skip_chat_template,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
-
     elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
@@ -2249,6 +2248,9 @@ class CustomMMDataset(CustomDataset):
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
+        lora_path: str | None = None,
+        max_loras: int | None = None,
+        skip_chat_template: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2268,6 +2270,10 @@ class CustomMMDataset(CustomDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
+            # cohere start
+            if not skip_chat_template:
+                prompt = self.apply_chat_transformation(prompt)
+            # cohere end
 
             prompt_len = len(tokenizer(prompt).input_ids)
             images = item["image_files"]

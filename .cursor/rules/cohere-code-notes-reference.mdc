@@ -1,0 +1,14 @@
+---
+description: Use Cohere code notes for understanding and document new findings
+alwaysApply: true
+---
+
+# Cohere Code Notes Reference Rule
+
+When working in this repository:
+
+- Read relevant docs in `docs/cohere/code_notes/` before or during code analysis to build context on existing Cohere-specific behavior.
+- Treat `docs/cohere/code_notes/upstream-diff.md` as the entry point, then drill into the topic-specific notes it references.
+- If you discover new behavior, constraints, pitfalls, or integration details not already documented, update `docs/cohere/code_notes/`.
+- New findings may be added to an existing note or captured in a new Markdown file under `docs/cohere/code_notes/`.
+- Keep updates concise, behavior-focused, and useful for future maintainers.

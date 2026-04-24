@@ -113,12 +113,17 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
+    # cohere start
+    # SigmoidRenorm: Sigmoid -> TopK -> Renormalize
+    # (divide by sum of top-K weights, could be disabled)
+    SigmoidRenorm = (6,)
     # Custom
-    Custom = (6,)
+    Custom = (7,)
     # Simulated
-    Simulated = (7,)
+    Simulated = (8,)
     # Unspecified
-    Unspecified = 8.0
+    Unspecified = 9.0
+    # cohere end
 
 
 def get_routing_method_type(
@@ -479,34 +484,37 @@ class FusedMoEQuantConfig:
         is_nvfp4_scale_swizzled: bool = True,
     ) -> "FusedMoEQuantConfig":
         """
-        General builder function for a FusedMoEQuantConfig.
-        - quant_dtype: Optional quantization type. None if activations are
-          unquantized or quantized prior to calling.  Note: "nvfp4", "mxfp4",
-          "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
-          for quant_dtype.
-        - per_act_token_quant: Activations have per token quantization.
-        - per_out_ch_quant: Outputs have per channel quantization. (only
-          for cutlass).
-        - block_shape: Optional block size for block-wise quantization.
-          Incompatible with per_act_token and per_out_ch quant.
-        - w1_scale: Optional scale to be used for w1.
-        - w2_scale: Optional scale to be used for w2.
-        - a1_scale: Optional scale to be used for a1.
-        - a2_scale: Optional scale to be used for a2.
-        - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
-                     Optional per-channel scales for w1 (for W4A8 FP8).
-                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
-        - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
-                     Optional per-channel scales for w2 (for W4A8 FP8).
-                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
-        - a1_gscale: Optional global quantization scales for a1 (1.0 /a2_scale).
-        - a2_gscale: Optional global quantization scales for a2 (1.0 /a2_scale).
-
-        - w1_bias: Optional biases for w1 (GPT OSS Triton).
-        - w2_bias: Optional biases for w1 (GPT OSS Triton).
-        - w1_zp: Optional w1 zero points for int4/int8 quantization.
-        - w2_zp: Optional w2 zero points for int4/int8 quantization.
-        - is_nvfp4_scale_swizzled: Whether to swizzle the nvfp4 scale swizzling.
+                General builder function for a FusedMoEQuantConfig.
+                - quant_dtype: Optional quantization type. None if activations are
+                  unquantized or quantized prior to calling.  Note: "nvfp4", "mxfp4",
+                  "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
+                  for quant_dtype.
+                - per_act_token_quant: Activations have per token quantization.
+                - per_out_ch_quant: Outputs have per channel quantization. (only
+                  for cutlass).
+                - block_shape: Optional block size for block-wise quantization.
+                  Incompatible with per_act_token and per_out_ch quant.
+                - w1_scale: Optional scale to be used for w1.
+                - w2_scale: Optional scale to be used for w2.
+                - a1_scale: Optional scale to be used for a1.
+                - a2_scale: Optional scale to be used for a2.
+                - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
+        # cohere start
+                    Optional per-channel scales for w1 (for W4A8 FP8).
+                    Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
+        # cohere end
+                - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
+        # cohere start
+                    Optional per-channel scales for w2 (for W4A8 FP8).
+                    Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
+                - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
+                - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
+        # cohere end
+                - w1_bias: Optional biases for w1 (GPT OSS Triton).
+                - w2_bias: Optional biases for w1 (GPT OSS Triton).
+                - w1_zp: Optional w1 zero points for int4/int8 quantization.
+                - w2_zp: Optional w2 zero points for int4/int8 quantization.
+                - is_nvfp4_scale_swizzled: Whether to swizzle the nvfp4 scale swizzling.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -1173,6 +1181,11 @@ class FusedMoEConfig:
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
+
+    # cohere start
+    # Whether to normalize top-k probabilities (renormalize).
+    norm_topk_prob: bool = True
+    # cohere end
 
     moe_backend: str = "auto"
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE

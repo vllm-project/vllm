@@ -1,0 +1,257 @@
+name: nightly-benchmark
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # runs daily at 1:00 AM EST
+  workflow_dispatch:      # optional: allows manual trigger if needed
+    inputs:
+      git_ref:
+        description: 'Branch to test (defaults to triggering branch)'
+        required: false
+        type: string
+      result_upload_branch:
+        description: 'Branch to upload results to (schedule uses gh-pages)'
+        required: false
+        type: string
+        default: ci_dump
+
+jobs:
+  # Resolve the branch to a pinned commit SHA before anything else runs.
+  # All downstream jobs reference this SHA so that a commit pushed mid-run
+  # cannot cause builds and tests to diverge.
+  resolve-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref_name }}
+      - id: resolve
+        run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # use common build step
+  trigger-build-and-push:
+    needs: resolve-commit
+    uses: ./.github/workflows/build-and-push.yaml
+    secrets: inherit
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      providers: '["nvidia","amd","cpu"]'
+
+  trigger-dispatch-cpu:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: gh-pages
+      features: cpu_check
+      benchmarks: none
+      device: cpu
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  # Separate dispatch for bee eval and bench runs
+  trigger-dispatch-h100:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: all
+      benchmarks: bee_eval
+      models: 'c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+      device: h100
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+      BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
+
+  trigger-dispatch-gb200:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: all
+      benchmarks: bee_eval
+      models: 'c4-25a218t_fp8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+      device: gb200
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+      BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
+
+  trigger-dispatch-mi300x:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: all
+      benchmarks: bee_eval
+      # AMD + w4a16 is not supported yet
+      # removed c4-25a218t_fp8_eagle_l5 as it almost doubled the runtime of c4-25a218t_fp8
+      models: 'c4-25a218t_fp8,c5-3a30t_fp8'
+      device: mi300x
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+      BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
+
+  # A100 dispatch removed: runner_map only defined fast_check for a100,
+  # and features: all no longer includes fast_check.
+
+  trigger-dispatch-b200:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: all
+      benchmarks: none
+      models: 'c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+      device: b200
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  # lm_eval runs
+
+  trigger-dispatch-lm-eval-h100:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: lm_eval
+      models: 'c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+      device: h100
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  trigger-dispatch-lm-eval-gb200:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: lm_eval
+      models: 'c4-25a218t_fp8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+      device: gb200
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  trigger-dispatch-lm-eval-mi300x:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: lm_eval
+      # AMD + w4a16 is not supported yet
+      models: 'c4-25a218t_fp8,c5-3a30t_fp8'
+      device: mi300x
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  # bench runs
+
+  trigger-dispatch-bench-h100:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: perf_1000
+      models: 'c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8,c5-8a133t_fp8'
+      device: h100
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  trigger-dispatch-bench-gb200:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: perf_1000
+      models: 'c4-25a218t_fp8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8,c5-8a133t_fp8'
+      device: gb200
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  trigger-dispatch-bench-b200:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: perf_1000
+      models: 'c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+      device: b200
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+
+  trigger-dispatch-bench-mi300x:
+    needs: [resolve-commit, trigger-build-and-push]
+    uses: ./.github/workflows/dispatcher.yaml
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      result_upload_branch: ${{ inputs.result_upload_branch || 'gh-pages' }}
+      features: none
+      benchmarks: perf_1000
+      models: 'c4-25a218t_fp8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8,c5-8a133t_fp8' # AMD + w4a16 is not supported yet
+      device: mi300x
+      hardware_profiles_override: ''
+      model_path: 'gs://cohere-model-efficiency-ci/engines/'
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}

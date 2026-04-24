@@ -1,0 +1,5 @@
+{
+    "model_map": {"c4-25a218t_fp8": "command-4"},
+    "sku_map": {"h100": "H100-80G", "mi300x": "MI300X", "b200": "B200"},
+    "task_map": {"include/vllm-ci/instruct_ci.toml": "c4_instruct", "include/vllm-ci/vision_ci.toml": "c4_vision", "include/vllm-ci/long_context_ci.toml": "c4_long_context", "include/vllm-ci/reasoning_ci.toml": "c4_reasoning"}
+}

@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -93,7 +94,45 @@ class LogitsProcessor(CustomOp):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        # cohere start
+        if envs.VLLM_USE_LOGITS_FP32_COMPUTATION:
+            if not hasattr(lm_head, "weight"):
+                raise RuntimeError(
+                    "VLLM_USE_LOGITS_FP32_COMPUTATION requires lm_head.weight "
+                    "for dense addmm/mm logits projection."
+                )
+            if hidden_states.dtype not in (torch.bfloat16, torch.float16):
+                raise RuntimeError(
+                    "VLLM_USE_LOGITS_FP32_COMPUTATION requires hidden_states in "
+                    "bf16/fp16 for addmm/mm fp32-output logits projection, got "
+                    f"{hidden_states.dtype}."
+                )
+
+            # Keep operand dtypes unchanged (bf16/fp16), but materialize logits
+            # as fp32 to improve downstream numerical stability.
+            weight_t = lm_head.weight.t()
+            try:
+                if embedding_bias is None:
+                    logits = torch.mm(hidden_states, weight_t, out_dtype=torch.float32)
+                else:
+                    logits = torch.addmm(
+                        embedding_bias.to(torch.float32),
+                        hidden_states,
+                        weight_t,
+                        out_dtype=torch.float32,
+                    )
+            except (TypeError, RuntimeError) as exc:
+                raise RuntimeError(
+                    "VLLM_USE_LOGITS_FP32_COMPUTATION is enabled, but dense "
+                    "addmm/mm with out_dtype=torch.float32 is not applicable on "
+                    f"this platform or dtype combination (hidden_states="
+                    f"{hidden_states.dtype}, weight={lm_head.weight.dtype})."
+                ) from exc
+        else:
+            logits = lm_head.quant_method.apply(
+                lm_head, hidden_states, bias=embedding_bias
+            )
+        # cohere end
 
         # Gather logits for TP
         logits = self._gather_logits(logits)

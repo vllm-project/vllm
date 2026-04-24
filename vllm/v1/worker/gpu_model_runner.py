@@ -636,6 +636,7 @@ class GPUModelRunner(
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
+        # cohere end
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -1358,6 +1359,17 @@ class GPUModelRunner(
         # Allow attention backend to reorder the batch, potentially
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
+        # cohere start
+        # the updates here are done in order to get the updated spec and outputokens
+        # for the current step to be processed by logitsprocessor, else
+        # the logits processors use a placeholder which are updated in the
+        # sampling step. (moved the updated from sampling to state update).
+        if self.use_async_scheduling:
+            if self._draft_token_req_ids is not None:
+                draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
+                self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
+            self.input_batch.update_async_output_token_ids()
+        # cohere end
         self.input_batch.refresh_metadata()
 
         # Incrementally update ngram_gpu tensors after batch is stable
@@ -3038,7 +3050,35 @@ class GPUModelRunner(
         if not is_pooling_model(model):
             return []
 
-        return list(model.pooler.get_supported_tasks())
+        supported_tasks = list(model.pooler.get_supported_tasks())
+        if self.scheduler_config.enable_chunked_prefill:
+            if "token_embed" in supported_tasks:
+                supported_tasks.remove("token_embed")
+            # cohere start
+            if "token_classify" in supported_tasks and self.model_config.architectures[
+                0
+            ] not in [
+                "Cohere2ForRewardModel",
+                "CohereForRewardModel",
+                "Cohere2VisionForRewardModel",
+            ]:
+                # cohere end
+                supported_tasks.remove("token_classify")
+
+            logger.debug_once(
+                "Chunked prefill is not supported with "
+                "token_embed and token_classify tasks "
+                "which using ALL pooling. "
+                "Please turn off chunked prefill by "
+                "`--no-enable-chunked-prefill` before using it."
+            )
+        if "score" in supported_tasks:
+            num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
+            if num_labels != 1:
+                supported_tasks.remove("score")
+                logger.debug_once("Score API is only enabled for num_labels == 1.")
+
+        return supported_tasks
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()
@@ -3323,20 +3363,11 @@ class GPUModelRunner(
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        # Update output token ids with tokens sampled in last step
-        # if async scheduling and required by current sampling params.
-        self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
-
-        # Update spec_token_ids with real draft tokens from pre step only when
-        # output_token_ids is needed (penalties or bad_words are in use).
-        if self.use_async_scheduling and self._draft_token_req_ids is not None:
-            draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
-            self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
@@ -4269,7 +4300,6 @@ class GPUModelRunner(
                     self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
             else:
                 propose_drafts_after_bookkeeping = input_fits_in_drafter
-
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
                 num_nans_in_logits,
@@ -6039,6 +6069,11 @@ class GPUModelRunner(
         # Max workspace sizes should have been captured during warmup/profiling.
         lock_workspace()
 
+        # cohere start
+        if envs.VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE:
+            self._zero_null_block_kv_data()
+        # cohere end
+
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
@@ -6084,6 +6119,42 @@ class GPUModelRunner(
             is_graph_capturing=True,
             profile_seq_lens=profile_seq_lens,
         )
+
+    # cohere start
+    def _zero_null_block_kv_data(self) -> None:
+        """Zero out block 0 (the null block) of every KV cache layer.
+
+        During CUDA graph warmup, dummy forward passes run reshape_and_cache
+        with all-zeros block tables, which writes stale KV data into physical
+        block 0.  For hybrid models with sliding window attention, the block
+        table contains null-block entries (block_id=0) for positions outside
+        the sliding window.  Attention kernels that load KV data before
+        applying the window mask (e.g. FA, FlashInfer) will read this stale
+        data; if it produces extreme values in Q@K, NaN can propagate through
+        softmax and corrupt the output.
+
+        Zeroing block 0 after capture ensures any such reads see zeros, which
+        are safely masked out.
+        """
+        for kv_cache in self.kv_caches:
+            if kv_cache is None or not isinstance(kv_cache, torch.Tensor):
+                continue
+            if kv_cache.dim() < 2:
+                continue
+            # KV cache layouts always have a dim of size 2 (K and V).
+            #   (num_blocks, 2, block_size, num_kv_heads, head_size)
+            #   (2, num_blocks, block_size, num_kv_heads, head_size)
+            assert kv_cache.shape[0] != 2 or kv_cache.shape[1] != 2, (
+                "Cannot determine whether the KV cache layout is "
+                "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+                f"a tensor of shape {kv_cache.shape}"
+            )
+            if kv_cache.shape[0] == 2:
+                kv_cache[:, 0].zero_()
+            else:
+                kv_cache[0].zero_()
+
+    # cohere end
 
     def _capture_cudagraphs(
         self,

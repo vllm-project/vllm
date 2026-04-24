@@ -1,0 +1,65 @@
+Unnamed: 0,prompt,completion,answer
+202,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ジョジーは10エイカーの農場でブドウを育てている。各エイカーにつき、毎年ぶどうを5トン生産できる。ブドウ1トンにつき、ワイン2バレルを製造できる。彼女の農場は毎年、何バレルのワインを製造できるか？
+ステップごとの答え：",100,
+94,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：近所では、ペットのウサギの数がペットの犬と猫を合わせた数よりも12匹少ない。犬1匹あたり2匹の猫がおり、犬の数は60匹だとすると、全部で近所には何匹のペットがいますか？
+ステップごとの答え：",348,
+31,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ガンターは瓶のジェリービーンズを数えようとしています。友達に、いくつ瓶に入っていると思うか聞きます。ある人は、80と答えます。別の人は、1人目の答えの半分よりも、20多いと答えます。3番目の人は、1人目の回答の25%増だと言います。3人の予想の平均値は何ですか？
+ステップごとの答え：",80,
+246,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ジーンはメイクアップアーティストから1時間250ドルを請求されます。出演している映画では高額のメイクアップが必要とされていて、メイクアップは毎回6時間かかり、それを1週間に4回行わないといけません。映画は5週間で終わりました。映画が完了した後、多額の支払いになったので、メイクアップアーティストはジーンに10%の割引を与えました。ジーンはいくら払いましたか？
+ステップごとの答え：",27000,
+215,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ローリーは320ドルの靴とそれに合う32ドルのベルトを買いたいと思っています。彼女はアルバイトで時給8ドルを稼いでいます。買い物ができるまでに何時間働く必要があるでしょうか？
+ステップごとの答え：",44,
+6,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：トゥルーズはチャールストンに比べ2倍の数の羊を飼っています。チャールストンはシアトルに比べ4倍の数の羊を飼っています。シアトルが飼っている羊の数が20頭だったとしたら、トゥルーズ、チャールストン、シアトルが飼っている羊の総数は何頭でしょうか？
+ステップごとの答え：",260,
+91,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ジャンにはマルシアの3倍の数のペットを飼っています。マルシアはシンディーよりも2匹多くペットを飼っています。もしシンディーが4匹のペットを飼っているなら、3人は全部で何匹のペットを飼っていますか？
+ステップごとの答え：",28,
+73,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：シーラは5つの携帯電話を3回払いで、それぞれ$150で購入した。各ユニットに、2%の利息が請求される。シーラは3カ月間、毎月いくら払うことになるか？
+ステップごとの答え：",255,
+129,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ある病院は500人の患者を毎日診察します。それぞれの患者は平均24分間診察されます。医者は病院に、1時間$150請求します。病院は患者に1時間$200請求します。病院はこれらの診察でいくら収益を得られますか？
+ステップごとの答え：",10000,
+5,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：カイラーは新しいアパート用にグラスを買いに店に出かけました。グラスは1つあたり5ドルかかりますが、1つ買うと2つ目は本来の60%の価格で買えます。カイラーはグラスを16個買おうとしています。総額はいくらになるでしょうか？
+ステップごとの答え：",64,
+81,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：チャーリーは10個のシールがあります。モールのストアで21個のシールを買い、誕生日に23個のシールをもらいました。それからチャーリーはそのうちの9個を妹にあげて、28個をグリーティングカードに使いました。チャーリーには何枚のシールが残っていますか？
+ステップごとの答え：",17,
+245,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ある水族館にカタツムリが4匹います。別の水族館にはカタツムリが32匹います。両者の差は、両方の水族館にいる魚の合計数の2倍です。それぞれの水族館に同じ数の魚がいるとすると、それぞれの水族館にいる魚は何匹ずつでしょうか？
+ステップごとの答え：",7,
+70,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：ジュディは、平日は毎日5つのダンスのクラスを教えており、土曜日は8クラス教えています。もしも各クラスに15人の生徒がおり、1人に$15請求しているとしたら、彼女は1週間でいくら稼ぎますか？
+ステップごとの答え：",7425,
+156,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：動物園の飼育係が、動物園のすべての猿に餌を与える。彼は地元の農場に、2か月ごとにバナナをすべて注文する。猿が200本のバナナ、ゴリラが400本のバナナ、ヒヒが100本のバナナを毎月必要な場合、彼は2か月間でどれだけのバナナを頼む必要があるか？
+ステップごとの答え：",1400,
+154,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：月曜、水曜、金曜に、大学生のキモは1時間の3つの講義を各日受ける。火曜と木曜に、彼は2時間の講義を2つ各日受ける。1セメスターで、学校は16週間ある。1セメスターで、キモは何時間講義に出席して過ごす？
+ステップごとの答え：",272,
+153,"Answer the question, solving it step by step. After you give your answer and explain your reasoning, repeat the final numeric answer after writing '#### '.
+
+問題：デイブはフライドポテトの大きなパックを購入し、お腹がすいたカモメがパックを彼の手から奪うまえに14個食べました。カモメは地上に降りて、デイブが食べたフライドポテトの半分を貪りました。それから3匹の鳩が彼から食べ物を奪い、それぞれ3本のポテトを食べました。後から、アライグマが残ったポテトの3分の2を奪いました。アリが最後のフライドポテトを運んで行き、5つ残りました。デイブが買った時、何本のフライドポテトがパックに入っていましたか？
+ステップごとの答え：",48,

@@ -1,7 +1,8 @@
 # default base image
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
-ARG BASE_IMAGE=rocm/vllm-dev:base
+# cohere: Built from docker/Dockerfile.rocm_base (see Makefile build-rocm-base target)
+ARG BASE_IMAGE
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -17,7 +18,9 @@ ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install some basic utilities
-RUN apt-get update -q -y && apt-get install -q -y \
+# this is a hotfix for https://cohereai.slack.com/archives/C06R5U37KBK/p1761740913122799?thread_ts=1759341378.757699&cid=C06R5U37KBK
+RUN rm -f /etc/apt/sources.list.d/amdgpu.list \
+    && apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl
 RUN python3 -m pip install --upgrade pip
@@ -429,7 +432,27 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
+# Copy in the v1 package
+COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
+# cohere start
+# Install RIXL wheel and runtime deps for disaggregated serving (nixl Python bindings)
+RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
+    uv pip install --system /rixl_install/*.whl
+RUN apt-get update -q -y && apt-get install -q -y \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    && rm -rf /var/lib/apt/lists/*
+# cohere end
+
+# cohere start
+# copy wheel
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    mkdir -p /app/cohere/dist \
+    && cp -R /install/*.whl /app/cohere/dist/
+# cohere end
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 

@@ -1,0 +1,111 @@
+# Lightweight workflow that builds only the CPU image and runs CPU tests on PRs.
+# This avoids the cost of building GPU images (nvidia/amd) on every PR.
+name: PR CPU Tests
+
+on:
+  pull_request:
+    branches: [cohere]
+
+concurrency:
+  group: pr-cpu-tests-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-cpu:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Depot CLI
+        uses: depot/setup-action@v1
+
+      - name: gcp auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: projects/751739702614/locations/global/workloadIdentityPools/githubdocker/providers/githubactions
+          service_account: dockerbuild@cohere-artifacts.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: ">= 363.0.0"
+
+      - name: 🔒 authenticate docker
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_on: error
+          command: gcloud auth configure-docker --quiet us-central1-docker.pkg.dev
+
+      - name: Check if CPU image already exists
+        id: check_image
+        run: |
+          COMMIT_SHA=$(git rev-parse HEAD)
+          IMAGE_NAME="us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-cpu:${COMMIT_SHA}"
+          if docker manifest inspect "$IMAGE_NAME" &> /dev/null; then
+            echo "CPU image already exists, skipping build."
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "CPU image not found, building..."
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "COMMIT_SHA=$COMMIT_SHA" >> "$GITHUB_ENV"
+
+      - name: Build CPU image
+        if: ${{ steps.check_image.outputs.skip_build != 'true' }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 60
+          max_attempts: 3
+          retry_on: error
+          command: |
+            set -eo pipefail
+            COMMIT_SHA=${{ env.COMMIT_SHA }} make build-and-push-cpu
+        env:
+          DEPOT_PROJECT: rkhjmshqw9
+
+  test-cpu:
+    needs: build-cpu
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+    runs-on: large
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Shared Test Setup
+        uses: ./.github/actions/setup
+        with:
+          git_ref: ${{ github.head_ref }}
+          gpu: cpu
+
+      - name: Run CPU tests (Docker)
+        run: |
+          docker run --rm \
+            -v ${{ runner.temp }}:/root/output \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -e TEST_GROUP=cpu_check \
+            us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-cpu:${{ env.COMMIT_SHA }} \
+            bash -c "cd tests && bash cohere/scripts/run_tests.sh"
+
+      - name: Test Report
+        uses: dorny/test-reporter@v2
+        if: always()
+        with:
+          name: "CPU Test Report"
+          path: "${{ runner.temp }}/*.xml"
+          reporter: java-junit
+          badge-title: cpu

@@ -1,0 +1,306 @@
+name: build-and-push
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_call:
+    inputs:
+      git_ref:
+        description: "Branch to checkout"
+        required: true
+        type: string
+      upload_wheels:
+        description: "Upload wheels to Artifact Registry"
+        required: false
+        type: boolean
+        default: false
+      sccache_key_prefix:
+        description: "sccache WebDAV key prefix for build cache"
+        required: false
+        type: string
+        default: "vllm-cohere-build-sccache-5"
+      incremental_build:
+        description: "Incremental build using latest available base image"
+        required: false
+        type: boolean
+        default: false
+      torch_cuda_arch_list:
+        description: "TORCH_CUDA_ARCH_LIST for NVIDIA builds"
+        required: false
+        type: string
+        default: "8.0 9.0 10.0+PTX"
+      providers:
+        description: 'JSON array of providers to build (e.g. ["nvidia","amd","cpu"])'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Branch to checkout (defaults to current branch)"
+        required: false
+        type: string
+      force_build:
+        description: "Force rebuild even if image already exists"
+        required: false
+        type: boolean
+        default: false
+      upload_wheels:
+        description: "Upload wheels to Artifact Registry (not for regular builds)"
+        required: false
+        type: boolean
+        default: false
+      use_precompiled:
+        description: "Use upstream precompiled binaries (not for regular builds)"
+        required: false
+        type: boolean
+        default: false
+      sccache_key_prefix:
+        description: "sccache WebDAV key prefix for build cache"
+        required: false
+        type: string
+        default: "vllm-cohere-build-sccache-5"
+      custom_tag:
+        description: "Additional custom tag to apply to the built image"
+        required: false
+        type: string
+      incremental_build:
+        description: "Incremental build using latest available base image"
+        required: false
+        type: boolean
+        default: true
+      torch_cuda_arch_list:
+        description: "TORCH_CUDA_ARCH_LIST for NVIDIA builds"
+        required: false
+        type: string
+        default: "8.0 9.0 10.0+PTX"
+      providers:
+        description: 'JSON array of providers to build (e.g. ["nvidia","amd","cpu"])'
+        required: false
+        type: string
+        default: '["nvidia","amd","cpu"]'
+
+# for a given commit/ref only run one at a time. subsequent runs are
+# queued so that when the first finished, the rest will pick up the built image
+concurrency:
+  group: build-and-push-${{ inputs.git_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    permissions:
+      contents: read
+      id-token: write
+    # project is configured to launch xlarge equivalent for remote build
+    runs-on: depot-ubuntu-24.04
+    strategy:
+      # Allow builds to continue even if one fails.
+      fail-fast: false
+      matrix:
+        provider: ${{ github.event_name == 'push' && fromJson('["nvidia","amd","cpu"]') || fromJson(inputs.providers) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.git_ref || github.ref_name }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Depot CLI
+        uses: depot/setup-action@v1
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        if: ${{ matrix.provider != 'cpu' }}
+        with:
+          ssh-private-key: ${{ secrets.TRANSFORMERS_DEPLOY_KEY }}
+
+      - name: Clone cohere-transformers
+        if: ${{ matrix.provider != 'cpu' }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_on: error
+          on_retry_command: rm -rf cohere-transformers
+          command: |
+            set -eo pipefail
+            git clone git@github.com:cohere-ai/cohere-transformers.git
+            cd cohere-transformers
+            # branch upgrade-4.56.2
+            git checkout v4.56.2.6
+
+      - name: gcp auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: projects/751739702614/locations/global/workloadIdentityPools/githubdocker/providers/githubactions
+          service_account: dockerbuild@cohere-artifacts.iam.gserviceaccount.com
+
+      - name: "Set up Cloud SDK"
+        uses: "google-github-actions/setup-gcloud@v2"
+        with:
+          version: ">= 363.0.0"
+
+      - name: 🔒 authenticate docker
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_on: error
+          command: gcloud auth configure-docker --quiet us-central1-docker.pkg.dev
+
+      - name: Set push tag
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          PUSH_TAG="${{ inputs.git_ref || github.ref_name }}"
+          echo "PUSH_TAG=$PUSH_TAG"
+          echo "PUSH_TAG=$PUSH_TAG" >> "$GITHUB_ENV"
+
+      - name: Find latest base image for incremental build
+        if: ${{ matrix.provider != 'cpu' }}
+        id: base_image
+        run: |
+          IMG_SUFFIX=${{ matrix.provider == 'amd' && 'rocm' || 'nvidia' }}
+          BASE_REPO="us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-${IMG_SUFFIX}"
+          # Base images are tagged as base-<sha> in the same repo as final images.
+          BASE_IMAGE=""
+          for sha in $(git rev-list --max-count=200 HEAD); do
+            if docker manifest inspect "${BASE_REPO}:base-${sha}" &> /dev/null; then
+              BASE_IMAGE="${BASE_REPO}:base-${sha}"
+              break
+            fi
+          done
+          if [[ -n "$BASE_IMAGE" ]]; then
+            echo "Found base image: $BASE_IMAGE"
+            echo "base_image=$BASE_IMAGE" >> "$GITHUB_OUTPUT"
+          else
+            echo "No base image found in the last 200 commits."
+          fi
+
+      # note: the underlying image might already be built, but not tagged with push_tag yet.
+      - name: Check docker image already built
+        id: check_image
+        run: |
+          if [[ "${{ matrix.provider }}" == "cpu" ]]; then
+            IMG_SUFFIX="cpu"
+          elif [[ "${{ matrix.provider }}" == "amd" ]]; then
+            IMG_SUFFIX="rocm"
+          else
+            IMG_SUFFIX="nvidia"
+          fi
+          COMMIT_SHA=$(git rev-parse HEAD)
+          IMAGE_NAME="us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-${IMG_SUFFIX}:${COMMIT_SHA}"
+          FORCE_BUILD=${{ (inputs.force_build || github.event_name == 'push') && 'true' || 'false' }}
+          BUILD_TARGET="build-and-push-${{ matrix.provider }}"
+          if [[ "${{ matrix.provider }}" != "cpu" ]]; then
+            INCREMENTAL_BUILD=${{ inputs.incremental_build && 'true' || 'false' }}
+            BASE_IMAGE="${{ steps.base_image.outputs.base_image }}"
+            if [[ "$INCREMENTAL_BUILD" == "true" ]]; then
+              if [[ -n "$BASE_IMAGE" ]]; then
+                BUILD_TARGET="build-cohere-${{ matrix.provider }}"
+                if [[ "${{ matrix.provider }}" == "amd" ]]; then
+                  echo "AMD_BASE_IMAGE=$BASE_IMAGE" >> "$GITHUB_ENV"
+                else
+                  echo "NVIDIA_BASE_IMAGE=$BASE_IMAGE" >> "$GITHUB_ENV"
+                fi
+                echo "Incremental build enabled using base image: $BASE_IMAGE"
+              else
+                echo "Incremental build enabled but no base image found; falling back to full build."
+              fi
+            fi
+          fi
+          if [[ "$FORCE_BUILD" == "true" ]]; then
+            echo "Force build requested (force_build=${{ inputs.force_build }}, event=${{ github.event_name }}), rebuilding image..."
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "$IMAGE_NAME" &> /dev/null; then
+            echo "Image $IMAGE_NAME already exists, skipping build."
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+            if [[ -n "$PUSH_TAG" ]]; then
+              docker pull "$IMAGE_NAME"
+              docker tag "$IMAGE_NAME" "us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-${IMG_SUFFIX}:${PUSH_TAG}"
+              echo "Tagged image with $PUSH_TAG"
+            else
+              echo "PUSH_TAG is not set, skipping tagging."
+            fi
+          else
+            echo "Image not built yet, building..."
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "COMMIT_SHA=$COMMIT_SHA" >> "$GITHUB_ENV"
+          echo "COMMIT_SHA=$COMMIT_SHA"
+          echo "build_target=$BUILD_TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: build image
+        if: ${{ steps.check_image.outputs.skip_build != 'true' }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 480 # 8 hours
+          max_attempts: 3
+          retry_on: error
+          command: |
+            set -eo pipefail
+            echo SCCACHE_WEBDAV_ENDPOINT="$SCCACHE_WEBDAV_ENDPOINT"
+            # if we don't set this manually, it seems the cache does not work (cache errors/no cache hits)
+            export SCCACHE_WEBDAV_ENDPOINT="https://cache.depot.dev"
+            export SCCACHE_WEBDAV_TOKEN="$SCCACHE_WEBDAV_TOKEN"
+            export SCCACHE_WEBDAV_KEY_PREFIX=${{ inputs.sccache_key_prefix }}
+            USE_SCCACHE=1 COMMIT_SHA=${{ env.COMMIT_SHA }} PUSH_TAG=${{ env.PUSH_TAG }} CUSTOM_TAG=${{ inputs.custom_tag }} VLLM_USE_PRECOMPILED=${{ inputs.use_precompiled && '1' || '0' }} TORCH_CUDA_ARCH_LIST="${{ inputs.torch_cuda_arch_list }}" make ${{ steps.check_image.outputs.build_target }}
+        env:
+          DEPOT_PROJECT: rkhjmshqw9
+
+  upload-wheels:
+    needs: build-and-push
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || inputs.upload_wheels
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        provider: ${{ github.event_name == 'push' && fromJson('["nvidia","amd","cpu"]') || fromJson(inputs.providers) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.git_ref || github.ref_name }}
+
+      - name: gcp auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: projects/751739702614/locations/global/workloadIdentityPools/githubdocker/providers/githubactions
+          service_account: dockerbuild@cohere-artifacts.iam.gserviceaccount.com
+
+      - name: "Set up Cloud SDK"
+        uses: "google-github-actions/setup-gcloud@v2"
+        with:
+          version: ">= 363.0.0"
+
+      - name: 🔒 authenticate docker
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_on: error
+          command: gcloud auth configure-docker --quiet us-central1-docker.pkg.dev
+
+      - name: Extract and upload wheels (efficient - no full image download)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 60
+          max_attempts: 3
+          retry_on: error
+          on_retry_command: rm -rf ./wheels
+          command: |
+            set -eo pipefail
+            COMMIT_SHA=$(git rev-parse HEAD)
+            IMG_SUFFIX=${{ matrix.provider == 'amd' && 'rocm' || matrix.provider }}
+            IMAGE_NAME=us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-$IMG_SUFFIX:$COMMIT_SHA
+
+            echo "Extracting wheels from registry (using crane - only downloads wheel layers)..."
+            bash .github/scripts/extract-wheels-from-registry.sh "$IMAGE_NAME" ./wheels
+
+            echo "Uploading wheels to Artifact Registry..."
+            bash .github/scripts/upload-wheels-dir-to-gar.sh ./wheels "${{ matrix.provider }}"

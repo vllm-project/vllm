@@ -194,9 +194,6 @@ cython_debug/
 # Codex
 .codex/
 
-# Cursor
-.cursor/
-
 # DS Store
 .DS_Store
 
@@ -239,5 +236,12 @@ vllm/grpc/vllm_engine_pb2.py
 vllm/grpc/vllm_engine_pb2_grpc.py
 vllm/grpc/vllm_engine_pb2.pyi
 
-# Ignore generated cpu headers 
+# Ignore generated cpu headers
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# cohere start
+tests/cohere/configs/serving-cohere-tests.json
+output/
+results/
+!tests/cohere/bee_eval_data/*.csv
+# cohere end

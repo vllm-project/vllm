@@ -122,7 +122,8 @@ python = "./.venv"
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "examples/pooling/token_embed/*", "build/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", "tests/entrypoints/openai/speech_to_text/test_transcription_validation.py",
-    "docs/governance/process.md", "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
+    "docs/governance/process.md", "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*",
+    "tests/cohere/*.txt"]  # cohere
 ignore-hidden = false
 
 [tool.typos.default]

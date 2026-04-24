@@ -337,6 +337,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    # cohere start
+    thinking_token_budget: int | None = Field(
+        default=None,
+        description="Max thinking tokens allowed (reasoning/Cohere). -1 = unlimited.",
+    )
+    continue_thinking: bool | None = Field(
+        default=None,
+        description="Whether to allow continuing thinking (Cohere).",
+    )
+
+    # cohere end
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -490,6 +501,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        # cohere start
+        thinking_token_budget = self.thinking_token_budget
+        if thinking_token_budget is None:
+            thinking_token_budget = default_sampling_params.get(
+                "thinking_token_budget", -1
+            )
+        continue_thinking = self.continue_thinking
+        if continue_thinking is None:
+            continue_thinking = default_sampling_params.get("continue_thinking", False)
+        # cohere end
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -516,8 +537,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
-            thinking_token_budget=self.thinking_token_budget,
             allowed_token_ids=self.allowed_token_ids,
+            # cohere start
+            thinking_token_budget=thinking_token_budget,
+            continue_thinking=continue_thinking,
+            # cohere end
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,

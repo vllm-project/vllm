@@ -28,6 +28,16 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningParser",
     ),
+    # cohere start
+    "cohere_command3": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand3ReasoningParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand4ReasoningParser",
+    ),
+    # cohere end
     "ernie45": (
         "ernie45_reasoning_parser",
         "Ernie45ReasoningParser",

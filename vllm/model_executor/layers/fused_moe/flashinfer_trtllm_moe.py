@@ -42,6 +42,7 @@ def _supports_routing_method_bf16(
         RoutingMethodType.DeepSeekV3,
         RoutingMethodType.Llama4,
         RoutingMethodType.RenormalizeNaive,
+        RoutingMethodType.SigmoidRenorm,  # cohere
     ]
 
 
@@ -92,6 +93,7 @@ def flashinfer_fused_moe_bf16(
     local_expert_offset: int,
     local_num_experts: int,
     routing_method_type: int,
+    norm_topk_prob: bool = True,  # cohere
     tune_max_num_tokens: int = 8192,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_bf16_moe
@@ -110,6 +112,7 @@ def flashinfer_fused_moe_bf16(
         local_expert_offset=local_expert_offset,
         local_num_experts=local_num_experts,
         routing_method_type=routing_method_type,
+        norm_topk_prob=norm_topk_prob,  # cohere
         tune_max_num_tokens=tune_max_num_tokens,
     )
 
@@ -128,6 +131,7 @@ def flashinfer_fused_moe_bf16_fake(
     local_expert_offset: int,
     local_num_experts: int,
     routing_method_type: int = RoutingMethodType.Renormalize,
+    norm_topk_prob: bool = True,  # cohere
     tune_max_num_tokens: int = 8192,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)

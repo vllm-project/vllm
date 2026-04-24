@@ -1,0 +1,58 @@
+{
+  "_comment": "Ground truths for bee eval tasks. NOTE: c4-25a218t_w4a8, c4-v2-25a218t_int4a16_gs32_gptq, and c4-v2-25a218t_int4a16_gs32_awq_gptq entry values are placeholders copied from c4-25a218t_int4a16; retune after the first successful CI run for each.",
+  "command-r7b_fp8": {
+    "MMLUPro_subset_AA": [0.28, 0.02]
+  },
+  "command-a-vision_fp8": {
+    "MathVista_acc": [0.685, 0.025],
+    "infovqa_anls": [0.872, 0.01],
+    "OCRBench_acc": [0.837, 0.01]
+  },
+  "c4-25a218t_fp8": {
+    "MMLUPro_subset_AA": [0.771, 0.02],
+    "MathVista_acc": [0.78, 0.025],
+    "OCRBench_soft_acc": [0.889, 0.01],
+    "aime_2025_AA": [0.787, 0.03]
+  },
+  "c4-25a218t_int4a16": {
+    "MMLUPro_subset_AA": [0.76, 0.015],
+    "MathVista_acc": [0.771, 0.02],
+    "OCRBench_soft_acc": [0.889, 0.01],
+    "aime_2025_AA": [0.787, 0.02]
+  },
+  "c4-v2-25a218t_int4a16_gs32_gptq": {
+    "MMLUPro_subset_AA": [0.76, 0.015],
+    "MathVista_acc": [0.771, 0.02],
+    "OCRBench_soft_acc": [0.889, 0.01],
+    "aime_2025_AA": [0.787, 0.02]
+  },
+  "c4-v2-25a218t_int4a16_gs32_awq_gptq": {
+    "MMLUPro_subset_AA": [0.76, 0.015],
+    "MathVista_acc": [0.771, 0.02],
+    "OCRBench_soft_acc": [0.889, 0.01],
+    "aime_2025_AA": [0.787, 0.02]
+  },
+  "c4-25a218t_w4a8": {
+    "MMLUPro_subset_AA": [0.76, 0.015],
+    "MathVista_acc": [0.771, 0.02],
+    "OCRBench_soft_acc": [0.889, 0.01],
+    "aime_2025_AA": [0.787, 0.02]
+  },
+  "c4-25a218t_fp8_eagle_l5": {
+    "MMLUPro_subset_AA": [0.771, 0.02],
+    "MathVista_acc": [0.78, 0.025],
+    "OCRBench_soft_acc": [0.889, 0.01]
+  },
+  "c5-3a30t-vision-7999_bf16": {
+    "MathVista_acc": [0.79, 0.025],
+    "OCRBench_soft_acc": [0.84, 0.01],
+    "MMLUPro_subset_AA": [0.72, 0.015],
+    "aime_2025_AA": [0.71, 0.02]
+  },
+  "c5-3a30t_fp8": {
+    "MathVista_acc": [0.79, 0.025],
+    "OCRBench_soft_acc": [0.84, 0.01],
+    "MMLUPro_subset_AA": [0.72, 0.015],
+    "aime_2025_AA": [0.71, 0.02]
+  }
+}

@@ -82,14 +82,30 @@ def read_markdown(file):
         return f"{file} not found.\n"
 
 
-def results_to_json(latency, throughput, serving):
-    return json.dumps(
-        {
-            "latency": latency.to_dict(),
-            "throughput": throughput.to_dict(),
-            "serving": serving.to_dict(),
-        }
-    )
+def _load_server_configs(results_folder: Path) -> dict[str, dict[str, Any]]:
+    """Load *_server_info.json sidecar files, keyed by server config name."""
+    configs: dict[str, dict[str, Any]] = {}
+    for path in results_folder.glob("*_server_info.json"):
+        key = path.stem.removesuffix("_server_info")
+        try:
+            with open(path) as f:
+                configs[key] = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Warning: could not load {path}: {e}")
+    return configs
+
+
+def results_to_json(latency, throughput, serving, server_configs=None):
+    out = {
+        "latency": latency.to_dict(),
+        "throughput": throughput.to_dict(),
+        "serving": serving.to_dict(),
+    }
+    # COHERE START
+    if server_configs:
+        out["server_configs"] = server_configs
+    # COHERE END
+    return json.dumps(out)
 
 
 def get_size_with_unit(bytes, suffix="B"):
@@ -204,8 +220,17 @@ if __name__ == "__main__":
     results_folder = Path(args.result)
     if not results_folder.exists():
         raise FileNotFoundError(f"results folder does not exist: {results_folder}")
+
+    # COHERE START
+    server_configs = _load_server_configs(results_folder)
+    # COHERE END
+
     # collect results
     for test_file in results_folder.glob("*.json"):
+        # COHERE START
+        if test_file.stem.endswith("_server_info"):
+            continue
+        # COHERE END
         with open(test_file) as f:
             raw_result = json.loads(f.read())
 
@@ -357,7 +382,10 @@ if __name__ == "__main__":
         ].rename(columns=throughput_results_column_mapping)
 
     processed_results_json = results_to_json(
-        latency_results, throughput_results, serving_results
+        latency_results,
+        throughput_results,
+        serving_results,
+        server_configs=server_configs,  # cohere
     )
 
     for df in [latency_results, serving_results, throughput_results]:
@@ -412,3 +440,9 @@ if __name__ == "__main__":
             + serving_results.to_dict(orient="records")
         )
         f.write(json.dumps(results))
+
+    # COHERE START
+    # formatted results to upload to gh-pages
+    with open(results_folder / "benchmark_results_summary.json", "w") as f:
+        f.write(processed_results_json)
+    # COHERE END

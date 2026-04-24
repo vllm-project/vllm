@@ -1,0 +1,10 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m nm-testing/Meta-Llama-3-8B-Instruct-W8-Channel-A8-Dynamic-Per-Token-Test -b "auto" -l 250 -f 5 -t 1
+# TODO(w4a8): threshold copied from INT4A16; retune after first W4A8 run.
+model_name: "/root/engines/c4-25a218t_w4a8"
+tasks:
+- name: "metabench"
+  metrics:
+  - name: "acc,none"
+    value: 0.63
+limit: 512
+max_num_batched_tokens: 128

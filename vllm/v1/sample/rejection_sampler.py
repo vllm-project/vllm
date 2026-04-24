@@ -286,7 +286,10 @@ class RejectionSampler(nn.Module):
             if sampling_metadata.allowed_token_ids_mask is not None:
                 token_mask = sampling_metadata.allowed_token_ids_mask[repeat_indices]
                 logits.masked_fill_(token_mask, float("-inf"))
-
+        # cohere start
+        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+            logits = processor.apply(logits, predict_bonus_token=False)
+        # cohere end
         # Apply bad words exclusion.
         if bad_words_token_ids := sampling_metadata.bad_words_token_ids:
             apply_bad_words_with_drafts(

@@ -1,0 +1,10 @@
+model_name: "/root/engines/c4-v2-25a218t_int4a16_gs32_gptq"
+tasks:
+- name: "niah_single_2"
+  metrics:
+  - name: "4096,none"
+    value: 1.0
+limit: 50
+metadata:
+  max_seq_lengths:
+    - 4096

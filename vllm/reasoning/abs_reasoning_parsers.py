@@ -14,10 +14,12 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig  # cohere
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
+
 
 logger = init_logger(__name__)
 
@@ -32,6 +34,7 @@ class ReasoningParser:
 
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer
+        self._model_config: ModelConfig | None = kwargs.get("model_config")  # cohere
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -81,6 +84,14 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    # COHERE START
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        """Adjust request parameters; override in subclasses as needed."""
+        return request
+
+    # COHERE END
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
@@ -149,12 +160,6 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
-
-    def adjust_request(
-        self, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Adjust request parameters; override in subclasses as needed."""
-        return request
 
     def prepare_structured_tag(
         self,

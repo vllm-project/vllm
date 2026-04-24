@@ -1287,6 +1287,7 @@ class SpecDecodeBaseProposer:
                 "GlmOcrForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
+                "Cohere2VisionForConditionalGeneration",  # cohere
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":

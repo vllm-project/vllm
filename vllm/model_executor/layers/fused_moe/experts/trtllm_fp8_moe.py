@@ -45,6 +45,7 @@ class TrtLlmFp8ExpertsBase:
         quant_config: FusedMoEQuantConfig,
     ):
         self.routing_method_type = moe_config.routing_method
+        self.norm_topk_prob = moe_config.norm_topk_prob  # cohere
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
@@ -197,6 +198,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,
+            norm_topk_prob=self.norm_topk_prob,  # cohere
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=0,
             fp8_quantization_type=fp8_quant_type,
@@ -294,6 +296,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Simulated,
+                RoutingMethodType.SigmoidRenorm,  # cohere
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
             # NOTE(dbari): as above, potentially allow others here.
@@ -301,6 +304,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Llama4,
                 RoutingMethodType.Simulated,
+                RoutingMethodType.SigmoidRenorm,  # cohere
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")
@@ -367,6 +371,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
+            norm_topk_prob=self.norm_topk_prob,  # cohere
             use_shuffled_weight=use_shuffled_weight,
             fp8_quantization_type=fp8_quant_type,
         )
@@ -425,6 +430,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             routed_scaling_factor=routed_scaling_factor,
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
+            norm_topk_prob=self.norm_topk_prob,  # cohere
             activation_type=activation_type,
         )
         return out

@@ -39,6 +39,12 @@ class CustomRoutingRouter(BaseRouter):
         # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
         if self.custom_routing_function == Llama4MoE.custom_routing_function:
             return RoutingMethodType.Llama4
+        # cohere start
+        from vllm.model_executor.models.commandr import token_choice_with_bias
+
+        if self.custom_routing_function == token_choice_with_bias:
+            return RoutingMethodType.SigmoidRenorm
+        # cohere end
         return RoutingMethodType.Custom
 
     def _compute_routing(

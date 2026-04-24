@@ -1368,7 +1368,7 @@ class Scheduler(SchedulerInterface):
             )
             if scheduled_spec_token_ids and generated_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_accepted = max(0, len(generated_token_ids) - 1)  # cohere
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
@@ -1406,6 +1406,23 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            if new_token_ids and self.structured_output_manager.should_advance(request):
+                struct_output_request = request.structured_output_request
+                assert struct_output_request is not None
+                assert struct_output_request.grammar is not None
+                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                    req_id, new_token_ids
+                ):
+                    logger.error(
+                        "Unexpected: grammar rejected tokens %s for request %s. "
+                        "Terminating request.",
+                        new_token_ids,
+                        req_id,
+                    )
+                    request.status = RequestStatus.FINISHED_ERROR
+                    request.resumable = False
+                    stopped = True
+
             routed_experts = None
             finish_reason = None
             if stopped:
@@ -1430,18 +1447,6 @@ class Scheduler(SchedulerInterface):
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
-
-            if new_token_ids and self.structured_output_manager.should_advance(request):
-                struct_output_request = request.structured_output_request
-                assert struct_output_request is not None
-                assert struct_output_request.grammar is not None
-                ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
-                if not ok:
-                    logger.warning(
-                        "Unexpected: grammar rejected tokens %s for request %s.",
-                        new_token_ids,
-                        req_id,
-                    )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]

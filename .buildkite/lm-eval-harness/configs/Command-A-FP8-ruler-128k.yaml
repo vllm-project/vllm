@@ -1,0 +1,10 @@
+model_name: "/root/engines/command-a_fp8"
+tasks:
+- name: "niah_single_2"
+  metrics:
+  - name: "131072,none"
+    value: 1.0
+limit: 10
+metadata:
+  max_seq_lengths:
+    - 131072

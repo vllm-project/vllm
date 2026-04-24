@@ -199,21 +199,38 @@ class LogitsprocsTestFakes(NamedTuple):
 def fake_update_logitsprocs_state(
     test_fakes: LogitsprocsTestFakes,
     batch_update: BatchUpdate,
+    spec_token_ids: list[list[int]] | None = None,  # cohere
 ) -> None:
     """Imitate logits processors persistent batch state update
     in engine core"""
     for logitproc in test_fakes.get_logitsprocs():
-        logitproc.update_state(batch_update)
+        logitproc.update_state(batch_update, spec_token_ids)  # cohere
 
 
 def fake_apply_logitsprocs(
     test_fakes: LogitsprocsTestFakes,
     slice_indices: list[int],
+    predict_bonus_token: bool = False,  # cohere
 ) -> torch.Tensor:
     """Imitate application of logits processors in engine core"""
-    logits = test_fakes.logits[torch.tensor(slice_indices, dtype=torch.long)].clone()
+    total_spec_rows = 0  # cohere
     for processor in test_fakes.get_logitsprocs():
-        logits = processor.apply(logits)
+        # cohere start
+        if getattr(processor, "in_spec_mode", False) and not predict_bonus_token:
+            spec_ids = getattr(processor, "spec_token_ids", [])
+            total_spec_rows = sum(len(s) for s in spec_ids)
+            break
+
+    if total_spec_rows > 0:
+        logits = test_fakes.logits[:total_spec_rows].clone()
+    else:
+        logits = test_fakes.logits[
+            torch.tensor(slice_indices, dtype=torch.long)
+        ].clone()
+
+    for processor in test_fakes.get_logitsprocs():
+        logits = processor.apply(logits, predict_bonus_token)
+    # cohere end
     return logits
 
 

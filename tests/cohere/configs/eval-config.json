@@ -1,0 +1,12 @@
+{
+  "_comment": "Configuration for bee eval tasks",
+  "command-r7b_fp8": ["include/vllm-ci/instruct_ci.toml"],
+  "command-a-vision_fp8": ["include/vllm-ci/vision_ci.toml", "include/vllm-ci/ca_vision_ci.toml"],
+  "c4-25a218t_fp8": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
+  "c4-25a218t_int4a16": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
+  "c4-v2-25a218t_int4a16_gs32_gptq": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
+  "c4-v2-25a218t_int4a16_gs32_awq_gptq": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
+  "c4-25a218t_w4a8": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
+  "c4-25a218t_fp8_eagle_l5": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml"],
+  "c5-3a30t_fp8": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"]
+}

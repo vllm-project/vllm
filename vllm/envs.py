@@ -251,6 +251,14 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
 
+    # COHERE START
+    VLLM_USE_LOGITS_FP32_COMPUTATION: bool = False
+    VLLM_XGRAMMAR_RECURSION_DEPTH: int = 64000
+    VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE: bool = False
+    VLLM_REPETITION_LIMIT: int = 0
+    VLLM_REPETITION_MAX_SEQUENCE_LENGTH: int = 0
+    # COHERE END
+
 
 def get_default_cache_root():
     return os.getenv(
@@ -484,6 +492,25 @@ logger = logging.getLogger(__name__)
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
+    # COHERE START
+    "VLLM_USE_LOGITS_FP32_COMPUTATION": lambda: (
+        os.getenv("VLLM_USE_LOGITS_FP32_COMPUTATION", "0").strip().lower()
+        in ("true", "1")
+    ),
+    "VLLM_XGRAMMAR_RECURSION_DEPTH": lambda: maybe_convert_int(
+        os.getenv("VLLM_XGRAMMAR_RECURSION_DEPTH", "64000")
+    ),
+    "VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE": lambda: os.environ.get(
+        "VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE", "False"
+    ).lower()
+    == "true",
+    "VLLM_REPETITION_LIMIT": lambda: maybe_convert_int(
+        os.getenv("VLLM_REPETITION_LIMIT", "0")
+    ),
+    "VLLM_REPETITION_MAX_SEQUENCE_LENGTH": lambda: maybe_convert_int(
+        os.getenv("VLLM_REPETITION_MAX_SEQUENCE_LENGTH", "0")
+    ),
+    # COHERE END
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),

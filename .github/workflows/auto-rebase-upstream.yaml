@@ -1,0 +1,357 @@
+name: Auto-rebase with upstream using rerere
+
+on:
+  # Run on schedule (weekly on Monday at 12 AM UTC / midnight)
+  schedule:
+    - cron: '0 0 * * 1'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Base branch name (will rebase from {source_branch}-squashed to {source_branch}-synced, defaults to current branch)'
+        required: false
+        type: string
+      upstream_ref:
+        description: 'Upstream ref to rebase onto (default: vllm-upstream/main)'
+        required: false
+        default: 'vllm-upstream/main'
+        type: string
+
+jobs:
+  rebase-with-rerere:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_branch || github.ref_name }}-squashed
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Enable rerere globally
+          git config rerere.enabled true
+          git config rerere.autoUpdate true
+
+      - name: Restore rerere cache from GitHub Actions cache
+        id: restore-rerere
+        uses: actions/cache@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.sha }}
+          restore-keys: |
+            rerere-cache-
+
+      - name: Also restore from uploaded rerere cache (if exists)
+        run: |
+          # Check if rerere-cache-upload branch exists
+          if git ls-remote --heads origin rerere-cache-upload | grep -q rerere-cache-upload; then
+            echo "Found uploaded rerere cache, downloading..."
+            git fetch origin rerere-cache-upload
+
+            # Checkout the rr-cache directory from that branch
+            git checkout origin/rerere-cache-upload -- rr-cache 2>/dev/null || true
+
+            if [ -d rr-cache ]; then
+              # Merge with existing cache
+              mkdir -p .git/rr-cache
+              cp -r rr-cache/* .git/rr-cache/ 2>/dev/null || true
+              echo "✅ Merged uploaded rerere cache"
+              rm -rf rr-cache
+            fi
+          else
+            echo "No uploaded rerere cache found (this is normal for first run)"
+          fi
+
+          # Clean up any staged changes from the checkout above
+          git reset --hard HEAD
+          git clean -fd
+
+      - name: Add upstream remote and fetch
+        env:
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'vllm-upstream/main' }}
+        run: |
+          # Add upstream if not exists
+          if ! git remote | grep -q "^vllm-upstream$"; then
+            git remote add vllm-upstream https://github.com/vllm-project/vllm.git
+          fi
+
+          # Fetch upstream
+          git fetch vllm-upstream
+
+          echo "Will rebase onto: $UPSTREAM_REF"
+
+      - name: Check rerere database
+        run: |
+          if [ -d .git/rr-cache ]; then
+            echo "Rerere cache found with $(find .git/rr-cache -type d -mindepth 1 | wc -l) recorded resolutions"
+            find .git/rr-cache -type d -mindepth 1 | head -10 || true
+          else
+            echo "No rerere cache found (first run)"
+          fi
+
+      - name: Attempt rebase with rerere
+        id: rebase
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'vllm-upstream/main' }}
+        run: |
+          # Target branch is always {source_branch}-synced
+          TARGET_BRANCH="${SOURCE_BRANCH}-synced"
+
+          # Create/reset target branch to squashed branch
+          git checkout -B "$TARGET_BRANCH" "${SOURCE_BRANCH}-squashed"
+
+          # Validate the upstream ref format
+          # Fail fast if someone passes remote/SHA (invalid format)
+          if [[ "$UPSTREAM_REF" =~ ^[a-z-]+/([0-9a-f]{7,40})$ ]]; then
+            echo "❌ Error: Invalid upstream ref format: $UPSTREAM_REF"
+            echo ""
+            echo "You passed what looks like a remote name with a commit SHA."
+            echo "This is not valid git syntax."
+            echo ""
+            echo "Valid formats:"
+            echo "  - Branch: vllm-upstream/main"
+            echo "  - Tag: v0.6.0"
+            echo "  - Commit SHA: 1da94e673c257373280026f75ceb4effac80e892"
+            echo ""
+            echo "NOT valid:"
+            echo "  - vllm-upstream/1da94e673c... ❌"
+            exit 1
+          fi
+
+          echo "Starting rebase onto $UPSTREAM_REF..."
+
+          # Call shared rebase logic
+          # Exit codes: 0=success, 1=conflicts (expected), 2=error
+          # We treat exit code 1 as success since outputs are set correctly
+          .github/scripts/rebase-with-rerere.sh "$UPSTREAM_REF" "$TARGET_BRANCH" --github-actions || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 1 ]; then
+              echo "Rebase has conflicts - continuing workflow to handle them"
+              exit 0
+            else
+              echo "Rebase script encountered an error (exit code: $EXIT_CODE)"
+              exit $EXIT_CODE
+            fi
+          }
+
+      - name: Handle unresolved conflicts
+        if: steps.rebase.outputs.has_conflicts == 'true'
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'vllm-upstream/main' }}
+        run: |
+          # Target branch is always {source_branch}-synced
+          TARGET_BRANCH="${SOURCE_BRANCH}-synced"
+
+          echo "Creating conflict resolution branch for manual review..."
+
+          # Get list of conflicted files for debugging
+          git diff --name-only --diff-filter=U | tr '\n' ' '
+
+          # Create a summary
+          cat > /tmp/conflict-summary.md <<EOF
+          # Rebase Conflicts Detected
+
+          The automatic rebase encountered conflicts that could not be resolved by rerere.
+
+          ## Conflicted Files
+          \`\`\`
+          $(git diff --name-only --diff-filter=U)
+          \`\`\`
+
+          ## Resolution Steps
+
+          **Note**: The \`$TARGET_BRANCH-conflicts\` branch is just a snapshot of the conflict state.
+          The rebase was aborted, so you need to restart it from scratch.
+
+          ### Option 1: Use the helper script (recommended)
+          \`\`\`bash
+          .github/scripts/resolve-rebase-conflicts.sh "$UPSTREAM_REF" "$TARGET_BRANCH"
+          \`\`\`
+
+          ### Option 2: Manual resolution
+          1. Enable rerere and download existing cache:
+             \`\`\`bash
+             git config rerere.enabled true
+             git config rerere.autoUpdate true
+             .github/scripts/download-rerere-cache.sh
+             \`\`\`
+          2. Reset to the squashed branch (start fresh):
+             \`\`\`bash
+             git checkout -B "$TARGET_BRANCH" "origin/${SOURCE_BRANCH}-squashed"
+             git fetch vllm-upstream
+             \`\`\`
+          3. Start the rebase: \`git rebase "$UPSTREAM_REF"\`
+          4. When conflicts occur, resolve them in the files listed above
+          5. Stage resolved files: \`git add <file>\`
+          6. Continue rebase: \`git rebase --continue\`
+          7. Repeat steps 4-6 until rebase completes
+          8. Force push when done: \`git push -f origin "$TARGET_BRANCH"\`
+          9. Upload your rerere resolutions: \`.github/scripts/upload-rerere-cache.sh\`
+
+          After uploading, future rebases will automatically use your conflict resolutions!
+
+          ## Conflict Details
+          \`\`\`
+          $(git status)
+          \`\`\`
+          EOF
+
+          cat /tmp/conflict-summary.md
+
+          # Save conflict state to a new branch
+          git checkout -b "${TARGET_BRANCH}-conflicts"
+
+          echo "Conflict state saved to branch: ${TARGET_BRANCH}-conflicts"
+
+          # Abort the rebase to clean up
+          git rebase --abort || true
+
+      - name: Push successful rebase
+        if: steps.rebase.outputs.status == 'success'
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+        run: |
+          # Target branch is always {source_branch}-synced
+          TARGET_BRANCH="${SOURCE_BRANCH}-synced"
+
+          git push -f origin "$TARGET_BRANCH"
+          echo "✅ Successfully pushed $TARGET_BRANCH"
+
+      - name: Trigger nightly benchmark
+        if: steps.rebase.outputs.status == 'success' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          CURRENT_REF: ${{ github.ref_name }}
+        with:
+          script: |
+            const sourceBranch = process.env.SOURCE_BRANCH;
+            const targetBranch = `${sourceBranch}-synced`;
+            const currentRef = process.env.CURRENT_REF;
+            console.log('Triggering nightly-benchmark workflow for branch: ' + targetBranch);
+            console.log('Using workflow file from branch: ' + currentRef);
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'nightly-benchmark.yaml',
+              ref: currentRef,  // Use workflow file from current branch
+              inputs: {
+                git_ref: targetBranch
+              }
+            });
+
+            console.log('✅ Successfully triggered nightly-benchmark workflow for ' + targetBranch);
+
+      - name: Push conflict branch for manual resolution
+        if: steps.rebase.outputs.has_conflicts == 'true'
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+        run: |
+          # Target branch is always {source_branch}-synced
+          TARGET_BRANCH="${SOURCE_BRANCH}-synced"
+
+          git push -f origin "${TARGET_BRANCH}-conflicts"
+          echo "⚠️ Pushed conflict state to ${TARGET_BRANCH}-conflicts for manual resolution"
+
+      - name: Save rerere cache
+        # Only save if rebase succeeded
+        # On conflicts, we abort the rebase, so rerere doesn't learn anything new
+        # New learnings come from manual conflict resolution → upload script
+        if: steps.rebase.outputs.status == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.sha }}
+
+      - name: Create issue on conflict (optional)
+        if: steps.rebase.outputs.has_conflicts == 'true' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'vllm-upstream/main' }}
+        with:
+          script: |
+            const conflictedFiles = await exec.getExecOutput('git', ['diff', '--name-only', '--diff-filter=U']);
+            const sourceBranch = process.env.SOURCE_BRANCH;
+            const targetBranch = `${sourceBranch}-synced`;
+            const upstreamRef = process.env.UPSTREAM_REF;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Auto-rebase] Manual conflict resolution needed`,
+              body: `The automatic upstream rebase encountered conflicts that could not be resolved by rerere.
+
+              **Branch:** \`${targetBranch}-conflicts\`
+
+              **Conflicted files:**
+              \`\`\`
+              ${conflictedFiles.stdout}
+              \`\`\`
+
+              **Next steps:**
+
+              ⚠️ **Note**: The \`${targetBranch}-conflicts\` branch is just a snapshot of the conflict state. The rebase was aborted, so you need to restart it from scratch.
+
+              **Option 1: Use the helper script (recommended)**
+              \`\`\`bash
+              .github/scripts/resolve-rebase-conflicts.sh ${upstreamRef} ${targetBranch}
+              \`\`\`
+
+              **Option 2: Manual resolution**
+              1. Enable rerere and download existing cache:
+                 \`\`\`bash
+                 git config rerere.enabled true
+                 git config rerere.autoUpdate true
+                 .github/scripts/download-rerere-cache.sh
+                 \`\`\`
+              2. Reset to the squashed branch (start fresh):
+                 \`\`\`bash
+                 git checkout -B ${targetBranch} origin/${sourceBranch}-squashed
+                 git fetch vllm-upstream
+                 \`\`\`
+              3. Start the rebase: \`git rebase ${upstreamRef}\`
+              4. When conflicts occur, resolve them manually
+              5. \`git add <resolved-files>\`
+              6. \`git rebase --continue\`
+              7. Repeat steps 4-6 until rebase completes
+              8. \`git push -f origin ${targetBranch}\`
+              9. Upload your rerere resolutions: \`.github/scripts/upload-rerere-cache.sh\`
+
+              After uploading, future rebases will automatically use your conflict resolutions!`,
+              labels: ['automation', 'rebase-conflict']
+            });
+
+      - name: Summary
+        if: always()
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'vllm-upstream/main' }}
+        run: |
+          # Target branch is always {source_branch}-synced
+          TARGET_BRANCH="${SOURCE_BRANCH}-synced"
+
+          echo "## Rebase Summary"
+          echo "Status: ${{ steps.rebase.outputs.status }}"
+          echo "Upstream ref: $UPSTREAM_REF"
+          echo "Target branch: $TARGET_BRANCH"
+
+          if [ "${{ steps.rebase.outputs.status }}" = "success" ]; then
+            echo "✅ Rebase completed successfully"
+            echo "View branch: ${{ github.server_url }}/${{ github.repository }}/tree/$TARGET_BRANCH"
+            if [ "${{ github.event_name }}" = "schedule" ]; then
+              echo "🚀 Triggered nightly-benchmark workflow"
+            fi
+          elif [ "${{ steps.rebase.outputs.has_conflicts }}" = "true" ]; then
+            echo "⚠️ Conflicts require manual resolution"
+            echo "View conflict branch: ${{ github.server_url }}/${{ github.repository }}/tree/$TARGET_BRANCH-conflicts"
+          fi

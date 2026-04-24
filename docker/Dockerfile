@@ -24,7 +24,6 @@
 
 ARG CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.12
-ARG UBUNTU_VERSION=22.04
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -39,7 +38,7 @@ ARG UBUNTU_VERSION=22.04
 # version are not backwards compatible with OSes that use an earlier version.
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -112,10 +111,6 @@ RUN apt-get update -y \
         gcc-10 \
         g++-10 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
-    # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
-    # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
-    # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
-    && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
@@ -246,10 +241,13 @@ ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ARG SCCACHE_REGION_NAME=us-west-2
-ARG SCCACHE_S3_NO_CREDENTIALS=0
+# cohere start
+# upstream also uses SCCACHE but we configure it slightly differently
+# to work with depot instead of s3 bucket
+ARG SCCACHE_WEBDAV_ENDPOINT
+ARG SCCACHE_WEBDAV_TOKEN
+ARG SCCACHE_WEBDAV_KEY_PREFIX
+# cohere end
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -282,10 +280,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
-        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
-        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
+        # cohere start
+        && export SCCACHE_WEBDAV_ENDPOINT="${SCCACHE_WEBDAV_ENDPOINT}" \
+        && export SCCACHE_WEBDAV_TOKEN="${SCCACHE_WEBDAV_TOKEN}" \
+        && export SCCACHE_WEBDAV_KEY_PREFIX="${SCCACHE_WEBDAV_KEY_PREFIX}$([ "${SCCACHE_ARCH}" = "aarch64" ] && echo "-arm64")" \
+        # cohere end
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
@@ -405,6 +404,59 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
+# max jobs used by Ninja to build extensions
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+# number of threads used by nvcc
+ARG nvcc_threads=8
+ENV NVCC_THREADS=$nvcc_threads
+
+ARG USE_SCCACHE
+# cohere start
+# upstream also uses SCCACHE but we configure it slightly differently
+# to work with depot instead of s3 bucket
+ARG SCCACHE_WEBDAV_ENDPOINT
+ARG SCCACHE_WEBDAV_TOKEN
+ARG SCCACHE_WEBDAV_KEY_PREFIX
+# cohere end
+
+# Flag to control whether to use pre-built vLLM wheels
+ARG VLLM_USE_PRECOMPILED=""
+ARG VLLM_MAIN_CUDA_VERSION=""
+
+# if USE_SCCACHE is set, use sccache to speed up compilation
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        # cohere start
+        # NOTE: we need download the correct sccache binary for the arch
+        # and use a separate cache prefix
+        && case "${TARGETPLATFORM}" in \
+          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
+          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
+          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+        esac \
+        # cohere end
+        && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
+        && tar -xzf sccache.tar.gz \
+        # cohere start
+        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
+        && export SCCACHE_WEBDAV_ENDPOINT="${SCCACHE_WEBDAV_ENDPOINT}" \
+        && export SCCACHE_WEBDAV_TOKEN="${SCCACHE_WEBDAV_TOKEN}" \
+        && export SCCACHE_WEBDAV_KEY_PREFIX="${SCCACHE_WEBDAV_KEY_PREFIX}$([ "${SCCACHE_ARCH}" = "aarch64" ] && echo "-arm64")" \
+        # cohere end
+        && export SCCACHE_IDLE_TIMEOUT=0 \
+        && export CMAKE_BUILD_TYPE=Release \
+        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
+        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        && sccache --show-stats \
+        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && sccache --show-stats; \
+    fi
 ARG vllm_target_device="cuda"
 ENV VLLM_TARGET_DEVICE=${vllm_target_device}
 
@@ -512,6 +564,7 @@ RUN apt-get update -y \
         software-properties-common \
         curl \
         sudo \
+        python3-pip \
         ffmpeg \
         libsm6 \
         libxext6 \
@@ -539,7 +592,6 @@ RUN apt-get update -y \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
@@ -587,33 +639,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
+# Install FlashInfer pre-compiled kernel cache and binaries
+# This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.6
+# cohere start (flashinfer nightly)
+# Nightly builds are served from https://flashinfer.ai/whl/nightly/
+ARG FLASHINFER_VERSION=0.6.7.dev20260406
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
+        --extra-index-url https://flashinfer.ai/whl/nightly/ \
+    && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+        --extra-index-url https://flashinfer.ai/whl/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
-
-# Pre-download FlashInfer TRTLLM BMM headers for air-gapped environments.
-# At runtime, MoE JIT compilation downloads these from edge.urm.nvidia.com
-# which fails without internet. This step caches them at build time.
-RUN python3 <<'PYEOF'
-from flashinfer.jit import env as jit_env
-from flashinfer.jit.cubin_loader import download_trtllm_headers, get_cubin
-from flashinfer.artifacts import ArtifactPath, CheckSumHash
-
-download_trtllm_headers(
-    'bmm',
-    jit_env.FLASHINFER_CUBIN_DIR / 'flashinfer' / 'trtllm' / 'batched_gemm' / 'trtllmGen_bmm_export',
-    f'{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export',
-    ArtifactPath.TRTLLM_GEN_BMM,
-    get_cubin(f'{ArtifactPath.TRTLLM_GEN_BMM}/checksums.txt', CheckSumHash.TRTLLM_GEN_BMM),
-)
-
-print('FlashInfer TRTLLM BMM headers downloaded successfully')
-PYEOF
+# cohere end
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -642,15 +681,15 @@ RUN set -eux; \
 ARG BITSANDBYTES_VERSION_X86=0.46.1
 ARG BITSANDBYTES_VERSION_ARM64=0.42.0
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.3"
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
     else \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
-    uv pip install --system accelerate modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
+    uv pip install --system accelerate hf_transfer modelscope \
+        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
@@ -682,6 +721,10 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# cohere: keep the wheel files
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    mkdir -p /app/cohere/dist \
+    && cp -R /vllm-workspace/dist/* /app/cohere/dist/
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
@@ -772,10 +815,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
-ENV HF_XET_HIGH_PERFORMANCE 1
-
-# increase timeout for hf downloads (for testing)
-ENV HF_HUB_DOWNLOAD_TIMEOUT 60
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1

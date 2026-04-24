@@ -1,0 +1,164 @@
+# Set the correct runner label and call the test group.
+name: Test Dispatcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        required: true
+        type: string
+        description: 'branch to build + test'
+      device:
+        required: true
+        type: choice
+        description: 'Device type (single device only - use build-and-test.yaml, build-and-eval.yaml, or build-and-bench.yaml for "all")'
+        options:
+          - cpu
+          - h100
+          - mi300x
+          - a100
+          - b200
+          - gb200
+      models:
+        required: false
+        type: string
+        default: ''
+        description: 'Models to run eval/perf on (comma-separated). Optional per-entry tensor parallel: model:tpN. If omitted or empty, uses recommended_tp from tp_model_map.json when models are listed. If any entry uses :tpN, all entries must use the same :tpN. Leave empty for feature-only runs (benchmarks none).'
+      benchmarks:
+        required: false
+        type: choice
+        default: 'none'
+        description: 'Benchmark tests to run'
+        options:
+          - none
+          - lm_eval
+          - bee_eval
+          - perf_100
+          - perf_1000
+      features:
+        required: false
+        type: choice
+        description: 'Feature tests to run (all excludes fast_check). cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+        default: 'all'
+        options:
+          - none
+          - cpu_check
+          - fast_check
+          - model_arch
+          - quantization
+          - GG_TB
+          - speculative_decoding
+          - vision
+          - all
+      hardware_profiles_override:
+        required: false
+        type: string
+        default: ''
+        description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      result_upload_branch:
+        required: false
+        default: ci_dump
+        type: choice
+        description: 'Branch to upload reporting results to'
+        options:
+          - ci_dump
+          - gh-pages
+      docker_commit:
+        required: false
+        type: string
+        description: 'Docker commit SHA to use for tests (defaults to current commit)'
+      model_path:
+        required: true
+        type: string
+        description: 'GCS prefix for model checkpoints (prefix + model_name)'
+  workflow_call:
+    inputs:
+      git_ref:
+        required: true
+        type: string
+      device:
+        required: true
+        type: string
+      models:
+        required: false
+        type: string
+        default: ''
+        description: 'Models to run eval/perf on (comma-separated). Optional :tpN suffix per entry; see workflow_dispatch. Omit or empty for feature-only runs.'
+      benchmarks:
+        required: true
+        type: string
+        description: 'Benchmark tests to run (none, lm_eval, bee_eval, perf_100, perf_1000)'
+      features:
+        required: true
+        type: string
+        description: 'Feature tests to run (none, cpu_check, fast_check, model_arch, quantization, GG_TB, speculative_decoding, vision, all). Note: all excludes fast_check. cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+      hardware_profiles_override:
+        required: true
+        type: string
+        description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      result_upload_branch:
+        required: true
+        type: string
+        description: 'Branch to upload reporting results to'
+      docker_commit:
+        required: false
+        type: string
+        description: 'Docker commit SHA to use for tests (defaults to current commit)'
+      model_path:
+        required: true
+        type: string
+        description: 'GCS prefix for model checkpoints (prefix + model_name)'
+    secrets:
+      HF_TOKEN:
+        required: true
+      SLACK_WEBHOOK:
+        required: true
+      CO_API_KEY_STAGING:
+        required: true
+      BEE_DEPLOY_KEY:
+        required: false
+
+jobs:
+  set-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    # this step uses runner_map.json to choose the correct
+    # runner label based on the requested test group + device
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine Test Groups + Runner Labels
+        id: set-matrix
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { setMatrixOutput } = require('./.github/scripts/dispatcher-set-matrix.js');
+            setMatrixOutput({ core, inputs: ${{ toJSON(inputs) }} });
+
+  # Run one test job for each test group specified.
+  run-tests:
+    needs: set-matrix
+    strategy:
+      # Allow jobs to continue running even if one fails.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/test-pipeline.yaml
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+      BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
+    with:
+      git_ref: ${{ inputs.git_ref }}
+      test_group: ${{ matrix.test_group }}
+      result_upload_branch: ${{ inputs.result_upload_branch }}
+      # Input expects a string.
+      runner_labels: '${{ toJSON(matrix.runner_labels) }}'
+      device: ${{ matrix.device }}
+      tp_size: ${{ matrix.tp_size }}
+      models: ${{ matrix.models }}
+      benchmark_output_len: ${{ matrix.benchmark_output_len || '' }}
+      hardware_profiles_override: ${{ matrix.hardware_profiles_override }}
+      docker_commit: ${{ inputs.docker_commit }}
+      model_path: ${{ inputs.model_path }}

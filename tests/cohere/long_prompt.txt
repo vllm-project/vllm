@@ -1,0 +1,3011 @@
+# ruff: noqa: E501
+Provided proper attribution is provided, Google hereby grants permission to
+reproduce the tables and figures in this paper solely for use in journalistic or
+scholarly works.
+Attention Is All You Need
+Ashish Vaswani∗
+Google Brain
+avaswani@google.com
+Noam Shazeer∗
+Google Brain
+noam@google.com
+Niki Parmar∗
+Google Research
+nikip@google.com
+Jakob Uszkoreit∗
+Google Research
+usz@google.com
+Llion Jones∗
+Google Research
+llion@google.com
+Aidan N. Gomez∗ †
+University of Toronto
+aidan@cs.toronto.edu
+Łukasz Kaiser∗
+Google Brain
+lukaszkaiser@google.com
+Illia Polosukhin∗ ‡
+illia.polosukhin@gmail.com
+Abstract
+The dominant sequence transduction models are based on complex recurrent or
+convolutional neural networks that include an encoder and a decoder. The best
+performing models also connect the encoder and decoder through an attention
+mechanism. We propose a new simple network architecture, the Transformer,
+based solely on attention mechanisms, dispensing with recurrence and convolutions
+entirely. Experiments on two machine translation tasks show these models to
+be superior in quality while being more parallelizable and requiring significantly
+less time to train. Our model achieves 28.4 BLEU on the WMT 2014 Englishto-German translation task, improving over the existing best results, including
+ensembles, by over 2 BLEU. On the WMT 2014 English-to-French translation task,
+our model establishes a new single-model state-of-the-art BLEU score of 41.8 after
+training for 3.5 days on eight GPUs, a small fraction of the training costs of the
+best models from the literature. We show that the Transformer generalizes well to
+other tasks by applying it successfully to English constituency parsing both with
+large and limited training data.
+∗Equal contribution. Listing order is random. Jakob proposed replacing RNNs with self-attention and started
+the effort to evaluate this idea. Ashish, with Illia, designed and implemented the first Transformer models and
+has been crucially involved in every aspect of this work. Noam proposed scaled dot-product attention, multi-head
+attention and the parameter-free position representation and became the other person involved in nearly every
+detail. Niki designed, implemented, tuned and evaluated countless model variants in our original codebase and
+tensor2tensor. Llion also experimented with novel model variants, was responsible for our initial codebase, and
+efficient inference and visualizations. Lukasz and Aidan spent countless long days designing various parts of and
+implementing tensor2tensor, replacing our earlier codebase, greatly improving results and massively accelerating
+our research.
+†Work performed while at Google Brain.
+‡Work performed while at Google Research.
+31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA.
+arXiv:1706.03762v7 [cs.CL] 2 Aug 2023
+1 Introduction
+Recurrent neural networks, long short-term memory [13] and gated recurrent [7] neural networks
+in particular, have been firmly established as state of the art approaches in sequence modeling and
+transduction problems such as language modeling and machine translation [35, 2, 5]. Numerous
+efforts have since continued to push the boundaries of recurrent language models and encoder-decoder
+architectures [38, 24, 15].
+Recurrent models typically factor computation along the symbol positions of the input and output
+sequences. Aligning the positions to steps in computation time, they generate a sequence of hidden
+states ht, as a function of the previous hidden state ht−1 and the input for position t. This inherently
+sequential nature precludes parallelization within training examples, which becomes critical at longer
+sequence lengths, as memory constraints limit batching across examples. Recent work has achieved
+significant improvements in computational efficiency through factorization tricks [21] and conditional
+computation [32], while also improving model performance in case of the latter. The fundamental
+constraint of sequential computation, however, remains.
+Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks, allowing modeling of dependencies without regard to their distance in
+the input or output sequences [2, 19]. In all but a few cases [27], however, such attention mechanisms
+are used in conjunction with a recurrent network.
+In this work we propose the Transformer, a model architecture eschewing recurrence and instead
+relying entirely on an attention mechanism to draw global dependencies between input and output.
+The Transformer allows for significantly more parallelization and can reach a new state of the art in
+translation quality after being trained for as little as twelve hours on eight P100 GPUs.
+2 Background
+The goal of reducing sequential computation also forms the foundation of the Extended Neural GPU
+[16], ByteNet [18] and ConvS2S [9], all of which use convolutional neural networks as basic building
+block, computing hidden representations in parallel for all input and output positions. In these models,
+the number of operations required to relate signals from two arbitrary input or output positions grows
+in the distance between positions, linearly for ConvS2S and logarithmically for ByteNet. This makes
+it more difficult to learn dependencies between distant positions [12]. In the Transformer this is
+reduced to a constant number of operations, albeit at the cost of reduced effective resolution due
+to averaging attention-weighted positions, an effect we counteract with Multi-Head Attention as
+described in section 3.2.
+Self-attention, sometimes called intra-attention is an attention mechanism relating different positions
+of a single sequence in order to compute a representation of the sequence. Self-attention has been
+used successfully in a variety of tasks including reading comprehension, abstractive summarization,
+textual entailment and learning task-independent sentence representations [4, 27, 28, 22].
+End-to-end memory networks are based on a recurrent attention mechanism instead of sequencealigned recurrence and have been shown to perform well on simple-language question answering and
+language modeling tasks [34].
+To the best of our knowledge, however, the Transformer is the first transduction model relying
+entirely on self-attention to compute representations of its input and output without using sequencealigned RNNs or convolution. In the following sections, we will describe the Transformer, motivate
+self-attention and discuss its advantages over models such as [17, 18] and [9].
+3 Model Architecture
+Most competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35].
+Here, the encoder maps an input sequence of symbol representations (x1, ..., xn) to a sequence
+of continuous representations z = (z1, ..., zn). Given z, the decoder then generates an output
+sequence (y1, ..., ym) of symbols one element at a time. At each step the model is auto-regressive
+[10], consuming the previously generated symbols as additional input when generating the next.
+2
+Figure 1: The Transformer - model architecture.
+The Transformer follows this overall architecture using stacked self-attention and point-wise, fully
+connected layers for both the encoder and decoder, shown in the left and right halves of Figure 1,
+respectively.
+3.1 Encoder and Decoder Stacks
+Encoder: The encoder is composed of a stack of N = 6 identical layers. Each layer has two
+sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, positionwise fully connected feed-forward network. We employ a residual connection [11] around each of
+the two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is
+LayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer
+itself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding
+layers, produce outputs of dimension dmodel = 512.
+Decoder: The decoder is also composed of a stack of N = 6 identical layers. In addition to the two
+sub-layers in each encoder layer, the decoder inserts a third sub-layer, which performs multi-head
+attention over the output of the encoder stack. Similar to the encoder, we employ residual connections
+around each of the sub-layers, followed by layer normalization. We also modify the self-attention
+sub-layer in the decoder stack to prevent positions from attending to subsequent positions. This
+masking, combined with fact that the output embeddings are offset by one position, ensures that the
+predictions for position i can depend only on the known outputs at positions less than i.
+3.2 Attention
+An attention function can be described as mapping a query and a set of key-value pairs to an output,
+where the query, keys, values, and output are all vectors. The output is computed as a weighted sum
+3
+Scaled Dot-Product Attention Multi-Head Attention
+Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several
+attention layers running in parallel.
+of the values, where the weight assigned to each value is computed by a compatibility function of the
+query with the corresponding key.
+3.2.1 Scaled Dot-Product Attention
+We call our particular attention "Scaled Dot-Product Attention" (Figure 2). The input consists of
+queries and keys of dimension dk, and values of dimension dv. We compute the dot products of the
+query with all keys, divide each by √
+dk, and apply a softmax function to obtain the weights on the
+values.
+In practice, we compute the attention function on a set of queries simultaneously, packed together
+into a matrix Q. The keys and values are also packed together into matrices K and V . We compute
+the matrix of outputs as:
+Attention(Q, K, V ) = softmax(QKT
+√
+dk
+)V (1)
+The two most commonly used attention functions are additive attention [2], and dot-product (multiplicative) attention. Dot-product attention is identical to our algorithm, except for the scaling factor
+of √
+1
+dk
+. Additive attention computes the compatibility function using a feed-forward network with
+a single hidden layer. While the two are similar in theoretical complexity, dot-product attention is
+much faster and more space-efficient in practice, since it can be implemented using highly optimized
+matrix multiplication code.
+While for small values of dk the two mechanisms perform similarly, additive attention outperforms
+dot product attention without scaling for larger values of dk [3]. We suspect that for large values of
+dk, the dot products grow large in magnitude, pushing the softmax function into regions where it has
+extremely small gradients 4
+. To counteract this effect, we scale the dot products by √
+1
+dk
+.
+3.2.2 Multi-Head Attention
+Instead of performing a single attention function with dmodel-dimensional keys, values and queries,
+we found it beneficial to linearly project the queries, keys and values h times with different, learned
+linear projections to dk, dk and dv dimensions, respectively. On each of these projected versions of
+queries, keys and values we then perform the attention function in parallel, yielding dv-dimensional
+4To illustrate why the dot products get large, assume that the components of q and k are independent random
+variables with mean 0 and variance 1. Then their dot product, q · k =
+Pdk
+i=1 qiki, has mean 0 and variance dk.
+4
+output values. These are concatenated and once again projected, resulting in the final values, as
+depicted in Figure 2.
+Multi-head attention allows the model to jointly attend to information from different representation
+subspaces at different positions. With a single attention head, averaging inhibits this.
+MultiHead(Q, K, V ) = Concat(head1, ..., headh)WO
+where headi = Attention(QWQ
+i
+, KW K
+i
+, V WV
+i
+)
+Where the projections are parameter matrices W
+Q
+i ∈ R
+dmodel×dk , W K
+i ∈ R
+dmodel×dk , WV
+i ∈ R
+dmodel×dv
+and WO ∈ R
+hdv×dmodel
+.
+In this work we employ h = 8 parallel attention layers, or heads. For each of these we use
+dk = dv = dmodel/h = 64. Due to the reduced dimension of each head, the total computational cost
+is similar to that of single-head attention with full dimensionality.
+3.2.3 Applications of Attention in our Model
+The Transformer uses multi-head attention in three different ways:
+• In "encoder-decoder attention" layers, the queries come from the previous decoder layer,
+and the memory keys and values come from the output of the encoder. This allows every
+position in the decoder to attend over all positions in the input sequence. This mimics the
+typical encoder-decoder attention mechanisms in sequence-to-sequence models such as
+[38, 2, 9].
+• The encoder contains self-attention layers. In a self-attention layer all of the keys, values
+and queries come from the same place, in this case, the output of the previous layer in the
+encoder. Each position in the encoder can attend to all positions in the previous layer of the
+encoder.
+• Similarly, self-attention layers in the decoder allow each position in the decoder to attend to
+all positions in the decoder up to and including that position. We need to prevent leftward
+information flow in the decoder to preserve the auto-regressive property. We implement this
+inside of scaled dot-product attention by masking out (setting to −∞) all values in the input
+of the softmax which correspond to illegal connections. See Figure 2.
+3.3 Position-wise Feed-Forward Networks
+In addition to attention sub-layers, each of the layers in our encoder and decoder contains a fully
+connected feed-forward network, which is applied to each position separately and identically. This
+consists of two linear transformations with a ReLU activation in between.
+FFN(x) = max(0, xW1 + b1)W2 + b2 (2)
+While the linear transformations are the same across different positions, they use different parameters
+from layer to layer. Another way of describing this is as two convolutions with kernel size 1.
+The dimensionality of input and output is dmodel = 512, and the inner-layer has dimensionality
+df f = 2048.
+3.4 Embeddings and Softmax
+Similarly to other sequence transduction models, we use learned embeddings to convert the input
+tokens and output tokens to vectors of dimension dmodel. We also use the usual learned linear transformation and softmax function to convert the decoder output to predicted next-token probabilities. In
+our model, we share the same weight matrix between the two embedding layers and the pre-softmax
+linear transformation, similar to [30]. In the embedding layers, we multiply those weights by √
+dmodel.
+5
+Table 1: Maximum path lengths, per-layer complexity and minimum number of sequential operations
+for different layer types. n is the sequence length, d is the representation dimension, k is the kernel
+size of convolutions and r the size of the neighborhood in restricted self-attention.
+Layer Type Complexity per Layer Sequential Maximum Path Length
+Operations
+Self-Attention O(n
+2
+· d) O(1) O(1)
+Recurrent O(n · d
+2
+) O(n) O(n)
+Convolutional O(k · n · d
+2
+) O(1) O(logk(n))
+Self-Attention (restricted) O(r · n · d) O(1) O(n/r)
+3.5 Positional Encoding
+Since our model contains no recurrence and no convolution, in order for the model to make use of the
+order of the sequence, we must inject some information about the relative or absolute position of the
+tokens in the sequence. To this end, we add "positional encodings" to the input embeddings at the
+bottoms of the encoder and decoder stacks. The positional encodings have the same dimension dmodel
+as the embeddings, so that the two can be summed. There are many choices of positional encodings,
+learned and fixed [9].
+In this work, we use sine and cosine functions of different frequencies:
+P E(pos,2i) = sin(pos/100002i/dmodel)
+P E(pos,2i+1) = cos(pos/100002i/dmodel)
+where pos is the position and i is the dimension. That is, each dimension of the positional encoding
+corresponds to a sinusoid. The wavelengths form a geometric progression from 2π to 10000 · 2π. We
+chose this function because we hypothesized it would allow the model to easily learn to attend by
+relative positions, since for any fixed offset k, P Epos+k can be represented as a linear function of
+P Epos.
+We also experimented with using learned positional embeddings [9] instead, and found that the two
+versions produced nearly identical results (see Table 3 row (E)). We chose the sinusoidal version
+because it may allow the model to extrapolate to sequence lengths longer than the ones encountered
+during training.
+4 Why Self-Attention
+In this section we compare various aspects of self-attention layers to the recurrent and convolutional layers commonly used for mapping one variable-length sequence of symbol representations
+(x1, ..., xn) to another sequence of equal length (z1, ..., zn), with xi
+, zi ∈ R
+d
+, such as a hidden
+layer in a typical sequence transduction encoder or decoder. Motivating our use of self-attention we
+consider three desiderata.
+One is the total computational complexity per layer. Another is the amount of computation that can
+be parallelized, as measured by the minimum number of sequential operations required.
+The third is the path length between long-range dependencies in the network. Learning long-range
+dependencies is a key challenge in many sequence transduction tasks. One key factor affecting the
+ability to learn such dependencies is the length of the paths forward and backward signals have to
+traverse in the network. The shorter these paths between any combination of positions in the input
+and output sequences, the easier it is to learn long-range dependencies [12]. Hence we also compare
+the maximum path length between any two input and output positions in networks composed of the
+different layer types.
+As noted in Table 1, a self-attention layer connects all positions with a constant number of sequentially
+executed operations, whereas a recurrent layer requires O(n) sequential operations. In terms of
+computational complexity, self-attention layers are faster than recurrent layers when the sequence
+6
+length n is smaller than the representation dimensionality d, which is most often the case with
+sentence representations used by state-of-the-art models in machine translations, such as word-piece
+[38] and byte-pair [31] representations. To improve computational performance for tasks involving
+very long sequences, self-attention could be restricted to considering only a neighborhood of size r in
+the input sequence centered around the respective output position. This would increase the maximum
+path length to O(n/r). We plan to investigate this approach further in future work.
+A single convolutional layer with kernel width k < n does not connect all pairs of input and output
+positions. Doing so requires a stack of O(n/k) convolutional layers in the case of contiguous kernels,
+or O(logk(n)) in the case of dilated convolutions [18], increasing the length of the longest paths
+between any two positions in the network. Convolutional layers are generally more expensive than
+recurrent layers, by a factor of k. Separable convolutions [6], however, decrease the complexity
+considerably, to O(k · n · d + n · d
+2
+). Even with k = n, however, the complexity of a separable
+convolution is equal to the combination of a self-attention layer and a point-wise feed-forward layer,
+the approach we take in our model.
+As side benefit, self-attention could yield more interpretable models. We inspect attention distributions
+from our models and present and discuss examples in the appendix. Not only do individual attention
+heads clearly learn to perform different tasks, many appear to exhibit behavior related to the syntactic
+and semantic structure of the sentences.
+5 Training
+This section describes the training regime for our models.
+5.1 Training Data and Batching
+We trained on the standard WMT 2014 English-German dataset consisting of about 4.5 million
+sentence pairs. Sentences were encoded using byte-pair encoding [3], which has a shared sourcetarget vocabulary of about 37000 tokens. For English-French, we used the significantly larger WMT
+2014 English-French dataset consisting of 36M sentences and split tokens into a 32000 word-piece
+vocabulary [38]. Sentence pairs were batched together by approximate sequence length. Each training
+batch contained a set of sentence pairs containing approximately 25000 source tokens and 25000
+target tokens.
+5.2 Hardware and Schedule
+We trained our models on one machine with 8 NVIDIA P100 GPUs. For our base models using
+the hyperparameters described throughout the paper, each training step took about 0.4 seconds. We
+trained the base models for a total of 100,000 steps or 12 hours. For our big models,(described on the
+bottom line of table 3), step time was 1.0 seconds. The big models were trained for 300,000 steps
+(3.5 days).
+5.3 Optimizer
+We used the Adam optimizer [20] with β1 = 0.9, β2 = 0.98 and ϵ = 10−9
+. We varied the learning
+rate over the course of training, according to the formula:
+lrate = d
+−0.5
+model · min(step_num−0.5
+, step_num · warmup_steps−1.5
+) (3)
+This corresponds to increasing the learning rate linearly for the first warmup_steps training steps,
+and decreasing it thereafter proportionally to the inverse square root of the step number. We used
+warmup_steps = 4000.
+5.4 Regularization
+We employ three types of regularization during training:
+7
+Table 2: The Transformer achieves better BLEU scores than previous state-of-the-art models on the
+English-to-German and English-to-French newstest2014 tests at a fraction of the training cost.
+Model
+BLEU Training Cost (FLOPs)
+EN-DE EN-FR EN-DE EN-FR
+ByteNet [18] 23.75
+Deep-Att + PosUnk [39] 39.2 1.0 · 1020
+GNMT + RL [38] 24.6 39.92 2.3 · 1019 1.4 · 1020
+ConvS2S [9] 25.16 40.46 9.6 · 1018 1.5 · 1020
+MoE [32] 26.03 40.56 2.0 · 1019 1.2 · 1020
+Deep-Att + PosUnk Ensemble [39] 40.4 8.0 · 1020
+GNMT + RL Ensemble [38] 26.30 41.16 1.8 · 1020 1.1 · 1021
+ConvS2S Ensemble [9] 26.36 41.29 7.7 · 1019 1.2 · 1021
+Transformer (base model) 27.3 38.1 3.3 · 1018
+Transformer (big) 28.4 41.8 2.3 · 1019
+Residual Dropout We apply dropout [33] to the output of each sub-layer, before it is added to the
+sub-layer input and normalized. In addition, we apply dropout to the sums of the embeddings and the
+positional encodings in both the encoder and decoder stacks. For the base model, we use a rate of
+Pdrop = 0.1.
+Label Smoothing During training, we employed label smoothing of value ϵls = 0.1 [36]. This
+hurts perplexity, as the model learns to be more unsure, but improves accuracy and BLEU score.
+6 Results
+6.1 Machine Translation
+On the WMT 2014 English-to-German translation task, the big transformer model (Transformer (big)
+in Table 2) outperforms the best previously reported models (including ensembles) by more than 2.0
+BLEU, establishing a new state-of-the-art BLEU score of 28.4. The configuration of this model is
+listed in the bottom line of Table 3. Training took 3.5 days on 8 P100 GPUs. Even our base model
+surpasses all previously published models and ensembles, at a fraction of the training cost of any of
+the competitive models.
+On the WMT 2014 English-to-French translation task, our big model achieves a BLEU score of 41.0,
+outperforming all of the previously published single models, at less than 1/4 the training cost of the
+previous state-of-the-art model. The Transformer (big) model trained for English-to-French used
+dropout rate Pdrop = 0.1, instead of 0.3.
+For the base models, we used a single model obtained by averaging the last 5 checkpoints, which
+were written at 10-minute intervals. For the big models, we averaged the last 20 checkpoints. We
+used beam search with a beam size of 4 and length penalty α = 0.6 [38]. These hyperparameters
+were chosen after experimentation on the development set. We set the maximum output length during
+inference to input length + 50, but terminate early when possible [38].
+Table 2 summarizes our results and compares our translation quality and training costs to other model
+architectures from the literature. We estimate the number of floating point operations used to train a
+model by multiplying the training time, the number of GPUs used, and an estimate of the sustained
+single-precision floating-point capacity of each GPU 5
+.
+6.2 Model Variations
+To evaluate the importance of different components of the Transformer, we varied our base model
+in different ways, measuring the change in performance on English-to-German translation on the
+5We used values of 2.8, 3.7, 6.0 and 9.5 TFLOPS for K80, K40, M40 and P100, respectively.
+8
+Table 3: Variations on the Transformer architecture. Unlisted values are identical to those of the base
+model. All metrics are on the English-to-German translation development set, newstest2013. Listed
+perplexities are per-wordpiece, according to our byte-pair encoding, and should not be compared to
+per-word perplexities.
+N dmodel dff h dk dv Pdrop ϵls
+train PPL BLEU params
+steps (dev) (dev) ×106
+base 6 512 2048 8 64 64 0.1 0.1 100K 4.92 25.8 65
+(A)
+1 512 512 5.29 24.9
+4 128 128 5.00 25.5
+16 32 32 4.91 25.8
+32 16 16 5.01 25.4
+(B) 16 5.16 25.1 58
+32 5.01 25.4 60
+(C)
+2 6.11 23.7 36
+4 5.19 25.3 50
+8 4.88 25.5 80
+256 32 32 5.75 24.5 28
+1024 128 128 4.66 26.0 168
+1024 5.12 25.4 53
+4096 4.75 26.2 90
+(D)
+0.0 5.77 24.6
+0.2 4.95 25.5
+0.0 4.67 25.3
+0.2 5.47 25.7
+(E) positional embedding instead of sinusoids 4.92 25.7
+big 6 1024 4096 16 0.3 300K 4.33 26.4 213
+development set, newstest2013. We used beam search as described in the previous section, but no
+checkpoint averaging. We present these results in Table 3.
+In Table 3 rows (A), we vary the number of attention heads and the attention key and value dimensions,
+keeping the amount of computation constant, as described in Section 3.2.2. While single-head
+attention is 0.9 BLEU worse than the best setting, quality also drops off with too many heads.
+In Table 3 rows (B), we observe that reducing the attention key size dk hurts model quality. This
+suggests that determining compatibility is not easy and that a more sophisticated compatibility
+function than dot product may be beneficial. We further observe in rows (C) and (D) that, as expected,
+bigger models are better, and dropout is very helpful in avoiding over-fitting. In row (E) we replace our
+sinusoidal positional encoding with learned positional embeddings [9], and observe nearly identical
+results to the base model.
+6.3 English Constituency Parsing
+To evaluate if the Transformer can generalize to other tasks we performed experiments on English
+constituency parsing. This task presents specific challenges: the output is subject to strong structural
+constraints and is significantly longer than the input. Furthermore, RNN sequence-to-sequence
+models have not been able to attain state-of-the-art results in small-data regimes [37].
+We trained a 4-layer transformer with dmodel = 1024 on the Wall Street Journal (WSJ) portion of the
+Penn Treebank [25], about 40K training sentences. We also trained it in a semi-supervised setting,
+using the larger high-confidence and BerkleyParser corpora from with approximately 17M sentences
+[37]. We used a vocabulary of 16K tokens for the WSJ only setting and a vocabulary of 32K tokens
+for the semi-supervised setting.
+We performed only a small number of experiments to select the dropout, both attention and residual
+(section 5.4), learning rates and beam size on the Section 22 development set, all other parameters
+remained unchanged from the English-to-German base translation model. During inference, we
+9
+Table 4: The Transformer generalizes well to English constituency parsing (Results are on Section 23
+of WSJ)
+Parser Training WSJ 23 F1
+Vinyals & Kaiser el al. (2014) [37] WSJ only, discriminative 88.3
+Petrov et al. (2006) [29] WSJ only, discriminative 90.4
+Zhu et al. (2013) [40] WSJ only, discriminative 90.4
+Dyer et al. (2016) [8] WSJ only, discriminative 91.7
+Transformer (4 layers) WSJ only, discriminative 91.3
+Zhu et al. (2013) [40] semi-supervised 91.3
+Huang & Harper (2009) [14] semi-supervised 91.3
+McClosky et al. (2006) [26] semi-supervised 92.1
+Vinyals & Kaiser el al. (2014) [37] semi-supervised 92.1
+Transformer (4 layers) semi-supervised 92.7
+Luong et al. (2015) [23] multi-task 93.0
+Dyer et al. (2016) [8] generative 93.3
+increased the maximum output length to input length + 300. We used a beam size of 21 and α = 0.3
+for both WSJ only and the semi-supervised setting.
+Our results in Table 4 show that despite the lack of task-specific tuning our model performs surprisingly well, yielding better results than all previously reported models with the exception of the
+Recurrent Neural Network Grammar [8].
+In contrast to RNN sequence-to-sequence models [37], the Transformer outperforms the BerkeleyParser [29] even when training only on the WSJ training set of 40K sentences.
+7 Conclusion
+In this work, we presented the Transformer, the first sequence transduction model based entirely on
+attention, replacing the recurrent layers most commonly used in encoder-decoder architectures with
+multi-headed self-attention.
+For translation tasks, the Transformer can be trained significantly faster than architectures based
+on recurrent or convolutional layers. On both WMT 2014 English-to-German and WMT 2014
+English-to-French translation tasks, we achieve a new state of the art. In the former task our best
+model outperforms even all previously reported ensembles.
+We are excited about the future of attention-based models and plan to apply them to other tasks. We
+plan to extend the Transformer to problems involving input and output modalities other than text and
+to investigate local, restricted attention mechanisms to efficiently handle large inputs and outputs
+such as images, audio and video. Making generation less sequential is another research goals of ours.
+The code we used to train and evaluate our models is available at https://github.com/
+tensorflow/tensor2tensor.
+Acknowledgements We are grateful to Nal Kalchbrenner and Stephan Gouws for their fruitful
+comments, corrections and inspiration.
+References
+[1] Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hinton. Layer normalization. arXiv preprint
+arXiv:1607.06450, 2016.
+[2] Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly
+learning to align and translate. CoRR, abs/1409.0473, 2014.
+[3] Denny Britz, Anna Goldie, Minh-Thang Luong, and Quoc V. Le. Massive exploration of neural
+machine translation architectures. CoRR, abs/1703.03906, 2017.
+[4] Jianpeng Cheng, Li Dong, and Mirella Lapata. Long short-term memory-networks for machine
+reading. arXiv preprint arXiv:1601.06733, 2016.
+10
+[5] Kyunghyun Cho, Bart van Merrienboer, Caglar Gulcehre, Fethi Bougares, Holger Schwenk,
+and Yoshua Bengio. Learning phrase representations using rnn encoder-decoder for statistical
+machine translation. CoRR, abs/1406.1078, 2014.
+[6] Francois Chollet. Xception: Deep learning with depthwise separable convolutions. arXiv
+preprint arXiv:1610.02357, 2016.
+[7] Junyoung Chung, Çaglar Gülçehre, Kyunghyun Cho, and Yoshua Bengio. Empirical evaluation
+of gated recurrent neural networks on sequence modeling. CoRR, abs/1412.3555, 2014.
+[8] Chris Dyer, Adhiguna Kuncoro, Miguel Ballesteros, and Noah A. Smith. Recurrent neural
+network grammars. In Proc. of NAACL, 2016.
+[9] Jonas Gehring, Michael Auli, David Grangier, Denis Yarats, and Yann N. Dauphin. Convolutional sequence to sequence learning. arXiv preprint arXiv:1705.03122v2, 2017.
+[10] Alex Graves. Generating sequences with recurrent neural networks. arXiv preprint
+arXiv:1308.0850, 2013.
+[11] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 770–778, 2016.
+[12] Sepp Hochreiter, Yoshua Bengio, Paolo Frasconi, and Jürgen Schmidhuber. Gradient flow in
+recurrent nets: the difficulty of learning long-term dependencies, 2001.
+[13] Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation,
+9(8):1735–1780, 1997.
+[14] Zhongqiang Huang and Mary Harper. Self-training PCFG grammars with latent annotations
+across languages. In Proceedings of the 2009 Conference on Empirical Methods in Natural
+Language Processing, pages 832–841. ACL, August 2009.
+[15] Rafal Jozefowicz, Oriol Vinyals, Mike Schuster, Noam Shazeer, and Yonghui Wu. Exploring
+the limits of language modeling. arXiv preprint arXiv:1602.02410, 2016.
+[16] Łukasz Kaiser and Samy Bengio. Can active memory replace attention? In Advances in Neural
+Information Processing Systems, (NIPS), 2016.
+[17] Łukasz Kaiser and Ilya Sutskever. Neural GPUs learn algorithms. In International Conference
+on Learning Representations (ICLR), 2016.
+[18] Nal Kalchbrenner, Lasse Espeholt, Karen Simonyan, Aaron van den Oord, Alex Graves, and Koray Kavukcuoglu. Neural machine translation in linear time. arXiv preprint arXiv:1610.10099v2,
+2017.
+[19] Yoon Kim, Carl Denton, Luong Hoang, and Alexander M. Rush. Structured attention networks.
+In International Conference on Learning Representations, 2017.
+[20] Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In ICLR, 2015.
+[21] Oleksii Kuchaiev and Boris Ginsburg. Factorization tricks for LSTM networks. arXiv preprint
+arXiv:1703.10722, 2017.
+[22] Zhouhan Lin, Minwei Feng, Cicero Nogueira dos Santos, Mo Yu, Bing Xiang, Bowen
+Zhou, and Yoshua Bengio. A structured self-attentive sentence embedding. arXiv preprint
+arXiv:1703.03130, 2017.
+[23] Minh-Thang Luong, Quoc V. Le, Ilya Sutskever, Oriol Vinyals, and Lukasz Kaiser. Multi-task
+sequence to sequence learning. arXiv preprint arXiv:1511.06114, 2015.
+[24] Minh-Thang Luong, Hieu Pham, and Christopher D Manning. Effective approaches to attentionbased neural machine translation. arXiv preprint arXiv:1508.04025, 2015.
+11
+[25] Mitchell P Marcus, Mary Ann Marcinkiewicz, and Beatrice Santorini. Building a large annotated
+corpus of english: The penn treebank. Computational linguistics, 19(2):313–330, 1993.
+[26] David McClosky, Eugene Charniak, and Mark Johnson. Effective self-training for parsing. In
+Proceedings of the Human Language Technology Conference of the NAACL, Main Conference,
+pages 152–159. ACL, June 2006.
+[27] Ankur Parikh, Oscar Täckström, Dipanjan Das, and Jakob Uszkoreit. A decomposable attention
+model. In Empirical Methods in Natural Language Processing, 2016.
+[28] Romain Paulus, Caiming Xiong, and Richard Socher. A deep reinforced model for abstractive
+summarization. arXiv preprint arXiv:1705.04304, 2017.
+[29] Slav Petrov, Leon Barrett, Romain Thibaux, and Dan Klein. Learning accurate, compact,
+and interpretable tree annotation. In Proceedings of the 21st International Conference on
+Computational Linguistics and 44th Annual Meeting of the ACL, pages 433–440. ACL, July
+2006.
+[30] Ofir Press and Lior Wolf. Using the output embedding to improve language models. arXiv
+preprint arXiv:1608.05859, 2016.
+[31] Rico Sennrich, Barry Haddow, and Alexandra Birch. Neural machine translation of rare words
+with subword units. arXiv preprint arXiv:1508.07909, 2015.
+[32] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton,
+and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts
+layer. arXiv preprint arXiv:1701.06538, 2017.
+[33] Nitish Srivastava, Geoffrey E Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: a simple way to prevent neural networks from overfitting. Journal of Machine
+Learning Research, 15(1):1929–1958, 2014.
+[34] Sainbayar Sukhbaatar, Arthur Szlam, Jason Weston, and Rob Fergus. End-to-end memory
+networks. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett, editors,
+Advances in Neural Information Processing Systems 28, pages 2440–2448. Curran Associates,
+Inc., 2015.
+[35] Ilya Sutskever, Oriol Vinyals, and Quoc VV Le. Sequence to sequence learning with neural
+networks. In Advances in Neural Information Processing Systems, pages 3104–3112, 2014.
+[36] Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jonathon Shlens, and Zbigniew Wojna.
+Rethinking the inception architecture for computer vision. CoRR, abs/1512.00567, 2015.
+[37] Vinyals & Kaiser, Koo, Petrov, Sutskever, and Hinton. Grammar as a foreign language. In
+Advances in Neural Information Processing Systems, 2015.
+[38] Yonghui Wu, Mike Schuster, Zhifeng Chen, Quoc V Le, Mohammad Norouzi, Wolfgang
+Macherey, Maxim Krikun, Yuan Cao, Qin Gao, Klaus Macherey, et al. Google’s neural machine
+translation system: Bridging the gap between human and machine translation. arXiv preprint
+arXiv:1609.08144, 2016.
+[39] Jie Zhou, Ying Cao, Xuguang Wang, Peng Li, and Wei Xu. Deep recurrent models with
+fast-forward connections for neural machine translation. CoRR, abs/1606.04199, 2016.
+[40] Muhua Zhu, Yue Zhang, Wenliang Chen, Min Zhang, and Jingbo Zhu. Fast and accurate
+shift-reduce constituent parsing. In Proceedings of the 51st Annual Meeting of the ACL (Volume
+1: Long Papers), pages 434–443. ACL, August 2013.
+12
+Attention Visualizations
+Input-Input Layer5 Itisinthis spirit that
+a
+majority
+of
+American
+governments
+have
+passed
+new
+laws
+since
+2009
+making
+the
+registration
+or
+voting
+process
+more
+difficult
+.
+<EOS>
+<pad>
+<pad>
+<pad>
+<pad>
+<pad>
+<pad>
+It
+is
+in
+this
+spirit
+that
+a
+majority
+of
+American
+governments
+have
+passed
+new
+laws
+since
+2009
+making
+the
+registration
+or
+voting
+process
+more
+difficult
+.
+<EOS>
+<pad>
+<pad>
+<pad>
+<pad>
+<pad>
+<pad>
+Figure 3: An example of the attention mechanism following long-distance dependencies in the
+encoder self-attention in layer 5 of 6. Many of the attention heads attend to a distant dependency of
+the verb ‘making’, completing the phrase ‘making...more difficult’. Attentions here shown only for
+the word ‘making’. Different colors represent different heads. Best viewed in color.
+
+
+
+Do Large Language Models Perform Latent Multi-Hop Reasoning
+without Exploiting Shortcuts?
+Sohee Yang1,2 Nora Kassner1 Elena Gribovskaya1 Sebastian Riedel1,2∗ Mor Geva3,4∗
+1Google DeepMind 2UCL 3Google Research 4Tel Aviv University
+{soheeyang,norakassner,egribovskaya,srriedel,pipek}@google.com
+Abstract
+We evaluate how well Large Language Models
+(LLMs) latently recall and compose facts to answer multi-hop queries like “In the year Scarlett Johansson was born, the Summer Olympics
+were hosted in the country of”. One major challenge in evaluating this ability is that LLMs
+may have developed shortcuts by encounters
+of the head entity “Scarlett Johansson” and
+the answer entity “United States” in the same
+training sequences or merely guess the answer
+based on frequency-based priors. To prevent
+shortcuts, we exclude test queries where the
+head and answer entities co-appear in pretraining corpora. Through careful selection of relations and facts and systematic removal of
+cases where models might guess answers or
+exploit partial matches, we construct an evaluation dataset SOCRATES (SHORTCUT-FREE
+LATENT REASONING). We observe that LLMs
+demonstrate promising latent multi-hop reasoning abilities without exploiting shortcuts, but
+only for certain types of queries. For queries
+requiring latent recall of countries as the intermediate answer, the best models achieve 80%
+latent composability, but this drops to just 5%
+for the recall of years. Comparisons with Chainof-Thought composability highlight a significant gap between the ability of models to reason latently versus explicitly. Analysis reveals
+that latent representations of the intermediate
+answer are constructed more often in queries
+with higher latent composability, and shows the
+emergence of latent multi-hop reasoning during
+pretraining.
+1 Introduction
+Latent multi-hop reasoning in Large Language
+Models (LLMs), or latently recalling and composing single-hop facts to answer multi-hop queries
+like “In the year Scarlett Johansson was born, the
+Summer Olympics were hosted in the country of”,
+*Corresponding authors.
+LLM 1
+Input query:
+Output:
+the United States
+Latent
+composition
+Potential
+shortcut
+exploitation
+LLM 2
+Scarlett Ingrid Johansson was born on
+November 22, 1984.
+The 1984 Summer Olympics were held
+from July 28 to August 12, 1984, in Los
+Angeles, California, United States.
+Major Events in the United States in 1984:
+● The United States played host to the
+Los Angeles Summer Games.
+● Scarlett Johansson was born.
+Scarlett Johansson is from the country
+of the United States.
+pretraining
+data of LLM 1
+pretraining
+data of LLM 2
+In the year Scarlett Johansson was born, the Summer Olympics
+were hosted in the country of
+Figure 1: Evaluation of latent multi-hop reasoning
+should exclude cases where LLMs can bypass the process of latently composing the single-hop facts by exploiting shortcuts. LLMs can develop shortcuts when
+they frequently encounter the head entity (“Scarlett Johansson”) or the relation pattern in the query (“the
+country of”) with the answer entity (“United States”).
+We propose desiderata for shortcut-free evaluation of latent multi-hop reasoning ability to minimize the chance
+of shortcuts.
+has been of growing interest in recent years. First,
+this ability can be a measure towards better localization and controllability of factual knowledge in
+LLMs, as it can signal learning of a compressed
+representation of facts and their latent composition (Yang et al., 2024b). This would provide more
+hope towards locate-then-edit or unlearn paradigm
+of LLMs (Meng et al., 2022; Hong et al., 2024). For
+instance, if complex facts are redundantly learned
+and recalled, edits with only single-hop facts would
+not propagate to the relevant multi-hop facts (Onoe
+et al., 2023; Zhong et al., 2023; Cohen et al., 2024;
+Ju et al., 2024). In addition, the ability to provide accurate answers without explicit Chain-ofThought (CoT) generation (Kojima and Gu, 2022)
+could reduce inference costs. At the same time,
+whether LLMs can spontaneously develop latent
+reasoning abilities during pretraining is of interest
+from a safety perspective, as latent reasoning is less
+visible and hard to monitor given the opaque comarXiv:2411.16679v1 [cs.CL] 25 Nov 2024
+putations in LLMs (Berglund et al., 2023; Treutlein
+et al., 2024; Chan et al., 2024). Taken together,
+these incentives raise the question of How well do
+today’s widely-used LLMs perform latent multi-hop
+reasoning over factual knowledge?
+If today’s best models such as GPT-4o (OpenAI,
+2024b), Claude 3.5 Sonnet (Anthropic, 2024), or
+Gemini 1.5 Pro (Gemini Team et al., 2024) struggle
+to perform latent reasoning, then the current pretraining, instruction-tuning, and scaling paradigm
+of LLMs may be insufficient for robust development of latent multi-hop reasoning abilities. Thus,
+we would need to adopt changes in this paradigm or
+the architecture of models to enhance their ability
+to latently recall, compose, and manipulate parametric knowledge. However, if there are certain
+cases where today’s LLMs show robust latent reasoning, we could further study these cases to find
+the underlying causes that make latent reasoning
+emerge during pretraining.
+In this work, we evaluate latent multi-hop reasoning abilities by assessing models’ performance
+in answering multi-hop queries. While prior works
+have suggested that pretrained LLMs develop this
+ability (Ofir Press et al., 2023; Yang et al., 2024b;
+Biran et al., 2024; Li et al., 2024), they have not adequately addressed the possibility of models exploiting shortcuts (Elazar et al., 2022; Xu et al., 2022;
+Tang et al., 2023; Kang and Choi, 2023; Ju et al.,
+2024). Shortcuts from frequent co-occurrences of
+subject-object entities or relation pattern-object entity in the pretraining data (Elazar et al., 2022; Xu
+et al., 2022; Tang et al., 2023; Kang and Choi,
+2023; Ju et al., 2024) could allow models to answer the multi-hop queries correctly without going through a true latent reasoning process. For instance, in a query about “Scarlett Johansson” (i.e.,
+the head entity) where the answer entity is “United
+States”, LLMs may simply learn a subject-object
+entity shortcut if these entities frequently co-occur
+in training sequences (Elazar et al., 2022; Kang and
+Choi, 2023; Zhang et al., 2024b; Ju et al., 2024).
+Similarly, LLMs can develop a relation-object
+shortcut from the frequency of “United States” appearing as a country and guess the answer based
+on the learned frequency-based prior (Elazar et al.,
+2022; Xu et al., 2022; Tang et al., 2023).
+To overcome this challenge, we propose desiderata for shortcut-free evaluation of latent multi-hop
+reasoning in LLMs, which we address through
+dataset construction and evaluation procedure. For
+the dataset, we only use test queries where the head
+and answer entities are estimated to never co-occur
+in pretraining sequences, thus minimizing subjectobject shortcuts. For evaluation, we measure latent
+composability as the rate of correct multi-hop answers when single-hop facts are known, without
+explicitly generating the intermediate answer (i.e.,
+the bridge entity). Additionally, we reduce relationobject shortcuts by excluding queries where the
+model may guess the answer when given partial information and without considering the head entity.
+The main challenge in satisfying our desiderata
+is that most LLMs’ pretraining data is inaccessible,
+making it impossible to directly check entity cooccurrences. To tackle this, we use a proxy corpus
+of roughly 4.8B unique documents by utilizing six
+publicly available training corpora, selecting only
+test queries where the head and answer entities
+never co-occur. This approximation’s effectiveness
+is validated by showing that strong latent composability for specific query types persists even when
+extending our entity co-occurrence check to the
+whole web via Google Search. We further minimize shortcuts by carefully selecting relation types
+and removing queries where the answers are easy
+to guess from a substring of the head entity.
+Our resulting dataset, named SOCRATES
+(SHORTCUT-FREE LATENT REASONING), consists of 7,232 pairs of single-hop and multi-hop
+queries of 17 types of relation compositions with
+4 types of bridge entities. It can be useful in analyzing any LLM that is not directly trained on
+synthetic data generated from a knowledge graph
+nor performing Chain-of-Thought (CoT) reasoning behind an API.1 Comparative experimental results with a dataset constructed from the same data
+distribution but without careful fact selection, cooccurrence-based filtering, and rigorous evaluation
+show that latent composability obtained without
+satisfying our desiderata can be overestimated.
+Our results for 41 LLMs from 9 families reveal
+that there are successful cases of latent multi-hop
+reasoning, but the performance varies substantially
+across different types of queries, according to the
+type of bridge entity that connects the facts. Notably, state-of-the-art models demonstrate strong latent composability of over 80% when the bridge entity is a country. However, this performance varies
+1While we cannot know whether the LLMs we evaluate
+have been trained on synthetic data generated from a knowledge graph, the low latent composability and high CoT composability obtained with our dataset suggest that this is highly
+unlikely for the evaluated models.
+significantly based on the bridge entity type, dropping to around 6% for year-based queries. This
+finding underscores the importance of considering the distribution of relation composition types
+when evaluating LLMs’ latent reasoning abilities.
+Models that know more single-hop facts tend to
+reason better latently, and this ability marginally
+improves with model scale. Comparisons with CoT
+composability highlight opportunities for improvement, as CoT composability is significantly higher
+than latent composability and effectively increases
+with the number of known single-hop facts and
+model size while maintaining more consistent performance across bridge entity types. Additional
+analysis shows that the latent representation of the
+bridge entity is clearly constructed more often for
+queries with higher latent composability, and reveals the emergence of latent multi-hop reasoning
+during pretraining.
+In summary, our contributions are as follows:
+• We propose desiderata and methods for the evaluation of latent multi-hop reasoning that minimize
+the risk of models exploiting shortcuts and bypassing the reasoning process, which is corroborated to
+be important through a comparative analysis with
+shortcut-prone data and evaluation.
+• We create a carefully curated dataset of >7K
+multi-hop queries, which enables the evaluation of
+latent multi-hop reasoning abilities with minimal
+risk of subject-object shortcuts.
+• We show that latent composability in LLMs significantly varies according to the bridge entity
+type, reaching >80% for queries with country-type
+bridge entities but ∼6% for year-type ones, highlighting the importance of dataset distribution and
+per-relation-composition analysis.
+• We show that latent reasoning marginally improves with the number of known single-hop facts
+and model scale and identify a significant gap between latent and CoT composability.
+• We present additional analysis that helps better
+understand LLMs’ mechanisms for latent multihop reasoning, such as different construction patterns of latent bridge entity representation and the
+emergence of the ability during pretraining.
+2 Related Work
+Studies have shown that LLMs’ predictions often rely on shortcuts, shallow heuristics, and cooccurrence biases (Chen and Durrett, 2019; Jiang
+and Bansal, 2019; Geirhos et al., 2020; Elazar et al.,
+2022; Zhang et al., 2022a; Xu et al., 2022; Liu
+et al., 2023; Tang et al., 2023; Kang and Choi,
+2023; Bachmann and Nagarajan, 2024; Ju et al.,
+2024). For instance, Elazar et al. (2022) have found
+that single-hop knowledge predictions can be influenced by subject-object co-occurrences or relationobject co-occurrences. Similarly, Kang and Choi
+(2023) and Zhang et al. (2024b) showed that frequent co-occurrences can lead LLMs to favor highfrequency words over correct responses. Lastly, Ju
+et al. (2024) demonstrated that head-answer entity
+co-occurrence frequencies in multi-hop facts are
+correlated with factual shortcuts, which can cause
+failures in multi-hop knowledge editing.
+Prior works on latent factual multi-hop reasoning
+have not fully addressed potential shortcuts (Ofir
+Press et al., 2023; Yang et al., 2024b; Biran et al.,
+2024; Li et al., 2024). While Ofir Press et al. (2023)
+attempt to create multi-hop questions unlikely to
+appear in training, their approach relies on assumptions rather than co-occurrence statistics (leaving
+shortcuts from subject-object co-occurrences exploitable) and does not address shortcuts from
+relation-object co-occurrences. Similarly, Biran
+et al. (2024) address relation-object shortcuts but
+overlook subject-object shortcuts.
+Construction of a shortcut-free evaluation
+dataset of latent factual multi-hop reasoning ability
+of any pretrained LLM presents a unique challenge,
+as the pretraining data of most of the widely used
+LLMs is not accessible, making it difficult to verify if certain single-hop facts or their composition
+appeared in the same training sequence. The consideration of what knowledge LLMs learn during pretraining makes our work distinct from prior works
+about shortcut-free evaluation, which have focused
+on the tasks of Machine Reading Comprehension
+and Knowledge-Base Question Answering where
+the training dataset is accessible (Min et al., 2019;
+Chen and Durrett, 2019; Ho et al., 2020; Trivedi
+et al., 2022; Gregucci et al., 2024).
+Other studies have attempted to circumvent these
+issues by fine-tuning LLMs on synthetic or counterfactual tasks to control for single-hop knowledge (Jiang et al., 2022; Kassner et al., 2020; AllenZhu and Li, 2023; Saparov et al., 2023; Hou et al.,
+2023; Berglund et al., 2023; Petty et al., 2024;
+Treutlein et al., 2024; Wang et al., 2024). However,
+these studies do not address our target question of
+how much latent multi-hop reasoning ability naturally emerges in training. Moreover, finetuning
+may introduce side effects, such as hallucinations,
+reduced knowledge learning, and utilization efficiency (Yin et al., 2023; Kang et al., 2024; Ghosal
+et al., 2024; Gekhman et al., 2024; Gottesman and
+Geva, 2024). Works on latent compositional reasoning with algorithmic or mathematical tasks (Dziri
+et al., 2023; Chen et al., 2023; Deng et al., 2024) do
+not address our target question of latent multi-hop
+reasoning ability with factual knowledge, and may
+still suffer from data contamination that inflates
+performance (Zhang et al., 2024a). Ko et al. (2024)
+examine performance gaps between different numbers of reasoning hops but focus on more general
+reasoning capabilities rather than latent reasoning
+with factual knowledge.
+Peng et al. (2024) study the theoretical limitations of compositional abilities. Consistent with
+our findings, they prove that for high arity relations
+(like relations with year-type bridge entity in our
+work), multi-hop reasoning is more difficult, albeit for the specific case of Transformers (Vaswani
+et al., 2017) with a single layer.
+3 Shortcut-Free Evaluation of Latent
+Multi-Hop Reasoning
+We begin with a precise formulation of latent
+multi-hop reasoning and establish desiderata for
+its shortcut-free evaluation.
+3.1 Problem Formulation
+Latent multi-hop reasoning We define the latent
+multi-hop reasoning ability of LLMs as the ability
+to latently recall and compose learned single-hop
+facts to answer multi-hop queries. In this work, we
+evaluate this ability by assessing a model’s performance in answering multi-hop queries. For example, assuming that the model learned the correct answer to “The year Scarlett Johansson was born in is”
+and “In 1984, the Summer Olympics were hosted in
+the country of”, we evaluate whether it recalls and
+composes these facts latently to correctly answer a
+multi-hop query like “In the year Scarlett Johansson was born, the Summer Olympics were hosted
+in the country of”. Importantly, to exclusively evaluate latent as opposed to explicit reasoning, we
+require models to answer the query directly without generating intermediate results (e.g., “1984”),
+e.g., without using Chain-of-Thought.
+We represent single-hop facts as r1(e1) = e2
+and r2(e2) = e3, and multi-hop facts as their
+composition r2◦r1(e1) = e3. In the aforementioned example, the entities “Scarlett Johansson”,
+“1984”, and “United States” are respectively represented by e1, e2, e3, and connected via relations r1
+(person-birthyear), r2 (year-eventcountry),
+and r2◦r1 (person-birthyear-eventcountry).
+The set of aliases (names that the entity is
+also known as), of e1, e2, and e3 are represented as E1, E2, and E3, respectively. Singlehop queries q(r1(e1)), q(r2(e2)), and multihop query q(r2◦r1(e1)) correspond to answer
+sets E2, E3, and E3, respectively. For instance, the answer set corresponding to the
+query “The year Scarlett Johansson was born
+in is” is {“1948”}. We call each tuple
+(q(r1(e1)), q(r2(e2)), q(r2◦r1(e1)), E1, E2, E3) a
+test case, where e2 is a bridge entity that connects
+the two facts, e1 is the head entity, and e3 the answer entity. Also, we call “the year Scarlett Johansson was born” the descriptive mention µ of
+the bridge entity.
+Shortcut A model has a chance of exploiting
+shortcuts when it can correctly answer a multi-hop
+query by observing only part of the query (e.g.,
+without e1 or r1 in the input). Shortcut exploitation is problematic for evaluating latent multi-hop
+reasoning abilities because it allows the model to
+bypass the need to latently recall and compose
+single-hop facts. Following Elazar et al. (2022),
+we consider two types of shortcuts: subject-object
+shortcuts, where the model predicts objects that
+frequently co-occur with certain subjects or substrings of subjects, regardless of the relation semantics, and relation-object shortcuts, where the model
+predicts objects that frequently appear with certain
+surface form text of a relation, regardless of the
+subject.
+3.2 Desiderata
+We propose two desiderata for shortcut-free evaluation of latent multi-hop reasoning:
+1. Latent multi-hop reasoning: The evaluation
+should exclude the cases where the model performs explicit reasoning, i.e., generates the
+bridge entity (intermediate answer) before generating the answer entity.
+2. Shortcut-free: The evaluation should exclude
+test queries that the model can answer using only
+partial information. Specifically, this means excluding queries prone to subject-object shortcuts
+(where the model can predict the answer from
+just the head entity) or relation-object shortcuts
+(where the model can predict the answer from
+just the relation pattern without the head entity).
+4 Evaluation Dataset
+In this section, we describe our dataset generation
+process that minimizes the chance of subject-object
+shortcut, satisfying Desideratum 2. Then, we introduce the resulting SOCRATES dataset.
+4.1 Dataset Construction Process
+We generate test cases from a knowledge graph
+G, where facts are represented as subject-relationobject triplets ⟨s, r, o⟩. Specifically, we collect
+pairs of facts r1(e1) = e2 and r2(e2) = e3 and
+their composition r2◦r1(e1) = e3 by considering
+pairs of triplets with a shared bridge entity, i.e.,
+⟨e1, r1, e2⟩, ⟨e2, r2, e3⟩.
+Step 1: Selection of fact pairs We select singlehop facts that are likely well-known, but their composition is unlikely to naturally appear in general
+text corpora, to minimize the change of the model
+developing a shortcut between e1 and e3. We observe that such cases typically occur when the set
+of possible options for e2 is large, there are numerous e1’s that map to the same e2, and the set of
+possible options for e3 is not too small (e.g., not
+person-bloodtype). This should lower the chance
+of the LLM getting the answer correct by mere
+guessing (Desideratum 2).
+We do not select relation compositions where e1
+and e3 are likely to be directly associated, such as
+novel-maincharacter-creator. To ensure fair
+evaluation across models with different knowledge
+cutoff dates, we abstain from using relations subject to change over time (organization-CEO or
+person-spouse). Additionally, we do not select
+relations where there are likely to be many entities with 1:n relation, such as person-children,
+and exclude single-hop facts with more than one
+answer.
+Step 2: Test case construction We convert
+the selected fact pairs into a set of test cases
+{(q(r1(e1)), q(r2(e2)), q(r2◦r1(e1)), E1, E2, E3)}.
+To create the two single-hop queries q(r1(e1)),
+q(r2(e2)) and their corresponding multi-hop query
+q(r2◦r1(e1)), we follow the common practice
+of using diverse handcrafted natural language
+templates (Petroni et al., 2019; Yang et al.,
+2024b). We construct the queries in the format
+of incomplete sentences, instead of questions, so
+that the test query can be naturally completed by
+any pretrained model to derive the answer without
+finetuning. We feed e2 to a template for r2 to
+create q(r2(e2)), and feed the descriptive mention
+µ of the bridge entity (e.g., “the year Scarlett
+Johansson was born”) to create q(r2◦r1(e1)), that
+both take E3 as the answer set (e.g., {“United
+States”, “US”, · · · }). The descriptive mention of
+the bridge entity is created with a template for r1.
+The same descriptive mention µ is also used to
+create q(r1(e1)) in the form “µ is” which takes
+E2 as the answer set (e.g., {“1948”}).
+Step 3: Test case filtering using training cooccurrence statistics To remove test cases where
+models have any chance of exploiting subjectobject shortcuts, we filter out cases where any of
+the possible combinations of the head entity e1 and
+answer entity e3 (or their aliases) appears at least
+once in the same sequence that the evaluated LLM
+has seen during training. Note that this step can
+be executed only when the pretraining sequences
+of the evaluated LLMs are available; in the next
+section, we show how we approximate this filtering
+without access to the training data of the model.
+4.2 The SOCRATES Dataset
+We implement the data generation process described in the previous section to create SOCRATES
+(SHORTCUT-FREE LATENT REASONING), a
+dataset for evaluation of shortcut-free evaluation of
+latent multi-hop reasoning.
+Implementation of steps 1-2 We construct our
+dataset from Wikidata (Vrandeciˇ c and Krötzsch ´ ,
+2014) by collecting fact pairs connected through
+four types of bridge entities (country, city,
+university, and year). In this step, we exclude
+cases where shortcuts might exist through two
+mechanisms. First, we remove the facts where
+the head and answer entities have a direct
+connection through popular single-hop relations
+other than the tested multi-hop relation (e.g.,
+person-birthyear-eventcountry(Scarlett
+Johansson) = United States = personbirthcountry(Scarlett Johansson)). Second,
+we filter out cases where the bridge entity is
+trivially inferrable from the head entity (e.g.,
+university-locationcountry(University
+of Washington) = United States), which
+often leads to a nontrivial chance of entity
+substrings co-occurring with answers (e.g.,
+e2 type relation composition type count example multi-hop query
+city person-birthcity-eventyear 33 e1’s birth city hosted the Eurovision Song Contest in the year
+country
+university-locationcountry-anthem 101 The country where e1 is in has the national anthem named
+university-locationcountry-isocode 30 The ISO 3166-1 numeric code of the country where e1 is located is
+university-locationcountry-year 7 The founding year of the location country of e1 is
+person-birthcountry-anthem 22 The name of the national anthem of e1’s country of birth is
+person-birthcountry-isocode 6 The ISO 3166-1 numeric code used for the country where e1 was born is
+university person-undergraduniversity-founder 33 The person who founded e1’s undergrad university is named
+person-undergraduniversity-year 25 The year when the university where e1 studied as an undergrad was founded is
+year
+person-birthyear-winner 4,484 The winner of the Nobel Prize in Literature in e1’s birth year was
+city-eventyear-winner 2 In the year when the G7 Summit were hosted in e1, the Nobel Prize in Chemistry was awarded to
+university-inceptionyear-winner 632 In the founding year of e1, the Nobel Prize in Literature was awarded to
+university-inceptionyear-hostleader 9 The person who was the host leader of the G7 Summit in the founding year of e1 is
+university-inceptionyear-eventcountry 13 In the year e1 was founded, the host country of the G7 Summit was
+university-inceptionyear-eventcity 62 In the founding year of e1, the host city of the G7 Summit was
+person-birthyear-eventcity 1,389 In the birth year of e1, the Winter Olympics were hosted in the city of
+person-birthyear-hostleader 260 The leader of the host of the G7 Summit in e1’s birth year is
+person-birthyear-eventcountry 124 The country where the Eurovision Song Contest took place in the birth year of e1 is
+7,232
+Table 1: Dataset statistics and example multi-hop test queries of SOCRATES. The head entities are replaced with e1
+to prevent potential data leakage. A more granular breakdown with the relation composition subtypes is shown in
+Appendix Table 3.
+university-locationcountry-anthem(University of Washington) = The Star-Spangled
+Banner, where “Washington” is likely to coappear with the answer in the same pretraining
+sequence). This filtering thus reduces the chance
+of both multi-hop queries reducing to single-hop
+queries (due to the first single-hop fact being
+easily inferrable) and substring-based shortcuts.
+For each fact pair, we use 16 templates (4 for
+each of the two single-hop queries) and randomly
+sample one template for each query, resulting
+in approximately 100K test cases. Details are
+provided in Appendix A.1.
+Implementation of step 3 with document cooccurrence counts Step 3 can be directly implemented when one has access to the LLM’s pretraining sequences. However, we cannot use the
+approach as-is since LLMs are trained on different
+pretraining data, and this data is often not publicly available. Moreover, even if the data is available, information on how it has been broken into
+training sequences is rarely provided. To overcome
+these challenges, instead of computing the exact
+co-occurrence counts, we approximate them using
+two simplifications.
+The first simplification is that we check the cooccurrence of the aliases of e1 and e3 within a
+document instead of a training sequence. To be
+specific, we use only test cases where there is no
+pretraining document in which any of the possible
+combinations of the aliases of e1 and e3 appear
+together. Filtering out test cases with non-zero document co-occurrence count imposes a stricter condition than doing so with sequence co-occurrence
+count because training sequences are substrings
+of a document in most LLMs trained with document boundaries, which is the standard approach
+in pretraining LLMs (Zhao et al., 2024).
+The second simplification is that we utilize a
+proxy corpus to check the document co-occurrence
+since even the document-level information of the
+pretraining data of most models is not available. We
+use six different training corpora as the proxy corpus: Dolma v1.5, v1.7 (Soldaini et al., 2024), Tulu
+v2 (Ivison, 2023), OSCAR (Suárez et al., 2020),
+C4 (Raffel et al., 2020), and OpenWebText (Peterson et al., 2019). The number of unique documents from the proxy corpus is roughly 4.8B.2
+In
+other words, we only use the test cases where none
+of any possible combination of the aliases of e1
+and e3 appears together in 4.8B unique documents,
+which imposes a highly restrictive condition that
+enables obtaining a tight approximation of the test
+queries where the head and answer entities do not
+co-appear in the single pretraining sequence. While
+we cannot guarantee the exclusion of all entity cooccurring cases without access to exact pretraining corpora, we further validate our approximation
+using Google Search to check for co-occurrences
+across the whole web (Appendix C.3). Further details of the implementation of Step 3 are provided
+in Appendix A.2.
+Data statistics Our dataset for shortcut-free evaluation of latent multi-hop reasoning ability contains 7,232 test cases of 17 types of relation com2
+4,367M (Dolma v1.5) + 432M (OSCAR) + 8M
+(OpenWebText) - 10M (OSCAR-Dolma overlap from
+WIMBD (Elazar et al., 2024) Demo Page)
+positions connected by 4 types of bridge entities,
+as shown in Table 1. Note that the distribution of
+relation compositions is imbalanced as e1 and e3
+of some relation compositions frequently appear
+together in the same document and most of the
+test cases are removed by the co-occurrence-based
+filtering.
+5 Evaluation Procedure
+We introduce an evaluation procedure that satisfies
+part of Desideratum 2 by minimizing the chance
+of the model exploiting the relation-object shortcut
+(Section 5.1) and Desideratum 1 that the evaluation
+should exclude cases where the model performs
+explicit reasoning. Then, we define our metric used
+to measure latent composability (Section 5.2).
+5.1 Filtering Guessable and Unusable Queries
+Following Desideratum 2, we exclude test cases
+where the evaluated LLM is likely to be correctly
+guessing the answer by exploiting a relation-object
+shortcut. Also, following desideratum 1, we exclude the cases where the LLM is performing CoTlike explicit reasoning where it generates the bridge
+entity before the answer entity.
+Excluding guessable cases Even when the prediction of the model for a multi-hop query is correct, there is still a chance that the LLM might have
+guessed the answer correctly by chance, meaning
+that Desideratum 2 is not satisfied. Specifically,
+when the answer is a popular entity among the
+potential answer set (e.g., “United States” as a
+country), the model might be exploiting a relationobject shortcut where the model makes the prediction based on the prior from the textual pattern of
+the relation, e.g., “. . . is from the country of”.
+To filter out the cases where it is indistinguishable whether models are guessing the answer, we
+adopt the method of Biran et al. (2024) which
+checks the model’s prediction for a set of ablated
+prompts Q∅ = {q(r2◦r1(∅)), q(r2(∅))}, where the
+specific information of e1 and r1(e1) is ablated
+from the query, respectively (e.g., {“In the year
+the person was born, the Summer Olympics were
+hosted in the country of”, “In the year, the Summer
+Olympics were hosted in the country of”}). When
+the model answers the tested multi-hop query correctly, but any of the model predictions for q∅ ∈ Q∅
+is also evaluated to be correct, we exclude the test
+case from the evaluation. Namely, we detect and
+remove the cases where models may be exploiting
+a relation-object shortcut between r2◦r1/r2 and e1.
+Excluding unusable cases When the model correctly predicts the answer for a test multi-hop query
+but the LLM has just enumerated multiple potential answer candidates (e.g., “A. United States B.
+Canada C. United Kingdom D. Australia”) or the
+LLM has performed an explicit reasoning (e.g.,
+“1984, United States”), we view these test cases as
+unusable for the evaluation of latent multi-hop reasoning ability and exclude the test case from the
+evaluation, following Desideratum 1. More detailed
+explanations are in Appendix B.1.
+Suppressing CoT for instruction-tuned LLMs
+When given only the test multi-hop query,
+instruction-tuned LLMs tend to perform CoT-style
+reasoning by default. For example, given the query
+“In the year Scarlett Johansson was born, the Summer Olympics were hosted in the country of”,
+Claude 3.5 Sonnet generates “Scarlett Johansson
+was born in 1984, and the Summer Olympics that
+year were hosted by the United States”. This makes
+the majority of the completions unusable for measuring latent multi-hop reasoning (Section 5.2).
+Therefore, for instruction-tuned models, we formulate the task as a fill-in-the-blank task using a
+CoT-suppressing instruction as described in Appendix C.2.
+3
+5.2 Evaluation Metrics
+Prediction accuracy We use a standard Exact
+Match (EM) score with string normalization to
+evaluate the correctness of model outputs. For additional details see Appendix B.2.
+Latent composability We assess latent composability as the ability of the LLM to latently compose the single-hop facts that it already knows by
+calculating the ratio of the cases where the LLM
+correctly answers the multi-hop query while correctly answering both of the corresponding singlehop queries, excluding the guessable and unusable
+cases.
+When performing an apple-to-apple comparison
+of latent composability of different models, it is
+misleading to compare latent composability calculated with different denominators and different
+3While it is possible to use few-shot learning to restrict
+the format of the answer (Ofir Press et al., 2023), we use
+instructions to avoid potential biases in the selection of the
+few-shot demonstrations (Zhang et al., 2022b).
+ claude-3-5-sonnet gpt-4o gpt-4o-mini gemini-1-5-pro gemini-1-5-flash Mixtral-8x7B-Instruct-v0.1 Mixtral-8x7B-v0.1
+ Mistral-Large-Instruct-2407 Mistral-Small-Instruct-2409 Mistral-Nemo-Instruct-2407 Mistral-7B-Instruct-v0.3 Mistral-Nemo-Base-2407 Mistral-7B-v0.3 Qwen2.5-72B-Instruct
+ Qwen2.5-32B-Instruct Qwen2.5-14B-Instruct Qwen2.5-7B-Instruct Qwen2.5-72B Qwen2.5-32B Qwen2.5-14B Qwen2.5-7B
+ Qwen2-72B-Instruct Qwen2-7B-Instruct Qwen2-72B Qwen2-7B Yi-1.5-34B-Chat Yi-1.5-9B-Chat Yi-1.5-6B-Chat
+ Yi-1.5-34B Yi-1.5-9B Yi-1.5-6B gemma-2-9b-it gemma-2-2b-it gemma-2-9b gemma-2-2b
+ gemma-7b-it gemma-2b-it gemma-7b gemma-2b OLMo-7B-Instruct OLMo-7B
+0 1000 2000 3000 4000 5000
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+(a) Latent composability. There are successful cases of latent
+multi-hop reasoning, although the overall percentage is low.
+0 200 400 600 800 1000 1200 1400 1600
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+(b) Effect of model scale on latent composability. Comparative
+latent composability slightly improves with model scale.
+0 1000 2000 3000 4000 5000
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+(c) CoT composability. CoT composability is significantly
+higher than latent composability.
+0 200 400 600 800 1000 1200 1400 1600
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+(d) Effect of model scale on CoT composability. Comparative
+CoT composability increases much more effectively with model
+scale compared to latent composability.
+Figure 2: Latent (upper row) and CoT (lower row) composability on SOCRATES.
+subsets of queries. Therefore, when directly comparing the latent composability of different models, we calculate the ratio using the same test case
+subset where all of the compared LLMs correctly
+answer both single-hop queries where the test cases
+are guessable or unusable for neither of the models.
+We call this value comparative latent composability.
+6 Experiments
+We use SOCRATES to evaluate the latent multihop reasoning ability of LLMs. Our results show
+that models can perform latent reasoning without
+exploiting shortcuts, but their ability depends on
+the type of bridge entity connecting the two facts.
+Table 4 in the Appendix shows exemplifying test
+cases, model predictions, and results.
+6.1 Experimental Setting
+We assess 41 LLMs of different families and sizes.
+Among the proprietary LLMs, we evaluate Claude
+3.5 Sonnet (Anthropic, 2024), GPT-4o (OpenAI,
+2024b), GPT-4o mini (OpenAI, 2024a), and Gemini 1.5 Pro and Flash (Gemini Team et al., 2024).
+Among the open-source LLMs, we evaluate Mistral Large 2407 Instruct (123B), Small 2409 Instruct (22B), and all the pretrained and instructiontuned models of Mistral Nemo 2407 (12B), Mistral 7B v0.3 (Jiang et al., 2023), Mixtral 8x7B
+v0.1 (Jiang et al., 2024), Qwen 2.5 (7B, 14B, 32B,
+72B) (Qwen Team, 2024), Qwen 2 (7B, 72B) (Yang
+et al., 2024a), Yi 1.5 (6B, 9B, 34B) (01.AI et al.,
+2024) Gemma (2B, 7B) (Mesnard et al., 2024),
+Gemma 2 (2B, 9B) (Gemma Team et al., 2024),
+and OLMo (7B) (Groeneveld et al., 2024). Refer to
+Appendix C.1 for the inference details.
+6.2 Evaluation Results on SOCRATES
+There are successful cases of latent multi-hop
+reasoning, although the overall percentage is
+low. Figure 2a shows the latent composability of
+41 models on SOCRATES. Note that the denominator to compute latent composability differs between models, as the number of test cases where a
+model predicts the correct answer to the single-hop
+queries differs. If the models could perform perfect
+latent multi-hop reasoning, they should have been
+able to answer the corresponding multi-hop queries
+correctly, since they answer the single-hop queries
+correctly. However, while there is a meaningful
+number of successful latent multi-hop reasoning
+cases (434 for Claude 3.5 Sonnet and 438 for GPT4o, the best performing models), the percentage
+of such cases of the whole dataset is low; latent
+composability of Claude 3.5 Sonnet and GPT-4o is
+only 8.4% and 7.6%, respectively.
+0 20 40 60 80 100 120
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+type(e 2)=country Normalized Slope: 0.78
+0 1000 2000 3000 4000 5000
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+type(e 2)=year Normalized Slope: 0.02
+(a) Latent composability on country-type (left) and year-type (right) bridge entity subsets. Latent composability varies according
+to the bridge entity type; it is over 80% for the best models when the bridge entity is a country, but it is around 5% when it is a
+year.
+0 20 40 60 80 100 120
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+type(e 2)=country Normalized Slope: 0.67
+0 1000 2000 3000 4000 5000
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+type(e 2)=year Normalized Slope: 0.70
+(b) CoT composability on country-type (left) and year-type (right) bridge entity subsets. CoT composability does not fluctuate
+as dramatically as latent composability according to the type of bridge entity.
+Figure 3: Latent (upper row) and CoT (lower row) composability measured for subsets of the test queries in
+SOCRATES, grouped according to the type of the bridge entity.
+Model scaling marginally improves overall performance. Figure 2b shows latent composability
+among models with different numbers of parameters within the same model family: GPT-4o vs.
+GPT-4o mini, Gemini 1.5 Pro vs. Gemini 1.5 Flash,
+Mistral Large (123B) vs. Small (22B) vs. Nemo
+(12B) Instruct, and Qwen 2.5 72B vs. 32B Instruct.
+To enable direct comparison, latent composability
+is normalized over the cases where the models of
+different sizes within the same family predicted the
+single-hop queries correctly. We observe a consistent trend across all model families, where larger
+models answer more multi-hop queries correctly
+than smaller models, although the difference is not
+large in number. The gap in latent composability
+is 6.7% (118) and 2.4% (31) for GPT-4o vs. GPT4o mini and Gemini 1.5 Pro vs. Gemini 1.5 Flash,
+respectively.
+Latent composability performance varies across
+bridge entity types. Our analysis reveals that
+state-of-the-art LLMs demonstrate strong latent
+composability for certain types of relation compositions, particularly when considering the type
+of bridge entity that connects the single-hop facts.
+Figure 3a shows the latent composability for two
+out of the four bridge entity types where the size
+of the subset of the queries is statistically significant (the results for all four types are in Appendix
+Figure 7). Notably, when single-hop facts are connected with country-type bridge entities, the latent
+composability of Claude 3.5 Sonnet and GPT-4o
+reaches 82.6% and 84.5%, respectively. However,
+the performance varies significantly across bridge
+entity types, with year-type bridge entities showing
+latent composability of 6.7% and 5.7% for Claude
+3.5 Sonnet and GPT-4o, respectively. The rate of
+improvement in latent composability with the number of known single-hop facts also varies across
+different bridge entity types.
+These findings have important implications for
+evaluating LLMs’ latent multi-hop reasoning abilities, as the overall score on SOCRATES is significantly influenced by the distribution of bridge entity types in our dataset. Due to our co-occurrencebased filtering process during dataset construction,
+year-type bridge entity cases comprise the majority
+of the dataset, while most test cases with other
+bridge entity types were filtered out. However,
+if the dataset had been constructed with mostly
+country-type bridge entity cases, the measured latent composability would have appeared much
+stronger. Therefore, when evaluating the latent
+multi-hop reasoning ability of LLMs, it is crucial
+to have diverse types of bridge entities, consider
+the distribution of the types of connected facts, and
+analyze performance separately for different types.
+Latent composability is significantly lower compared to CoT composability. Figure 2c shows
+CoT composability, which is calculated as the ratio
+of the cases where the model correctly answers
+the multi-hop query using a CoT-triggering instruction (Appendix C.2). CoT composability is
+notably higher than latent composability shown
+in Figure 2a; while GPT-4o can correctly answer
+92.8% of the multi-hop queries of the whole dataset
+with CoT reasoning, it can only answer 7.6% of the
+claude-3-5-sonnet
+gpt-4o
+gpt-4o-mini
+gemini-1-5-pro
+gemini-1-5-flash Mixtral-8x7B-Instruct-v0.1
+Mixtral-8x7B-v0.1
+Mistral-Large-Instruct-2407 Mistral-Small-Instruct-2409 Mistral-Nemo-Instruct-2407 Mistral-7B-Instruct-v0.3
+Mistral-Nemo-Base-2407
+Mistral-7B-v0.3 Qwen2.5-72B-Instruct Qwen2.5-32B-Instruct Qwen2.5-14B-Instruct Qwen2.5-7B-Instruct Qwen2.5-72B Qwen2.5-32B Qwen2.5-14B Qwen2-72B-Instruct Qwen2-72B
+Yi-1.5-34B-Chat
+Yi-1.5-34B
+Yi-1.5-9B
+Yi-1.5-6B
+gemma-2-9b-it
+gemma-2-2b-it
+gemma-2-9b
+gemma-2-2b
+0
+0.05
+0.1
+0.15
+0.2
+0.25
+type
+shortcut-free data & eval
+shortcut-free data, shortcut-prone eval
+shortcut-prone data, shortcut-free eval
+shortcut-prone data & eval
+model
+latent composability
+Figure 4: Latent composability measured with shortcut free/prone data and evaluation. The blue bars show the
+latent composability on SOCRATES evaluated with the proposed evaluation procedure, while the purple bars show
+the latent composability on shortcut-prone evaluation. The results are shown only when the denominator used
+to calculate the composability is greater or equal to 30. Latent composability measured with SOCRATES and the
+proposed evaluation procedure is consistently lower than that measured with shortcut-prone data and evaluation
+across all models, implying that overlooking the proposed desiderata can lead to an overestimation of the actual
+latent composability.
+cases with latent reasoning. Also, there are almost
+no cases where latent reasoning succeeds but CoT
+reasoning fails (Appendix Figure 9).
+The effectiveness of increasing model size is significantly higher for CoT composability. Figure 2d shows the comparative composability calculated using the model predictions obtained with
+CoT reasoning. Comparison with the counterpart
+with latent reasoning shown in Figure 2b highlights
+that CoT composability scales much more effectively with the model size compared to latent composability, which shows that naively increasing the
+number of parameters cannot be an efficient solution for enhancing the latent multi-hop reasoning
+ability of LLMs.
+CoT composability does not fluctuate dramatically for different types of the bridge entity.
+Figure 3b shows the CoT composability calculated
+for a subset of test queries, grouped according to
+the type of the bridge entity (the results for all four
+types are in Appendix Figure 8). Contrary to the
+case for latent reasoning shown in Figure 3a, CoT
+composability and its scaling trend with respect to
+the number of correctly answered single-hop facts
+does not vary as dramatically as the counterparts
+of latent composability. This result further shows
+the huge gap in generalization between latent reasoning and CoT reasoning.
+6.3 Additional Analysis
+Shortcut-free evaluation is important. To
+check the importance of satisfying the desiderata
+for shortcut-free evaluation of multi-hop reasoning, we perform a comparative experiment with a
+shortcut-prone dataset and evaluation that does not
+follow the proposed desiderata. Specifically, we
+construct a dataset with almost exactly the same
+distribution of the relation composition types (and
+thus the bridge entity types) of SOCRATES, but
+without applying any measure to remove potential
+shortcuts such as the entity co-occurrence-based
+filtering or relation-specific heuristics. For evaluation, we only check whether both of the single-hop
+facts are known by the model, and do not exclude
+the guessable and unusable cases.
+Figure 4 shows the result; the blue bars show the
+latent composability on SOCRATES evaluated with
+the proposed evaluation procedure, while the purple bars show the latent composability on shortcutprone evaluation. The former is consistently lower
+than the latter, implying that not satisfying the proposed desiderata can overestimate the latent composability of the model. For example, the latent
+composability of Gemini 1.5 Flash is 2.4% when
+the desiderata is satisfied, compared to 11.6% when
+it is not, which is five times higher than the actual
+case.
+Bridge entity representation appears more
+clearly for the query types with higher latent
+composability. Figure 6 shows the experimental
+results using Patchscopes (Ghandeharioun et al.,
+2024) following Biran et al. (2024) for Mistral 7B
+v0.3, which examines whether the model constructs
+latent representations of the bridge entity (e.g.,
+“1984” for “the year Scarlett Johansson was born”)
+and the answer entity (e.g., “United States”) during multi-hop query processing. The result shows
+100k 200k 300k 400k 500k
+e 1, e 3 co-appeared
+multi-hop query correctly answered
+both single-hop queries correctly answered
+second single-hop query correctly answered
+e 2, e 3 co-appeared
+first single-hop query correctly answered
+e 1, e 2 co-appeared
+False
+True
+The national anthem of the location country of Manuel S. Enverga University Foundation is named (e 3: Lupang Hinirang, e 2: Philippines)
+pretraining step
+Figure 5: One successful case of OLMo 7B that demonstrates the emergence of latent multi-hop reasoning ability
+even when e1 and e3 have never co-appeared in any sequence throughout pretraining. While being pretrained for
+557K steps, the model starts to correctly predict the answer to the single-hop queries after consistently seeing (e1,
+e2) and (e2, e3) together across multiple pretraining steps. After the model starts to learn to correctly answer the
+single-hop queries, the model starts to learn to correctly answer the multi-hop query.
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of bridge entity description
+(type(e 2)=country)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of bridge entity description
+(type(e 2)=year)
+target layer index
+source layer inde
+x
+Figure 6: Experimental results with Mistral 7B v0.3 that
+apply Patchscopes (Ghandeharioun et al., 2024) to examine whether the model constructs latent representations
+of the bridge entity (e.g., “1984” for “the year Scarlett Johansson was born”) during the multi-hop query
+processing. Bridge entity representations are clearly constructed more often for the queries with country-type
+bridge entities, which show higher latent composability.
+that latent bridge entity representations are clearly
+constructed more often for the type of queries with
+higher latent composability (queries with countrytype bridge entity). Figure 10 in Appendix C.4
+shows that the bridge entity representation appears
+more clearly than the answer entity, suggesting that
+LLMs struggle more with second-hop reasoning
+(finding the final answer) than first-hop reasoning
+(identifying the bridge entity).
+Emergence of latent multi-hop reasoning during
+pretraining. Our analysis of OLMo 7B’s intermediate checkpoints (557 checkpoints from 1K to
+557K pretraining steps) shows that for a subset of
+prompts, OLMO first learns to predict the singlehop answers, and then begins to correctly answer
+the respective multi-hop query. Figure 5 illustrates
+one such case. This set is small: 12 out of 13 cases
+where the model successfully performs multi-hop
+reasoning at a point, among 110 cases where the
+model is correct on both single-hop facts at some
+point and the model is not likely to be guessing the
+answer at any point during pretraining. That said,
+for OLMo, we have access to all the pretraining
+sequences in order and can hence guarantee that
+head entities have not been seen together with the
+answer entities in any of the pretraining sequences.
+Together with our other filtering to reduce the probability that answers can be correct by chance and
+guesswork, this indicates that even a small model
+like OLMo 7B can perform some level of latent
+reasoning, albeit only occasionally. More details of
+the experiment are provided in Appendix C.5.
+7 Discussion
+Why does latent composability performance
+dramatically vary across bridge entity types?
+We observe that latent composability varies significantly across bridge entity types, with notably high performance when facts are connected
+through country-type bridge entities. We consider and rule out two potential explanations.
+First, our careful dataset construction, which selects only cases where countries cannot be readily inferred (Appendix A.3), accounts for easy
+guessing of countries from entity names (e.g.,
+university-locationcountry(University of
+Washington) = United States). Therefore,
+the high latent composability of the country-type
+bridge entity cases does not come from the model
+simplifying the multi-hop query into a single-hoplike problem by easily guessing the first hop. Second, it’s unlikely to stem from insufficient filtering
+of co-occurrences: adding a Google Search filter
+to exclude cases where entities appear together in
+search results does not drop latent composability,
+with an average relative drop of only 0.03 (details
+in Appendix C.3).
+Drawing from findings in finetuning studies, e.g.,
+(Jiang et al., 2022; Wang et al., 2024), one speculative explanation of what has caused LLMs to
+develop strong composability for test queries with
+country-type bridge entity is that country-related
+facts might be more frequently learned in composi-
+tion during pretraining. While these studies show
+that exposure to fact compositions during finetuning can improve multi-hop reasoning, we emphasize that extending these findings to pretraining
+remains an untested hypothesis that warrants future
+investigation.
+Why is CoT composability much stronger than
+latent composability? We conjecture that the explicit generation of the bridge entity is the main factor behind high CoT composability. Transformerbased LLMs go through a subject enrichment process that helps models recall the attributes of the
+subject (Geva et al., 2023; Gottesman and Geva,
+2024). While LLMs can develop latent representations of bridge entities (e.g., “1984” from “the year
+Scarlett Johansson was born”) in early-middle layers (Yang et al., 2024b; Biran et al., 2024; Li et al.,
+2024; Wang et al., 2024), these representations may
+appear too late or not emerge at all (Biran et al.,
+2024). In contrast, when CoT reasoning generates
+the correct bridge entity, it ensures a clear and early
+contextualized representation of the bridge entity to
+form, facilitating retrieval of the second single-hop
+fact.
+Supporting this hypothesis, merely instructing
+models to think step-by-step (Kojima and Gu,
+2022) but only internally, thus without generating
+the bridge entity, does not improve performance;
+Claude 3.5 Sonnet’s latent composability remains
+low (6.1%) even with an explicit hint to identify and
+utilize the information of the bridge entity (instruction shown in Appendix C.2). Moreover, 96.0%
+of CoT failures of Claude 3.5 Sonnet stem from
+incorrect bridge entity generation, highlighting its
+crucial role.
+8 Conclusion
+In this work, we introduce desiderata for shortcutfree evaluation of LLMs’ ability to latently recall
+and compose learned single-hop facts to answer
+multi-hop queries. Through careful filtering of entity co-occurrences and systematic removal of potential shortcuts, we construct SOCRATES dataset,
+enabling a more rigorous assessment of latent multihop reasoning. Our analysis reveals that while today’s models can perform latent reasoning effectively in specific scenarios (achieving 80% accuracy with country-type bridge entities), their ability
+varies dramatically across different types of queries
+(dropping to 6% with year-type bridge entities).
+This fluctuation, along with the significant gap between latent and explicit Chain-of-Thought reasoning, suggests substantial room for improvement in
+how LLMs internally compose their knowledge.
+Our work provides resources and insights for precise evaluation, understanding, and improvement
+of latent multi-hop reasoning of LLMs.
+Limitations
+We do not test other forms of compositional reasoning such as comparisons because if the answer
+is binary, it is hard to rule out the cases of guessing.
+We do not test more than two hops because latent
+two-hop composability is already quite low, and
+adding more complexity to the problem may lower
+it to zero success cases. We do not consider facts
+that are subject to frequent change over time to
+compare models trained at different corpus cutout
+times. While we cannot know whether the LLMs
+we evaluate have not been trained on synthetic
+data generated from a knowledge graph, the low
+latent composability and high CoT composability
+obtained with our dataset suggest that the chance is
+very low for the evaluated models. While we cannot
+guarantee that the head and answer entities of every
+test query of SOCRATES would have never been
+learned in a single pretraining sequence for every
+model that we evaluate, we believe that our dataset
+construction that utilizes document co-occurrence
+counts of multiple pretraining corpora provides a
+tight approximation, which is also supported by the
+experimental results in Appendix C.3.
+References
+01.AI, Alex Young, Bei Chen, Chao Li, Chengen Huang,
+Ge Zhang, Guanwei Zhang, Heng Li, Jiangcheng
+Zhu, Jianqun Chen, Jing Chang, Kaidong Yu, Peng
+Liu, Qiang Liu, Shawn Yue, Senbin Yang, Shiming
+Yang, Tao Yu, Wen Xie, Wenhao Huang, Xiaohui
+Hu, Xiaoyi Ren, Xinyao Niu, Pengcheng Nie, Yuchi
+Xu, Yudong Liu, Yue Wang, Yuxuan Cai, Zhenyu Gu,
+Zhiyuan Liu, and Zonghong Dai. 2024. Yi: Open
+foundation models by 01.AI. arXiv [cs.CL].
+Zeyuan Allen-Zhu and Yuanzhi Li. 2023. Physics of
+language models: Part 3.2, knowledge manipulation.
+arXiv [cs.CL].
+Anthropic. 2024. Introducing Claude 3.5 Sonnet. Anthropic blog.
+Gregor Bachmann and Vaishnavh Nagarajan. 2024. The
+pitfalls of next-token prediction. In ICML.
+Shay Banon. 2010. Elasticsearch: A distributed, RESTful search and analytics engine.
+Lukas Berglund, Asa Cooper Stickland, Mikita Balesni,
+Max Kaufmann, Meg Tong, Tomasz Korbak, Daniel
+Kokotajlo, and Owain Evans. 2023. Taken out of context: On measuring situational awareness in LLMs.
+arXiv.
+BigScience Workshop et al. 2022. BLOOM: A 176Bparameter open-access multilingual language model.
+arXiv [cs.CL].
+Eden Biran, Daniela Gottesman, Sohee Yang, Mor Geva,
+and Amir Globerson. 2024. Hopping too late: Exploring the limitations of large language models on
+multi-hop queries. In EMNLP.
+Alan Chan, Carson Ezell, Max Kaufmann, Kevin Wei,
+Lewis Hammond, Herbie Bradley, Emma Bluemke,
+Nitarshan Rajkumar, David Krueger, Noam Kolt,
+Lennart Heim, and Markus Anderljung. 2024. Visibility into AI agents. In FAccT.
+Hoyeon Chang, Jinho Park, Seonghyeon Ye, Sohee
+Yang, Youngkyung Seo, Du-Seong Chang, and Minjoon Seo. 2024. How do large language models
+acquire factual knowledge during pretraining? In
+NeurIPS.
+Jifan Chen and Greg Durrett. 2019. Understanding
+dataset design choices for multi-hop reasoning. In
+NAACL.
+Jiuhai Chen, Lichang Chen, Heng Huang, and Tianyi
+Zhou. 2023. When do you need chain-of-thought
+prompting for ChatGPT? arXiv [cs.AI].
+Roi Cohen, Eden Biran, Ori Yoran, Amir Globerson,
+and Mor Geva. 2024. Evaluating the ripple effects of
+knowledge editing in language models. TACL.
+Yuntian Deng, Kiran Prasad, Roland Fernandez, Paul
+Smolensky, Vishrav Chaudhary, and Stuart Shieber.
+2024. Implicit chain of thought reasoning via knowledge distillation. In ICLR.
+Nouha Dziri, Ximing Lu, Melanie Sclar, Xiang Lorraine
+Li, Liwei Jiang, Bill Yuchen Lin, Sean Welleck, Peter
+West, Chandra Bhagavatula, Ronan Le Bras, Jena D
+Hwang, Soumya Sanyal, Xiang Ren, Allyson Ettinger, Zaid Harchaoui, and Yejin Choi. 2023. Faith
+and fate: Limits of transformers on compositionality.
+In NeurIPS.
+Yanai Elazar, Akshita Bhagia, Ian Magnusson, Abhilasha Ravichander, Dustin Schwenk, Alane Suhr,
+Pete Walsh, Dirk Groeneveld, Luca Soldaini, Sameer
+Singh, Hanna Hajishirzi, Noah A Smith, and Jesse
+Dodge. 2024. What’s in my big data? In ICLR.
+Yanai Elazar, Nora Kassner, Shauli Ravfogel, Amir
+Feder, Abhilasha Ravichander, Marius Mosbach,
+Yonatan Belinkov, Hinrich Schütze, and Yoav Goldberg. 2022. Measuring causal effects of data statistics on language model’s ‘factual’ predictions. arXiv
+[cs.CL].
+Robert Geirhos, Jörn-Henrik Jacobsen, Claudio
+Michaelis, Richard Zemel, Wieland Brendel,
+Matthias Bethge, and Felix A Wichmann. 2020.
+Shortcut learning in deep neural networks. Nature
+Machine Intelligence.
+Zorik Gekhman, Gal Yona, Roee Aharoni, Matan Eyal,
+Amir Feder, Roi Reichart, and Jonathan Herzig. 2024.
+Does fine-tuning LLMs on new knowledge encourage
+hallucinations? In EMNLP.
+Gemini Team et al. 2024. Gemini 1.5: Unlocking multimodal understanding across millions of tokens of
+context. arXiv [cs.CL].
+Gemma Team et al. 2024. Gemma 2: Improving open
+language models at a practical size. arXiv [cs.CL].
+Mor Geva, Jasmijn Bastings, Katja Filippova, and Amir
+Globerson. 2023. Dissecting recall of factual associations in auto-regressive language models. In
+EMNLP.
+Asma Ghandeharioun, Avi Caciularu, Adam Pearce, Lucas Dixon, and Mor Geva. 2024. Patchscopes: A
+unifying framework for inspecting hidden representations of language models. In ICML.
+Gaurav Ghosal, Tatsunori Hashimoto, and Aditi Raghunathan. 2024. Understanding finetuning for factual
+knowledge extraction. In ICML.
+Daniela Gottesman and Mor Geva. 2024. Estimating
+knowledge in large language models without generating a single token. In EMNLP.
+Cosimo Gregucci, Bo Xiong, Daniel Hernandez,
+Lorenzo Loconte, Pasquale Minervini, Steffen Staab,
+and Antonio Vergari. 2024. Is complex query answering really complex? arXiv [cs.LG].
+Dirk Groeneveld, Iz Beltagy, Pete Walsh, Akshita Bhagia, Rodney Kinney, Oyvind Tafjord, Ananya Harsh
+Jha, Hamish Ivison, Ian Magnusson, Yizhong Wang,
+Shane Arora, David Atkinson, Russell Authur, Khyathi Raghavi Chandu, Arman Cohan, Jennifer Dumas, Yanai Elazar, Yuling Gu, Jack Hessel, Tushar
+Khot, William Merrill, Jacob Morrison, Niklas Muennighoff, Aakanksha Naik, Crystal Nam, Matthew E
+Peters, Valentina Pyatkin, Abhilasha Ravichander,
+Dustin Schwenk, Saurabh Shah, Will Smith, Emma
+Strubell, Nishant Subramani, Mitchell Wortsman,
+Pradeep Dasigi, Nathan Lambert, Kyle Richardson,
+Luke Zettlemoyer, Jesse Dodge, Kyle Lo, Luca Soldaini, Noah A Smith, and Hannaneh Hajishirzi. 2024.
+OLMo: Accelerating the science of language models.
+In ACL.
+Xanh Ho, Anh-Khoa Duong Nguyen, Saku Sugawara,
+and Akiko Aizawa. 2020. Constructing a multi-hop
+QA dataset for comprehensive evaluation of reasoning steps. In COLING.
+Yihuai Hong, Lei Yu, Shauli Ravfogel, Haiqin Yang, and
+Mor Geva. 2024. Intrinsic evaluation of unlearning
+using parametric knowledge traces. arXiv [cs.CL].
+Yifan Hou, Jiaoda Li, Yu Fei, Alessandro Stolfo,
+Wangchunshu Zhou, Guangtao Zeng, Antoine Bosselut, and Mrinmaya Sachan. 2023. Towards a mechanistic interpretation of multi-step reasoning capabilities of language models. In EMNLP.
+Hamish Ivison. 2023. Camels in a changing climate:
+Enhancing lm adaptation with tulu 2. Ai2 blog.
+Albert Q Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego
+de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, Lélio Renard Lavaud,
+Marie-Anne Lachaux, Pierre Stock, Teven Le Scao,
+Thibaut Lavril, Thomas Wang, Timothée Lacroix,
+and William El Sayed. 2023. Mistral 7B. arXiv
+[cs.CL].
+Albert Q Jiang, Alexandre Sablayrolles, Antoine
+Roux, Arthur Mensch, Blanche Savary, Chris
+Bamford, Devendra Singh Chaplot, Diego de las
+Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, Lélio Renard Lavaud, Lucile Saulnier, MarieAnne Lachaux, Pierre Stock, Sandeep Subramanian,
+Sophia Yang, Szymon Antoniak, Teven Le Scao,
+Théophile Gervet, Thibaut Lavril, Thomas Wang,
+Timothée Lacroix, and William El Sayed. 2024. Mixtral of experts. arXiv [cs.LG].
+Yichen Jiang and Mohit Bansal. 2019. Avoiding reasoning shortcuts: Adversarial evaluation, training, and
+model development for multi-hop QA. In ACL.
+Zhengbao Jiang, Jun Araki, Haibo Ding, and Graham
+Neubig. 2022. Understanding and improving zeroshot multi-hop reasoning in generative question answering. In COLING.
+Tianjie Ju, Yijin Chen, Xinwei Yuan, Zhuosheng Zhang,
+Wei Du, Yubin Zheng, and Gongshen Liu. 2024. Investigating multi-hop factual shortcuts in knowledge
+editing of large language models. In ACL.
+Cheongwoong Kang and Jaesik Choi. 2023. Impact
+of co-occurrence on factual knowledge of large language models. In Findings of EMNLP.
+Katie Kang, Eric Wallace, Claire Tomlin, Aviral Kumar, and Sergey Levine. 2024. Unfamiliar finetuning
+examples control how language models hallucinate.
+arXiv [cs.LG].
+Nora Kassner, Benno Krojer, and Hinrich Schütze. 2020.
+Are pretrained language models symbolic reasoners
+over knowledge? In CoNLL.
+Miyoung Ko, Sue Hyun Park, Joonsuk Park, and Minjoon Seo. 2024. Investigating how large language
+models leverage internal knowledge to perform complex reasoning. In EMNLP.
+Takeshi Kojima and Shixiang Shane Gu. 2022. Large
+language models are zero-shot reasoners. In
+NeurIPS.
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying
+Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient
+memory management for large language model serving with PagedAttention. In SOSP.
+Zhaoyi Li, Gangwei Jiang, Hong Xie, Linqi Song, Defu
+Lian, and Ying Wei. 2024. Understanding and patching compositional reasoning in LLMs. In Findings
+of ACL.
+Bingbin Liu, Jordan T Ash, Surbhi Goel, Akshay Krishnamurthy, and Cyril Zhang. 2023. Transformers
+learn shortcuts to automata. In ICLR.
+Kevin Meng, David Bau, Alex Andonian, and Yonatan
+Belinkov. 2022. Locating and editing factual associations in GPT. arXiv [cs.CL].
+Thomas Mesnard et al. 2024. Gemma: Open models
+based on gemini research and technology. arXiv
+[cs.CL].
+Sewon Min, Eric Wallace, Sameer Singh, Matt Gardner,
+Hannaneh Hajishirzi, and Luke Zettlemoyer. 2019.
+Compositional questions do not necessitate multi-hop
+reasoning. In ACL.
+Ofir Press, Muru Zhang, Sewon Min, Ludwig Schmidt,
+Noah Smith, and Mike Lewis. 2023. Measuring and
+narrowing the compositionality gap in language models. In Findings of EMNLP.
+Yasumasa Onoe, Michael J Q Zhang, Shankar Padmanabhan, Greg Durrett, and Eunsol Choi. 2023. Can
+LMs learn new entities from descriptions? challenges
+in propagating injected knowledge. In ACL.
+OpenAI. 2022. Introducing chatgpt. OpenAI blog.
+OpenAI. 2024a. Gpt-4o mini: advancing cost-efficient
+intelligence. OpenAI blog.
+OpenAI. 2024b. Hello GPT-4o. OpenAI blog.
+Binghui Peng, Srini Narayanan, and Christos Papadimitriou. 2024. On limitations of the transformer architecture. In COLM.
+Jordan Peterson, Ruairidh Battleday, Thomas Griffiths,
+and Olga Russakovsky. 2019. Openwebtext corpus.
+GitHub repository.
+Fabio Petroni, Tim Rocktäschel, Patrick Lewis, Anton
+Bakhtin, Yuxiang Wu, Alexander H Miller, and Sebastian Riedel. 2019. Language models as knowledge bases? In EMNLP.
+Jackson Petty, Sjoerd van Steenkiste, Ishita Dasgupta,
+Fei Sha, Dan Garrette, and Tal Linzen. 2024. The
+impact of depth on compositional generalization in
+transformer language models. In NAACL.
+Nina Poerner, Ulli Waltinger, and Hinrich Schütze. 2020.
+E-BERT: Efficient-yet-effective entity embeddings
+for BERT. In Findings of EMNLP.
+Qwen Team. 2024. Qwen2.5: A party of foundation
+models! Qwen Blog.
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan,
+Dario Amodei, Ilya Sutskever, et al. 2019. Language
+models are unsupervised multitask learners. OpenAI
+blog.
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine
+Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+Wei Li, and Peter J Liu. 2020. Exploring the limits
+of transfer learning with a unified text-to-text transformer. JMLR.
+Abulhair Saparov, Richard Yuanzhe Pang, Vishakh Padmakumar, Nitish Joshi, Seyed Mehran Kazemi, Najoung Kim, and He He. 2023. Testing the general
+deductive reasoning capacity of large language models using OOD examples. In NeurIPS.
+Luca Soldaini, Rodney Kinney, Akshita Bhagia, Dustin
+Schwenk, David Atkinson, Russell Authur, Ben Bogin, Khyathi Chandu, Jennifer Dumas, Yanai Elazar,
+Valentin Hofmann, Ananya Harsh Jha, Sachin Kumar,
+Li Lucy, Xinxi Lyu, Nathan Lambert, Ian Magnusson,
+Jacob Morrison, Niklas Muennighoff, Aakanksha
+Naik, Crystal Nam, Matthew E Peters, Abhilasha
+Ravichander, Kyle Richardson, Zejiang Shen, Emma
+Strubell, Nishant Subramani, Oyvind Tafjord, Pete
+Walsh, Luke Zettlemoyer, Noah A Smith, Hannaneh
+Hajishirzi, Iz Beltagy, Dirk Groeneveld, Jesse Dodge,
+and Kyle Lo. 2024. Dolma: An open corpus of
+three trillion tokens for language model pretraining
+research. In ACL.
+Pedro Javier Ortiz Suárez, Laurent Romary, and Benoît
+Sagot. 2020. A monolingual approach to contextualized word embeddings for mid-resource languages.
+In ACL.
+Ruixiang Tang, Dehan Kong, Longtao Huang, and Hui
+Xue. 2023. Large language models can be lazy learners: Analyze shortcuts in in-context learning. In Findings of ACL.
+Johannes Treutlein, Dami Choi, Jan Betley, Cem Anil,
+Samuel Marks, Roger Baker Grosse, and Owain
+Evans. 2024. Connecting the dots: LLMs can infer
+and verbalize latent structure from disparate training
+data. In NeurIPS.
+Harsh Trivedi, Niranjan Balasubramanian, Tushar Khot,
+and Ashish Sabharwal. 2022. MuSiQue: Multihop questions via single-hop question composition.
+TACL.
+Ashish Vaswani, Noam Shazeer, Google Brain, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+and Łukasz Kaiser. 2017. Attention is all you need.
+In NeurIPS.
+Denny Vrandeciˇ c and Markus Krötzsch. 2014. ´ Wikidata: a free collaborative knowledgebase. Communications of the ACM.
+Boshi Wang, Xiang Yue, Yu Su, and Huan Sun. 2024.
+Grokked transformers are implicit reasoners: A mechanistic journey to the edge of generalization. In
+NeurIPS.
+Thomas Wolf, Lysandre Debut, Victor Sanh, Julien
+Chaumond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Rémi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen,
+Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu,
+Teven Le Scao, Sylvain Gugger, Mariama Drame,
+Quentin Lhoest, and Alexander M Rush. 2020. Transformers: State-of-the-art natural language processing.
+In EMNLP System Demonstrations.
+Nan Xu, Fei Wang, Bangzheng Li, Mingtao Dong, and
+Muhao Chen. 2022. Does your model classify entities reasonably? diagnosing and mitigating spurious
+correlations in entity typing. In EMNLP.
+An Yang et al. 2024a. Qwen2 technical report. arXiv
+[cs.CL].
+Sohee Yang, Elena Gribovskaya, Nora Kassner, Mor
+Geva, and Sebastian Riedel. 2024b. Do large language models latently perform multi-hop reasoning?
+In ACL.
+Xunjian Yin, Baizhou Huang, and Xiaojun Wan. 2023.
+ALCUNA: Large language models meet new knowledge. In EMNLP.
+Honghua Zhang, Liunian Harold Li, Tao Meng, KaiWei Chang, and Guy Van den Broeck. 2022a. On the
+paradox of learning to reason from data. In IJCAI.
+Hugh Zhang, Jeff Da, Dean Lee, Vaughn Robinson,
+Catherine Wu, Will Song, Tiffany Zhao, Pranav Raja,
+Dylan Slack, Qin Lyu, Sean Hendryx, Russell Kaplan,
+Michele Lunati, and Summer Yue. 2024a. A careful
+examination of large language model performance
+on grade school arithmetic. arXiv [cs.CL].
+Xiao Zhang, Miao Li, and Ji Wu. 2024b. Co-occurrence
+is not factual association in language models. arXiv
+[cs.CL].
+Yiming Zhang, Shi Feng, and Chenhao Tan. 2022b. Active example selection for in-context learning. In
+EMNLP.
+Yu Zhao, Yuanbin Qu, Konrad Staniszewski, Szymon
+Tworkowski, Wei Liu, Piotr Miłos, Yuxiang Wu, and ´
+Pasquale Minervini. 2024. Analysing the impact
+of sequence composition on language model pretraining. In ACL.
+Zexuan Zhong, Zhengxuan Wu, Christopher D Manning,
+Christopher Potts, and Danqi Chen. 2023. MQAKE:
+Assessing knowledge editing in language models via
+multi-hop questions. In EMNLP.
+relation composition heuristic conditions to meet
+person-birthcity-year city ̸= capital of a country
+person’s birth year ̸= event year
+person-undergraduniversity-year Person’s birth year ̸= University’s inception year
+person-birthyear-winner person’s birth/citizenship country ̸= winner’s birth/citizenship country
+person-birthyear-event country/city/leader person’s birth/citizenship country ̸= event country
+university-inceptionyear-winner university’s location country ̸= winner birth/citizenship country
+university ̸= winner’s university for any degree
+city-eventyear-winner event country ̸= winner’s birth/citizenship country
+university-inceptionyear-event country/city/leader university’s location country ̸= event country
+Table 2: Relation-specific heuristic conditions that the collected test cases need to satisfy to prevent using the test
+queries where spurious correlations of e1 and e3 exist.
+A Details of the SOCRATES Dataset
+A.1 Implementation Details of Steps 1-2
+We choose Wikidata (Vrandeciˇ c and Krötzsch ´ ,
+2014) as the knowledge graph and collect facts
+in English. We select 11 types of r1(e1) = e2 and
+10 types of r2(e2) = e3 that are connected to each
+other with four types of e2 — “country”, “city”,
+“university”, and “year” — resulting in a total of 21
+relation composition types, although the number
+reduces to 17 through filtering during the implementation of step 3. Table 3 shows the 17 relation
+compositions that consist SOCRATES. As shown in
+the table, the relation compositions are divided further into subtypes for events4
+and award winners5
+.
+To use only the entities where e1 and e3 are
+not likely to be connected through other popular single-hop relations, we apply a relationspecific heuristic filtering. For instance, for
+person-birthyear-eventcountry relation (e.g.,
+“The country where the Eurovision Song Contest
+took place in the birth year of e1 is”), we exclude
+the cases where the country in which the event took
+place is the same with the person’s birth country.
+A list of such heuristics is provided in Appendix
+Table 2.
+Additionally, we exclude cases where e2 can be
+easily inferred from the surface form of e1, such as
+university-locationcountry(University of
+Washington) = United States, as these cases
+are where the multi-hop query is reduced into more
+like a single-hop query and also the cases where
+a substring of e1 has relatively higher chance to
+frequently co-appear with e3 in the same training
+sequences. A more detailed explanation is provided
+in Appendix A.3.
+Through this process, we collect about 100K
+4Olympics Summer, Olympics Winter, Eurovision, Champions League Final, G7, European Capital of Culture
+5Nobel Prize for Peace, Chemistry, Literature, Physiology
+or Medicine, and Masters Championship
+tuples (e1, e2, e3, r1, r2, E1, E2, E3), where e1, e2,
+e3 are the Wikidata entity titles, and E1, E2, E3 are
+their corresponding sets of Wikidata aliases. We
+manually construct four natural language templates
+for each subtype of r2 and r1 and randomly select
+one of the templates for each test case. Since multihop queries are constructed with the combinations
+of the templates chosen for r2 and r2, 16 templates
+are used for each type of relation composition. We
+filter out the dataset further during quality assurance (Appendix A.4).
+A.2 Implementation Details of Step 3
+We use six different training corpora: Dolma v1.5,
+v1.7 (Soldaini et al., 2024), Tulu v2 (Ivison, 2023),
+OSCAR (Suárez et al., 2020), C4 (Raffel et al.,
+2020), and OpenWebText (Peterson et al., 2019),
+each of which contains 4,367M, 2,532M, 326K,
+432M, 365M, 8M documents, used to train OLMo,
+OLMo 0724, OLMo Instruct (Groeneveld et al.,
+2024), BLOOM (BigScience Workshop et al.,
+2022), T5 (Raffel et al., 2020), and GPT-2 (Radford
+et al., 2019), respectively.
+We use the WIMBD (Elazar et al., 2024) API
+to get the document co-occurrence counts of
+these pretraining corpora which utilize Elasticsearch (Banon, 2010) as the backend with caseinsensitive string match and exclude the test cases
+with non-zero co-occurrence count. After this filtering process, we obtain about 32K test cases of
+17 relation composition types in total. Note that the
+distribution of the relation compositions is forced
+to be imbalanced as e1 and e3 of some relation compositions frequently appear together in the same
+document and most of the test cases are removed by
+the co-occurrence-based filtering. We down-sample
+the test cases with year-type bridge entities as the
+queries of these types outweigh other types.
+A.3 Filtering Out the Cases with Easily
+Inferrable Bridge Entities
+To prevent the multi-hop query from being
+reduced to be more similar to a single-hop
+query, we filter out the cases where the
+bridge entity is easily inferrable from the
+surface form of e1 (Poerner et al., 2020), e.g.,
+university-locationcountry(University
+of Washington) = United States, since
+Washington is a geographical location in the
+United States. Note that they also correspond to
+the cases where a substring of e1 is likely to coappear with e3 in the same training sequence, e.g.,
+university-locationcountry-anthem(University
+of Washington) = The Star-Spangled Banner
+where “Washington” likely co-occurs with “The
+Star-Spangled Banner”.
+There are two such r1 in our dataset:
+university-locationcountry and
+person-birthcountry. We use the prompt
+to GPT 3.5 turbo (OpenAI, 2022) and Claude 3
+Haiku to guess the bridge entity solely from the
+name of the head entity for the first single-hop
+facts of these relation types (instruction is provided
+in Appendix C.2), and if any of these models
+correctly predict the answer, we exclude it from
+the dataset.
+As a result, for the cases with country as the
+bridge entity type, we only use the cases where
+the country of location of a university or the
+birth country of a person is hard to guess solely
+from the name without knowing the correct fact,
+such as university-locationcountry(The
+International Graduate School
+of English) = South Korea and
+person-birthcountry(Natalie Portman)
+= Israel.
+A.4 Dataset Quality Assurance
+We apply several heuristic filterings to enhance the
+quality of the dataset such as excluding the cases
+without a natural language Wikidata title, excluding
+the cases with non-Unicode characters in the entity,
+excluding e1 that contain double quotation marks
+or slashes, removing country flag emojis from the
+aliases of countries, and excluding the cases where
+each of e1, e2, and e3 is a substring of the others.
+HTML characters are escaped and normalized. We
+discover that when all the open-source LLMs we
+evaluate fail to correctly answer a single-hop query,
+it is either because there is an error or noise in the
+answer set (Wikidata aliases) or the single-hop fact
+is not popular, and thus discard such cases from
+the dataset. Additionally, we use only the test cases
+where any alias combination of e1 and e2, and e2
+and e3 appear together in Dolma v1.5 at least once.
+B Details of Evaluation Procedure
+B.1 Excluding unusable Cases
+We observe that there are test cases such that the
+LLM generation is evaluated as correct, but the test
+cases are actually unusable for correct evaluation
+of the latent multi-hop reasoning due to the way
+the model generates the answer. The first type of
+such case is when the model completes the query
+as if constructing the answer choices of a multiplechoice question, such as completing “National anthem of Woodie Flowers’s country of birth:” with
+“1. “O Canada” 2. “The Star-Spangled Banner” 3.
+“God Save the Queen””.
+6 When this is the case for
+the completion of a single-hop or multi-hop query,
+we mark the case unusable.
+The second type of unusable only applies to
+multi-hop queries. Especially for instruction-tuned
+models, even though we explicitly instruct the
+model to directly generate the answer without the
+bridge entity (Section 5.1), the models sometimes
+generate the bridge entity before generating the
+answer, such as completing “The name of the national anthem of the country where Rishi Bankim
+Chandra Colleges is based is” with “\nThe correct
+answer is India.\nThe national anthem of India is
+Jana Gana Mana.” Such cases should be excluded
+from the evaluation of the latent multi-hop reasoning ability. Therefore, for the multi-hop queries
+with the EM score of 1, we additionally check if
+the LLM completion contains any of e2 ∈ E2 before the earliest e3 ∈ E3. If it is the case, we mark
+the case as unusable.
+B.2 Normalized Exact Match Score
+To check whether an LLM has correctly predicted
+the answer to the given test query, we use the binary score of normalized exact match score (EM).
+For each single-hop query, we apply string normalization to the completion of the LLM and each
+of the answer candidates in the answer set, which
+is the alias of the entity. The normalization consists of applying lowercase, removing accents, ar6This occurs the most often with pretrained Qwen2 models
+possibly due to training on the corpus where a large portion
+consists of multiple-choice questions and answers.
+relation composition type relation composition subtype count example multi-hop query
+person-birthcity-eventyear
+person-birthcity-g7year 9 The G7 Summit was hosted in e1’s birth city in the year
+person-birthcity-capitalofcultureyear 3 The year the birth city of e1 was declared as the European Capital of Culture was
+person-birthcity-olympicswinteryear 5 The city where e1 was born hosted the Winter Olympics in the year
+person-birthcity-eurovisionyear 16 The year when the birth city of e1 hosted the Eurovision Song Contest was
+person-birthcountry-anthem person-birthcountry-anthem 22 The name of the national anthem of the birth country of e1 is
+person-birthcountry-isocode person-birthcountry-isocode 6 The ISO 3166-1 numeric code of the country where e1 was born is
+university-locationcountry-anthem university-locationcountry-anthem 101 The country where e1 is based has the national anthem named
+university-locationcountry-isocode university-locationcountry-isocode 30 The ISO 3166-1 numeric code used for the country where e1 is located is
+university-locationcountry-year university-locationcountry-year 7 The country where e1 is located was established in the year
+person-undergraduniversity-founder person-undergraduniversity-founder 33 The person who founded the university where e1 studied as an undergrad is named
+person-undergraduniversity-year person-undergraduniversity-year 25 The establishment year of the university where e1 studied as an undergrad is
+city-eventyear-winner city-eurovisionyear-nobelchem 1 In the year the Eurovision Song Contest took place in e1, the laureate of the Nobel Prize in Chemistry was
+city-g7year-nobelchem 1 In the year when the G7 Summit were hosted in e1, the Nobel Prize in Chemistry was awarded to
+person-birthyear-eventcity
+person-birthyear-championsleaguecity 196 In e1’s year of birth, the host city of the Champions League final was
+person-birthyear-capitalofculturecity 264 In the year e1 was born, the city that was named the European Capital of Culture was
+person-birthyear-olympicswintercity 288 In e1’s year of birth, the Winter Olympics were hosted in the city of
+person-birthyear-eurovisioncity 391 In e1’s birth year, the host city of the Eurovision Song Contest was
+person-birthyear-g7city 167 In the year e1 was born, the host city of the G7 Summit was
+person-birthyear-olympicssummercity 83 The city where the Summer Olympics took place in e1’s year of birth is
+person-birthyear-eventcountry
+person-birthyear-olympicssummercountry 7 In e1’s birth year, the Summer Olympics were hosted in the country of
+person-birthyear-championsleaguecountry 35 In the birth year of e1, the Champions League final was hosted in the country of
+person-birthyear-olympicswintercountry 8 In e1’s birth year, the Winter Olympics were hosted in the country of
+person-birthyear-g7country 6 The country that hosted the G7 Summit in e1’s birth year is
+person-birthyear-eurovisioncountry 68 The country where the Eurovision Song Contest took place in the birth year of e1 is
+person-birthyear-hostleader person-birthyear-hostleader 260 The person who was the host leader of the G7 Summit in e1’s year of birth is
+person-birthyear-winner
+person-birthyear-nobelpsymed 655 In the birth year of e1, the Nobel Prize in Physiology or Medicine was awarded to
+person-birthyear-nobelphysics 675 The winner of the Nobel Prize in Physics in the year e1 was born is
+person-birthyear-nobelchem 853 In the birth year of e1, the Nobel Prize in Chemistry was awarded to
+person-birthyear-nobellit 777 In the birth year of e1, the Nobel Prize in Literature was awarded to
+person-birthyear-masterschampion 931 In the year e1 was born, the winner of the Masters Tournament was
+person-birthyear-nobelpeace 593 The Nobel Peace Prize in the year e1 was born was awarded to
+university-inceptionyear-eventcity
+university-inceptionyear-championsleaguecity 14 In the year e1 was founded, the Champions League final was hosted in the city of
+university-inceptionyear-eurovisioncity 17 The city that hosted the Eurovision Song Contest in e1’s inception year is
+university-inceptionyear-olympicswintercity 7 The city that hosted the Winter Olympics in the inception year of e1 is
+university-inceptionyear-g7city 9 In the inception year of e1, the host city of the G7 Summit was
+university-inceptionyear-olympicssummercity 2 In the year e1 was founded, the host city of the Summer Olympics was
+university-inceptionyear-capitalofculturecity 13 The city that became the European Capital of Culture in the founding year of e1 was
+university-inceptionyear-eventcountry
+university-inceptionyear-eurovisioncountry 7 The country that hosted the Eurovision Song Contest in the inception year of e1 is
+university-inceptionyear-championsleaguecountry 5 The country where the Champions League final took place in the inception year of e1 is
+university-inceptionyear-g7country 1 In the year e1 was founded, the host country of the G7 Summit was
+university-inceptionyear-hostleader university-inceptionyear-hostleader 9 In the year e1 was founded, the host leader of the G7 Summit was
+university-inceptionyear-winner
+university-inceptionyear-nobellit 159 In the inception year of e1, the laureate of the Nobel Prize in Literature was
+university-inceptionyear-nobelchem 156 The winner of the Nobel Prize in Chemistry in the year e1 was founded is
+university-inceptionyear-nobelpeace 109 The Nobel Peace Prize in the inception year of e1 was awarded to
+university-inceptionyear-nobelphysics 103 The winner of the Nobel Prize in Physics in the founding year of e1 is
+university-inceptionyear-nobelpsymed 105 In the year e1 was founded, the Nobel Prize in Physiology or Medicine was awarded to
+7,232
+Table 3: Dataset statistics and example multi-hop test queries. The head entities are replaced with e1 to prevent
+potential data leakage.
+ticles, and spaces in abbreviations, and replacing
+punctuation marks with spaces. The EM is 1 (correct) if any of the answer candidates is included
+in the generation respecting the word boundaries,
+and 0 (incorrect) otherwise. For the completion of
+the multi-hop queries, the calculation of EM goes
+through one more step of checking if the test case
+is unusable, as detailed below.
+C Details of Experiments
+C.1 Inference Details
+For all open-source LLMs, we use vLLM (Kwon
+et al., 2023) or HuggingFace Transformers (Wolf
+et al., 2020) to run the inference and greedy decoding7 All experiments are performed with 1 to
+7We have also tried using random seed 0 and the decoding
+parameters specified in generation_config.json of each
+model in the HuggingFace Model Hub (https://hf.co). However, the performance difference was not large; in general, pretrained models performed slightly better with greedy decoding,
+and instruction-tuned models performed slightly worse with
+greedy decoding. Therefore, we chose to evaluate the models
+8 40GB A100s using half precision. The proprietary LLM APIs are run with the default decoding
+parameters.
+C.2 Instruction Details
+For the LLMs that support custom system instruction (Claude, GPT, Mistral, Qwen), we provide
+the instruction as the system instruction. For other
+models, we use the instruction at the beginning of
+the prompt with a separator of “\n\n”.
+CoT-suppressing instruction To suppress the
+default CoT behavior of instruction-tuned LLMs,
+we use the instruction “Fill in the blank. Write
+down only what goes in the blank. Do not explain
+your answer. The answer can consist of multiple
+words.” and postpend “ ___” to all test queries to
+measure latent composability. This prompt has the
+most effectively prevented the CoT-style reasoning
+among several different task formulations that have
+been manually tested.
+with greedy decoding for simplification and reproducibility.
+0 20 40 60 80 100 120
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+type(e 2)=country Normalized Slope: 0.78
+(a) country-type bridge entity subset
+0 5 10 15 20
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+type(e 2)=city Normalized Slope: 0.27
+(b) city-type bridge entity subset
+0 5 10 15 20 25
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+type(e 2)=university Normalized Slope: 0.05
+(c) university-type bridge entity subset
+0 1000 2000 3000 4000 5000
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+latent composability
+type(e 2)=year Normalized Slope: 0.02
+(d) year-type bridge entity subset
+Figure 7: Latent composability measured for subsets of the test queries in SOCRATES, grouped according to the
+type of the bridge entity. Latent composability varies according to the bridge entity type; it is over 80% for the best
+models when the bridge entity is a country, but it is around 6% when it is a year.
+0 20 40 60 80 100 120
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+type(e 2)=country Normalized Slope: 0.67
+(a) country-type bridge entity subset
+0 5 10 15 20
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+type(e 2)=city Normalized Slope: 0.32
+(b) city-type bridge entity subset
+0 5 10 15 20 25
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+type(e 2)=university Normalized Slope: 0.18
+(c) university-type bridge entity subset
+0 1000 2000 3000 4000 5000
+0
+0.2
+0.4
+0.6
+0.8
+1
+# of cases where first & second single-hop query answers are correctly predicted
+CoT composability
+type(e 2)=year Normalized Slope: 0.70
+(d) year-type bridge entity subset
+Figure 8: CoT composability measured for subsets of the test queries in SOCRATES, grouped according to the type
+of the bridge entity. CoT composability does not fluctuate as dramatically as latent composability according to the
+type of the bridge entity, although the result is noisy for the city and university-type bridge entity subsets due to the
+small denominator.
+claude-3-5-sonnet gpt-4ogpt-4o-mini gemini-1-5-pro gemini-1-5-flash Mixtral-8x7B-Instruct-v0.1
+Mistral-Large-Instruct-2407 Mistral-Small-Instruct-2409 Mistral-Nemo-Instruct-2407 Mistral-7B-Instruct-v0.3 Qwen2.5-72B-Instruct Qwen2.5-32B-Instruct Qwen2.5-14B-Instruct Qwen2.5-7B-Instruct Qwen2-72B-Instruct Qwen2-7B-Instruct
+Yi-1.5-34B-Chat gemma-2-9b-it gemma-2-2b-it
+0
+0.2
+0.4
+0.6
+0.8
+1 case
+CoT O, latent O
+CoT O, latent X
+CoT X, latent O
+CoT X, latent X
+model
+ratio of composability cases
+Figure 9: Ratio of whether each model successfully composes the facts with latent or CoT reasoning, among the
+cases where the models correctly predict the answer to both single-hop questions, excluding guessable and unusable
+cases. The results are shown only when the denominator used to calculate the composability is greater or equal to
+30. There are almost no cases where latent reasoning succeeds but CoT reasoning fails.
+CoT-triggering instruction To trigger CoT of
+instruction-tuned LLMs, we use the following instruction: “Fill in the blank. First, write the stepby-step explanation necessary to get the solution
+with the prefix "EXPLANATION:". After that, write
+down the final answer with the prefix "ANSWER:".
+For the final answer, write down only what goes in
+the blank. The answer can consist of multiple words.”
+and postpend “ ___” to the tested multi-hop query.
+Internal think-step-by-step instruction We use
+the following instruction: “Fill in the blank. Write
+down only what goes in the blank. Think step-bystep, but do it only internally and do not explain
+it in the answer. The answer can consist of multiple words.\n\nWhen is e1’s birth year? Use the
+information.\n” and postpend “ ___” to the tested
+multi-hop query.
+Guessing the bridge entities For the first singlehop facts with university-locationcountry relations, we use the following instruction: “Guessing from the name, what are the candidates of the
+country where “The University of Washington” is
+likely to be located? To be more specific, does “The
+University of Washington” contain the name of a
+location? If so, which country is the location in?
+Moreover, if “The University of Washington” contains a word of a language other than English that
+is used in specific countries, what are the names of
+those countries? Make sure to list the names of the
+countries guessed solely from the name.”
+For the first single-hop facts with
+person-birthcountry relations, we use the
+following instruction: “Guessing from the name,
+what are the candidates of the country where
+“Shohei Ohtani” was likely to be born? To be more
+specific, what are the candidates of the country
+where someone with the first name “Shohei” was
+likely to be born? Likely, what are the candidates
+of the country where someone with the last name
+“Ohtani” was likely to be born? Make sure to list
+the names of the countries guessed solely from the
+person name.”
+C.3 Additional Google Search Filter
+For the subset of the test queries with country-type
+bridge entities where latent composability is notably high, we experiment with adding a Google
+Search filter to further exclude test cases where the
+head and answer entities appear together in any
+of approximately 400B documents indexed by the
+Google Search Engine. Note that such filtering is
+aggressive and greatly reduces the number of test
+cases usable for measuring latent composability.
+Since the latent composability of only five models
+is calculated with a denominator of greater or equal
+to 30, we calculate the average relative change of
+latent composability among these five models. Denoting c as the original latent composability and c
+′
+as the latent composability on the subset with an
+additional Google Search filter, we calculate the
+average relative drop after applying Google Search
+as E[
+c−c
+′
+c
+], and the value is minimal as 0.03.
+C.4 Patchscopes Experiment
+Using Patchscopes (Ghandeharioun et al., 2024)
+following the study of Biran et al. (2024), we check
+the extraction rate of the bridge entity and answer
+entity at the last token of the descriptive mention
+of the bridge entity and the last token of the multihop query. We slightly modify the original Patchscopes target prompt “Syria: Syria, Leonardo DiCaprio: Leonardo DiCaprio, Samsung: Samsung,
+x” to “StarCraft: StarCraft, Leonardo DiCaprio:
+Leonardo DiCaprio, Samsung: Samsung, x” to
+avoid any entity that falls into the types of the
+bridge entity for our dataset being used as the fewshot example and contaminating our analysis.
+Figure 10 shows that the maximum extraction
+rate of the bridge entity and answer entity, according to the bridge entity type, roughly corresponds
+with the latent composability. Also, in general, it
+seems like the bridge entity is extracted at a higher
+rate than the answer entity, which suggests that
+LLMs suffer more failures in retrieving the second
+hop fact than retrieving the first hop fact.
+C.5 Emergence of Latent Multi-Hop
+Reasoning
+OLMo (Groeneveld et al., 2024) provides intermediate training checkpoints (557 checkpoints from
+1K to 557K pretraining steps) and the pretraining sequences that the model learns at each of the
+557K steps. This allows us to: (1) definitively verify whether the head entity (e1) and answer entity
+(e3) of a multi-hop test query appear together in any
+single sequence during pretraining, without relying
+on any approximation, and (2) track the emergence
+of latent multi-hop reasoning ability by monitoring
+the model’s accuracy as training progresses.
+We build an ElasticSearch index using all
+of OLMo 7B’s pretraining sequences to check
+whether (e1, e2), (e2, e3), and (e1, e3) co-appear in
+any single training sequence that the model learns
+at each pretraining step. Then, for the test queries
+where (e1, e3) never appears across all pretraining
+steps, we analyze the model’s prediction accuracy
+for both single-hop and multi-hop queries. During the evaluation, we exclude any test case that is
+guessable or unusable at any of the 557 pretraining
+steps.
+Through this evaluation procedure, we observe
+13 (11.8%) cases where the model successfully
+performs multi-hop reasoning at some point during
+pretraining, out of 110 cases where the model is correct on both single-hop facts at some point and the
+model is not likely to be guessing the answer at any
+point during pretraining. In 12 of these 13 cases,
+the model begins to correctly answer the multi-hop
+query only after learning both constituent singlehop facts. While the number of such success cases
+is currently limited by the model’s capacity and
+is too small for quantitative analysis, these examples provide direct evidence that LLMs can develop latent multi-hop reasoning capabilities purely
+through pretraining.
+Figure 5 demonstrates one successful case of
+OLMo 7B that demonstrates the emergence of latent multi-hop reasoning ability even when e1 and
+e3 have never co-appeared in any sequence throughout pretraining. It is also noticeable that the model
+starts to correctly predict the answer to the singlehop queries after consistently seeing (e1, e2) and
+(e2, e3) together across multiple pretraining steps.
+This aligns with the finding of Chang et al. (2024)
+that models learn simple facts by accumulating observations of the fact.
+country city university year
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+0.14
+0.16
+type(e 2)
+multi-hop query accuracy
+country city university year
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+type(e 2)
+latent composability
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of bridge entity description
+(type(e 2)=country)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of bridge entity description
+(type(e 2)=country)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of query
+(type(e 2)=country)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of query
+(type(e 2)=country)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of bridge entity description
+(type(e 2)=city)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of bridge entity description
+(type(e 2)=city)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of query
+(type(e 2)=city)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of query
+(type(e 2)=city)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of bridge entity description
+(type(e 2)=university)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of bridge entity description
+(type(e 2)=university)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of query
+(type(e 2)=university)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of query
+(type(e 2)=university)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of bridge entity description
+(type(e 2)=year)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of bridge entity description
+(type(e 2)=year)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e2 at the end of query
+(type(e 2)=year)
+target layer index
+source layer inde
+x
+0 10 20 30
+0
+5
+10
+15
+20
+25
+30
+0
+0.02
+0.04
+0.06
+0.08
+0.1
+0.12
+e3 at the end of query
+(type(e 2)=year)
+target layer index
+source layer inde
+x
+Figure 10: First row: Per-bridge-entity multi-hop accuracy (left) and latent composability (right) of Mistral 7B
+v0.3. Other rows: Experimental results that apply Patchscopes (Ghandeharioun et al., 2024) to Mistral 7B v0.3 to
+check the extraction rate of the bridge entity and answer entity at the last token of the descriptive mention of the
+bridge entity and the last token of the multi-hop query. Bridge entity types with higher query accuracy also tend to
+have higher extraction rates for both bridge and answer entities, with the peak answer extraction rate lower than the
+peak bridge entity extraction rate.
+evaluation result
+success success failure failure guessable guessable unusable
+relation composition type
+person-year-winner university-countryanthem
+university-year-winner person-year-eventcity person-year-winner person-year-winner university-year-winner
+relation composition subtype
+person-year-nobelchem university-countryanthem
+university-year-nobellit person-yeareurovisioncity
+person-year-nobelphysics person-yearmasterschampion
+university-yearnobelpsymed
+E1 {‘Ryan Cayabyab’, ‘Raymundo Cipriano Pujante
+Cayabyab’}
+{‘Royal University of Law
+and Economics’}
+{‘Nyenrode Business University’, ‘Nijenrode’}
+{‘Chalita Suansane’} {‘Turid Balke’} {‘Mario Cuenca
+Sandoval’}
+{‘Lagos State University’,
+‘LASU’}
+E2 {‘1954’} {‘Cambodia’, ‘Kingdom
+of Cambodia’, ‘Kampuchea’, ‘Camboya’,
+‘Campuchia’, ‘Kamboja’,
+‘Kambodzha’}
+{‘1946’} {‘1995’} {‘1921’} {‘1975’} {‘1983’}
+E3 {‘Linus Pauling’, ‘Linus
+Carl Pauling’, ‘Linus C.
+Pauling’}
+{‘Nokor Reach’} {‘Hermann Hesse’, ‘Hermann Karl Hesse’, ‘H.
+Hesse’}
+{‘Dublin’, ‘Baile Átha
+Cliath’, ‘City of Dublin’,
+‘Dublin city’, ‘Dublin,
+Ireland’}
+{‘Albert Einstein’, ‘Einstein’, ‘A. Einstein’}
+{‘Jack Nicklaus’, ‘Golden
+Bear’, ‘Jack William Nicklaus’, ‘William Nicklaus’,
+‘Bear’, ‘Karnak’}
+{‘Barbara McClintock’,
+‘Eleanor McClintock’}
+q(r1(e1)) Ryan Cayabyab’s year of
+birth is
+The country where Royal
+University of Law and
+Economics is based is
+Nyenrode Business University’s inception year is
+Chalita Suansane’s year of
+birth is
+The birth year of Turid
+Balke is
+Mario Cuenca Sandoval’s
+birth year is
+The year Lagos State University was founded is
+completion 1954. He is a Filipino composer, conductor, arranger,
+and pianist. He is also
+known as Mr. C.
+Cambodia.
+The country where Royal
+University of Law and
+Economics is based is
+Cambodia.
+The country where Royal
+University of Law
+1946. The university was
+founded by business and
+industry as a post-war initiative to help rebuild the
+country. Nyenrode is
+1995. She is a Thai model
+and beauty pageant titleholder who was crowned Miss Universe Thailand
+2016. She
+1921. She was born in Norway. She is a Norwegian
+actress. She is best known
+for her role as the mother
+of the main
+1975. He was born in
+Spain. He is a Spanish actor. He is best known for
+his role as the main character in the Spanish
+1983.
+The year Lagos State University was founded is
+1983.
+The Lagos State University (L
+q(r2(e2)) In 1954, the laureate of the
+Nobel Prize in Chemistry
+was
+The name of the national
+anthem of Cambodia is
+In 1946, the Nobel Prize
+in Literature was awarded
+to
+The city where the Eurovision Song Contest took
+place in 1995 is
+In 1921, the Nobel Prize
+in Physics was awarded to
+In 1975, the winner of the Masters Tournament was
+The Nobel Prize in Physiology or Medicine in 1983
+was awarded to
+completion Linus Pauling. He was
+awarded the prize for his
+research into the nature of
+the chemical bond and its
+application to the elucidation of the structure
+“Nokor Reach” which
+means “Nation of Glory”.
+It was adopted in 1941.
+The lyrics were written by
+Ch
+Hermann Hesse, a
+German-born Swiss
+novelist and poet. Hesse is
+best known for his novels
+Siddhartha, Steppenw
+the capital of the Republic of Ireland. Dublin is the
+largest city in Ireland and
+is located on the east coast
+of the island. The city is
+divided into two
+Albert Einstein for his discovery of the law of the
+photoelectric effect. The
+photoelectric effect is the
+emission of electrons from
+a metal surface when light
+Jack Nicklaus. He won the
+tournament for the fifth
+time, and he did it in style.
+Nicklaus shot a final round
+of 68
+Barbara McClintock for
+her discovery of mobile
+genetic elements.
+The Nobel Prize in Physiology or Medicine in 1983
+was
+q(r2(r1(e1))) In Ryan Cayabyab’s year
+of birth, the laureate of the
+Nobel Prize in Chemistry
+was
+The name of the national
+anthem of the country
+where Royal University of
+Law and Economics is
+based is
+In Nyenrode Business University’s inception year,
+the Nobel Prize in Literature was awarded to
+The city where the Eurovision Song Contest
+took place in Chalita
+Suansane’s year of birth is
+In the birth year of Turid
+Balke, the Nobel Prize in
+Physics was awarded to
+In Mario Cuenca Sandoval’s birth year, the winner of the Masters Tournament was
+The Nobel Prize in Physiology or Medicine in
+the year Lagos State University was founded was
+awarded to
+completion the American scientist Linus Pauling.
+Ryan Cayabyab was born
+in 1954.
+### When was Ryan C
+“Nokor Reach” (Motherland).
+The national anthem of
+Cambodia was adopted in
+1941.
+the French author Albert
+Camus. The jury praised
+Camus for his "clearsightedness, which illuminates the problems of the
+human conscience
+the host city of the 2018
+edition.
+Chalita Suansane represented Thailand at the
+2016 Eurovision Song
+Albert Einstein for his discovery of the law of the
+photoelectric effect.
+In the birth year of Turid
+Balke, the Nobel Prize in
+Jack Nicklaus.
+The year was 1966.
+Cuenca Sandoval, a senior
+at the University of North
+the following scientists:
+- 1983: Barbara McClintock, for her discovery of
+mobile genetic elements. -
+19
+q(r2(∅)) In the year, the laureate of
+the Nobel Prize in Chemistry was
+The name of the national
+anthem of the country is
+In the year, the Nobel
+Prize in Literature was
+awarded to
+The city where the Eurovision Song Contest took
+place in the year is
+In the year, the Nobel
+Prize in Physics was
+awarded to
+In the year, the winner of
+the Masters Tournament
+was
+The Nobel Prize in Physiology or Medicine in the
+year was awarded to
+completion awarded to the German
+chemist Richard Kuhn for
+his work on carotenoids
+and vitamins.
+The Nobel Prize in Chemistry
+“The Star-Spangled Banner”. The lyrics of the
+national anthem of the
+United States of America
+were written by Francis
+Scott Key and the music
+the French writer Jean- Marie Gustave Le Clézio.
+The Nobel Prize in Literature 2008 was awarded to
+the city of the Eurovision
+Song Contest. The Eurovision Song Contest is a
+song contest held annually among the member
+countries of the European
+Broadcasting
+Albert Einstein for his
+work on the photoelectric
+effect. The photoelectric
+effect is the phenomenon
+in which electrons are
+emitted from a material
+when it
+Tiger Woods. The Masters
+Tournament is one of the
+four major championships
+in professional golf. It is
+held annually at the Augusta National Golf Club
+in
+three scientists for their
+work on the immune system.
+The Nobel Prize in Physiology or Medicine in the
+year was awarded to three
+scientists for their
+q(r2(r1(∅))) In the person’s year of
+birth, the laureate of the
+Nobel Prize in Chemistry
+was
+The name of the national
+anthem of the country
+where the university is
+based is
+In the university’s inception year, the Nobel Prize
+in Literature was awarded
+to
+The city where the Eurovision Song Contest took
+place in the person’s year
+of birth is
+In the birth year of the
+person, the Nobel Prize in
+Physics was awarded to
+In the person’s birth year,
+the winner of the Masters
+Tournament was
+The Nobel Prize in Physiology or Medicine in the
+year the university was
+founded was awarded to
+completion the American chemist
+Theodore William
+Richards. He was awarded
+the prize for his accurate
+determination of the
+atomic weight of a number of chemical elements.
+“God Save the Queen”.
+## What is the national anthem of the UK?
+The national anthem of the
+United Kingdom is
+the university’s first professor of literature, Carl
+David af Wirsén.
+The Nobel Prize in Literature is awarded by the
+Swedish Academy,
+the most popular place to
+be born in the UK, according to new research.
+The study, by the Office for National Statistics
+(ONS), found
+the American physicist
+Arthur Ashkin for the invention of optical tweezers
+and their application to biological systems.
+The Nobel Prize in Chemistry
+Jack Nicklaus.
+The winner of the U.S.
+Open was Tom Weiskopf.
+The winner of the British
+Open was Lee
+the German physiologist
+Emil von Behring for his
+work on serum therapy,
+particularly its application
+against diphtheria, but it
+was not
+Table 4: Example test cases, the corresponding completions of Qwen 2 72B, and the evaluation results. For all
+examples, the answers to both single-hop queries are correctly predicted. The green texts highlight correctly
+predicted answers. The red parts highlight the reasons for the negative results: failure, guessable, and unusable. The
+guessable and unusable cases are excluded from the evaluation of latent composa

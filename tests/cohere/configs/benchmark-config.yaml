@@ -1,0 +1,17 @@
+# Configuration for serving benchmark parameter sweeps
+# Following the format in https://github.com/cohere-ai/cohere-benchmark/tree/main/config
+benchmarks:
+  - input_len: 1000
+    requests: 2
+    warmup: 1
+    users: [1, 4, 32]
+
+  - input_len: 10000
+    requests: 2
+    warmup: 1
+    users: [1, 4, 32]
+
+  - input_len: 100000
+    requests: 2
+    warmup: 1
+    users: [1, 4]

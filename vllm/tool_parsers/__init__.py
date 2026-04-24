@@ -34,6 +34,16 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv32_tool_parser",
         "DeepSeekV32ToolParser",
     ),
+    # cohere start
+    "cohere_command3": (
+        "cohere_command_tool_parser",
+        "CohereCommand3ToolParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_tool_parser",
+        "CohereCommand4ToolParser",
+    ),
+    # cohere end
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
