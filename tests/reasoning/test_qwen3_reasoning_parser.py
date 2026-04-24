@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -10,7 +12,13 @@ from tests.reasoning.utils import (
     run_reasoning_extraction_streaming,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    ExtractedToolCallInformation,
+)
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 parser_name = "qwen3"
 start_token = "<think>"
@@ -375,6 +383,66 @@ def test_reasoning_thinking_disabled(
     assert content == expected_content
 
 
+def test_is_reasoning_end_complete_tool_call_in_single_delta(
+    qwen3_tokenizer,
+) -> None:
+    """
+    Regression – is_reasoning_end must return True when a complete
+    <tool_call>…</tool_call> arrives in a single delta (MTP / speculative-
+    decoding scenario). The paired-token guard was incorrectly skipping this
+    case, preventing reasoning from being marked as ended.
+    """
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    tool_call_end_id = vocab["</tool_call>"]
+    # Use a regular content token (first token ID from any word)
+    content_token = qwen3_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
+        parser_name
+    )(qwen3_tokenizer)
+
+    delta_ids = [tool_call_id, content_token, tool_call_end_id]
+    assert parser.is_reasoning_end(delta_ids), (
+        "is_reasoning_end returned False for a complete <tool_call>…</tool_call> "
+        "pair in a single delta — the paired-token guard incorrectly skips real "
+        "output tool calls when both opening and closing tokens arrive together."
+    )
+
+
+def test_is_reasoning_end_false_after_complete_tool_call_in_output(
+    qwen3_tokenizer,
+) -> None:
+    """
+    is_reasoning_end must return True for accumulated
+    output that contains a complete <tool_call>…</tool_call> (no explicit
+    </think>). Once reasoning ended via <tool_call>, the invariant must hold
+    for any superset of those tokens.
+    """
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    tool_call_end_id = vocab["</tool_call>"]
+    reasoning_token = qwen3_tokenizer.encode("thinking", add_special_tokens=False)[0]
+    content_token = qwen3_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
+        parser_name
+    )(qwen3_tokenizer)
+
+    output_ids = [
+        reasoning_token,
+        reasoning_token,
+        tool_call_id,
+        content_token,
+        tool_call_end_id,
+    ]
+    assert parser.is_reasoning_end(output_ids), (
+        "is_reasoning_end returned False after <tool_call>…</tool_call> is "
+        "complete in the accumulated output — the paired-token guard violates "
+        "the invariant that reasoning stays ended once it has ended."
+    )
+
+
 def test_extract_reasoning_streaming_fragmented_tool_call(qwen3_tokenizer):
     """
     Test streaming reasoning extraction when the <tool_call> tag is fragmented
@@ -433,3 +501,72 @@ def test_extract_reasoning_streaming_fragmented_tool_call(qwen3_tokenizer):
     assert msg3.reasoning is None
     assert msg3.content == "call>\n<function=bash>"
 
+
+class _StubToolParser(ToolParser):
+    """Always returns DeltaMessage(content="[tool]") to detect overwrites."""
+
+    def extract_tool_calls(
+        self, model_output: str, _request: ChatCompletionRequest
+    ) -> ExtractedToolCallInformation:
+        return ExtractedToolCallInformation(
+            tools_called=False, tool_calls=[], content=model_output
+        )
+
+    def extract_tool_calls_streaming(
+        self,
+        _previous_text: str,
+        _current_text: str,
+        _delta_text: str,
+        _previous_token_ids: Sequence[int],
+        _current_token_ids: Sequence[int],
+        _delta_token_ids: Sequence[int],
+        _request: ChatCompletionRequest,
+    ) -> DeltaMessage | None:
+        return DeltaMessage(content="[tool]")
+
+
+def test_reasoning_preserved_when_transition_and_tool_call_in_same_delta(
+    qwen3_tokenizer,
+) -> None:
+    """
+    When a delta contains both the last reasoning fragment AND the <tool_call>
+    token (implicit reasoning end), parse_delta must not lose the reasoning
+    text by overwriting delta_message with the result of
+    extract_tool_calls_streaming.
+
+    Sequence inside parse_delta (before fix):
+      1. extract_reasoning_streaming  → DeltaMessage(reasoning="last text",
+                                                      content="<tool_call>…")
+      2. Transition: reasoning_ended = True, current_text = "<tool_call>…"
+      3. extract_tool_calls_streaming → DeltaMessage(content="[tool]")
+      4. delta_message = step-3 result  ← reasoning "last text" silently lost
+    """
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    reasoning_token = qwen3_tokenizer.encode("reasoning", add_special_tokens=False)[0]
+
+    parser_cls = ParserManager.get_parser(
+        reasoning_parser_name="qwen3",
+        tool_parser_name="qwen3_coder",
+    )
+    # Swap in the stub so the test doesn't depend on qwen3_coder streaming logic
+    parser = parser_cls(qwen3_tokenizer)
+    parser._tool_parser = _StubToolParser(qwen3_tokenizer)
+
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    delta_text = "last reasoning text\n<tool_call>\n<function=test_func>"
+
+    result = parser.parse_delta(
+        delta_text=delta_text,
+        delta_token_ids=[reasoning_token, tool_call_id],
+        request=request,
+    )
+
+    assert result is not None, (
+        "parse_delta returned None — both reasoning and tool content were lost."
+    )
+    assert result.reasoning == "last reasoning text\n", (
+        f"last reasoning fragment lost in transition delta. "
+        f"Got reasoning={result.reasoning!r}, expected 'last reasoning text\\n'. "
+        f"delta_message was overwritten by extract_tool_calls_streaming."
+    )
