@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -45,7 +46,13 @@ def flash_attn_maxseqlen_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `flash_attn_varlen_func` needs a Python int for kernel launch
+        # bounds; the D2H is unavoidable here.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
@@ -126,7 +133,12 @@ def triton_attn_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `context_attention_fwd` needs a Python int; the D2H is unavoidable.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = torch.empty_like(q)
@@ -228,7 +240,9 @@ def torch_sdpa_wrapper(
 
     outputs = []
 
-    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    # `torch.split` needs Python int sizes; the D2H is unavoidable here.
+    with gpu_sync_allowed():
+        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     q_chunks = torch.split(q, lens, dim=1)
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
@@ -304,7 +318,10 @@ def flashinfer_wrapper(
     batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
     batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
     sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
-    max_seqlen = max_seqlen.item()
+    # `cudnn_batch_prefill_with_kv_cache` needs Python ints for the
+    # max-token-per-seq bounds; the D2H is unavoidable here.
+    with gpu_sync_allowed():
+        max_seqlen = max_seqlen.item()
 
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,

@@ -1394,8 +1394,12 @@ class Qwen2_5_VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors
-        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+        # Tensors. Build on pinned CPU and upload non-blocking to avoid the
+        # synchronous H2D copy that `torch.as_tensor(list, device=cuda)`
+        # would force.
+        input_ids_t = torch.tensor(
+            input_ids, dtype=torch.long, pin_memory=is_pin_memory_available()
+        ).to(device, non_blocking=True)
 
         mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
         mm_embeddings_pos = [
