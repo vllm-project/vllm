@@ -812,7 +812,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-
         window_index_id = 0
         cu_window_seqlens_last = 0
         for t, h, w in grid_thw:
@@ -883,16 +882,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=device, non_blocking=True)
-        rotary_pos_emb_cos = rotary_pos_emb_cos.to(
-            device=device, non_blocking=True
-        )
-        rotary_pos_emb_sin = rotary_pos_emb_sin.to(
-            device=device, non_blocking=True
-        )
+        rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
+        rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
         window_index = window_index.to(device=device, non_blocking=True)
-        reverse_indices = reverse_indices.to(
-            device=device, non_blocking=True
-        )
+        reverse_indices = reverse_indices.to(device=device, non_blocking=True)
 
         metadata["rotary_pos_emb_cos"] = rotary_pos_emb_cos
         metadata["rotary_pos_emb_sin"] = rotary_pos_emb_sin
@@ -902,7 +895,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         metadata["cu_window_seqlens"] = cu_window_seqlens
         metadata["max_seqlen_full"] = max_seqlen_full
         metadata["max_seqlen_window"] = max_seqlen_window
-
 
         return metadata
 
@@ -1550,7 +1542,7 @@ class Qwen2_5_VLForConditionalGeneration(
         # only enabled when EVS is disabled.
         if not self.is_multimodal_pruning_enabled:
             modalities.append("video")
-        
+
         return EncoderCudaGraphConfig(
             modalities=modalities,
             input_key_by_modality={
@@ -1558,18 +1550,17 @@ class Qwen2_5_VLForConditionalGeneration(
                 "video": "pixel_values_videos",
             },
             buffer_keys=[
-              "rotary_pos_emb_cos",
-              "rotary_pos_emb_sin",
-              "window_index",
-              "reverse_indices",
-              "cu_seqlens",
-              "cu_window_seqlens",
-              "max_seqlen_full",
-              "max_seqlen_window",
+                "rotary_pos_emb_cos",
+                "rotary_pos_emb_sin",
+                "window_index",
+                "reverse_indices",
+                "cu_seqlens",
+                "cu_window_seqlens",
+                "max_seqlen_full",
+                "max_seqlen_window",
             ],
             out_hidden_size=self.visual.out_hidden_size,
         )
-
 
     def get_input_modality(
         self,
@@ -1700,9 +1691,7 @@ class Qwen2_5_VLForConditionalGeneration(
         # than token_budget when token_budget is not divisible by max_batch_size
         # (e.g., 324 budget with max_batch_size=8). Floor under-allocates
         # input_buffer and can fail replay copy for valid single-item batches.
-        per_mm_item_output = (
-            token_budget + max_batch_size - 1
-        ) // max_batch_size
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:
