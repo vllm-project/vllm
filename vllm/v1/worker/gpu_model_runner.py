@@ -6216,6 +6216,14 @@ class GPUModelRunner(
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
+                # KVCacheGroupSpec carries the full model's layer names,
+                # but under pipeline parallelism each worker only materialises
+                # the layers for its own stage — get_layers_from_vllm_config
+                # silently drops the rest. Skip names that aren't ours so PP
+                # ranks > 0 don't KeyError on global indices they never own
+                # (issue #40649).
+                if layer_name not in layers:
+                    continue
                 attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
