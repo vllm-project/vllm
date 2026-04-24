@@ -754,8 +754,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_prefills = attn_metadata.num_prefills
         hidden = linear_attention_decode(
             q,
             k,
@@ -763,10 +761,10 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             kv_cache,
             self.tp_slope,
             state_indices_tensor,
-            q_start=num_prefill_tokens,
-            q_end=None,
-            slot_start=num_prefills,
-            slot_end=None,
+            q_start=0,
+            q_end=attn_metadata.num_decode_tokens,
+            slot_start=0,
+            slot_end=attn_metadata.num_decodes,
             block_size=32,
         )
         return hidden
