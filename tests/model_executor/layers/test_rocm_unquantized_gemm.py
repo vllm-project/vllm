@@ -31,7 +31,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
     llmm1_mock = MagicMock(side_effect=lambda w, x_view, _: x_view @ w.t())
-    monkeypatch.setattr(utils.ops, "LLMM1", llmm1_mock)
+    monkeypatch.setattr(utils.ops, "vecMatMul", llmm1_mock)
 
     out = utils.rocm_unquantized_gemm_impl(x, weight, None)
     ref = torch.nn.functional.linear(x, weight, None)
@@ -55,7 +55,7 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_4_falls_back(monkeypatch):
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
     llmm1_mock = MagicMock(side_effect=lambda w, x_view, _: x_view @ w.t())
-    monkeypatch.setattr(utils.ops, "LLMM1", llmm1_mock)
+    monkeypatch.setattr(utils.ops, "vecMatMul", llmm1_mock)
 
     out = utils.rocm_unquantized_gemm_impl(x, weight, None)
     ref = torch.nn.functional.linear(x, weight, None)

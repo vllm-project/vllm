@@ -2306,8 +2306,10 @@ def selective_scan_fwd(
 
 
 # ROCm skinny gemms
-def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
-    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
+def vecMatMul(
+    mat: torch.Tensor, vec: torch.Tensor, rows_per_block: int
+) -> torch.Tensor:
+    return torch.ops._rocm_C.vecMatMul(mat, vec, rows_per_block)
 
 
 def wvSplitK(

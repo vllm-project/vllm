@@ -182,7 +182,7 @@ def rocm_unquantized_gemm_impl(
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
         elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-            out = ops.LLMM1(weight, x_view, 4)
+            out = ops.vecMatMul(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
     if rocm_aiter_ops.is_tgemm_enabled():

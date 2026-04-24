@@ -14,7 +14,7 @@ from vllm.utils.platform_utils import num_compute_units
 DTYPES = [torch.bfloat16, torch.float16]
 BIAS_MODES = [0, 1, 2]
 # Specific (N, K, M) combinations for targeted testing
-NKM_FACTORS_LLMM1 = [
+NKM_FACTORS_VEC_MAT_MUL = [
     # Small, medium, large cases
     (1, 8, 16),
     (1, 32, 64),
@@ -172,24 +172,22 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_VEC_MAT_MUL)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
-def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
+def test_rocm_vec_mat_mul_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.manual_seed(seed)
-    # TODO: Zero-centering the inputs causes errors for LLMM1!
-    #      Without that the numbers quickly saturate, and may
-    #      be giving false matches.
-    A = torch.rand(n, k, dtype=dtype, device="cuda")
-    B = torch.rand(m, k, dtype=dtype, device="cuda")
+    A = torch.randn(n, k, dtype=dtype, device="cuda")
+    B = torch.randn(m, k, dtype=dtype, device="cuda")
 
     ref_out = torch.matmul(A, B.t())
-    out = ops.LLMM1(B, A, rows_per_block)
+    out = ops.vecMatMul(B, A, rows_per_block)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])
