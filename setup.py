@@ -429,6 +429,9 @@ class precompiled_wheel_utils:
     @staticmethod
     def is_rocm_system() -> bool:
         """Detect ROCm without relying on torch (for build environment)."""
+        # BEGIN-COHERE: Force CUDA path on this system
+        return False
+        # END-COHERE
         if os.getenv("ROCM_PATH"):
             return True
         if os.path.isdir("/opt/rocm"):

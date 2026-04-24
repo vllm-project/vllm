@@ -34,7 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 
 from .commandr import LayerNorm
-from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
     extract_layer_index,
     is_pp_missing_parameter,
@@ -331,15 +331,9 @@ class CohereMoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
@@ -388,7 +382,7 @@ class CohereMoeModel(nn.Module):
         return hidden_states
 
 
-class CohereMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
+class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     is_text_generation_model = True
 
     packed_modules_mapping = {
@@ -407,12 +401,9 @@ class CohereMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.config = config
         assert getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale
         self.logits_processor = LogitsProcessor(
@@ -445,14 +436,7 @@ class CohereMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        is_not_lora = hasattr(self.model.embed_tokens, "weight")
-        if is_not_lora:
-            logits = self.logits_processor(self.model.embed_tokens, hidden_states)
-        else:
-            logits = self.logits_processor(
-                self.model.embed_tokens.base_layer, hidden_states
-            )
-        return logits
+        return self.logits_processor(self.model.embed_tokens, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
