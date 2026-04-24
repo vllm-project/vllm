@@ -235,8 +235,11 @@ class TestDensePlanExecutors:
 
         block_ids = ([1, 5, 10, 20],)
         ids = NixlConnectorWorker._compute_desc_ids_from_plan(
-            plan, block_ids, dst_num_blocks=num_blocks,
-            block_size_ratio=None, physical_blocks_per_logical=1,
+            plan,
+            block_ids,
+            dst_num_blocks=num_blocks,
+            block_size_ratio=None,
+            physical_blocks_per_logical=1,
         )
 
         num_regions = len(plan.fa_regions)
@@ -278,7 +281,9 @@ class TestDensePlanExecutors:
 
         local_ids = ([1, 2, 3],)
         remote_ids = ([4, 5, 6],)
-        specs = NixlConnectorWorker._compute_read_specs_from_plan(plan, local_ids, remote_ids)
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(
+            plan, local_ids, remote_ids
+        )
 
         assert len(specs) == len(plan.all_source_ranks)
         for spec in specs:
@@ -489,7 +494,9 @@ class TestMambaPlanReadSpecs:
         local_ids = ([1, 2], [3, 4])
         remote_ids = ([5, 6], [7, 8])
 
-        specs = NixlConnectorWorker._compute_read_specs_from_plan(plan, local_ids, remote_ids)
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(
+            plan, local_ids, remote_ids
+        )
         assert len(specs) == 2
         for spec in specs:
             assert list(spec.local_block_ids[0]) == [1, 2]
@@ -512,7 +519,9 @@ class TestMambaPlanReadSpecs:
         local_ids = ([1, 2], [3, 4])
         remote_ids = ([5, 6], [7, 8])
 
-        specs = NixlConnectorWorker._compute_read_specs_from_plan(plan, local_ids, remote_ids)
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(
+            plan, local_ids, remote_ids
+        )
         assert len(specs) == 3
 
         # Rank 0 (FA source): gets all groups
@@ -560,7 +569,9 @@ class TestMambaPlanSplitHandles:
             (3000, 400, 0),  # SSM desc 0
         ]
 
-        splits = NixlConnectorWorker._build_local_splits_from_plan(plan, src_blocks_data, 2)
+        splits = NixlConnectorWorker._build_local_splits_from_plan(
+            plan, src_blocks_data, 2
+        )
 
         assert len(splits) == 2  # 2 source ranks
 

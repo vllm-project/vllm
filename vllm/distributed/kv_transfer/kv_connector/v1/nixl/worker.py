@@ -81,7 +81,7 @@ from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -105,8 +105,7 @@ class NixlConnectorWorker:
         for region in plan.all_regions:
             base_addr = nixl_agent_meta.kv_caches_base_addr[region.layer_idx]
             for blk in range(region.num_blocks):
-                addr = (base_addr + blk * region.page_stride
-                        + region.offset_in_page)
+                addr = base_addr + blk * region.page_stride + region.offset_in_page
                 result.append((addr, region.descriptor_bytes, dev_id))
 
         return result
@@ -138,19 +137,19 @@ class NixlConnectorWorker:
             if _is_attention_spec(spec_type):
                 fa_region_ids = np.arange(num_fa_regions)[:, None]
                 all_descs.append(
-                    (fa_region_ids * num_blocks
-                     + group_arr[None, :]).flatten()
+                    (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
             elif _is_ssm_spec(spec_type):
                 ssm_region_ids = np.arange(num_ssm_regions)[:, None]
                 all_descs.append(
-                    (ssm_region_ids * logical_blocks
-                     + group_arr[None, :]
-                     + num_fa_descs).flatten()
+                    (
+                        ssm_region_ids * logical_blocks
+                        + group_arr[None, :]
+                        + num_fa_descs
+                    ).flatten()
                 )
             else:
-                raise ValueError(
-                    f"Unknown spec type {spec_type} at index {i}")
+                raise ValueError(f"Unknown spec type {spec_type} at index {i}")
 
         return np.concatenate(all_descs)
 
@@ -201,8 +200,7 @@ class NixlConnectorWorker:
         fa_num_splits = len(plan.source_ranks_per_group[0])
 
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
-        ssm_num_splits = (len(plan.source_ranks_per_group[-1])
-                          if has_ssm_descs else 0)
+        ssm_num_splits = len(plan.source_ranks_per_group[-1]) if has_ssm_descs else 0
 
         result: list[list[tuple[int, int, int]]] = []
 
@@ -1037,8 +1035,6 @@ class NixlConnectorWorker:
         data copy correctness.
         """
         assert self.transfer_topo is not None
-        transfer_topo = self.transfer_topo
-
         block_size_ratio = self.block_size // block_size
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
@@ -1144,8 +1140,7 @@ class NixlConnectorWorker:
                 remote_info=transfer_info,
                 remote_meta=nixl_agent_meta,
                 group_spec_types=tuple(
-                    type(g.kv_cache_spec)
-                    for g in self.kv_cache_config.kv_cache_groups
+                    type(g.kv_cache_spec) for g in self.kv_cache_config.kv_cache_groups
                 ),
                 conv_decomp=self._conv_decomp,
                 ssm_sizes=self._mamba_ssm_size,
@@ -1157,8 +1152,7 @@ class NixlConnectorWorker:
                 remote_info=transfer_info,
                 remote_meta=nixl_agent_meta,
                 group_spec_types=tuple(
-                    type(g.kv_cache_spec)
-                    for g in self.kv_cache_config.kv_cache_groups
+                    type(g.kv_cache_spec) for g in self.kv_cache_config.kv_cache_groups
                 ),
                 local_physical_blocks_per_logical=(
                     self._physical_blocks_per_logical_kv_block
