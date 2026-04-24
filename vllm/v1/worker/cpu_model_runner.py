@@ -65,16 +65,16 @@ class CPUModelRunner(GPUModelRunner):
 
         # Speculative decoding fallbacks
         import vllm.v1.sample.rejection_sampler
-        import vllm.v1.spec_decode.eagle
+        import vllm.v1.spec_decode.llm_base_proposer
         import vllm.v1.spec_decode.utils
 
-        vllm.v1.spec_decode.eagle.eagle_prepare_inputs_padded_kernel = (
+        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
             cpu_tl.eagle_prepare_inputs_padded_kernel
         )
-        vllm.v1.spec_decode.eagle.eagle_prepare_next_token_padded_kernel = (
+        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_next_token_padded_kernel = (
             cpu_tl.eagle_prepare_next_token_padded_kernel
         )
-        vllm.v1.spec_decode.eagle.copy_and_expand_eagle_inputs_kernel = (
+        vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
         vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel = (
@@ -116,21 +116,7 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings(self.vllm_config):
-            self._dummy_run(
-                min(
-                    max(16, self.max_num_reqs),
-                    self.scheduler_config.max_num_batched_tokens,
-                )
-            )
-
-        # Warm up drafter for speculative decoding
-        if self.speculative_config and (self.speculative_config.uses_draft_model()):
-            from vllm.v1.spec_decode.draft_model import DraftModelProposer
-
-            if isinstance(self.drafter, (DraftModelProposer)):
-                logger.info("Warming up drafter model...")
-                self.drafter.dummy_run(max(16, self.max_num_reqs))
-
+            self.profile_run()
         logger.info("Warming up done.")
 
     def initialize_kv_cache(

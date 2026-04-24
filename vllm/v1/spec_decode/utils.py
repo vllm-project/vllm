@@ -594,3 +594,9 @@ def update_num_computed_tokens_for_batch_change(
     num_accepted_tokens.copy_(
         torch.where(participating, valid_counts, num_accepted_tokens)
     )
+
+
+def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
+    """Convert per-position unconditional rates to per-position conditional
+    rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
+    return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]

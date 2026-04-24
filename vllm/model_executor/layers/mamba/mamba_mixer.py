@@ -40,6 +40,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 
@@ -258,15 +259,16 @@ class MambaMixer(MambaBase, PluggableLayer):
         """
 
         forward_context: ForwardContext = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
+        attn_metadata_raw = forward_context.attn_metadata
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
 
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
             query_start_loc_p = attn_metadata.query_start_loc_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
@@ -391,6 +393,9 @@ class MambaMixer(MambaBase, PluggableLayer):
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
+            # state_indices_tensor_d is assigned when attn_metadata is not None,
+            # and has_decode is only True when attn_metadata is not None
+            assert state_indices_tensor_d is not None
             if is_mamba_cache_all:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
