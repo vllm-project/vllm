@@ -22,8 +22,9 @@ typedef struct __tile_config {
 // 2-2-4 pattern, for 16 < m <= 32
 // TILE 0, 1: load A matrix, row num should be 16, m - 16
 // TILE 2, 3: load B matrix, row num should be 16
-// TILE 4, 5, 6, 7: store results C matrix, row num should be 16, 16, m - 16, m
-// - 16 q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
+// TILE 4, 5, 6, 7: store results C matrix, row num should be 16, 16,
+// m - 16, m - 16
+// q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
 template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm224 {
  public:
@@ -43,9 +44,7 @@ class TileGemm224 {
   }
 };
 
-// Dequantize one FP8 tile (AMX_TILE_ROW_NUM rows × 32 cols) to BF16.
-// Only valid for FP8 kv_cache_t; the BF16 else-branch is dead code when
-// kv_cache_t is BFloat16, but must still compile.
+// Dequantize one FP8 tile (AMX_TILE_ROW_NUM rows x 32 cols) to BF16.
 template <typename kv_cache_t>
 FORCE_INLINE void deq_tile_amx(const uint8_t* src, c10::BFloat16* dst) {
   for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
@@ -100,7 +99,8 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
-    const int32_t k_times = dynamic_k_size / 32;
+    const int32_t k_times =
+        dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
 
     c10::BFloat16* __restrict__ a_tile_0 = a_tile;
     c10::BFloat16* __restrict__ a_tile_1 = a_tile + lda * AMX_TILE_ROW_NUM;
@@ -196,9 +196,11 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
 };
 
 // 1-2-2 pattern, for 0 < m <= 16
-// TILE 0, (1): load A matrix, use extra 1 tile for prefetch, row num should be
-// m, m TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row
-// num should be 16 TILE 6, 7: store results C matrix, row num should be m
+// TILE 0, (1): load A matrix, use extra 1 tile for prefetch, row num should
+// be m, m
+// TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row num
+// should be 16
+// TILE 6, 7: store results C matrix, row num should be m
 // q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
 template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm122 {
@@ -282,7 +284,8 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
     float* __restrict__ c_tile_7 = c_tile + AMX_TILE_ROW_BYTES / sizeof(float);
     const int64_t c_stride = ldc * sizeof(float);
 
-    const int32_t k_times = dynamic_k_size / 32;
+    const int32_t k_times =
+        dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
     const int32_t k_group_times = k_times / 2;
     const bool has_tail = (k_times % 2 == 1);
 
