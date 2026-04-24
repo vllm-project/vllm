@@ -835,6 +835,8 @@ class Scheduler(SchedulerInterface):
                     # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
+                        # Scheduled a fresh encoder run -> GPU encoder-cache miss.
+                        self.encoder_cache_manager.record_miss()
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
