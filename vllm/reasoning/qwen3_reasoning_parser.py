@@ -190,7 +190,24 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             # end_token_id in IDs but not in text (already stripped)
             return None
 
+        # No end token in this delta.
+        if not delta_text:
+            # Nothing left after stripping start token.
+            return None
+        elif self.end_token_id in previous_token_ids:
+            # End token already passed: everything is content now.
+            return DeltaMessage(content=delta_text)
+        elif (
+            self._tool_call_token_id is not None
+            and self._tool_call_token_id in previous_token_ids
+        ) or (
+            bool(self._tool_call_tag)
+            and self._tool_call_tag in previous_text
+        ):
+            return DeltaMessage(content=delta_text)
+
         # Implicit reasoning end via <tool_call>.
+        # Only do this if we haven't already passed the end token.
         has_tool_call_id = (
             self._tool_call_token_id is not None
             and self._tool_call_token_id in delta_token_ids
@@ -217,21 +234,5 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                     content=content if content else None,
                 )
 
-        # No end token in this delta.
-        if not delta_text:
-            # Nothing left after stripping start token.
-            return None
-        elif self.end_token_id in previous_token_ids:
-            # End token already passed: everything is content now.
-            return DeltaMessage(content=delta_text)
-        elif (
-            self._tool_call_token_id is not None
-            and self._tool_call_token_id in previous_token_ids
-        ) or (
-            bool(self._tool_call_tag)
-            and self._tool_call_tag in previous_text
-        ):
-            return DeltaMessage(content=delta_text)
-        else:
-            # No end token yet: still in reasoning phase.
-            return DeltaMessage(reasoning=delta_text)
+        # No end token yet: still in reasoning phase.
+        return DeltaMessage(reasoning=delta_text)

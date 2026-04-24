@@ -570,3 +570,49 @@ def test_reasoning_preserved_when_transition_and_tool_call_in_same_delta(
         f"Got reasoning={result.reasoning!r}, expected 'last reasoning text\\n'. "
         f"delta_message was overwritten by extract_tool_calls_streaming."
     )
+
+
+def test_reasoning_swallows_post_think_content(qwen3_tokenizer):
+    """
+    Regression test: If </think> was ALREADY emitted, and a later delta contains <tool_call>,
+    the parser incorrectly sends the text BEFORE <tool_call> as reasoning instead of content.
+    """
+    from vllm.reasoning import ReasoningParserManager
+    parser = ReasoningParserManager.get_reasoning_parser("qwen3")(qwen3_tokenizer)
+    
+    # Delta 1: ends thinking
+    end_token_id = qwen3_tokenizer.get_vocab()["</think>"]
+    msg1 = parser.extract_reasoning_streaming(
+        previous_text="<think> thoughts",
+        current_text="<think> thoughts</think>",
+        delta_text="</think>",
+        previous_token_ids=[1, 2],
+        current_token_ids=[1, 2, end_token_id], # end_token_id is </think>
+        delta_token_ids=[end_token_id]
+    )
+    if msg1 is not None:
+        assert msg1.content is None
+    
+    # Delta 2: content + tool call in same delta (e.g. speculative decoding or fast generation)
+    # The text "I will use a tool\n" is clearly AFTER </think>, so it must be content!
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    
+    prev_text = "<think> thoughts</think>"
+    delta_text = "I will use a tool.\n<tool_call>"
+    curr_text = prev_text + delta_text
+    
+    msg2 = parser.extract_reasoning_streaming(
+        previous_text=prev_text,
+        current_text=curr_text,
+        delta_text=delta_text,
+        previous_token_ids=[1, 2, end_token_id],
+        current_token_ids=[1, 2, end_token_id, 3, 4, tool_call_id],
+        delta_token_ids=[3, 4, tool_call_id]
+    )
+    
+    assert msg2 is not None
+    # "I will use a tool.\n" should NOT be reasoning!
+    assert msg2.reasoning is None, f"Parser incorrectly swallowed post-think text into reasoning: {msg2.reasoning}"
+    assert "I will use a tool" in msg2.content
+
