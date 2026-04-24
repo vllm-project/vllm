@@ -1166,19 +1166,16 @@ class LLM:
 
         if pooling_task is None:
             raise ValueError(
-                "pooling_task required for `LLM.encode`\n"
-                "Please use one of the more specific methods or set the "
-                "pooling_task when using `LLM.encode`:\n"
-                "  - For embeddings, use `LLM.embed(...)` "
-                'or `pooling_task="embed"`.\n'
-                "  - For classification logits, use `LLM.classify(...)` "
-                'or `pooling_task="classify"`.\n'
-                "  - For similarity scores, use `LLM.score(...)`.\n"
-                "  - For rewards, use `LLM.reward(...)` "
-                'or `pooling_task="token_classify"`\n'
-                "  - For token classification, "
-                'use `pooling_task="token_classify"`\n'
-                '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
+                """
+                pooling_task required for `LLM.encode`.
+                Please use one of the more specific methods or set the pooling_task when using `LLM.encode`:
+                  - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
+                  - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
+                  - For similarity scores, use `LLM.score(...)`.
+                  - For rewards, `pooling_task="classify"` or `pooling_task="token_classify"`.
+                  - For token classification, use `pooling_task="token_classify"`.
+                  - For multi-vector retrieval, use `pooling_task="token_embed"`.
+                """  # noqa: E501
             )
 
         if (
@@ -1340,6 +1337,11 @@ class LLM:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
         """
+        logger.warning_once(
+            "`llm.reward` api is deprecated and will be removed in v0.23. "
+            'Please use `LLM.encode` with `pooling_task="classify"` or '
+            '`pooling_task="token_classify"` instead.'
+        )
         return self.encode(
             prompts,
             use_tqdm=use_tqdm,
