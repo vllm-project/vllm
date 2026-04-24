@@ -15,6 +15,7 @@ reason about temporal order.
 """
 
 import math
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
@@ -63,6 +64,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -515,6 +517,57 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _call_hf_processor_without_local_kwargs(
+        self,
+        processor: Gemma4Processor,
+        data: Mapping[str, object],
+        kwargs: Mapping[str, object],
+        *,
+        num_tries: int = 1,
+        max_tries: int = 5,
+    ) -> BatchFeature:
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
+            processor,
+            kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+        allowed_kwargs.setdefault("return_tensors", "pt")
+
+        try:
+            output = processor(**data, **allowed_kwargs)
+        except Exception as exc:
+            # See https://github.com/huggingface/tokenizers/issues/537
+            if (
+                isinstance(exc, RuntimeError)
+                and exc
+                and exc.args[0] == "Already borrowed"
+                and num_tries < max_tries
+            ):
+                logger.warning(
+                    "Failed to acquire tokenizer in current thread. "
+                    "Retrying (%d/%d)...",
+                    num_tries,
+                    max_tries,
+                )
+                time.sleep(0.5)
+                return self._call_hf_processor_without_local_kwargs(
+                    processor,
+                    data,
+                    kwargs,
+                    num_tries=num_tries + 1,
+                    max_tries=max_tries,
+                )
+
+            msg = (
+                f"Failed to apply {type(processor).__name__} "
+                f"on data={data} with kwargs={allowed_kwargs}"
+            )
+            raise ValueError(msg) from exc
+
+        output_ = self.info.ctx._postprocess_output(output.data)
+        return BatchFeature(output_)
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -530,6 +583,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if val is None:
             val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
 
+        hf_merged_mm_kwargs = _get_hf_processor_mm_kwargs(merged_kwargs)
+
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
             raise ValueError(
                 f"Unsupported max_soft_tokens value: {val}. "
@@ -537,7 +592,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             )
 
         mm_data = dict(mm_data)
-        hf_mm_kwargs = _get_hf_processor_mm_kwargs(mm_kwargs)
+        hf_mm_kwargs = dict(hf_merged_mm_kwargs)
 
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
@@ -581,11 +636,10 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
 
-                frame_outputs = super()._call_hf_processor(
-                    prompt=dummy_prompt,
-                    mm_data={"images": frames},
-                    mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
+                frame_outputs = self._call_hf_processor_without_local_kwargs(
+                    self.info.get_hf_processor(**video_mm_kwargs),
+                    dict(text=dummy_prompt, images=frames),
+                    dict(video_mm_kwargs, **tok_kwargs),
                 )
 
                 # Remap HF key name
@@ -679,16 +733,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # NOTE: This requires a corresponding type annotation on the
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
-        patched_mm_kwargs = dict(mm_kwargs)
+        patched_mm_kwargs = dict(hf_merged_mm_kwargs)
         if val is not None:
             patched_mm_kwargs["max_soft_tokens"] = val
-        patched_mm_kwargs = _get_hf_processor_mm_kwargs(patched_mm_kwargs)
-
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            patched_mm_kwargs,
-            tok_kwargs,
+        processed_outputs = self._call_hf_processor_without_local_kwargs(
+            self.info.get_hf_processor(**patched_mm_kwargs),
+            dict(text=prompt, **mm_data),
+            dict(patched_mm_kwargs, **tok_kwargs),
         )
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.

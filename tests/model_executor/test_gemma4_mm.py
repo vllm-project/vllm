@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from types import MethodType
 
 import pytest
 import torch
+from transformers import BatchFeature
 
 from vllm.model_executor.models.gemma4_mm import (
     _DEFAULT_VIDEO_VISION_BATCH_SIZE,
@@ -55,6 +57,58 @@ def test_get_mm_fields_config_keeps_video_batch_size_on_cpu() -> None:
     assert isinstance(field, MultiModalSharedField)
     assert field.batch_size == 2
     assert field.keep_on_cpu is True
+
+
+@dataclass
+class _FakeCtx:
+    config_mm_kwargs: dict[str, object]
+
+    def get_merged_mm_kwargs(self, kwargs: dict[str, object]):
+        return self.config_mm_kwargs | kwargs
+
+    def _postprocess_output(self, output):
+        return output
+
+
+class _FakeProcessor:
+    def __init__(self) -> None:
+        self.captured_kwargs: dict[str, object] | None = None
+
+    def __call__(self, text=None, images=None, **kwargs):
+        self.captured_kwargs = kwargs
+        return BatchFeature({"input_ids": [[1, 2, 3]]})
+
+
+def test_call_hf_processor_drops_local_only_kwargs_after_config_merge() -> None:
+    processor = object.__new__(Gemma4MultiModalProcessor)
+    fake_hf_processor = _FakeProcessor()
+    fake_ctx = _FakeCtx({
+        "max_soft_tokens": 70,
+        "video_vision_batch_size": 4,
+    })
+
+    class _FakeInfo:
+        ctx = fake_ctx
+
+        def get_hf_processor(self, **kwargs):
+            return fake_hf_processor
+
+    processor.info = _FakeInfo()
+
+    outputs = Gemma4MultiModalProcessor._call_hf_processor(
+        processor,
+        prompt="hello",
+        mm_data={},
+        mm_kwargs={},
+        tok_kwargs={"padding": True},
+    )
+
+    assert fake_hf_processor.captured_kwargs == {
+        "max_soft_tokens": 70,
+        "padding": True,
+        "return_tensors": "pt",
+    }
+    assert outputs["input_ids"] == [[1, 2, 3]]
 
 
 def test_embed_multimodal_uses_request_video_batch_size() -> None:
