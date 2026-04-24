@@ -19,6 +19,8 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
 logger = init_logger(__name__)
 
 
@@ -279,7 +281,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
-            lora = self._load_adapter(lora_request)
+            # Adapter loading may sync (e.g. tensorizer's H2D weight copy);
+            # it's a one-time-per-adapter event, so allow it.
+            with gpu_sync_allowed():
+                lora = self._load_adapter(lora_request)
 
             # Remove the existing adapter if it exists
             # Use case for LoRA inplace
