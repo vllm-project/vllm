@@ -60,7 +60,7 @@ pub struct NoopValueParser;
 
 #[track_caller]
 fn noop_warn(arg: impl Display) {
-    tracing::warn!("argument '{arg}' has no effect in Rust frontend, ignoring");
+    tracing::warn!("argument '{arg}' currently has no effect in Rust frontend, ignoring");
 }
 
 impl TypedValueParser for NoopValueParser {
@@ -357,7 +357,7 @@ pub struct EngineUnsupportedArgs {
 
     /// Structured outputs configuration.
     #[arg(long)]
-    pub structured_outputs_config: Option<Unsupported>,
+    pub structured_outputs_config: Option<Noop>,
 
     /// Log aggregate rather than per-engine statistics when using data parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
