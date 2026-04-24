@@ -74,7 +74,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
         pooling_params.verify(model_config)
 
 
-@pytest.mark.parametrize("task", ["score", "classify"])
+@pytest.mark.parametrize("task", ["classify"])
 def test_classify(task):
     model_config = MockModelConfig(pooler_config=PoolerConfig(seq_pooling_type="CLS"))
 

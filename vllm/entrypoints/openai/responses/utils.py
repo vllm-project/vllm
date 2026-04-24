@@ -94,8 +94,10 @@ def construct_input_messages(
 
     # Prepend the conversation history.
     if prev_msg is not None:
-        # Add the previous messages.
-        messages.extend(prev_msg)
+        # Filter out system messages from previous conversation -- per the
+        # OpenAI spec, instructions should NOT carry over across responses.
+        # The current request's instructions (if any) were already added above.
+        messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
         # Add the previous output.
         for output_item in prev_response_output:
@@ -191,13 +193,13 @@ def _construct_single_message_from_response_item(
             ],
         )
     elif isinstance(item, ResponseReasoningItem):
-        reasoning_content = ""
+        reasoning = ""
         if item.encrypted_content:
             raise ValueError("Encrypted content is not supported.")
         elif item.content and len(item.content) >= 1:
-            reasoning_content = item.content[0].text
+            reasoning = item.content[0].text
         elif len(item.summary) >= 1:
-            reasoning_content = item.summary[0].text
+            reasoning = item.summary[0].text
             logger.warning(
                 "Using summary text as reasoning content for item %s. "
                 "Please use content instead of summary for "
@@ -206,7 +208,7 @@ def _construct_single_message_from_response_item(
             )
         return {
             "role": "assistant",
-            "reasoning": reasoning_content,
+            "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
         return {
@@ -262,7 +264,7 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
 def construct_tool_dicts(
     tools: list[Tool], tool_choice: ToolChoice
 ) -> list[dict[str, Any]] | None:
-    if tools is None or (tool_choice == "none"):
+    if not tools or (tool_choice == "none"):
         tool_dicts = None
     else:
         tool_dicts = [
