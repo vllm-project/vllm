@@ -386,10 +386,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
-        # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
-        if kv_cache_dtype.startswith("turboquant_"):
-            self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
-
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
@@ -409,50 +405,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 if is_per_head
                 else GroupShape.PER_TENSOR,
             )
-
-    def _init_turboquant_buffers(
-        self, cache_dtype: str, head_size: int, prefix: str
-    ) -> None:
-        """Initialize TurboQuant centroids for Lloyd-Max quantization."""
-        from vllm.model_executor.layers.quantization.turboquant.centroids import (
-            get_centroids,
-        )
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
-
-        self.register_buffer(
-            "_tq_centroids",
-            get_centroids(head_size, tq_config.centroid_bits),
-        )
-        self._tq_config = tq_config
-
-        # Share decode intermediate buffers across all TQ attention layers.
-        # Layers execute sequentially so one set of buffers is sufficient.
-        # This reduces memory from O(num_layers) to O(1) — saving ~11 GiB
-        # for a 64-layer model like Qwen2.5-32B.
-        _vllm_cfg = get_current_vllm_config()
-        B = _vllm_cfg.scheduler_config.max_num_seqs
-        Hq = self.num_heads
-        S = _vllm_cfg.attention_config.tq_max_kv_splits_for_cuda_graph
-        D = head_size
-
-        if not hasattr(
-            Attention, "_tq_shared_mid_o_buf"
-        ) or Attention._tq_shared_mid_o_buf.shape != (B, Hq, S, D + 1):
-            # First TQ layer initializes the shared buffers
-            Attention._tq_shared_mid_o_buf = torch.empty(
-                B, Hq, S, D + 1, dtype=torch.float32
-            )
-            Attention._tq_shared_output_buf = torch.empty(B, Hq, D, dtype=torch.float32)
-            Attention._tq_shared_lse_buf = torch.empty(B, Hq, dtype=torch.float32)
-
-        # Point this layer's buffers to the shared ones (no new allocation)
-        self._tq_mid_o_buf = Attention._tq_shared_mid_o_buf
-        self._tq_output_buf = Attention._tq_shared_output_buf
-        self._tq_lse_buf = Attention._tq_shared_lse_buf
 
     def forward(
         self,

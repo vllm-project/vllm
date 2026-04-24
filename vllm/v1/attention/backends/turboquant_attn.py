@@ -26,6 +26,9 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.model_executor.layers.quantization.turboquant.centroids import (
+    get_centroids,
+)
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -49,6 +52,10 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
@@ -336,8 +343,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             layer._tq_PiT = H
             layer._tq_Pi = H
 
-            c = layer._tq_centroids.to(device=device, dtype=torch.float32)
-            c_sorted, _ = c.sort()
+            # Centroids for Lloyd-Max quantization.
+            layer._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
+                device=device, dtype=torch.float32
+            )
+
+            c_sorted, _ = layer._tq_centroids.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
             layer._tq_cached = True
 
@@ -805,44 +816,22 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         PiT: torch.Tensor | None = None,
         layer: torch.nn.Module | None = None,
     ) -> torch.Tensor:
-        # Grab cached decode buffers from the layer (shared across layers).
+        # Acquire shared decode scratch buffers from WorkspaceManager.
+        # Layers execute sequentially so one set of buffers is sufficient.
+        # Falls back to kernel-internal allocation if workspace unavailable.
+        B = query.shape[0]
+        D = self.head_size
+        S = self.max_num_kv_splits
+        Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
-        if layer is not None:
-            mid_o_buf = getattr(layer, "_tq_mid_o_buf", None)
-            output_buf = getattr(layer, "_tq_output_buf", None)
-            lse_buf = getattr(layer, "_tq_lse_buf", None)
-            # Ensure shared buffers are on the right device (they start
-            # on CPU since we no longer use register_buffer for auto .to())
-            if mid_o_buf is not None and mid_o_buf.device != query.device:
-                from vllm.model_executor.layers.attention.attention import (
-                    Attention,
+        if is_workspace_manager_initialized():
+            mid_o_buf, output_buf, lse_buf = (
+                current_workspace_manager().get_simultaneous(
+                    ((B, Hq, S, D + 1), torch.float32),
+                    ((B, Hq, D), torch.float32),
+                    ((B, Hq), torch.float32),
                 )
-
-                # Check if another layer already migrated the shared buffers
-                shared = getattr(Attention, "_tq_shared_mid_o_buf", None)
-                if (
-                    shared is not None
-                    and shared.device == query.device
-                    and shared.shape == mid_o_buf.shape
-                ):
-                    # Reuse already-migrated shared buffers
-                    mid_o_buf = shared
-                    output_buf = Attention._tq_shared_output_buf
-                    lse_buf = Attention._tq_shared_lse_buf
-                else:
-                    # First layer to decode — migrate and update shared refs
-                    mid_o_buf = mid_o_buf.to(query.device)
-                    Attention._tq_shared_mid_o_buf = mid_o_buf
-                    if output_buf is not None:
-                        output_buf = output_buf.to(query.device)
-                        Attention._tq_shared_output_buf = output_buf
-                    if lse_buf is not None:
-                        lse_buf = lse_buf.to(query.device)
-                        Attention._tq_shared_lse_buf = lse_buf
-                # Update this layer's instance refs to the GPU tensors
-                layer._tq_mid_o_buf = mid_o_buf
-                layer._tq_output_buf = output_buf
-                layer._tq_lse_buf = lse_buf
+            )
 
         result = triton_turboquant_decode_attention(
             query=query,
