@@ -205,6 +205,22 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         pass
 
 
+@pytest.mark.forked
+def test_torch_compile_disable(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    with (
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
+        vllm_runner(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
 def test_splitting_ops_dynamic():
     # Default config
     config = VllmConfig()
