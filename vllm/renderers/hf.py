@@ -181,11 +181,9 @@ def _build_mixed_prompt_embeds(
     full_embeds = torch.zeros(total_len, hidden_size, dtype=dtype)
     is_token_ids = torch.ones(total_len, dtype=torch.bool)
 
-    indices = torch.cat(
-        [torch.arange(start, start + length) for start, length in positions]
-    )
-    full_embeds[indices] = torch.cat(list(prompt_embeds_tensors), dim=0)
-    is_token_ids[indices] = False
+    for (start, length), tensor in zip(positions, prompt_embeds_tensors, strict=True):
+        full_embeds[start : start + length] = tensor
+        is_token_ids[start : start + length] = False
 
     return full_embeds, is_token_ids.tolist()
 
