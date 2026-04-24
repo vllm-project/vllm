@@ -846,61 +846,55 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     )
 
 
-def _rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_impl(
+def _rocm_aiter_mla_dual_rmsnorm_impl(
     q_c: torch.Tensor,
     q_a_layernorm_weight: torch.Tensor,
     q_a_layernorm_variance_epsilon: float,
     kv_c: torch.Tensor,
     kv_a_layernorm_weight: torch.Tensor,
     kv_a_layernorm_variance_epsilon: float,
-    group_size: int,
-    transpose_scale: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused dual RMSNorm for MLA.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused dual RMSNorm for MLA using aiter's fused_qk_rmsnorm.
 
-    Fuses RMSNorm on q_c and kv_c. Returns unquantized BF16 outputs to allow
-    Linear layers to choose optimal quantization strategy and avoid forcing
-    block-scaled GEMM.
+    Fuses RMSNorm on q_c and kv_c into a single kernel call. Returns BF16
+    outputs, ~2× faster than separate RMS norms.
+
+    Uses aiter.ops.fused_qk_norm_rope_cache_quant.fused_qk_rmsnorm which is
+    optimized for dual RMS norm with 2D grid parallelization and automatic
+    fallback to separate norms for very large batch sizes (≥16384 tokens).
 
     Returns:
-        (q_c_normed, None, kv_c_normed)
+        (q_c_normed, kv_c_normed): Both BF16 tensors after RMSNorm
     """
-    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
 
-    _, q_c_normed, kv_c_normed, _ = fused_rms_fp8_group_quant(
+    q_c_normed, kv_c_normed = fused_qk_rmsnorm(
         q_c,
         q_a_layernorm_weight,
         q_a_layernorm_variance_epsilon,
         kv_c,
         kv_a_layernorm_weight,
         kv_a_layernorm_variance_epsilon,
-        group_size,
-        FP8_DTYPE,
-        None,
-        True,  # output_unquantized_inp1 - return BF16 instead of FP8
-        transpose_scale,
     )
-    return q_c_normed, None, kv_c_normed
+    return q_c_normed, kv_c_normed
 
 
-def _rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_fake(
+def _rocm_aiter_mla_dual_rmsnorm_fake(
     q_c: torch.Tensor,
     q_a_layernorm_weight: torch.Tensor,
     q_a_layernorm_variance_epsilon: float,
     kv_c: torch.Tensor,
     kv_a_layernorm_weight: torch.Tensor,
     kv_a_layernorm_variance_epsilon: float,
-    group_size: int,
-    transpose_scale: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile/CUDA graphs.
 
-    Returns unquantized BF16 outputs (just RMSNorm) to match real implementation.
+    Returns BF16 outputs (just RMSNorm) to match real implementation.
     """
-    # Return BF16 RMSNorm outputs, no quantization or scales
+    # Return BF16 RMSNorm outputs
     out1_normed = torch.empty_like(q_c)  # BF16 q_c after RMSNorm
     out2_normed = torch.empty_like(kv_c)  # BF16 kv_c after RMSNorm
-    return out1_normed, None, out2_normed
+    return out1_normed, out2_normed
 
 
 def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
@@ -1545,9 +1539,9 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_mla_dual_rmsnorm_fp8_group_quant",
-                op_func=_rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_impl,
-                fake_impl=_rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_fake,
+                op_name="rocm_aiter_mla_dual_rmsnorm",
+                op_func=_rocm_aiter_mla_dual_rmsnorm_impl,
+                fake_impl=_rocm_aiter_mla_dual_rmsnorm_fake,
             )
 
             direct_register_custom_op(
@@ -1642,8 +1636,8 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
 
     @staticmethod
-    def get_mla_dual_rmsnorm_fp8_group_quant_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_mla_dual_rmsnorm_fp8_group_quant.default
+    def get_mla_dual_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_mla_dual_rmsnorm.default
 
     @staticmethod
     def get_per_token_quant_op() -> OpOverload:

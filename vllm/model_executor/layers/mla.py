@@ -76,7 +76,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        fp8_group_size: int = 128,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -144,24 +143,18 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
-        # Enable RMSNorm+Quant fusion when AITER is available with FP8
-        self.quant_config = quant_config
-        self.quant_dtype = None
-        self.fuse_qknorm_quant = False
-        self.fp8_group_size = fp8_group_size
+        # Enable dual RMSNorm fusion when AITER is available
+        self.fuse_dual_rmsnorm = False
 
-        if _AITER_AVAILABLE and quant_config is not None:
-            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-            from vllm.platforms import current_platform
+        if _AITER_AVAILABLE:
+            from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm
 
-            if isinstance(quant_config, Fp8Config):
-                self.quant_dtype = current_platform.fp8_dtype()
-                self.fuse_qknorm_quant = True
+            if check_aiter_fused_qk_rmsnorm():
+                self.fuse_dual_rmsnorm = True
                 logger.info(
-                    "[MLA_FUSION_INIT] Fusion enabled for %s: "
-                    "AITER available and FP8 quantization detected (group_size=%d)",
+                    "[MLA_FUSION_INIT] Dual RMSNorm fusion enabled for %s: "
+                    "Using aiter.fused_qk_rmsnorm (2× faster than separate norms)",
                     prefix,
-                    self.fp8_group_size,
                 )
 
     def forward(
@@ -195,26 +188,22 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
 
             # Step 2: Apply RMSNorm (fused if available)
-            if self.fuse_qknorm_quant:
-                # Fused dual RMSNorm using AITER op
-                # Returns BF16 to allow Linear layer to choose optimal quantization
-                mla_dual_quant_op = (
-                    rocm_aiter_ops.get_mla_dual_rmsnorm_fp8_group_quant_op()
-                )
-                q_c_normed, _, kv_c_normed = mla_dual_quant_op(
+            if self.fuse_dual_rmsnorm:
+                # Fused dual RMSNorm using AITER op (2× faster than separate)
+                # Returns BF16 outputs, same as unfused path
+                mla_dual_rmsnorm_op = rocm_aiter_ops.get_mla_dual_rmsnorm_op()
+                q_c_normed, kv_c_normed = mla_dual_rmsnorm_op(
                     q_c,
                     self.q_a_layernorm.weight,
                     self.q_a_layernorm.variance_epsilon,
                     kv_c,
                     self.kv_a_layernorm.weight,
                     self.kv_a_layernorm.variance_epsilon,
-                    self.fp8_group_size,
-                    False,  # transpose_scale (unused when returning BF16)
                 )
                 # q_c_normed is BF16, same as unfused path below
                 q = self.q_b_proj(q_c_normed)[0]
             else:
-                # Unfused path: RMSNorm only
+                # Unfused path: Separate RMSNorm calls
                 q_c = self.q_a_layernorm(q_c)
                 kv_c_normed = self.kv_a_layernorm(kv_c)
                 q = self.q_b_proj(q_c)[0]
