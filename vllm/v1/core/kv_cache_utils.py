@@ -515,9 +515,24 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
     lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
-    )
+    # Hierarchical cache salt: when shared_prefix_tokens > 0, apply the
+    # tenant salt only at the boundary block (first block at or after the
+    # shared prefix length).  Blocks before the boundary carry no salt and
+    # can be reused across tenants.  Blocks after the boundary inherit
+    # isolation through the parent-hash chain.
+    _shared = getattr(request, "shared_prefix_tokens", 0)
+    if request.cache_salt and _shared > 0:
+        # Salt goes on the boundary block, not block 0
+        cache_salt_keys = (
+            [request.cache_salt] if (start_token_idx <= _shared < end_token_idx) else []
+        )
+    else:
+        # Legacy flat salt: inject on block 0 only
+        cache_salt_keys = (
+            [request.cache_salt]
+            if (start_token_idx == 0 and request.cache_salt)
+            else []
+        )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
