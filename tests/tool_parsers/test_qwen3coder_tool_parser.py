@@ -322,10 +322,9 @@ fahrenheit
                         ),
                     )
                 ),
-            ],
-            None,
-        ),
-        (
+                ],
+                "\n",
+                ),        (
             """Let me calculate that area for you.<tool_call>
 <function=calculate_area>
 <parameter=shape>
@@ -589,10 +588,9 @@ celsius
                         ),
                     )
                 ),
-            ],
-            None,
-        ),
-        # Added tool_with_typed_params test case
+                ],
+                "\n",
+                ),        # Added tool_with_typed_params test case
         (
             """Let me calculate that area for you.<tool_call>
 <function=calculate_area>
