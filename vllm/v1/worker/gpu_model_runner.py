@@ -3307,8 +3307,19 @@ class GPUModelRunner(
         slot_mapping = slot_mappings_by_group[0][:num_scheduled_tokens]
         flat_hidden = hidden_states[:num_scheduled_tokens]
 
-        # Accumulate per-block sums for every token in this step.
-        self.aux_pool_state.update_block_sums(slot_mapping, flat_hidden)
+        # Per-step CPU-only precheck: skip the GPU scatter-add when this
+        # step is pure-decode (no request is still in prefill). This trades
+        # multi-turn correctness — opt-in requests whose cache-hit prefix
+        # contains tokens written during a prior request's decode would see
+        # an undercounted mean — for substantial throughput on single-turn
+        # workloads where decoded tokens never become future prompt tokens.
+        any_prefill = any(
+            int(self.input_batch.num_computed_tokens_cpu[idx]) < req.num_prompt_tokens
+            for req_id, idx in self.input_batch.req_id_to_index.items()
+            if (req := self.requests.get(req_id)) is not None
+        )
+        if any_prefill:
+            self.aux_pool_state.update_block_sums(slot_mapping, flat_hidden)
 
         # no opted-in request arrived yet
         if not self.pool_req_ids:
