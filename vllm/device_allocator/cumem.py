@@ -262,8 +262,8 @@ class CuMemAllocator:
         # If the user has enabled expandable segments via
         # PYTORCH_CUDA_ALLOC_CONF, temporarily disable them for the duration
         # of the memory pool context and restore on exit.
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        expandable_was_enabled = "expandable_segments:True" in conf
+        alloc_settings = torch.cuda.memory.get_allocator_settings()
+        expandable_was_enabled = alloc_settings.get('expandable_segments', False)
         if expandable_was_enabled:
             torch.cuda.memory._set_allocator_settings("expandable_segments:False")
 
