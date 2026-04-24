@@ -10,7 +10,13 @@ from tests.tool_parsers.common_tests import (
 )
 from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from transformers import AutoTokenizer
+from vllm.tokenizers import get_tokenizer
+MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+
+
+@pytest.fixture(scope="module")
+def qwen3_tokenizer():
+    return get_tokenizer(tokenizer_name=MODEL)
 
 class TestQwen3xmlToolParser(ToolParserTests):
     @pytest.fixture
@@ -73,16 +79,12 @@ class TestQwen3xmlToolParser(ToolParserTests):
             supports_typed_arguments=False,
         )
 
-    @pytest.mark.asyncio
-    async def test_qwen3xml_async_streaming_free_text(self):
-        
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-        parser = Qwen3XMLToolParser(tokenizer)
+    def test_qwen3xml_async_streaming_free_text(self, qwen3_tokenizer):
+        parser = Qwen3XMLToolParser(qwen3_tokenizer)
         
         # 1. First tool call
         # 2. Free text
         # 3. Second tool call
-        
         text_to_stream = (
             "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
             "\nNext, I will check the weather for London:\n"
@@ -90,15 +92,14 @@ class TestQwen3xmlToolParser(ToolParserTests):
         )
         
         request = ChatCompletionRequest(messages=[], model="test")
-        
         emitted_messages = []
         previous_text = ""
         previous_tokens = []
-        token_ids = tokenizer.encode(text_to_stream, add_special_tokens=False)
+        token_ids = qwen3_tokenizer.encode(text_to_stream, add_special_tokens=False)
         
         for i in range(1, len(token_ids) + 1):
             current_token_ids = token_ids[:i]
-            current_text = tokenizer.decode(current_token_ids)
+            current_text = qwen3_tokenizer.decode(current_token_ids)
             delta_text = current_text[len(previous_text):]
             token_delta = current_token_ids[len(previous_tokens):]
             
