@@ -82,8 +82,8 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
     image_prompts = IMAGE_ASSETS.prompts(
         {
-            "stop_sign": config.image_prompt,
-            "cherry_blossom": config.image_prompt,
+            "stop_sign": config.image_prompt,  # type: ignore[typeddict-item]
+            "cherry_blossom": config.image_prompt,  # type: ignore[typeddict-item]
         }
     )
     images = [[asset.pil_image] for asset in image_assets]
@@ -124,7 +124,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
 
     video_prompts = VIDEO_ASSETS.prompts(
         {
-            "baby_reading": config.video_prompt,
+            "baby_reading": config.video_prompt,  # type: ignore[typeddict-item]
         }
     )
     if config.needs_video_metadata:
