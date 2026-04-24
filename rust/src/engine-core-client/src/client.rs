@@ -494,7 +494,7 @@ impl EngineCoreClient {
     pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
-        A: serde::Serialize,
+        A: serde::Serialize + std::fmt::Debug,
     {
         trace!(
             method,
@@ -539,8 +539,8 @@ impl EngineCoreClient {
         kwargs: K,
     ) -> Result<Vec<rmpv::Value>>
     where
-        A: serde::Serialize,
-        K: serde::Serialize,
+        A: serde::Serialize + std::fmt::Debug,
+        K: serde::Serialize + std::fmt::Debug,
     {
         let results = self
             .call_utility::<rmpv::Value, _>("collective_rpc", (method, timeout, args, kwargs))

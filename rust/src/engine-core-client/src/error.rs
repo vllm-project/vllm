@@ -9,21 +9,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the Rust engine-core client.
 #[derive(Debug, Error, Macro)]
 pub enum Error {
-    #[error("messagepack encode failed")]
-    Encode(#[from] rmp_serde::encode::Error),
-    #[error("messagepack decode failed")]
-    Decode(#[from] rmp_serde::decode::Error),
+    #[error("messagepack encode failed for {target_type}: {message}")]
+    Encode {
+        target_type: &'static str,
+        message: String,
+    },
     #[error("messagepack decode failed for {target_type}: {message}")]
-    DecodeWithMessage {
+    Decode {
         target_type: &'static str,
         message: String,
     },
     #[error("messagepack value decode failed")]
     ValueDecode(#[from] rmpv::decode::Error),
-    #[error("messagepack ext value encode failed: {message}")]
-    ValueEncodeExt { message: String },
     #[error("messagepack ext value decode failed: {message}")]
-    ValueDecodeExt { message: String },
+    ExtValueDecode { message: String },
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("transport error")]

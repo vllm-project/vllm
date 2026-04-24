@@ -3,15 +3,14 @@ mod array;
 mod tests;
 mod wire;
 
-use std::io::Cursor;
 use std::ops::{Deref, DerefMut};
 
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use self::wire::*;
-use super::{EngineCoreOutput, EngineCoreOutputs};
-use crate::error::{Error, Result, bail_value_decode_ext, value_decode_ext};
+use super::{EngineCoreOutput, EngineCoreOutputs, decode_msgpack};
+use crate::error::{Error, Result, bail_ext_value_decode, ext_value_decode};
 
 /// One token candidate and its logprob metadata for a single sequence position.
 ///
@@ -40,14 +39,14 @@ impl PositionLogprobs {
     /// pair together with the sampled/selected token's actual vocab rank.
     fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], sampled_rank: u32) -> Result<Self> {
         if token_ids.len() != logprobs.len() {
-            bail_value_decode_ext!(
+            bail_ext_value_decode!(
                 "logprobs row length mismatch: token_ids={}, logprobs={}",
                 token_ids.len(),
                 logprobs.len()
             );
         }
         if sampled_rank == 0 {
-            bail_value_decode_ext!("token_ranks must be >= 1 for decoded engine-core logprobs");
+            bail_ext_value_decode!("token_ranks must be >= 1 for decoded engine-core logprobs");
         }
 
         let mut entries = Vec::with_capacity(token_ids.len());
@@ -256,7 +255,7 @@ impl WireLogprobs {
         Frame: AsRef<[u8]>,
     {
         if let Some(indices) = self.cu_num_generated_tokens {
-            bail_value_decode_ext!(
+            bail_ext_value_decode!(
                 "{field_prefix}.cu_num_generated_tokens: \
                  expected None for per-request engine-core logprobs payload, got {indices:?}"
             );
@@ -276,7 +275,7 @@ impl WireLogprobs {
         )?;
 
         if token_ids.rows != logprobs.rows || token_ids.cols != logprobs.cols {
-            bail_value_decode_ext!(
+            bail_ext_value_decode!(
                 "{field_prefix}: row shape mismatch between token ids ({}, {}) and logprobs ({}, {})",
                 token_ids.rows,
                 token_ids.cols,
@@ -285,7 +284,7 @@ impl WireLogprobs {
             );
         }
         if token_ids.rows != token_ranks.len() {
-            bail_value_decode_ext!(
+            bail_ext_value_decode!(
                 "{field_prefix}: token_ranks length {} does not match row count {}",
                 token_ranks.len(),
                 token_ids.rows
@@ -318,11 +317,9 @@ where
 {
     let first_frame = frames
         .first()
-        .ok_or_else(|| value_decode_ext!("missing output frame"))?;
+        .ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
-    let value = rmpv::decode::read_value(&mut Cursor::new(first_frame.as_ref()))?;
-    let mut outputs: EngineCoreOutputs =
-        rmpv::ext::from_value(value).map_err(|error| value_decode_ext!("{}", error))?;
+    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
     outputs.resolve_in_place(frames)?;
     Ok(outputs)
 }

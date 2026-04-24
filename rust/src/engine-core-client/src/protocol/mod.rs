@@ -10,7 +10,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use thiserror_ext::AsReport;
 
-use crate::error::{Error, Result, value_encode_ext};
+use crate::error::{Error, Result};
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
@@ -379,10 +379,14 @@ impl EngineCoreUtilityRequest {
         args: T,
     ) -> Result<Self>
     where
-        T: Serialize,
+        T: Serialize + std::fmt::Debug,
     {
-        let args = rmpv::ext::to_value(args).map_err(|error| {
-            value_encode_ext!("failed to encode utility args: {}", error.as_report())
+        let args = rmpv::ext::to_value(&args).map_err(|error| Error::Encode {
+            target_type: type_name::<T>(),
+            message: format!(
+                "failed to encode utility args `{args:?}`: {}",
+                error.to_report_string()
+            ),
         })?;
         let args = match args {
             Value::Nil => Value::Array(Vec::new()),
@@ -536,12 +540,19 @@ pub struct EngineCoreOutputs {
 /// Encode a Rust value into msgpack using the protocol crate's serde model.
 pub fn encode_msgpack<T>(value: &T) -> Result<Vec<u8>>
 where
-    T: Serialize,
+    T: Serialize + std::fmt::Debug,
 {
-    Ok(rmp_serde::to_vec_named(value)?)
+    rmp_serde::to_vec_named(value).map_err(|error| Error::Encode {
+        target_type: type_name::<T>(),
+        message: format!(
+            "failed to encode value `{:?}`: {}",
+            value,
+            error.to_report_string()
+        ),
+    })
 }
 
-/// Decode a msgpack payload into a strongly typed protocol value.
+/// Decode a msgpack payload into a strongly typed protocol value, with enhanced error reporting.
 pub fn decode_msgpack<T>(bytes: &[u8]) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -553,7 +564,7 @@ where
         }
     }
 
-    rmp_serde::from_slice(bytes).map_err(|error| Error::DecodeWithMessage {
+    rmp_serde::from_slice(bytes).map_err(|error| Error::Decode {
         target_type: type_name::<T>(),
         message: format!("{error}; value fallback: {}", decode_value_preview(bytes)),
     })

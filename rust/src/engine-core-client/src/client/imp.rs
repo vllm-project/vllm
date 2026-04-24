@@ -167,7 +167,7 @@ impl ClientInner {
         payload: &T,
     ) -> Result<()>
     where
-        T: serde::Serialize,
+        T: serde::Serialize + std::fmt::Debug,
     {
         let payload = encode_msgpack(payload)?;
         let mut input_send = self.input_send.clone();
