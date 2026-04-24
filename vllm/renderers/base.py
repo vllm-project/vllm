@@ -226,7 +226,9 @@ class BaseRenderer(ABC, Generic[_T]):
             model_config = self.model_config
             mm_config = model_config.get_multimodal_config()
             processor = self.mm_processor
-            mm_limits = processor.info.allowed_mm_limits
+            mm_limits = {
+                k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0
+            }
 
             try:
                 logger.debug("Warming up multi-modal processing...")
@@ -435,6 +437,11 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
+            if not isinstance(prompt.get("prompt"), str):
+                raise TypeError(
+                    "Expected prompt['prompt'] to be a string before tokenization; "
+                    "use 'prompt_token_ids' for token ID inputs"
+                )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
 
@@ -466,6 +473,11 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
+            if not isinstance(prompt.get("prompt"), str):
+                raise TypeError(
+                    "Expected prompt['prompt'] to be a string before tokenization; "
+                    "use 'prompt_token_ids' for token ID inputs"
+                )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
 

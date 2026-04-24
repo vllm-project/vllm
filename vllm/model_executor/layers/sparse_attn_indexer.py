@@ -26,7 +26,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
-    from vllm._xpu_ops import xpu_ops as ops
+    from vllm._xpu_ops import xpu_ops
 
 logger = init_logger(__name__)
 
@@ -84,12 +84,12 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
         )
-    attn_metadata = attn_metadata[k_cache_prefix]
-    assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
-    slot_mapping = attn_metadata.slot_mapping
-    has_decode = attn_metadata.num_decodes > 0
-    has_prefill = attn_metadata.num_prefills > 0
-    num_decode_tokens = attn_metadata.num_decode_tokens
+    attn_metadata_narrowed = attn_metadata[k_cache_prefix]
+    assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
+    slot_mapping = attn_metadata_narrowed.slot_mapping
+    has_decode = attn_metadata_narrowed.num_decodes > 0
+    has_prefill = attn_metadata_narrowed.num_prefills > 0
+    num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
 
     # During speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens. Truncate k to avoid
@@ -97,6 +97,8 @@ def sparse_attn_indexer(
     num_tokens = slot_mapping.shape[0]
     k = k[:num_tokens]
 
+    # scale_fmt can be None, but the function expects str
+    assert scale_fmt is not None
     ops.indexer_k_quant_and_cache(
         k,
         kv_cache,
@@ -107,7 +109,7 @@ def sparse_attn_indexer(
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
-        prefill_metadata = attn_metadata.prefill
+        prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
         # Get the full shared workspace buffers once (will allocate on first use)
@@ -144,7 +146,7 @@ def sparse_attn_indexer(
             ]
 
             if current_platform.is_xpu():
-                ops.top_k_per_row_prefill(
+                xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
                     logits,
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
@@ -167,7 +169,7 @@ def sparse_attn_indexer(
                 )
 
     if has_decode:
-        decode_metadata = attn_metadata.decode
+        decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
         # kv_cache shape [
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
@@ -213,15 +215,15 @@ def sparse_attn_indexer(
             )
             torch.ops._C.persistent_topk(
                 logits,
-                decode_metadata.seq_lens,
+                seq_lens,
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
-                attn_metadata.max_seq_len,
+                attn_metadata_narrowed.max_seq_len,
             )
         else:
             if current_platform.is_xpu():
-                ops.top_k_per_row_decode(
+                xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
                     logits,
                     next_n,
                     seq_lens,
@@ -250,7 +252,7 @@ def sparse_attn_indexer(
                 topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens,
             )
-            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
+            topk_indices_buffer[: topk_indices.shape[0], : topk_indices.shape[-1]] = (
                 topk_indices
             )
 
