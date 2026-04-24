@@ -400,8 +400,8 @@ class Qwen3CoderToolParser(ToolParser):
             ):
                 self.is_tool_call_started = True
                 # Return any content before the tool call
-                last_start = current_text.rfind(self.tool_call_start_token)
-                if last_start > self._sent_content_idx:
+                last_start = current_text.find(self.tool_call_start_token, self._sent_content_idx)
+                if last_start != -1 and last_start > self._sent_content_idx:
                     content_before = current_text[self._sent_content_idx:last_start]
                     self._sent_content_idx = last_start
                     if content_before:
