@@ -14,7 +14,6 @@ Run:
 """
 
 import argparse
-import dataclasses
 import json
 import time
 from collections import defaultdict
@@ -225,7 +224,7 @@ def benchmark_multimodal_processor(
         args.seed = 0
 
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     tokenizer = llm.get_tokenizer()
     requests = get_requests(args, tokenizer)

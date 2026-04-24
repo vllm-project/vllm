@@ -147,6 +147,9 @@ struct AttentionMetadata {
       case ISA::NEON:
         ss << "NEON, ";
         break;
+      case ISA::VXE:
+        ss << "VXE, ";
+        break;
     }
     ss << "workitem_group_num: " << workitem_group_num
        << ", reduction_item_num: " << reduction_item_num
@@ -1149,7 +1152,11 @@ class AttentionMainLoop {
                        bool use_sink) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
+      bool constexpr IsReducedPrecision =
+          std::is_same_v<query_t, c10::BFloat16> ||
+          std::is_same_v<query_t, c10::Half>;
 #endif
+
       using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
       static_assert(sizeof(prob_buffer_t) <= sizeof(logits_buffer_t));
 
@@ -1198,8 +1205,17 @@ class AttentionMainLoop {
             vec = vec - max_vec;
 
             // compute exp
-#ifdef DEFINE_FAST_EXP
-            vec = fast_exp(vec);
+
+#if defined(DEFINE_FAST_EXP)
+  #ifdef __aarch64__
+            if constexpr (IsReducedPrecision) {
+              vec = fast_exp_f16(vec);
+            } else
+  #endif
+            {
+              vec = fast_exp(vec);
+            }
+
             prob_buffer_vec_t output_vec(vec);
             output_vec.save(curr_prob_buffer_iter);
 #else
@@ -1255,7 +1271,11 @@ class AttentionMainLoop {
                        int32_t kv_tile_token_num, float softcap_scale) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
+      bool constexpr IsReducedPrecision =
+          std::is_same_v<query_t, c10::BFloat16> ||
+          std::is_same_v<query_t, c10::Half>;
 #endif
+
       float inv_softcap_scale = 1.0 / softcap_scale;
       vec_op::FP32Vec16 softcap_scale_vec(softcap_scale);
       vec_op::FP32Vec16 inv_softcap_scale_vec(inv_softcap_scale);
@@ -1269,8 +1289,15 @@ class AttentionMainLoop {
           vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
           vec = vec * inv_softcap_scale_vec;
 
-#ifdef DEFINE_FAST_EXP
-          vec = fast_exp(vec);
+#if defined(DEFINE_FAST_EXP)
+  #ifdef __aarch64__
+          if constexpr (IsReducedPrecision) {
+            vec = fast_exp_f16(vec);
+          } else
+  #endif
+          {
+            vec = fast_exp(vec);
+          }
           vec_op::FP32Vec16 inv_vec = ones_vec / vec;
           vec = (vec - inv_vec) / (vec + inv_vec);
 #else

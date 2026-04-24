@@ -546,10 +546,7 @@ def main():
         args.prefill_backends = yaml_config.get("prefill_backends", None)
 
         # Check for special modes
-        if "mode" in yaml_config:
-            args.mode = yaml_config["mode"]
-        else:
-            args.mode = None
+        args.mode = yaml_config.get("mode", None)
 
         # Batch specs and sizes
         # Support both explicit batch_specs and generated batch_spec_ranges
@@ -572,10 +569,7 @@ def main():
             elif "batch_specs" in yaml_config:
                 args.batch_specs = yaml_config["batch_specs"]
 
-        if "batch_sizes" in yaml_config:
-            args.batch_sizes = yaml_config["batch_sizes"]
-        else:
-            args.batch_sizes = None
+        args.batch_sizes = yaml_config.get("batch_sizes", None)
 
         # Model config
         if "model" in yaml_config:

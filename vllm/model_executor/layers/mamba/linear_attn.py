@@ -396,10 +396,11 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
@@ -413,7 +414,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         if attn_metadata is not None:
-            kv_cache = self.kv_cache[forward_context.virtual_engine][0]
+            kv_cache = self.kv_cache[0]
             state_indices_tensor = attn_metadata.state_indices_tensor
             clear_linear_attention_cache_for_new_sequences(
                 kv_cache, state_indices_tensor, attn_metadata

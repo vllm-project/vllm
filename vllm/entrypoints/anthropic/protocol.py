@@ -5,7 +5,7 @@
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AnthropicError(BaseModel):
@@ -112,6 +112,19 @@ class AnthropicMessagesRequest(BaseModel):
     top_k: int | None = None
     top_p: float | None = None
 
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
+
     @field_validator("model")
     @classmethod
     def validate_model(cls, v):
@@ -181,6 +194,11 @@ class AnthropicMessagesResponse(BaseModel):
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
 
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
@@ -200,6 +218,15 @@ class AnthropicCountTokensRequest(BaseModel):
     system: str | list[AnthropicContentBlock] | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
 
     @field_validator("model")
     @classmethod
