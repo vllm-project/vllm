@@ -593,6 +593,8 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata._seq_lens_cpu += 1
             if common_attn_metadata._num_computed_tokens_cpu is not None:
                 common_attn_metadata._num_computed_tokens_cpu += 1
+            if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
+                common_attn_metadata.seq_lens_cpu_upper_bound += 1
 
             # Rebuild attention metadata
             _, per_layer_attn_metadata = self.build_per_group_and_layer_attn_metadata(
@@ -959,6 +961,7 @@ class SpecDecodeBaseProposer:
             query_start_loc_cpu=query_start_loc_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -1183,7 +1186,11 @@ class SpecDecodeBaseProposer:
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+        # upper_bound - rejected = actual post-rejection seq_lens (no D2H sync).
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        new_seq_lens_cpu = (
+            common_attn_metadata.seq_lens_cpu_upper_bound - num_rejected_tokens
+        )
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1237,6 +1244,7 @@ class SpecDecodeBaseProposer:
             query_start_loc_cpu=new_query_start_loc_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
