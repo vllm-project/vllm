@@ -332,7 +332,17 @@ class Scheduler(SchedulerInterface):
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
             if num_computed_tokens_after_sched < last_cache_position:
                 # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+                aligned = num_new_tokens // block_size * block_size
+                if aligned > 0:
+                    num_new_tokens = aligned
+                # else: keep original num_new_tokens to prevent a permanent
+                # scheduling deadlock when the encoder cache cannot hold two
+                # adjacent multimodal inputs simultaneously.  The Mamba
+                # running state is still correctly maintained by
+                # preprocess_mamba via mamba_state_idx; only the block-
+                # boundary checkpoint is skipped for this sub-block chunk
+                # (consistent with the "simply not cached" exception
+                # documented above).
             elif (
                 num_computed_tokens
                 < last_cache_position
