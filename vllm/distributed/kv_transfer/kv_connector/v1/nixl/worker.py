@@ -45,12 +45,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
-    GroupKind,
-    build_local_descs,
-    build_local_splits_from_plan,
-    build_remote_descs_from_plan,
-    compute_desc_ids_from_plan,
-    compute_read_specs_from_plan,
+    ReadSpec,
+    _is_attention_spec,
+    _is_ssm_spec,
+    build_fa_local_descs,
+    build_mamba_local_descs,
     generate_dense_plan,
     generate_mamba_plan,
 )
@@ -75,7 +74,6 @@ from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
@@ -91,17 +89,167 @@ logger = init_logger(__name__)
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
+    # ------------------------------------------------------------------
+    # Plan executors (pure functions, no self access)
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _spec_to_group_kind(spec: "KVCacheSpec") -> GroupKind:
-        if isinstance(spec, MambaSpec):
-            return GroupKind.MAMBA
-        if isinstance(spec, SlidingWindowSpec):
-            return GroupKind.SWA
-        if isinstance(spec, FullAttentionSpec):
-            return GroupKind.FA
-        raise NotImplementedError(
-            f"Unsupported KVCacheSpec type for NIXL transfer: {type(spec)}"
+    def _build_remote_descs_from_plan(
+        plan: EngineTransferPlan,
+        nixl_agent_meta: "NixlAgentMetadata",
+    ) -> list[tuple[int, int, int]]:
+        """Build (addr, len, dev_id) descriptor tuples from plan."""
+        result: list[tuple[int, int, int]] = []
+        dev_id = nixl_agent_meta.device_id
+
+        for region in plan.all_regions:
+            base_addr = nixl_agent_meta.kv_caches_base_addr[region.layer_idx]
+            for blk in range(region.num_blocks):
+                addr = (base_addr + blk * region.page_stride
+                        + region.offset_in_page)
+                result.append((addr, region.descriptor_bytes, dev_id))
+
+        return result
+
+    @staticmethod
+    def _compute_desc_ids_from_plan(
+        plan: EngineTransferPlan,
+        block_ids: BlockIds,
+        dst_num_blocks: int,
+        block_size_ratio: float | None,
+        physical_blocks_per_logical: int,
+    ) -> np.ndarray:
+        """Compute NIXL descriptor IDs for given block IDs."""
+        num_fa_regions = len(plan.fa_regions)
+        num_ssm_regions = len(plan.ssm_regions)
+
+        num_blocks = dst_num_blocks
+        if block_size_ratio is not None:
+            num_blocks = int(num_blocks * block_size_ratio)
+        ratio = physical_blocks_per_logical
+        logical_blocks = num_blocks // ratio
+
+        num_fa_descs = num_fa_regions * num_blocks
+
+        all_descs: list[np.ndarray] = []
+        for i, group in enumerate(block_ids):
+            group_arr = np.asarray(group)
+            spec_type = plan.group_spec_types[i]
+            if _is_attention_spec(spec_type):
+                fa_region_ids = np.arange(num_fa_regions)[:, None]
+                all_descs.append(
+                    (fa_region_ids * num_blocks
+                     + group_arr[None, :]).flatten()
+                )
+            elif _is_ssm_spec(spec_type):
+                ssm_region_ids = np.arange(num_ssm_regions)[:, None]
+                all_descs.append(
+                    (ssm_region_ids * logical_blocks
+                     + group_arr[None, :]
+                     + num_fa_descs).flatten()
+                )
+            else:
+                raise ValueError(
+                    f"Unknown spec type {spec_type} at index {i}")
+
+        return np.concatenate(all_descs)
+
+    @staticmethod
+    def _compute_read_specs_from_plan(
+        plan: EngineTransferPlan,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+    ) -> list[ReadSpec]:
+        """Compute read specs from plan.
+
+        For each source rank, includes only the groups whose
+        source_ranks_per_group contains that rank.
+        """
+        num_groups = len(local_block_ids)
+        return [
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=[
+                    list(local_block_ids[g])
+                    if rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
+                ],
+                remote_block_ids=[
+                    list(remote_block_ids[g])
+                    if rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
+                ],
+            )
+            for rank in plan.all_source_ranks
+        ]
+
+    @staticmethod
+    def _build_local_splits_from_plan(
+        plan: EngineTransferPlan,
+        src_blocks_data: list[tuple[int, int, int]],
+        num_fa_descs: int,
+    ) -> list[list[tuple[int, int, int]]]:
+        """Build split handle data for P_TP > D_TP scenario.
+
+        num_fa_descs is the boundary between FA and SSM descriptors.
+        Split counts are derived from source_ranks_per_group lengths.
+        FA uses rank_to_attention_slot for the slot offset;
+        SSM uses the rank's positional index.
+        """
+        fa_num_splits = len(plan.source_ranks_per_group[0])
+
+        has_ssm_descs = num_fa_descs < len(src_blocks_data)
+        ssm_num_splits = (len(plan.source_ranks_per_group[-1])
+                          if has_ssm_descs else 0)
+
+        result: list[list[tuple[int, int, int]]] = []
+
+        for p_idx, p_rank in enumerate(plan.all_source_ranks):
+            fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
+
+            handle: list[tuple[int, int, int]] = []
+            for j, (addr, local_len, dev) in enumerate(src_blocks_data):
+                if j < num_fa_descs:
+                    chunk = local_len // fa_num_splits
+                    handle.append((addr + fa_slot * chunk, chunk, dev))
+                else:
+                    chunk = local_len // ssm_num_splits
+                    handle.append((addr + p_idx * chunk, chunk, dev))
+            result.append(handle)
+
+        return result
+
+    def _build_local_descs(
+        self,
+        base_addresses: list[int],
+        block_size_ratio: int,
+    ) -> list[tuple[int, int, int]]:
+        """Build local (src) descriptor tuples for NIXL registration."""
+        assert self.transfer_topo is not None
+        fa_descs = build_fa_local_descs(
+            base_addresses,
+            self.device_id,
+            self.num_blocks,
+            block_size_ratio,
+            self.block_len_per_layer,
+            self.transfer_topo.is_kv_layout_blocks_first,
         )
+        if not self._has_mamba:
+            return fa_descs
+        assert self._conv_decomp is not None
+        mamba_descs = build_mamba_local_descs(
+            base_addresses,
+            self.block_len_per_layer,
+            self._logical_num_blocks,
+            block_size_ratio,
+            self.device_id,
+            self._conv_decomp,
+            self._mamba_ssm_size,
+            self._physical_blocks_per_logical_kv_block,
+        )
+        return fa_descs + mamba_descs
 
     def __init__(
         self,
@@ -142,14 +290,13 @@ class NixlConnectorWorker:
         }
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
 
-        # ---- Group kinds and model state (derived from model config) ----
-        self._group_kinds = tuple(
-            self._spec_to_group_kind(group.kv_cache_spec)
-            for group in kv_cache_config.kv_cache_groups
-        )
+        # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
         self._conv_decomp: MambaConvSplitInfo | None = None
-        self._has_mamba = any(k.is_ssm for k in self._group_kinds)
+        self._has_mamba = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
         if self._has_mamba:
             assert self._is_hma_required
             from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -895,19 +1042,7 @@ class NixlConnectorWorker:
         block_size_ratio = self.block_size // block_size
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
-        blocks_data = build_local_descs(
-            has_mamba=self._has_mamba,
-            conv_decomp=self._conv_decomp,
-            ssm_sizes=self._mamba_ssm_size,
-            base_addresses=local_base_addresses,
-            device_id=self.device_id,
-            num_blocks=self.num_blocks,
-            logical_num_blocks=self._logical_num_blocks,
-            block_size_ratio=block_size_ratio,
-            block_len_per_layer=self.block_len_per_layer,
-            is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-        )
+        blocks_data = self._build_local_descs(local_base_addresses, block_size_ratio)
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
@@ -1000,9 +1135,7 @@ class NixlConnectorWorker:
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
-        # Generate the pre-computed transfer plan for this remote engine.
-        # Plan generation is model-aware (if/else), but the per-request
-        # hot path only consumes the plan (model-agnostic).
+        # Generate the transfer plan for this remote engine.
         if self._has_mamba:
             assert self._conv_decomp is not None
             self._transfer_plans[engine_id] = generate_mamba_plan(
@@ -1010,7 +1143,10 @@ class NixlConnectorWorker:
                 block_len_per_layer=self.block_len_per_layer,
                 remote_info=transfer_info,
                 remote_meta=nixl_agent_meta,
-                group_kinds=self._group_kinds,
+                group_spec_types=tuple(
+                    type(g.kv_cache_spec)
+                    for g in self.kv_cache_config.kv_cache_groups
+                ),
                 conv_decomp=self._conv_decomp,
                 ssm_sizes=self._mamba_ssm_size,
             )
@@ -1020,6 +1156,10 @@ class NixlConnectorWorker:
                 block_len_per_layer=self.block_len_per_layer,
                 remote_info=transfer_info,
                 remote_meta=nixl_agent_meta,
+                group_spec_types=tuple(
+                    type(g.kv_cache_spec)
+                    for g in self.kv_cache_config.kv_cache_groups
+                ),
                 local_physical_blocks_per_logical=(
                     self._physical_blocks_per_logical_kv_block
                 ),
@@ -1071,7 +1211,7 @@ class NixlConnectorWorker:
             # we only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            for handle_data in build_local_splits_from_plan(
+            for handle_data in self._build_local_splits_from_plan(
                 plan,
                 self.src_blocks_data,
                 self.num_descs,
@@ -1083,7 +1223,7 @@ class NixlConnectorWorker:
                 self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         ### Register remote agent memory regions
-        blocks_data = build_remote_descs_from_plan(plan, nixl_agent_meta)
+        blocks_data = self._build_remote_descs_from_plan(plan, nixl_agent_meta)
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
@@ -1627,7 +1767,7 @@ class NixlConnectorWorker:
             plan.remote_expansion_stride,
         )
         remote_block_ids = meta.remote.block_ids
-        read_specs = compute_read_specs_from_plan(
+        read_specs = self._compute_read_specs_from_plan(
             plan,
             local_block_ids=meta.local_physical_block_ids,
             remote_block_ids=remote_block_ids,
@@ -1776,8 +1916,9 @@ class NixlConnectorWorker:
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        # Partial prefix cache hit: trim remote blocks to match local count.
-        # SSM groups share the block table so counts always match (no-op trim).
+        # Partial prefix cache hit: just read uncomputed blocks.
+        # Skip mamba groups — their blocks represent full state (conv+ssm),
+        # not per-token data, so trimming would corrupt the transfer.
         remote_block_ids = list(remote_block_ids)
         for i, remote_group in enumerate(remote_block_ids):
             num_local_blocks = len(local_block_ids[i])
@@ -1789,16 +1930,15 @@ class NixlConnectorWorker:
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.  Both calls use the same plan since region counts
-        # (len(fa_regions), len(ssm_regions)) are model-determined and
-        # identical across engines.
-        remote_block_descs_ids = compute_desc_ids_from_plan(
+        # Get descs ids.
+        remote_block_descs_ids = self._compute_desc_ids_from_plan(
             plan,
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+            block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
         )
-        local_block_descs_ids = compute_desc_ids_from_plan(
+        local_block_descs_ids = self._compute_desc_ids_from_plan(
             plan,
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],

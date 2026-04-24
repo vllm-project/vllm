@@ -93,31 +93,27 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_kinds,expansion_stride,remote_block_ids,expected_remote_block_ids",
+    "group_spec_types,expansion_stride,remote_block_ids,"
+    "expected_remote_block_ids",
     [
-        # Dense (FA+SWA): stride == local_ratio, all groups expanded.
-        # Regression for https://github.com/vllm-project/vllm/pull/39724
-        (
-            ("FA", "SWA"),
+        pytest.param(
+            ("FullAttentionSpec", "SlidingWindowSpec"),
             2,
             ([0, 1, 2], [3, 4]),
             [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
+            id="dense_fa_swa",
         ),
-        # Mamba (FA+Mamba): stride == remote_physical_blocks_per_logical,
-        # FA expanded, Mamba passed through unchanged.
-        # stride=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
-        # the wrong stride produces different FA results.
-        (
-            ("FA", "MAMBA"),
+        pytest.param(
+            ("FullAttentionSpec", "MambaSpec"),
             261,
             ([0, 1, 2], [10, 11]),
             [[0, 1, 261, 262, 522, 523], [10, 11]],
+            id="mamba_fa_ssm",
         ),
     ],
-    ids=["dense_fa_swa", "mamba_fa_ssm"],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    group_kinds,
+    group_spec_types,
     expansion_stride,
     remote_block_ids,
     expected_remote_block_ids,
@@ -135,18 +131,28 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
         EngineTransferPlan,
-        GroupKind,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        MambaSpec,
+        SlidingWindowSpec,
+    )
+
+    spec_name_to_type = {
+        "FullAttentionSpec": FullAttentionSpec,
+        "SlidingWindowSpec": SlidingWindowSpec,
+        "MambaSpec": MambaSpec,
+    }
+    resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = 2
-    worker._group_kinds = tuple(GroupKind[k] for k in group_kinds)
 
-    has_mamba = any(k == "MAMBA" for k in group_kinds)
-    has_swa = any(k == "SWA" for k in group_kinds)
+    has_mamba = any(t is MambaSpec for t in resolved_types)
+    has_swa = any(t is SlidingWindowSpec for t in resolved_types)
     worker.kv_cache_config = make_kv_cache_config(
         block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
     )
@@ -308,29 +314,30 @@ def test_nixl_metadata_hma_block_ids_structure():
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
-    """Test compute_desc_ids_from_plan uses per-group strides for hybrid
+    """Test _compute_desc_ids uses per-group strides for hybrid
     FA+SSM when ratio=1 (no kernel block size mismatch)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
-        GroupKind,
-        compute_desc_ids_from_plan,
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
     )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     from .test_transfer_plan import _make_mamba_plan_for_desc_ids
 
     plan = _make_mamba_plan_for_desc_ids(
         num_fa_regions=2,
         num_ssm_regions=4,
-        group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+        group_spec_types=(FullAttentionSpec, MambaSpec),
         fa_num_blocks=100,
         ssm_num_blocks=100,
     )
 
     fa_blocks = [3, 5]
     ssm_blocks = [1, 2]
-    result = compute_desc_ids_from_plan(
+    result = NixlConnectorWorker._compute_desc_ids_from_plan(
         plan,
         block_ids=(fa_blocks, ssm_blocks),
         dst_num_blocks=100,
+        block_size_ratio=None,
         physical_blocks_per_logical=1,
     )
 
@@ -340,12 +347,12 @@ def test_get_block_descs_ids_hybrid_ssm():
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
-    """Test compute_desc_ids_from_plan uses different strides for FA
+    """Test _compute_desc_ids uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
-        GroupKind,
-        compute_desc_ids_from_plan,
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
     )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     from .test_transfer_plan import _make_mamba_plan_for_desc_ids
 
@@ -356,17 +363,18 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     plan = _make_mamba_plan_for_desc_ids(
         num_fa_regions=2,
         num_ssm_regions=4,
-        group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+        group_spec_types=(FullAttentionSpec, MambaSpec),
         fa_num_blocks=num_blocks,
         ssm_num_blocks=logical_blocks,
     )
 
     fa_blocks = [3, 7]
     ssm_blocks = [1, 2]
-    result = compute_desc_ids_from_plan(
+    result = NixlConnectorWorker._compute_desc_ids_from_plan(
         plan,
         block_ids=(fa_blocks, ssm_blocks),
         dst_num_blocks=num_blocks,
+        block_size_ratio=None,
         physical_blocks_per_logical=ratio,
     )
 
