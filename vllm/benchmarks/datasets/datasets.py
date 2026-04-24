@@ -2298,14 +2298,24 @@ class CustomMMDataset(CustomDataset):
             prompt = item["prompt"]
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            images = item["image_files"]
-            if len(images) > 1:
-                logger.warning(
-                    "Multiple image files found for sample %d. "
-                    "Only the first image will be used.",
-                    i,
-                )
-            mm_content = process_image(images[0])
+            if "video_files" in item:
+                videos = item["video_files"]
+                if len(videos) > 1:
+                    logger.warning(
+                        "Multiple video files found for sample %d. "
+                        "Only the first video will be used.",
+                        i,
+                    )
+                mm_content = process_video(videos[0])
+            else:
+                images = item["image_files"]
+                if len(images) > 1:
+                    logger.warning(
+                        "Multiple image files found for sample %d. "
+                        "Only the first image will be used.",
+                        i,
+                    )
+                mm_content = process_image(images[0])
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
