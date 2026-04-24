@@ -335,11 +335,16 @@ class MoERunner(MoERunnerInterface):
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
 
-        This is the "early" all-reduce path. When the combine kernel produces
-        already-reduced fused output, shared output must be reduced separately
-        to match.
+        * If the combine kernel does the reduction for fused_output, reduce
+          shared_output separately. O.w, reduce fused_output+shared_output later.
+        * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
+          in the model.
         """
-        if shared_output is not None and self._fused_output_is_reduced:
+        if (
+            shared_output is not None
+            and not self.moe_config.is_sequence_parallel
+            and self._fused_output_is_reduced
+        ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
