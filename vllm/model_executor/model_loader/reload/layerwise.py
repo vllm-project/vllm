@@ -200,6 +200,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
 
+    deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
+
     for layer in model.modules():
         info = get_layerwise_info(layer)
         if not info.can_load():
@@ -208,22 +210,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # Attention/MLA layers are processed after all other layers
         if isinstance(layer, (Attention, MLAAttention)):
-            if info.load_numel > 0:
-                raise NotImplementedError(
-                    "Layerwise reloading of Q/K/V scale weights is not implemented yet"
-                )
-
-            elif info.kernel_tensors is None:
-                raise NotImplementedError(
-                    "Layerwise loading of Q/K/V scale weights is not implemented yet"
-                )
-
-            else:
-                _place_kernel_tensors(layer, info)
-                layer.process_weights_after_loading(model_config.dtype)
+            deferred_attn.append((layer, info))
+            continue
 
         # No weights were loaded
-        elif info.load_numel <= 0:
+        if info.load_numel <= 0:
             # first load: checkpoint did not contain weights for this layer
             if info.kernel_tensors is None:
                 _layerwise_process(layer, info)
@@ -244,9 +235,56 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         info.reset()
 
+    # Process attention layers after all other layers are done
+    for layer, info in deferred_attn:
+        _finalize_attention_layer(layer, info, model_config)
+        info.reset()
+
 
 def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)
+
+
+def _finalize_attention_layer(
+    layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
+) -> None:
+    if info.load_numel > 0 and info.kernel_tensors is not None:
+        # Reload with new scale weights from checkpoint
+        _place_kernel_tensors(layer, info)
+        _reload_attention_scales(layer, info)
+    elif info.load_numel > 0 or info.kernel_tensors is None:
+        raise ValueError(
+            "Layerwise loading of attention layers is not supported. "
+            "Attention must always process after linears."
+        )
+    else:
+        _place_kernel_tensors(layer, info)
+    layer.process_weights_after_loading(model_config.dtype)
+
+
+def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Load and process attention scale weights (k_scale, v_scale, etc.)
+    during reload.
+
+    Assumes dtype/shapes of attention tensors do not change during
+    processing, since we use .data.copy_() to preserve kernel tensor
+    references."""
+    quant_method = getattr(layer, "quant_method", None)
+    if quant_method is None:
+        return
+
+    # Re-create scale Parameters with sentinel values so unloaded scales
+    # are correctly detected by process_weights_after_loading
+    quant_method.create_weights(layer)
+
+    for name, args in info.loaded_weights:
+        param = getattr(layer, name)
+        args.arguments["param"] = param
+        _get_weight_loader(param)(*args.args, **args.kwargs)
+
+    quant_method.process_weights_after_loading(layer)
+
+    _copy_and_restore_kernel_tensors(layer, info)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -278,7 +316,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param.weight_loader(*args.args, **args.kwargs)
 
     # Process weights (quantization, repacking, etc.)
-    # Attention/MLA are processed in `finalize_layerwise_reload`
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
@@ -286,13 +323,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
-        parameters, buffers = info.kernel_tensors
-        for name, param in parameters.items():
-            param.data.copy_(getattr(layer, name))
-        for name, buffer in buffers.items():
-            buffer.data.copy_(getattr(layer, name))
-
-        _place_kernel_tensors(layer, info)
+        _copy_and_restore_kernel_tensors(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
@@ -309,6 +340,19 @@ def _get_original_loader(tensor: torch.Tensor) -> Callable:
 
 def _get_weight_loader(tensor: torch.Tensor):
     return getattr(tensor, "weight_loader", default_weight_loader)
+
+
+def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Copy processed values into original kernel tensor storage and restore
+    kernel tensor references on the layer. Preserves cudagraph references."""
+    assert info.kernel_tensors is not None
+    parameters, buffers = info.kernel_tensors
+    for name, param in parameters.items():
+        param.data.copy_(getattr(layer, name))
+    for name, buffer in buffers.items():
+        buffer.data.copy_(getattr(layer, name))
+
+    _place_kernel_tensors(layer, info)
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):

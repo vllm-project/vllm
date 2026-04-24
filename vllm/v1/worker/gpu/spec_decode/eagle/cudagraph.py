@@ -19,21 +19,16 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class EagleCudaGraphManager(CudaGraphManager):
-    """CudaGraphManager for Eagle speculative decoding (FULL mode only)."""
+    """CudaGraphManager for Eagle speculative decoding."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        draft_tokens: torch.Tensor,
+        decode_query_len: int,
     ):
-        assert not cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE), (
-            "EagleCudaGraphManager does not support PIECEWISE mode yet"
-        )
-        # Eagle always uses uniform decode with query_len=1
-        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len=1)
-        self.draft_tokens = draft_tokens
+        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
 
         # Use a dedicated pool for Eagle to avoid memory overlap with the main
         # model's cudagraph. The base class uses a shared global pool, but Eagle's
@@ -44,7 +39,7 @@ class EagleCudaGraphManager(CudaGraphManager):
 
     def capture(
         self,
-        generate_fn: Callable,
+        forward_fn: Callable,
         model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
@@ -52,7 +47,7 @@ class EagleCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture CUDA graphs for Eagle speculative decoding (FULL mode only)."""
+        """Capture CUDA graphs for Eagle."""
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -74,7 +69,7 @@ class EagleCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
             )
 
-            return lambda cg_mode: generate_fn(
+            return lambda cg_mode: forward_fn(
                 num_reqs,
                 num_tokens,
                 attn_metadata,
@@ -84,8 +79,3 @@ class EagleCudaGraphManager(CudaGraphManager):
             )
 
         super().capture(create_forward_fn, progress_bar_desc)
-
-    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor:
-        """Replay a captured FULL cudagraph and return draft tokens."""
-        super().run_fullgraph(desc)
-        return self.draft_tokens

@@ -315,6 +315,7 @@ def _test_backend_correctness(
     backend_to_test: list[AttentionBackendEnum | str],
     mask_mod,
     *,
+    causal: bool = True,
     attn_type: AttentionType = AttentionType.DECODER,
     block_size: int = 16,
     atol: float = 1e-2,
@@ -370,7 +371,7 @@ def _test_backend_correctness(
     )
     device = torch.device(f"{DEVICE_TYPE}:0")
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -453,9 +454,7 @@ def _test_backend_correctness(
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, vllm_config.cache_config.block_size, device
     )
-    if attn_type == AttentionType.ENCODER_ONLY:
-        # For encoder-only, all tokens are prefill tokens
-        common_attn_metadata.causal = False
+    common_attn_metadata.causal = causal
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
     kv_cache = create_and_prepopulate_kv_cache(
@@ -736,6 +735,76 @@ def test_sliding_window_encoder_backend_correctness(
         model,
         SLIDING_WINDOW_BACKENDS_TO_TEST,
         sliding_window_mask_mod_fn,
+        causal=False,
         attn_type=AttentionType.ENCODER_ONLY,
         tensor_parallel_size=tensor_parallel_size,
     )
+
+
+NON_CAUSAL_BACKENDS_TO_TEST = [
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    "FLEX_ATTENTION_SLOW",
+]
+
+if current_platform.is_rocm():
+    NON_CAUSAL_BACKENDS_TO_TEST = [
+        x
+        for x in NON_CAUSAL_BACKENDS_TO_TEST
+        if x is not AttentionBackendEnum.FLASH_ATTN
+    ]
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_small",
+    ],
+)
+@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+def test_non_causal_backend_correctness(
+    default_vllm_config, batch_spec_name: str, model: str
+):
+    """Test backend's correctness with non-causal (bidirectional) decoder
+    attention, as used by DFlash speculative decoding."""
+
+    def bidirectional_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return q_idx >= 0  # Always True
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    LARGE_BLOCK_BACKENDS = (
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
+    )
+
+    SMALL_BLOCK_BACKENDS = [
+        x for x in NON_CAUSAL_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+    ]
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SMALL_BLOCK_BACKENDS,
+        bidirectional_mask_mod,
+        causal=False,
+    )
+
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(
+            batch_spec,
+            model,
+            LARGE_BLOCK_BACKENDS,
+            bidirectional_mask_mod,
+            causal=False,
+            block_size=128,
+        )

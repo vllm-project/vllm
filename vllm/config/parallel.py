@@ -36,7 +36,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl"]
+EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -90,6 +90,7 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
     - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
     """
@@ -619,6 +620,18 @@ class ParallelConfig:
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
+            and self.data_parallel_size > 1
+        )
+
+    @property
+    def use_batched_dp_moe(self) -> bool:
+        return (
+            self.all2all_backend
+            in (
+                "deepep_low_latency",
+                "nixl_ep",
+            )
+            and self.enable_expert_parallel
             and self.data_parallel_size > 1
         )
 

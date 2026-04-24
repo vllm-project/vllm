@@ -568,6 +568,20 @@ class DelegatingParser(Parser):
             return input_ids
         return self._reasoning_parser.extract_content_ids(input_ids)
 
+    def _in_reasoning_phase(self, state: StreamState) -> bool:
+        if self._reasoning_parser is None:
+            return False
+        if self._tool_parser is None:
+            return True
+        return not state.reasoning_ended
+
+    def _in_tool_call_phase(self, state: StreamState) -> bool:
+        if self._tool_parser is None:
+            return False
+        if self._reasoning_parser is None:
+            return True
+        return state.reasoning_ended
+
     def parse_delta(
         self,
         delta_text: str,
@@ -584,47 +598,10 @@ class DelegatingParser(Parser):
 
         current_text = state.previous_text + delta_text
         current_token_ids = state.previous_token_ids + delta_token_ids
-
         delta_message: DeltaMessage | None = None
 
-        if self._reasoning_parser and self._tool_parser:
-            if not state.reasoning_ended:
-                delta_message = self.extract_reasoning_streaming(
-                    previous_text=state.previous_text,
-                    current_text=current_text,
-                    delta_text=delta_text,
-                    previous_token_ids=state.previous_token_ids,
-                    current_token_ids=current_token_ids,
-                    delta_token_ids=delta_token_ids,
-                )
-                if self.is_reasoning_end(delta_token_ids):
-                    state.reasoning_ended = True
-                    current_token_ids = self.extract_content_ids(delta_token_ids)
-                    if delta_message and delta_message.content:
-                        current_text = delta_message.content
-                        delta_message.content = None
-                    else:
-                        current_text = ""
-
-            if state.reasoning_ended:
-                if not state.tool_call_text_started:
-                    state.tool_call_text_started = True
-                    state.previous_text = ""
-                    state.previous_token_ids = []
-                    delta_text = current_text
-                    delta_token_ids = current_token_ids
-
-                delta_message = self.extract_tool_calls_streaming(
-                    previous_text=state.previous_text,
-                    current_text=current_text,
-                    delta_text=delta_text,
-                    previous_token_ids=state.previous_token_ids,
-                    current_token_ids=current_token_ids,
-                    delta_token_ids=delta_token_ids,
-                    request=request,  # type: ignore[arg-type]
-                )
-
-        elif self._reasoning_parser:
+        # Reasoning extraction
+        if self._in_reasoning_phase(state):
             delta_message = self.extract_reasoning_streaming(
                 previous_text=state.previous_text,
                 current_text=current_text,
@@ -633,8 +610,24 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
+            # Hand off remaining content to tool parser
+            if self._tool_parser and self.is_reasoning_end(delta_token_ids):
+                state.reasoning_ended = True
+                current_token_ids = self.extract_content_ids(delta_token_ids)
+                if delta_message and delta_message.content:
+                    current_text = delta_message.content
+                    delta_message.content = None
+                else:
+                    current_text = ""
 
-        elif self._tool_parser:
+        # Tool call extraction
+        if self._in_tool_call_phase(state):
+            if not state.tool_call_text_started:
+                state.tool_call_text_started = True
+                state.previous_text = ""
+                state.previous_token_ids = []
+                delta_text = current_text
+                delta_token_ids = current_token_ids
             delta_message = self.extract_tool_calls_streaming(
                 previous_text=state.previous_text,
                 current_text=current_text,
@@ -645,7 +638,8 @@ class DelegatingParser(Parser):
                 request=request,  # type: ignore[arg-type]
             )
 
-        else:
+        # No parsers: pass through as content
+        if self._reasoning_parser is None and self._tool_parser is None:
             delta_message = DeltaMessage(content=delta_text)
 
         state.previous_text = current_text
@@ -671,10 +665,14 @@ class _WrappedParser(DelegatingParser):
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
 
-    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+    def __init__(
+        self, tokenizer: TokenizerLike, tools: list[Tool] | None = None, **kwargs
+    ):
         super().__init__(tokenizer)
         # Instantiate the underlying parsers from class attributes
         if self.__class__.reasoning_parser_cls is not None:
-            self._reasoning_parser = self.__class__.reasoning_parser_cls(tokenizer)
+            self._reasoning_parser = self.__class__.reasoning_parser_cls(
+                tokenizer, **kwargs
+            )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)

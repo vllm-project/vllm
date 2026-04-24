@@ -109,6 +109,23 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "mxfp4":
+            model_config.hf_config.quantization_config["quant_method"] = "gpt_oss_mxfp4"
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "mxfp4"
+        ):
+            model_config.hf_text_config.quantization_config["quant_method"] = (
+                "gpt_oss_mxfp4"
+            )
+
+    @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config
         if structured_outputs_config.reasoning_parser == "":
@@ -308,15 +325,26 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
-                )
-                logger.warning(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
+                if (
+                    model_config.supports_mamba_prefix_caching
+                    and vllm_config.speculative_config is not None
+                ):
+                    cache_config.mamba_cache_mode = "align"
+                    logger.warning(
+                        "Mamba cache mode is set to 'align' for %s by default "
+                        "when prefix caching and speculative decoding are enabled",
+                        model_config.architecture,
+                    )
+                else:
+                    cache_config.mamba_cache_mode = (
+                        "all" if model_config.supports_mamba_prefix_caching else "align"
+                    )
+                    logger.warning(
+                        "Mamba cache mode is set to '%s' for %s by default "
+                        "when prefix caching is enabled",
+                        cache_config.mamba_cache_mode,
+                        model_config.architecture,
+                    )
             if (
                 cache_config.mamba_cache_mode == "all"
                 and not model_config.supports_mamba_prefix_caching
