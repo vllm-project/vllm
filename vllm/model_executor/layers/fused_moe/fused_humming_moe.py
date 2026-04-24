@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 
 
 def get_humming_moe_gemm_type() -> str:
-    env_gemm_type = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
+    env_gemm_type: str = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
     env_gemm_type = env_gemm_type.lower()
     if env_gemm_type in ["indexed", "grouped"]:
         gemm_type = env_gemm_type
