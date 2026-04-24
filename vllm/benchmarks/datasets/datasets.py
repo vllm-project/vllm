@@ -1803,7 +1803,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     if args.dataset_name == "custom":
         dataset = CustomDataset(
-            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
         )
         input_requests = dataset.sample(
             num_requests=args.num_prompts,
@@ -1816,7 +1818,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     elif args.dataset_name == "custom_mm":
         dataset = CustomMMDataset(
-            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
         )
         input_requests = dataset.sample(
             num_requests=args.num_prompts,
