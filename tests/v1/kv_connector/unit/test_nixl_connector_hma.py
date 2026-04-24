@@ -93,8 +93,7 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_spec_types,expansion_stride,remote_block_ids,"
-    "expected_remote_block_ids",
+    "group_spec_types,expansion_stride,remote_block_ids,expected_remote_block_ids",
     [
         pytest.param(
             ("FullAttentionSpec", "SlidingWindowSpec"),

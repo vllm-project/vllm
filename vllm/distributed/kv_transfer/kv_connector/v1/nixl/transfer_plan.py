@@ -149,14 +149,14 @@ def _compute_tp_mapping(
     elif tp_size >= remote_tp_size:
         attn_ranks = [tp_rank * remote_tp_size // tp_size]
     else:
-        # P (remote TP size) > D (local TP size): one local rank reads from multiple remote ranks.
+        # P (remote TP) > D (local TP): one local rank
+        # reads from multiple remote ranks.
         # GQA dedup: when K < remote_tp_size, several remote ranks
         # hold the same KV head.  np.unique keeps only the first
         # rank per unique head so we don't issue redundant reads.
         abs_tp = remote_tp_size // tp_size
         start = tp_rank * abs_tp
-        heads = (np.arange(start, start + abs_tp)
-                 * total_num_kv_heads // remote_tp_size)
+        heads = np.arange(start, start + abs_tp) * total_num_kv_heads // remote_tp_size
         _, unique_idx = np.unique(heads, return_index=True)
         attn_ranks = (start + np.sort(unique_idx)).tolist()
 
@@ -193,8 +193,7 @@ def _compute_tp_mapping(
         rank_offset_factor = 0
     elif tp_size > total_num_kv_heads:
         local_head = tp_rank * total_num_kv_heads // tp_size
-        p_start = (attn_ranks[0] * total_num_kv_heads
-                   // remote_tp_size)
+        p_start = attn_ranks[0] * total_num_kv_heads // remote_tp_size
         rank_offset_factor = local_head - p_start
     else:
         rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
@@ -492,5 +491,3 @@ def build_mamba_local_descs(
                 )
             )
     return result
-
-
