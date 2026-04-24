@@ -187,6 +187,7 @@ from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_chang
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
+from vllm.v1.worker.aux_pool_state import AuxPoolState
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_total_cp_world_size,
@@ -394,6 +395,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    aux_pooled_output: dict[str, torch.Tensor] | None
 
 
 class GPUModelRunner(
@@ -500,6 +502,17 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        # Auxiliary mean-pool of prompt hidden states for requests
+        self.aux_pool_state: AuxPoolState | None = (
+            AuxPoolState(
+                block_size=self.cache_config.block_size,
+                hidden_size=self.model_config.get_hidden_size(),
+                device=self.device,
+            )
+            if self.model_config.enable_return_embed and get_pp_group().is_last_rank
+            else None
+        )
+        self.pool_req_ids: set[str] = set()
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
@@ -1084,6 +1097,10 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            if req_id in self.pool_req_ids:
+                assert self.aux_pool_state is not None
+                self.pool_req_ids.discard(req_id)
+                self.aux_pool_state.cleanup(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1189,6 +1206,25 @@ class GPUModelRunner(
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
+
+            # Per-request opt-in to prompt mean-pool.
+            extra_args = sampling_params.extra_args if sampling_params else None
+            if self.aux_pool_state is not None and (extra_args or {}).get(
+                "return_embed"
+            ):
+                # Seed the per-request running sum from any cached prefix blocks.
+                # NOTE(zzaebok): models with multiple KV cache groups
+                # may need per-group aux stores;
+                cached_block_ids = (
+                    list(new_req_data.block_ids[0]) if new_req_data.block_ids else []
+                )
+                self.aux_pool_state.init_request(
+                    req_id=req_id,
+                    prompt_len=len(new_req_data.prompt_token_ids or []),
+                    cached_block_ids=cached_block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                )
+                self.pool_req_ids.add(req_id)
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -3258,6 +3294,61 @@ class GPUModelRunner(
             async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
         )
 
+    def _maybe_run_aux_pool(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        slot_mappings_by_group: dict[int, torch.Tensor] | None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Mean-pool prompt hidden states for opted-in generative requests."""
+        if self.aux_pool_state is None or slot_mappings_by_group is None:
+            return None
+
+        slot_mapping = slot_mappings_by_group[0][:num_scheduled_tokens]
+        flat_hidden = hidden_states[:num_scheduled_tokens]
+
+        # Accumulate per-block sums for every token in this step.
+        self.aux_pool_state.update_block_sums(slot_mapping, flat_hidden)
+
+        # no opted-in request arrived yet
+        if not self.pool_req_ids:
+            return None
+
+        # Per-request: add this step's prompt-token contribution and check
+        # for finalization. Only opted-in requests have state.
+        results: dict[str, torch.Tensor] = {}
+        query_start_loc_cpu = self.query_start_loc.np
+        for req_id in list(self.pool_req_ids):
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                # Request not scheduled this step; nothing to do.
+                continue
+            start = int(query_start_loc_cpu[req_index])
+            end = int(query_start_loc_cpu[req_index + 1])
+            if end <= start:
+                # This request has 0 tokens to process at this step
+                continue
+
+            # Tokens in this step that are still part of the prompt.
+            num_computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
+
+            req_state = self.requests[req_id]
+            prompt_len = req_state.num_prompt_tokens
+            num_prompt_tokens_in_slice = max(
+                0, min(end - start, prompt_len - num_computed)
+            )
+            if num_prompt_tokens_in_slice <= 0:
+                continue
+            slice_tensor = flat_hidden[start : start + num_prompt_tokens_in_slice]
+            pooled = self.aux_pool_state.update_request(req_id, slice_tensor)
+
+            if pooled is not None:
+                results[req_id] = pooled.cpu()
+                self.aux_pool_state.cleanup(req_id)
+                self.pool_req_ids.discard(req_id)
+
+        return results or None
+
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
@@ -4141,6 +4232,12 @@ class GPUModelRunner(
                     self.kv_connector_output = kv_connector_output
                     return hidden_states
 
+                aux_pooled_output = self._maybe_run_aux_pool(
+                    hidden_states,
+                    num_scheduled_tokens,
+                    slot_mappings_by_group,
+                )
+
                 if self.is_pooling_model:
                     # Return the pooling output.
                     return self._pool(
@@ -4155,6 +4252,7 @@ class GPUModelRunner(
             else:
                 # Rare case.
                 assert not self.is_pooling_model
+                aux_pooled_output = None
 
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
@@ -4193,6 +4291,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            aux_pooled_output,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4237,6 +4336,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            aux_pooled_output,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -4427,6 +4527,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts_dict=routed_experts_dict,
+                aux_pooled_output=aux_pooled_output,
             )
 
         if not self.use_async_scheduling:
@@ -6931,6 +7032,8 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if self.aux_pool_state is not None:
+            self.aux_pool_state.enable(kv_cache_config.num_blocks)
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
