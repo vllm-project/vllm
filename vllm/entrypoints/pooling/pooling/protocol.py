@@ -8,7 +8,11 @@ from pydantic import Field
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import (
+from vllm.renderers import TokenizeParams
+from vllm.tasks import PoolingTask
+from vllm.utils import random_uuid
+
+from ..base.protocol import (
     ChatRequestMixin,
     ClassifyRequestMixin,
     CompletionRequestMixin,
@@ -16,9 +20,6 @@ from vllm.entrypoints.pooling.base.protocol import (
     EncodingRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.renderers import TokenizeParams
-from vllm.tasks import PoolingTask
-from vllm.utils import random_uuid
 
 
 class PoolingCompletionRequest(
@@ -94,6 +95,11 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=not model_config.is_encoder_decoder,
             max_total_tokens_param="max_model_len",
+        )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            task=self.task,
         )
 
 

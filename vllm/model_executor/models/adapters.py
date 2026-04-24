@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
 from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -181,7 +182,8 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             seen_weights = list[tuple[str, torch.Tensor]]()
             for name, loaded_weight in weights:
-                seen_weights.append((name, loaded_weight))
+                # Clone because the iterator may reuse the tensor buffer
+                seen_weights.append((name, loaded_weight.clone()))
 
                 try:
                     target_prefix = next(
@@ -208,9 +210,11 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                     self._get_name(),
                 )
 
+            # Lazy chain so buffer-reusing weight iterators (e.g.
+            # runai_streamer) are consumed one tensor at a time.
             mapped_weights = (
                 (target_prefix + name, weight)
-                for name, weight in (*seen_weights, *weights)
+                for name, weight in itertools.chain(seen_weights, weights)
             )
 
             def default_load_weights(weights):

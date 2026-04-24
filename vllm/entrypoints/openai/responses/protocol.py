@@ -105,8 +105,8 @@ def serialize_message(msg):
     elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
-        # fallback to pyandic dump
-        return msg.model_dump_json()
+        # fallback to pydantic dump
+        return msg.model_dump(mode="json", by_alias=True)
 
 
 def serialize_messages(msgs):
@@ -173,6 +173,24 @@ class ResponsesRequest(OpenAIBaseModel):
     user: str | None = None
     skip_special_tokens: bool = True
     include_stop_str_in_output: bool = False
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
     prompt_cache_key: str | None = Field(
         default=None,
         description=(
@@ -252,6 +270,10 @@ class ResponsesRequest(OpenAIBaseModel):
             "numeric values, used by custom extensions."
         ),
     )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
     # --8<-- [end:responses-extra-params]
 
     def build_chat_params(
@@ -324,6 +346,12 @@ class ResponsesRequest(OpenAIBaseModel):
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
 
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get("presence_penalty", 0.0)
+
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
+
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -351,6 +379,10 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -359,6 +391,8 @@ class ResponsesRequest(OpenAIBaseModel):
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
             stop=stop,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
@@ -367,7 +401,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
-            extra_args=self.vllm_xargs or {},
+            extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -458,6 +492,46 @@ class ResponsesRequest(OpenAIBaseModel):
         data["input"] = processed_input
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_usage(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        tools = data.get("tools")
+        tool_choice = data.get("tool_choice", "auto")
+        has_tools = tools is not None and len(tools) > 0
+        is_named_tool_choice = (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+        )
+
+        if not has_tools:
+            if tool_choice in ("auto", "none"):
+                data["tool_choice"] = "none"
+            elif tool_choice == "required":
+                raise VLLMValidationError(
+                    "Tool choice 'required' must be specified with 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            elif is_named_tool_choice:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+        elif is_named_tool_choice and tools is not None:
+            tool_name = tool_choice.get("name")
+            tool_names = {
+                t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+                for t in tools
+            }
+            if not tool_name or tool_name not in tool_names:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+
+        return data
+
 
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
@@ -487,6 +561,30 @@ class ResponsesResponse(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"]
     usage: ResponseUsage | None = None
     user: str | None = None
+
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
+
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
 
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
@@ -531,6 +629,7 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -560,12 +659,15 @@ class ResponsesResponse(OpenAIBaseModel):
             prompt=request.prompt,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            presence_penalty=sampling_params.presence_penalty,
+            frequency_penalty=sampling_params.frequency_penalty,
             status=status,
             text=request.text,
             top_logprobs=sampling_params.logprobs,
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            kv_transfer_params=kv_transfer_params,
         )
 
 

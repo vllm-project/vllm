@@ -38,8 +38,11 @@ from vllm.compilation.decorators import (
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -53,7 +56,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -453,7 +455,9 @@ class Llama4UnfoldConvolution(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_encoder
+    dynamic_arg_dims={"images_flattened": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
 )
 class Llama4VisionModel(nn.Module):
     def __init__(
@@ -754,12 +758,7 @@ class Llama4ForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
-            from vllm.compilation.backends import set_model_tag
-
-            with (
-                set_current_vllm_config(vllm_config),
-                set_model_tag("Llama4VisionModel", is_encoder=True),
-            ):
+            with set_current_vllm_config(vllm_config):
                 self.vision_model = Llama4VisionModel(
                     config=config.vision_config,
                     quant_config=None,
@@ -1075,7 +1074,7 @@ class Llama4ForConditionalGeneration(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

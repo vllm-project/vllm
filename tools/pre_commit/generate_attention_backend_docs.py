@@ -446,7 +446,7 @@ def parse_attention_types(node: ast.ClassDef) -> str:
 
     if not types:
         return "Decoder"
-    return "All" if len(types) >= 3 else ", ".join(sorted(types))
+    return "All" if types >= set(type_map.values()) else ", ".join(sorted(types))
 
 
 def parse_impl_bool_attr(
@@ -634,9 +634,10 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    # Analyze the functions to determine FA3-specific features
+    # Analyze the functions to determine FA3/FA4-specific features
     fa3_supports_fp8 = False
     fa3_supports_sinks = False
+    fa4_supports_sinks = False
     fa3_compute_cap: str | None = None
     fa4_compute_cap: str | None = None
 
@@ -656,17 +657,49 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
                     fa3_supports_fp8 = True
                     break
 
-        # Check flash_attn_supports_sinks - looks for `get_flash_attn_version() == 3`
+        # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
+        # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
         if node.name == "flash_attn_supports_sinks":
             for n in ast.walk(node):
                 if (
                     isinstance(n, ast.Compare)
-                    and isinstance(n.left, ast.Call)
-                    and isinstance(n.left.func, ast.Name)
-                    and n.left.func.id == "get_flash_attn_version"
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.Eq)
+                    and isinstance(n.comparators[0], ast.Constant)
                 ):
-                    fa3_supports_sinks = True
-                    break
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare:
+                        val = n.comparators[0].value
+                        if val == 3:
+                            fa3_supports_sinks = True
+                        elif val == 4:
+                            fa4_supports_sinks = True
+                elif (
+                    isinstance(n, ast.Compare)
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.In)
+                    and isinstance(n.comparators[0], (ast.Tuple, ast.List, ast.Set))
+                ):
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare:
+                        for elt in n.comparators[0].elts:
+                            if isinstance(elt, ast.Constant):
+                                if elt.value == 3:
+                                    fa3_supports_sinks = True
+                                elif elt.value == 4:
+                                    fa4_supports_sinks = True
 
         # Check get_flash_attn_version for FA3/FA4 compute capability
         if node.name == "get_flash_attn_version":
@@ -731,7 +764,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         "fa4": {
             "compute_capability": fa4_compute_cap,
             "supports_fp8": False,
-            "supports_sink": False,
+            "supports_sink": fa4_supports_sinks,
         },
     }
 

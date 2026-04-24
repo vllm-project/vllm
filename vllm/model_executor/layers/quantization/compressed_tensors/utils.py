@@ -6,7 +6,35 @@ from types import MappingProxyType
 
 import regex as re
 from compressed_tensors import CompressionFormat
+from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Module
+
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
+from vllm.model_executor.parameter import (
+    BlockQuantScaleParameter,
+    ChannelQuantScaleParameter,
+    PerTensorScaleParameter,
+)
+
+# Maps quantization strategy to the corresponding scale parameter type.
+# Shared across compressed-tensor scheme classes (w8a16_fp8, w8a8_fp8, …).
+STRATEGY_TO_PARAMETER_TYPE = {
+    QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
+    QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
+    QuantizationStrategy.TENSOR: PerTensorScaleParameter,
+}
+
+# Maps quantization strategy to the vLLM weight-quant key used for
+# kernel selection.  Shared across compressed-tensor scheme classes.
+STRATEGY_TO_WEIGHT_QUANT_KEY = {
+    QuantizationStrategy.BLOCK: kFp8Static128BlockSym,
+    QuantizationStrategy.CHANNEL: kFp8StaticChannelSym,
+    QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
+}
 
 
 def is_activation_quantization_format(format: str) -> bool:

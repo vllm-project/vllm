@@ -8,7 +8,6 @@ GENERATION_TASKS: tuple[GenerationTask, ...] = get_args(GenerationTask)
 PoolingTask = Literal[
     "embed",
     "classify",
-    "score",
     "token_embed",
     "token_classify",
     "plugin",
@@ -16,11 +15,12 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
-# Score API handles score/rerank for:
-# - "score" task (score_type: cross-encoder models)
-# - "embed" task (score_type: bi-encoder models)
-# - "token_embed" task (score_type: late interaction models)
 ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
+SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
+    "embed": "bi-encoder",
+    "classify": "cross-encoder",
+    "token_embed": "late-interaction",
+}
 
 FrontendTask = Literal["render"]
 FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.tokenizers import get_tokenizer
 
 parser_name = "step3p5"
 start_token = "<think>"
@@ -16,124 +16,124 @@ REASONING_MODEL_NAME = "stepfun-ai/Step-3.5-Flash"
 
 @pytest.fixture(scope="module")
 def step3p5_tokenizer():
-    return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+    return get_tokenizer(tokenizer_name=REASONING_MODEL_NAME)
 
 
 SIMPLE_REASONING = {
     "output": "This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 # need to get into parser again to remove newline after </think>
 COMPLETE_REASONING = {
     "output": "This is a reasoning section</think>",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
 NO_CONTENT = {
     "output": "This is content",
-    "reasoning_content": "This is content",
+    "reasoning": "This is content",
     "content": None,
     "is_reasoning_end": False,
 }
 NO_REASONING_STREAMING = {
     "output": "This is a reasoning section",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
 MULTIPLE_LINES = {
     "output": "This\nThat</think>This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING_NO_STREAMING = {
     "output": "</think>This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING = {
     "output": "</think>This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 REASONING_WITH_THINK = {
     "output": "<think>This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 COMPLETE_REASONING_WITH_THINK = {
     "output": "<think>This is a reasoning section</think>",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
 MULTIPLE_LINES_WITH_THINK = {
     "output": "<think>This\nThat</think>This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
     "output": "</think>This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING_WITH_THINK = {
     "output": "</think>This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 THINK_NO_END = {
     "output": "<think>This is a reasoning section",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
 EMPTY = {
     "output": "",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
     "is_reasoning_end": False,
 }
 EMPTY_STREAMING = {
     "output": "",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
     "is_reasoning_end": False,
 }
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 NEW_LINE_STREAMING = {
     "output": "\n<think>This is a reasoning section\n</think>\nThis is the rest",
-    "reasoning_content": "\nThis is a reasoning section",
+    "reasoning": "\nThis is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 NEW_LINE_STREAMING_COMPLEX_CONTENT = {
     "output": "\n This is a \n reasoning section\n\n\n</think>\n\nThis is the rest",
-    "reasoning_content": "\n This is a \n reasoning section\n\n",
+    "reasoning": "\n This is a \n reasoning section\n\n",
     "content": "\nThis is the rest",
     "is_reasoning_end": True,
 }
 
 MULTI_TURN_PROMPT_CONTENT = {
     "output": "<think> This is last turn's reasoning section </think> hello <think>",
-    "reasoning_content": "",
+    "reasoning": "",
     "content": "",
     "is_reasoning_end": False,
 }
@@ -296,7 +296,7 @@ def test_reasoning(
     print(f"content: {content}")
     test_id = request.node.callspec.id if hasattr(request.node, "callspec") else None
     if request.node.callspec.id != "multi_turn_prompt_content":
-        assert reasoning == param_dict["reasoning_content"]
+        assert reasoning == param_dict["reasoning"]
         assert content == param_dict["content"]
 
     # Test is_reasoning_end
