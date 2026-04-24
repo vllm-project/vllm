@@ -1871,13 +1871,12 @@ def test_hybrid_swa_cap_does_not_crash_allocator():
 
     req = make_request(request_id, [1] * num_tokens, block_size, sha256)
     full_required_blocks = (num_tokens + block_size - 1) // block_size
-    allocated = manager.block_pool.get_new_blocks(
-        manager.block_pool.num_gpu_blocks - 1)
+    allocated = manager.block_pool.get_new_blocks(manager.block_pool.num_gpu_blocks - 1)
     full_mgr, swa_mgr = manager.coordinator.single_type_managers
 
     full_mgr.req_to_blocks[request_id] = allocated[:full_required_blocks]
     swa_mgr.req_to_blocks[request_id] = allocated[
-        full_required_blocks:full_required_blocks + (full_required_blocks - 1)
+        full_required_blocks : full_required_blocks + (full_required_blocks - 1)
     ]
 
     assert manager.block_pool.get_num_free_blocks() == 0

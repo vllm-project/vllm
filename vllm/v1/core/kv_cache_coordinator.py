@@ -114,7 +114,8 @@ class KVCacheCoordinator(ABC):
                 )
             else:
                 effective_num_tokens = self._get_admission_num_tokens(
-                    manager, num_tokens)
+                    manager, num_tokens
+                )
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     effective_num_tokens,
@@ -220,8 +221,7 @@ class KVCacheCoordinator(ABC):
     ) -> int:
         # SWA layers never need more than their window plus one prefill chunk.
         if isinstance(manager, SlidingWindowManager):
-            return min(num_tokens,
-                       manager.sliding_window + self.max_num_batched_tokens)
+            return min(num_tokens, manager.sliding_window + self.max_num_batched_tokens)
         return num_tokens
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:

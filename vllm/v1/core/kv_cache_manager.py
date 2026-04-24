@@ -246,7 +246,7 @@ class KVCacheManager:
         )
         full_num_tokens = min(request.num_tokens, self.max_model_len)
 
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_needed_for_admission(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=new_computed_block_list,
@@ -377,19 +377,16 @@ class KVCacheManager:
             request.request_id, total_computed_tokens
         )
 
-        block_allocation_kwargs = dict(
+        total_comp = num_local_computed_tokens + num_external_computed_tokens
+
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_needed_for_admission(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
-            total_computed_tokens=num_local_computed_tokens
-            + num_external_computed_tokens,
+            total_computed_tokens=total_comp,
             num_tokens_main_model=num_tokens_main_model,
         )
-
-        num_blocks_to_allocate = (
-            self.coordinator.get_num_blocks_needed_for_admission(
-                **block_allocation_kwargs))
 
         num_free_blocks = self.block_pool.get_num_free_blocks()
         if num_blocks_to_allocate > num_free_blocks:
@@ -401,7 +398,13 @@ class KVCacheManager:
         # with the uncapped token count so we fail cleanly instead of throwing
         # out of BlockPool.get_new_blocks().
         actual_num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            **block_allocation_kwargs)
+            request_id=request.request_id,
+            num_tokens=num_tokens_need_slot,
+            new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=total_comp,
+            num_tokens_main_model=num_tokens_main_model,
+        )
         if actual_num_blocks_to_allocate > num_free_blocks:
             return None
 
