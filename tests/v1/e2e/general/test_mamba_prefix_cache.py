@@ -73,7 +73,6 @@ def get_fake_sample_fn() -> SamplerOutput:
             return SamplerOutput(
                 sampled_token_ids=torch.tensor(
                     [[prompt_token_ids[first_token_id_index]]],
-                    device=DEVICE_TYPE,
                     dtype=torch.int32,
                 ),
                 logprobs_tensors=None,
@@ -86,7 +85,6 @@ def get_fake_sample_fn() -> SamplerOutput:
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
                 [sampled_token_ids],
-                device=DEVICE_TYPE,
                 dtype=torch.int32,
             ),
             logprobs_tensors=None,
@@ -132,13 +130,11 @@ def get_fake_propose_draft_token_ids_fn():
                 - 1
                 + num_accepted_tokens
             ],
-            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
         valid_sampled_tokens_count = torch.tensor(
             [num_accepted_tokens],
-            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
@@ -146,7 +142,6 @@ def get_fake_propose_draft_token_ids_fn():
 
         return torch.tensor(
             proposed_draft_token_ids,
-            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
@@ -495,6 +490,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
 
 @create_new_process_for_each_test()
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
