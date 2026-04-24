@@ -26,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheTensor,
     SlidingWindowSpec,
-    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
@@ -1263,28 +1262,6 @@ def get_kv_cache_groups(
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-    # TurboQuant layers create TQFullAttentionSpec (even for sliding-window
-    # layers).  If the model also has non-TQ sliding-window / full-attention
-    # boundary layers the spec mix is heterogeneous.  Force unification so
-    # every spec becomes a FullAttentionSpec sub-type and the
-    # UniformTypeKVCacheSpecs path can handle per-layer page sizes.
-    if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
-        has_tq = any(
-            isinstance(s, TQFullAttentionSpec)
-            for s in kv_cache_spec.values()
-        )
-        has_non_tq_sw = any(
-            isinstance(s, SlidingWindowSpec)
-            and not isinstance(s, TQFullAttentionSpec)
-            for s in kv_cache_spec.values()
-        )
-        if has_tq and has_non_tq_sw:
-            logger.info(
-                "TurboQuant + sliding-window boundary layers detected; "
-                "disabling hybrid KV cache manager for this model."
-            )
-            unify_hybrid_kv_cache_specs(kv_cache_spec)
-
     if is_kv_cache_type_attention_free(kv_cache_spec):
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
@@ -1300,6 +1277,25 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
+
+    # When page sizes aren't clean multiples of each other, the LCM-based
+    # unification below creates excessively large blocks.  Try converting
+    # SlidingWindowSpec / ChunkedLocalAttentionSpec → FullAttentionSpec
+    # first: if that collapses all specs into one uniform type, the
+    # single-group path avoids the LCM blow-up entirely.
+    page_sizes = {s.page_size_bytes for s in kv_cache_spec.values()}
+    if len(page_sizes) > 1 and max(page_sizes) % min(page_sizes) != 0:
+        try:
+            unify_hybrid_kv_cache_specs(kv_cache_spec)
+        except ValueError:
+            pass  # Could not fully unify; fall through to LCM path
+        else:
+            if is_kv_cache_spec_uniform(kv_cache_spec):
+                return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
+            elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(
+                kv_cache_spec
+            ):
+                return _get_kv_cache_groups_uniform_type(uniform_spec)
 
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function

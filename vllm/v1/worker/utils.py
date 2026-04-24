@@ -451,8 +451,8 @@ def add_kv_sharing_layers_to_kv_cache_groups(
         tgt_kv_cache_group.layer_names.append(layer_name)
 
         # When the group uses UniformTypeKVCacheSpecs, also register the
-        # shared layer in its per-layer spec dict so that later look-ups
-        # (e.g. get_attn_backends_for_group) can find it.
+        # shared layer so that per-layer spec lookups (e.g. in
+        # get_attn_backends_for_group) can find it.
         group_spec = tgt_kv_cache_group.kv_cache_spec
         if isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec.kv_cache_specs[layer_name] = (
