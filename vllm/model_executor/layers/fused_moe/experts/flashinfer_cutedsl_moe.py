@@ -407,6 +407,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
 
         # Precompute MMA-layout views of the weight scale factors once here
         # rather than recomputing on every forward pass.
+        assert self.w1_scale is not None
         num_experts_w1, m1, k1_sf = self.w1_scale.shape
         k1 = k1_sf * 16
         self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
@@ -416,6 +417,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
             num_groups=num_experts_w1,
         )
 
+        assert self.w2_scale is not None
         num_experts_w2, m2, k2_sf = self.w2_scale.shape
         k2 = k2_sf * 16
         self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
