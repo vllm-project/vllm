@@ -20,7 +20,7 @@ else()
   FetchContent_Declare(
     deepgemm
     GIT_REPOSITORY https://github.com/deepseek-ai/DeepGEMM.git
-    GIT_TAG 7f2a703ed51ac1f7af07f5e1453b2d3267d37d50
+    GIT_TAG 891d57b4db1071624b5c8fa0d1e51cb317fa709f
     GIT_SUBMODULES "third-party/cutlass" "third-party/fmt"
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""

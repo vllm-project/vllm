@@ -10,6 +10,7 @@ import torch
 
 class AuxStreamType(Enum):
     Attention = 1
+    SharedExperts = 2
 
 
 class EventType(Enum):

@@ -25,7 +25,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -39,7 +38,11 @@ from vllm.utils.multi_stream_utils import AuxStreamType
 
 from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
-from .deepseek_v4 import DeepseekV4DecoderLayer, hc_head
+from .deepseek_v4 import (
+    DeepseekV4DecoderLayer,
+    hc_head,
+    make_deepseek_v4_expert_params_mapping,
+)
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -105,6 +108,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
         self.aux_stream_dict = {
             AuxStreamType.Attention: torch.cuda.Stream(),
+            AuxStreamType.SharedExperts: torch.cuda.Stream(),
         }
         self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
@@ -308,12 +312,8 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
-        expert_mapping = SharedFusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
+        expert_mapping = make_deepseek_v4_expert_params_mapping(
+            self.config.n_routed_experts
         )
 
         for name, loaded_weight in weights:
@@ -428,8 +428,13 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
+        self.finalize_mega_moe_weights()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def finalize_mega_moe_weights(self) -> None:
+        for layer in self.model.layers.values():
+            layer.mtp_block.ffn.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
