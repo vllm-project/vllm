@@ -1710,11 +1710,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
-    "VLLM_USE_SPINLOOP_EXT": lambda: bool(
-        int(
-            os.getenv("VLLM_USE_SPINLOOP_EXT", "0")
-        )
-    ),
+    "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
 }
 
 

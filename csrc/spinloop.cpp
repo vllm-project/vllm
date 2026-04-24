@@ -66,8 +66,8 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
   }
 
   static const char* keywords[] = {"buffer", "callback", "timeout", NULL};
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*O|d", (char **)keywords, &buffer,
-                                   &callback, &timeout)) {
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*O|d", (char **)keywords,
+                                   &buffer, &callback, &timeout)) {
     return NULL;
   }
 
@@ -146,7 +146,8 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
       // Run mwaitx with enabled timeout (bit 1). The actual timeout value
       // is not very important, we just want to ensure we don't lock up
       // here for too long.
-      Py_BEGIN_ALLOW_THREADS _mm_mwaitx((1 << 1), 0, MWAITX_DEFAULT_TIMEOUT_CYCLES);
+      Py_BEGIN_ALLOW_THREADS _mm_mwaitx((1 << 1), 0,
+                                        MWAITX_DEFAULT_TIMEOUT_CYCLES);
       Py_END_ALLOW_THREADS
     }
 
@@ -158,7 +159,7 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
 #if defined(__i386__) || defined(__x86_64__)
       __builtin_ia32_pause();
 #elif defined(__aarch64__)
-      __asm__ volatile("yield" ::: "memory");
+        __asm__ volatile("yield" ::: "memory");
 #endif
       Py_END_ALLOW_THREADS
 #if defined(__i386__) || defined(__x86_64__)
@@ -186,8 +187,8 @@ static PyMethodDef spinloop_methods[] = {
 
 static struct PyModuleDef spinloop_module = {
     PyModuleDef_HEAD_INIT, "spinloop",
-    "Hardware-optimized spinloops for Python",
-    sizeof(spinloop_state_t), spinloop_methods};
+    "Hardware-optimized spinloops for Python", sizeof(spinloop_state_t),
+    spinloop_methods};
 
 PyMODINIT_FUNC PyInit_spinloop(void) {
   PyObject* m = PyModule_Create(&spinloop_module);
