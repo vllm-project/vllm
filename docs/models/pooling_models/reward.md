@@ -139,7 +139,7 @@ Please refer to the [pooling API](README.md#pooling-api). Pooling task correspon
 
 More examples can be found here: [examples/pooling/reward](../../../examples/pooling/reward)
 
-## Removed Features
+## Deprecated Features
 
 ### `LLM.reward`
 
