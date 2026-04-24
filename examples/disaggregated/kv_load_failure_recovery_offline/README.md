@@ -1,6 +1,6 @@
 # KV Load Failure Recovery Test
 
-This example builds upon the `disaggregated-prefill-v1` example in `examples/offline_inference`.
+This example builds upon the `disaggregated-prefill-v1-offline` example in `examples/disaggregated`.
 
 It demonstrates vLLM's ability to recover from KV load failures in both synchronous and asynchronous loading modes. The goal is to verify that vLLM correctly identifies invalid KV blocks, reschedules the affected requests, and ensures successful and consistent output.
 
