@@ -34,50 +34,38 @@ struct EngineLoadSnapshot {
     running: usize,
 }
 
-/// Frontend-local routing state for one connected engine.
-///
-/// The frontend prefers the latest real scheduler stats when present, but keeps a local
-/// in-flight count as the bootstrap fallback before any stats have arrived. An optimistic
-/// waiting overlay is applied on request admission so back-to-back requests do not pile onto
-/// the same engine while the next stats refresh is still in flight.
 #[derive(Debug, Default)]
 struct EngineRoutingState {
     /// Requests admitted by this frontend that have not finished yet.
     ///
-    /// This is only used as the fallback "waiting" count before real scheduler stats exist.
+    /// This is used both as the bootstrap fallback before real scheduler stats exist and as a
+    /// lower bound afterwards so asynchronous scheduler snapshots cannot erase frontend admission
+    /// history.
     inflight: usize,
     /// The latest real scheduler snapshot received from this engine, if any.
     last_scheduler_stats: Option<EngineLoadSnapshot>,
-    /// Local waiting bump applied at admission time until the next real stats update lands.
-    optimistic_waiting_overlay: usize,
 }
 
 impl EngineRoutingState {
     /// Compute the routing score used to pick the least-loaded engine.
     ///
-    /// If real scheduler stats exist, use `waiting * 4 + running`, plus any local optimistic
-    /// waiting overlay. Otherwise, fall back to treating the frontend's in-flight count as the
-    /// waiting count and `0` as running, without re-applying the optimistic overlay on top.
+    /// Scheduler stats can raise the load estimate above the frontend-local view, but they should
+    /// not lower it below requests this frontend has already admitted. Waiting requests still get
+    /// the same extra penalty as the original `waiting * 4 + running` score.
     fn routing_score(&self) -> usize {
-        let (waiting, running, overlay) = match self.last_scheduler_stats {
-            Some(stats) => (
-                stats.waiting,
-                stats.running,
-                self.optimistic_waiting_overlay,
-            ),
-            None => (self.inflight, 0, 0),
+        const WAITING_WEIGHT: usize = 4;
+
+        let Some(stats) = self.last_scheduler_stats else {
+            return self.inflight;
         };
 
-        (waiting + overlay) * 4 + running
+        let scheduler_total = stats.running + stats.waiting;
+        self.inflight.max(scheduler_total) + stats.waiting * (WAITING_WEIGHT - 1)
     }
 
     /// Replace the local routing view with a fresh real scheduler snapshot.
-    ///
-    /// Any optimistic waiting overlay is cleared because the scheduler's own counts are now the
-    /// source of truth again.
     fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
         self.last_scheduler_stats = Some(next);
-        self.optimistic_waiting_overlay = 0;
     }
 }
 
@@ -134,7 +122,6 @@ impl RequestRegistry {
             .get_mut(&engine_id)
             .expect("request registry must track all known engines");
         state.inflight += 1;
-        state.optimistic_waiting_overlay += 1;
 
         Ok((engine_id, rx))
     }
@@ -249,7 +236,6 @@ impl RequestRegistry {
                 ?engine_id,
                 previous_waiting = previous.map(|stats| stats.waiting),
                 previous_running = previous.map(|stats| stats.running),
-                previous_optimistic_waiting_overlay = state.optimistic_waiting_overlay,
                 waiting = next.waiting,
                 running = next.running,
                 "updated scheduler routing counts",
@@ -438,14 +424,39 @@ mod tests {
     }
 
     #[test]
-    fn routing_score_does_not_double_count_overlay_before_stats_arrive() {
+    fn routing_score_uses_inflight_before_stats_arrive() {
         let state = EngineRoutingState {
             inflight: 3,
             last_scheduler_stats: None,
-            optimistic_waiting_overlay: 2,
         };
 
-        assert_eq!(state.routing_score(), 12);
+        assert_eq!(state.routing_score(), 3);
+    }
+
+    #[test]
+    fn routing_score_uses_inflight_as_scheduler_stats_lower_bound() {
+        let state = EngineRoutingState {
+            inflight: 7,
+            last_scheduler_stats: Some(EngineLoadSnapshot {
+                waiting: 0,
+                running: 2,
+            }),
+        };
+
+        assert_eq!(state.routing_score(), 7);
+    }
+
+    #[test]
+    fn routing_score_keeps_extra_waiting_penalty() {
+        let state = EngineRoutingState {
+            inflight: 1,
+            last_scheduler_stats: Some(EngineLoadSnapshot {
+                waiting: 3,
+                running: 2,
+            }),
+        };
+
+        assert_eq!(state.routing_score(), 14);
     }
 
     #[test]
