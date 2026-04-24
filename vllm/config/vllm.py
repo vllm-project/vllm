@@ -1194,9 +1194,9 @@ class VllmConfig:
                 and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
             ):
                 logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention."
-                    " Will fall back to eager execution if a batch runs "
-                    "into cascade attentions."
+                    "No piecewise cudagraph for executing cascade attention. "
+                    "Will fall back to eager execution if a batch runs into "
+                    "cascade attentions."
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():

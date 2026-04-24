@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -292,11 +290,14 @@ def test_async_tp_pass_replace(
 
 
 def test_async_tp_pass_requires_full_graph_compilation():
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.use_inductor_graph_partition = False
+    vllm_config.compilation_config.splitting_ops = [
+        "vllm::unified_attention_with_output"
+    ]
+
     async_tp_pass = object.__new__(AsyncTPPass)
-    async_tp_pass.compilation_config = SimpleNamespace(
-        use_inductor_graph_partition=False,
-        splitting_ops=["vllm::unified_attention_with_output"],
-    )
+    async_tp_pass.compilation_config = vllm_config.compilation_config
 
     with pytest.raises(
         AssertionError, match="AsyncTPPass requires full-graph compilation"

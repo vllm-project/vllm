@@ -504,21 +504,7 @@ def test_sequence_parallelism_requires_full_graph_compilation(
     expected_max_size: int,
 ):
     with patch.object(current_platform, "device_count", return_value=2):
-        compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=[1, 2, 4, 15],
-            use_inductor_graph_partition=use_inductor_graph_partition,
-            pass_config=PassConfig(
-                enable_sp=True,
-                fuse_gemm_comms=True,
-                fuse_norm_quant=True,
-                fuse_act_quant=True,
-                eliminate_noops=True,
-                sp_min_token_num=512,
-            ),
-            cudagraph_mode=cudagraph_mode,
-        )
         vllm_config = VllmConfig(
-            compilation_config=compilation_config,
             parallel_config=ParallelConfig(tensor_parallel_size=2),
             scheduler_config=SchedulerConfig(
                 max_num_seqs=128,
@@ -534,9 +520,22 @@ def test_sequence_parallelism_requires_full_graph_compilation(
             disable_cascade_attn=False,
             get_hidden_size=MagicMock(return_value=4096),
         )
-        vllm_config.compilation_config.max_cudagraph_capture_size = None
-        vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 15]
-        vllm_config.compilation_config.compile_sizes = ["cudagraph_capture_sizes"]
+        vllm_config.compilation_config = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_capture_sizes=[1, 2, 4, 15],
+            max_cudagraph_capture_size=None,
+            compile_sizes=["cudagraph_capture_sizes"],
+            use_inductor_graph_partition=use_inductor_graph_partition,
+            pass_config=PassConfig(
+                enable_sp=True,
+                fuse_gemm_comms=True,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+                sp_min_token_num=512,
+            ),
+            cudagraph_mode=cudagraph_mode,
+        )
         vllm_config.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=vllm_config.parallel_config.all2all_backend,
             data_parallel_size=1,
