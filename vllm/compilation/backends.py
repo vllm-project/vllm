@@ -926,6 +926,7 @@ class VllmBackend:
 
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
+    @dynamo_timed("vllm_configure_post_pass")
     def configure_post_pass(self) -> None:
         # TODO proper PassManager?
         pre_grad_pass_key = "pre_grad_custom_pass"
@@ -1168,27 +1169,30 @@ class VllmBackend:
         else:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
-        self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
+        with dynamo_timed("vllm_split_graph"):
+            self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
         # keep a split_gm copy from BEFORE the interpreter replaces
         # submodules with PiecewiseBackend -- used for serialization
         original_split_gm = None
         if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-            original_split_gm = deepcopy(self.split_gm)
+            with dynamo_timed("vllm_deepcopy_split_gm"):
+                original_split_gm = deepcopy(self.split_gm)
 
-        from torch._dynamo.utils import lazy_format_graph_code
+        with dynamo_timed("vllm_graph_logging"):
+            from torch._dynamo.utils import lazy_format_graph_code
 
-        # depyf will hook lazy_format_graph_code and dump the graph
-        # for debugging, no need to print the graph here
-        lazy_format_graph_code("before split", self.graph)
-        lazy_format_graph_code("after split", self.split_gm)
+            # depyf will hook lazy_format_graph_code and dump the graph
+            # for debugging, no need to print the graph here
+            lazy_format_graph_code("before split", self.graph)
+            lazy_format_graph_code("after split", self.split_gm)
 
-        # Log the piecewise split graph for TORCH_TRACE/tlparse
-        trace_structured(
-            "graph_dump",
-            metadata_fn=lambda: {"name": "vllm_piecewise_split_graph"},
-            payload_fn=lambda: self.split_gm.print_readable(print_output=False),
-        )
+            # Log the piecewise split graph for TORCH_TRACE/tlparse
+            trace_structured(
+                "graph_dump",
+                metadata_fn=lambda: {"name": "vllm_piecewise_split_graph"},
+                payload_fn=lambda: self.split_gm.print_readable(print_output=False),
+            )
 
         compilation_counter.num_piecewise_graphs_seen += len(self.piecewise_graphs)
         submod_names_to_compile = [
@@ -1211,9 +1215,10 @@ class VllmBackend:
         # compile submodules with symbolic shapes, and compile all ranges
         # up front so that compilation is complete before the callable
         # is returned.
-        PiecewiseCompileInterpreter(
-            self.split_gm, submod_names_to_compile, self.vllm_config, self
-        ).run(*fake_args)
+        with dynamo_timed("vllm_piecewise_interpret"):
+            PiecewiseCompileInterpreter(
+                self.split_gm, submod_names_to_compile, self.vllm_config, self
+            ).run(*fake_args)
 
         # All compilation is done. Save the cache.
         time_before_saving = time.perf_counter()
