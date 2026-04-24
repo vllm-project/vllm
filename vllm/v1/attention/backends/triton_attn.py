@@ -684,13 +684,13 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Dedicated decode/prefill kernels apply only to INT8 / FP8
-        # per-token-head modes (they read a flat head slot).  INT4 / INT2
-        # use packed storage and must go through the unified_attention
-        # factory dispatch instead.
+        # Dedicated decode/prefill kernels for all per-token-head modes.
+        # The launchers dispatch internally on ``kv_quant_mode``: INT8 / FP8
+        # use the flat-head-slot kernels (with optional int8 WMMA on int8
+        # caches), INT4 / INT2 use the sub-byte packed variants with Q
+        # rotation done Python-side.
         if (
-            self._kv_quant_mode
-            in (KVQuantMode.INT8_PER_TOKEN_HEAD, KVQuantMode.FP8_PER_TOKEN_HEAD)
+            self._is_per_token_head_quant
             and self.alibi_slopes is None
             and not self.use_alibi_sqrt
             and self.sinks is None
@@ -822,6 +822,7 @@ class TritonAttentionImpl(AttentionImpl):
                     num_reqs=num_reqs_pref,
                     max_query_len=attn_metadata.max_query_len,
                     use_qk_int8_wmma=use_qk_int8_wmma,
+                    kv_quant_mode=self._kv_quant_mode,
                 )
                 return output
 
@@ -896,6 +897,7 @@ class TritonAttentionImpl(AttentionImpl):
                     num_reqs=num_reqs_pref,
                     max_query_len=attn_metadata.max_query_len,
                     use_qk_int8_wmma=use_qk_int8_wmma,
+                    kv_quant_mode=self._kv_quant_mode,
                 )
                 return output
 
@@ -955,6 +957,7 @@ class TritonAttentionImpl(AttentionImpl):
                     lse_buf=lse_buf,
                     buf_holder=layer,
                     use_qk_int8_wmma=use_qk_int8_wmma,
+                    kv_quant_mode=self._kv_quant_mode,
                 )
                 return output
         # FP8 per-tensor / auto path (original flow).
