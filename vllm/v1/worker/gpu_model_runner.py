@@ -2322,8 +2322,7 @@ class GPUModelRunner(
             # Per-range filtering keeps bidi for small images/video
             # frames while skipping oversized images.
             hf_text_config = self.model_config.hf_text_config
-            _bidi_sw = None
-                _bidi_sw = getattr(hf_text_config, "sliding_window", None)
+            _bidi_sw = getattr(hf_text_config, "sliding_window", None)
 
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
