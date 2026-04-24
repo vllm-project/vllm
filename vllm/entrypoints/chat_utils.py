@@ -55,7 +55,10 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.renderers.embed_utils import (
+    safe_load_prompt_embeds,
+    safe_load_prompt_embeds_async,
+)
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -1072,23 +1075,22 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         Like the sync variant, emits a single sentinel `PROMPT_EMBEDS_PLACEHOLDER_TOKEN`
         per content part. Unlike the sync variant, the tensor decode is deferred to a
-        thread-pool executor via `run_in_executor`.
+        thread-pool executor via `safe_load_prompt_embeds_async`.
         """
         if not self.model_config.enable_prompt_embeds:
             raise ValueError(_ENABLE_PROMPT_EMBEDS_ERROR)
 
-        model_config = self.model_config
-        data_bytes = data.encode()
-
-        async def _decode() -> tuple[torch.Tensor, None]:
-            loop = asyncio.get_running_loop()
-            tensor = await loop.run_in_executor(
-                None, safe_load_prompt_embeds, model_config, data_bytes
-            )
-            return (tensor, None)
-
-        self._tracker.add("prompt_embeds", _decode())
+        coro = self._load_prompt_embeds_async(data.encode())
+        self._tracker.add("prompt_embeds", coro)
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
+
+    async def _load_prompt_embeds_async(
+        self, data_bytes: bytes
+    ) -> tuple[torch.Tensor, None]:
+        # Second tuple slot fills the tracker's generic `(item, uuid | None)`
+        # contract. prompt_embeds has no UUID concept, so it's always `None`.
+        tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
+        return tensor, None
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
         image = (

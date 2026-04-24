@@ -7,6 +7,7 @@ import pybase64
 import torch
 
 from vllm.exceptions import VLLMValidationError
+from vllm.utils.async_utils import make_async
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -67,3 +68,9 @@ def safe_load_prompt_embeds(
         )
 
     return tensor
+
+
+safe_load_prompt_embeds_async = make_async(safe_load_prompt_embeds)
+"""Async variant of `safe_load_prompt_embeds` that defers the decode to a
+thread-pool executor, so the asyncio event loop is not blocked by the base64
+decode + `torch.load` work."""
