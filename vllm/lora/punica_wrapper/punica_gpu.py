@@ -50,8 +50,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.max_loras = self.lora_config.max_loras
 
         # Compute captured LoRA counts for cudagraph specialization.
+        # Cap at max_batches (== max_num_seqs): at most that many distinct
+        # LoRA adapters can be active at the same time.
         captured_lora_counts = get_captured_lora_counts(
-            self.max_loras, self.lora_config.specialize_active_lora
+            self.max_loras,
+            self.lora_config.specialize_active_lora,
+            max_concurrent_loras=max_batches,
         )
 
         self.token_mapping_meta = LoRAKernelMeta.make(
