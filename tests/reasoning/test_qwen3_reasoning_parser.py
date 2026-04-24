@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -387,37 +388,49 @@ def test_is_reasoning_end_complete_tool_call_in_single_delta(
     qwen3_tokenizer,
 ) -> None:
     """
-    Regression – is_reasoning_end must return True when a complete
+    Regression – is_reasoning_end_streaming must return True when a complete
     <tool_call>…</tool_call> arrives in a single delta (MTP / speculative-
-    decoding scenario). The paired-token guard was incorrectly skipping this
-    case, preventing reasoning from being marked as ended.
+    decoding scenario).
+
+    is_reasoning_end uses a paired-token guard so it returns False when
+    <tool_call> is followed by </tool_call> (prompt examples). For streaming
+    delta checks, is_reasoning_end_streaming is used instead — it inspects
+    only the delta_ids and always returns True when <tool_call> is present.
     """
     vocab = qwen3_tokenizer.get_vocab()
     tool_call_id = vocab["<tool_call>"]
     tool_call_end_id = vocab["</tool_call>"]
-    # Use a regular content token (first token ID from any word)
     content_token = qwen3_tokenizer.encode("hello", add_special_tokens=False)[0]
 
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
         parser_name
     )(qwen3_tokenizer)
 
+    # Simulate accumulated token IDs before this delta
+    prior_ids = [content_token]
+    # Single delta that contains the complete <tool_call>…</tool_call>
     delta_ids = [tool_call_id, content_token, tool_call_end_id]
-    assert parser.is_reasoning_end(delta_ids), (
-        "is_reasoning_end returned False for a complete <tool_call>…</tool_call> "
-        "pair in a single delta — the paired-token guard incorrectly skips real "
-        "output tool calls when both opening and closing tokens arrive together."
+
+    assert parser.is_reasoning_end_streaming(prior_ids, delta_ids), (
+        "is_reasoning_end_streaming returned False for a complete "
+        "<tool_call>…</tool_call> pair in a single delta. "
+        "Speculative-decoding flushes can deliver both the opening and closing "
+        "tokens at once; the streaming check must still signal reasoning end."
     )
 
 
-def test_is_reasoning_end_false_after_complete_tool_call_in_output(
+def test_is_reasoning_end_streaming_detects_tool_call_in_delta(
     qwen3_tokenizer,
 ) -> None:
     """
-    is_reasoning_end must return True for accumulated
-    output that contains a complete <tool_call>…</tool_call> (no explicit
-    </think>). Once reasoning ended via <tool_call>, the invariant must hold
-    for any superset of those tokens.
+    is_reasoning_end_streaming must return True when the current delta
+    contains <tool_call>, regardless of whether </tool_call> is also present.
+
+    This covers the real-world case where the model emits <tool_call> as its
+    first implicit-end-of-reasoning signal.  abstract_parser uses
+    is_reasoning_end_streaming (not is_reasoning_end) for per-delta checks so
+    that the paired-token guard in is_reasoning_end does not prevent the
+    streaming transition.
     """
     vocab = qwen3_tokenizer.get_vocab()
     tool_call_id = vocab["<tool_call>"]
@@ -429,17 +442,17 @@ def test_is_reasoning_end_false_after_complete_tool_call_in_output(
         parser_name
     )(qwen3_tokenizer)
 
-    output_ids = [
-        reasoning_token,
-        reasoning_token,
-        tool_call_id,
-        content_token,
-        tool_call_end_id,
-    ]
-    assert parser.is_reasoning_end(output_ids), (
-        "is_reasoning_end returned False after <tool_call>…</tool_call> is "
-        "complete in the accumulated output — the paired-token guard violates "
-        "the invariant that reasoning stays ended once it has ended."
+    # Accumulated token IDs up to (but not including) the current delta
+    prior_ids = [reasoning_token, reasoning_token]
+
+    # Delta that begins the tool call (speculative decoding may include the
+    # entire <tool_call>…</tool_call> sequence in one flush)
+    delta_ids = [tool_call_id, content_token, tool_call_end_id]
+
+    assert parser.is_reasoning_end_streaming(prior_ids, delta_ids), (
+        "is_reasoning_end_streaming returned False when the delta contains "
+        "<tool_call>. abstract_parser will miss the reasoning→tool-call "
+        "transition and route all subsequent output to the reasoning parser."
     )
 
 
@@ -683,5 +696,109 @@ def test_extract_reasoning_streaming_fragmented_end_and_tool_call(qwen3_tokenize
     if msg2 and msg2.content:
         assert msg2.content != "ol_call>\n<function=", \
             "Parser corrupted the tool call tag by splitting it across reasoning and content."
+
+
+def test_is_reasoning_end_false_for_prompt_with_paired_tool_call_examples(
+    qwen3_tokenizer,
+) -> None:
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    tool_call_end_id = vocab["</tool_call>"]
+    content_token = qwen3_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
+        parser_name
+    )(qwen3_tokenizer)
+
+    # Simulate a prompt whose token_ids contain a paired tool-call example:
+    #   ... system_text ... <tool_call> func_body </tool_call> ... user_text ...
+    # (No <think> or </think> after the pair, as is the case for non-3.5 models.)
+    prompt_token_ids = [
+        content_token,    # "You are a helpful assistant."
+        content_token,    # "Example:"
+        tool_call_id,     # <tool_call>  ← example in system prompt
+        content_token,    # function body text
+        tool_call_end_id, # </tool_call>  ← closes the example
+        content_token,    # user turn content
+    ]
+
+    result = parser.is_reasoning_end(prompt_token_ids)
+    assert not result, (
+        "is_reasoning_end returned True for a prompt that contains a PAIRED "
+        "<tool_call>…</tool_call> example. "
+        "This makes abstract_parser set state.reasoning_ended=True before the "
+        "model generates any token, routing all output (including reasoning) to "
+        "the tool parser and silently discarding the <reasoning> field. "
+        "The paired-token guard must be reinstated for this case."
+    )
+
+
+def test_parse_delta_reasoning_not_bypassed_when_prompt_has_tool_examples(
+    qwen3_tokenizer,
+) -> None:
+
+    
+
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    tool_call_end_id = vocab["</tool_call>"]
+    content_token = qwen3_tokenizer.encode("hello", add_special_tokens=False)[0]
+    end_token_id = vocab["</think>"]
+
+    # Build a DelegatingParser with qwen3 reasoning + stub tool parser.
+    class _TestParser(DelegatingParser):
+        pass
+
+    _TestParser._reasoning_parser = None
+    _TestParser._tool_parser = None
+
+    reasoning_parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+    stub_tool_parser = _StubToolParser(qwen3_tokenizer)
+
+    parser = _TestParser(qwen3_tokenizer)
+    parser._reasoning_parser = reasoning_parser
+    parser._tool_parser = stub_tool_parser
+
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    # prompt_token_ids: system message with a <tool_call> example, then user turn.
+    # No <think> token at the end (Qwen3 non-3.5 style).
+    prompt_token_ids = [
+        content_token,    # system text
+        tool_call_id,     # <tool_call> in system example
+        content_token,    # function body
+        tool_call_end_id, # </tool_call> closing the example
+        content_token,    # user message
+    ]
+
+    # First delta: a reasoning token (model starts generating its reasoning).
+    reasoning_text = "I need to think about this."
+    reasoning_token = qwen3_tokenizer.encode(
+        reasoning_text, add_special_tokens=False
+    )[0]
+
+    result = parser.parse_delta(
+        delta_text=reasoning_text,
+        delta_token_ids=[reasoning_token],
+        request=request,
+        prompt_token_ids=prompt_token_ids,
+    )
+
+    assert result is not None, (
+        "parse_delta returned None for the first reasoning delta — "
+        "the reasoning parser was bypassed entirely."
+    )
+    assert result.reasoning is not None, (
+        f"First delta was routed to the tool parser instead of the reasoning "
+        f"parser. Got result={result!r}. "
+        f"is_reasoning_end(prompt_token_ids) returned True because the prompt "
+        f"contains a <tool_call> token, causing state.reasoning_ended=True "
+        f"before any model output was generated."
+    )
+    assert result.tool_calls is None or result.tool_calls == [], (
+        "Tool calls were incorrectly populated during a reasoning-phase delta."
+    )
 
 

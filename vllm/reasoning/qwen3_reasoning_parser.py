@@ -65,6 +65,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
         tool_call_token_id = self._tool_call_token_id
+        tool_call_end_token_id = self._tool_call_end_token_id
 
         for i in range(len(input_ids) - 1, -1, -1):
             token_id = input_ids[i]
@@ -73,6 +74,15 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             if token_id == end_token_id:
                 return True
             if tool_call_token_id is not None and token_id == tool_call_token_id:
+                # Skip <tool_call> tokens that are paired with a subsequent
+                # </tool_call> — these appear in system-prompt tool examples
+                # and must not be mistaken for an implicit reasoning end.
+                # Unpaired <tool_call> (model output) still signals the end.
+                if tool_call_end_token_id is not None and any(
+                    input_ids[j] == tool_call_end_token_id
+                    for j in range(i + 1, len(input_ids))
+                ):
+                    continue
                 return True
         return False
 
