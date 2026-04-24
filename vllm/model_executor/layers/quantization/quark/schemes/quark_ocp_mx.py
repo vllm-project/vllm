@@ -96,21 +96,12 @@ try:
                     x_q = x
                     x_s = x_scales
 
-                # 32 alignment is enough for dim0 padding of output for
-                # gemm_a4w4 kernel
-                y = torch.empty(
-                    (M + 31) // 32 * 32,
-                    weight.shape[0],
-                    device=x_q.device,
-                    dtype=out_dtype,
-                )
-
-                gemm_a4w4(
+                y = gemm_a4w4(
                     x_q,
                     weight.view(x_q.dtype),
                     x_s,
                     weight_scale.view(x_s.dtype),
-                    y,
+                    dtype=out_dtype,
                     bpreshuffle=True,
                 )
             return y[:M]
