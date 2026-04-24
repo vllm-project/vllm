@@ -2319,11 +2319,6 @@ class GPUModelRunner(
             # frames while skipping oversized images.
             hf_text_config = self.model_config.hf_text_config
             _bidi_sw = None
-            if (
-                getattr(self.model_config.hf_config, "model_type", None) == "gemma4"
-                and getattr(hf_text_config, "use_bidirectional_attention", None)
-                == "vision"
-            ):
                 _bidi_sw = getattr(hf_text_config, "sliding_window", None)
 
             for req_id in self.input_batch.req_ids:
