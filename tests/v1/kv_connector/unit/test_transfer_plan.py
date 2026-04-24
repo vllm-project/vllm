@@ -20,15 +20,13 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
-    GroupKind,
-    RegionKind,
     RegionPlan,
-    build_local_splits_from_plan,
-    build_remote_descs_from_plan,
-    compute_desc_ids_from_plan,
-    compute_read_specs_from_plan,
     generate_dense_plan,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+    NixlConnectorWorker,
+)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 # ======================================================================
 # Test fixtures / helpers
@@ -115,6 +113,7 @@ def _common_plan_params(
             block_lens=remote_block_lens,
             block_size=remote_block_size,
         ),
+        group_spec_types=(FullAttentionSpec,),
         local_physical_blocks_per_logical=local_physical_blocks_per_logical,
     )
 
@@ -193,7 +192,7 @@ class TestDensePlanExecutors:
         meta = _make_nixl_meta(
             base_addrs, num_blocks, remote_block_lens, block_size=block_size
         )
-        descs = build_remote_descs_from_plan(plan, meta)
+        descs = NixlConnectorWorker._build_remote_descs_from_plan(plan, meta)
 
         expected_count = len(plan.fa_regions) * num_blocks
         assert len(descs) == expected_count
@@ -235,7 +234,10 @@ class TestDensePlanExecutors:
         )
 
         block_ids = ([1, 5, 10, 20],)
-        ids = compute_desc_ids_from_plan(plan, block_ids, dst_num_blocks=num_blocks)
+        ids = NixlConnectorWorker._compute_desc_ids_from_plan(
+            plan, block_ids, dst_num_blocks=num_blocks,
+            block_size_ratio=None, physical_blocks_per_logical=1,
+        )
 
         num_regions = len(plan.fa_regions)
         assert len(ids) == num_regions * len(block_ids[0])
@@ -276,7 +278,7 @@ class TestDensePlanExecutors:
 
         local_ids = ([1, 2, 3],)
         remote_ids = ([4, 5, 6],)
-        specs = compute_read_specs_from_plan(plan, local_ids, remote_ids)
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(plan, local_ids, remote_ids)
 
         assert len(specs) == len(plan.all_source_ranks)
         for spec in specs:
@@ -314,7 +316,7 @@ class TestDensePlanExecutors:
 
         src_blocks_data = [(0x2000 + i * 1024, 1024, 0) for i in range(8)]
         num_descs = len(src_blocks_data)
-        splits = build_local_splits_from_plan(
+        splits = NixlConnectorWorker._build_local_splits_from_plan(
             plan,
             src_blocks_data,
             num_descs,
@@ -349,23 +351,21 @@ class TestDensePlanStructure:
     def test_no_ssm_regions(self):
         plan = generate_dense_plan(**_common_plan_params())
         assert plan.ssm_regions == ()
-        assert plan.group_kinds == (GroupKind.FA,)
+        assert plan.group_spec_types == (FullAttentionSpec,)
 
     def test_blocks_first_has_k_and_v(self):
         plan = generate_dense_plan(
             **_common_plan_params(is_blocks_first=True),
         )
-        kinds = [r.kind.value for r in plan.fa_regions]
-        assert "fa_k" in kinds
-        assert "fa_v" in kinds
+        num_layers = 2
+        assert len(plan.fa_regions) == num_layers * 2  # K + V per layer
 
     def test_not_blocks_first_has_only_k(self):
         plan = generate_dense_plan(
             **_common_plan_params(is_blocks_first=False),
         )
-        kinds = [r.kind.value for r in plan.fa_regions]
-        assert "fa_k" in kinds
-        assert "fa_v" not in kinds
+        num_layers = 2
+        assert len(plan.fa_regions) == num_layers  # K only per layer
 
 
 # ======================================================================
@@ -376,14 +376,13 @@ class TestDensePlanStructure:
 def _make_mamba_plan_for_desc_ids(
     num_fa_regions: int,
     num_ssm_regions: int,
-    group_kinds: tuple[GroupKind, ...],
+    group_spec_types: tuple[type, ...],
     fa_num_blocks: int = 100,
     ssm_num_blocks: int = 100,
 ) -> EngineTransferPlan:
     """Build a minimal plan with enough structure for compute_desc_ids."""
     fa_regions = tuple(
         RegionPlan(
-            kind=RegionKind.FA_K,
             layer_idx=i,
             descriptor_bytes=100,
             offset_in_page=0,
@@ -394,7 +393,6 @@ def _make_mamba_plan_for_desc_ids(
     )
     ssm_regions = tuple(
         RegionPlan(
-            kind=RegionKind.SSM_CONV_X,
             layer_idx=i % (num_ssm_regions // 4) if num_ssm_regions >= 4 else 0,
             descriptor_bytes=50,
             offset_in_page=0,
@@ -404,11 +402,11 @@ def _make_mamba_plan_for_desc_ids(
         for i in range(num_ssm_regions)
     )
     all_ranks = (0,)
-    source_ranks_per_group = tuple(all_ranks for _ in group_kinds)
+    source_ranks_per_group = tuple(all_ranks for _ in group_spec_types)
     return EngineTransferPlan(
         fa_regions=fa_regions,
         ssm_regions=ssm_regions,
-        group_kinds=group_kinds,
+        group_spec_types=group_spec_types,
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=(0,),
         rank_to_attention_slot={0: 0},
@@ -424,7 +422,7 @@ class TestMambaPlanDescIds:
         plan = _make_mamba_plan_for_desc_ids(
             num_fa_regions=2,
             num_ssm_regions=4,  # 4 regions per layer, 1 layer
-            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+            group_spec_types=(FullAttentionSpec, MambaSpec),
             fa_num_blocks=100,
             ssm_num_blocks=100,
         )
@@ -432,10 +430,11 @@ class TestMambaPlanDescIds:
         fa_blocks = [3, 5]
         ssm_blocks = [1, 2]
 
-        result = compute_desc_ids_from_plan(
+        result = NixlConnectorWorker._compute_desc_ids_from_plan(
             plan,
             block_ids=(fa_blocks, ssm_blocks),
             dst_num_blocks=100,
+            block_size_ratio=None,
             physical_blocks_per_logical=1,
         )
 
@@ -451,7 +450,7 @@ class TestMambaPlanDescIds:
         plan = _make_mamba_plan_for_desc_ids(
             num_fa_regions=2,
             num_ssm_regions=4,
-            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+            group_spec_types=(FullAttentionSpec, MambaSpec),
             fa_num_blocks=num_blocks,
             ssm_num_blocks=logical_blocks,
         )
@@ -459,10 +458,11 @@ class TestMambaPlanDescIds:
         fa_blocks = [3, 7]
         ssm_blocks = [1, 2]
 
-        result = compute_desc_ids_from_plan(
+        result = NixlConnectorWorker._compute_desc_ids_from_plan(
             plan,
             block_ids=(fa_blocks, ssm_blocks),
             dst_num_blocks=num_blocks,
+            block_size_ratio=None,
             physical_blocks_per_logical=ratio,
         )
 
@@ -479,7 +479,7 @@ class TestMambaPlanReadSpecs:
         plan = EngineTransferPlan(
             fa_regions=(),
             ssm_regions=(),
-            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+            group_spec_types=(FullAttentionSpec, MambaSpec),
             source_ranks_per_group=(both, both),
             all_source_ranks=(0, 1),
             rank_to_attention_slot={0: 0, 1: 1},
@@ -489,7 +489,7 @@ class TestMambaPlanReadSpecs:
         local_ids = ([1, 2], [3, 4])
         remote_ids = ([5, 6], [7, 8])
 
-        specs = compute_read_specs_from_plan(plan, local_ids, remote_ids)
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(plan, local_ids, remote_ids)
         assert len(specs) == 2
         for spec in specs:
             assert list(spec.local_block_ids[0]) == [1, 2]
@@ -502,7 +502,7 @@ class TestMambaPlanReadSpecs:
         plan = EngineTransferPlan(
             fa_regions=(),
             ssm_regions=(),
-            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+            group_spec_types=(FullAttentionSpec, MambaSpec),
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1, 2),
             rank_to_attention_slot={0: 0},
@@ -512,7 +512,7 @@ class TestMambaPlanReadSpecs:
         local_ids = ([1, 2], [3, 4])
         remote_ids = ([5, 6], [7, 8])
 
-        specs = compute_read_specs_from_plan(plan, local_ids, remote_ids)
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(plan, local_ids, remote_ids)
         assert len(specs) == 3
 
         # Rank 0 (FA source): gets all groups
@@ -539,7 +539,6 @@ class TestMambaPlanSplitHandles:
             fa_regions=(),
             ssm_regions=(
                 RegionPlan(
-                    kind=RegionKind.SSM_STATE,
                     layer_idx=0,
                     descriptor_bytes=100,
                     offset_in_page=0,
@@ -547,7 +546,7 @@ class TestMambaPlanSplitHandles:
                     num_blocks=10,
                 ),
             ),
-            group_kinds=(GroupKind.FA, GroupKind.MAMBA),
+            group_spec_types=(FullAttentionSpec, MambaSpec),
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1),
             rank_to_attention_slot={0: 0, 1: 0},
@@ -561,7 +560,7 @@ class TestMambaPlanSplitHandles:
             (3000, 400, 0),  # SSM desc 0
         ]
 
-        splits = build_local_splits_from_plan(plan, src_blocks_data, 2)
+        splits = NixlConnectorWorker._build_local_splits_from_plan(plan, src_blocks_data, 2)
 
         assert len(splits) == 2  # 2 source ranks
 
