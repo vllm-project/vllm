@@ -4,7 +4,7 @@
 
 import json
 import math
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import torch
 from humming import dtypes
