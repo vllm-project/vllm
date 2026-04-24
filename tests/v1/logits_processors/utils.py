@@ -150,7 +150,7 @@ class DummyPerReqLogitsProcessor:
         output_ids: list[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        val_to_keep = logits[self.target_token]
+        val_to_keep = logits[self.target_token].clone()
         logits[:] = float("-inf")
         logits[self.target_token] = val_to_keep
         return logits
