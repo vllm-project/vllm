@@ -799,6 +799,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits,
         )
 
+        # CPU upper bound on seq_lens; padded entries left at zero.
+        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+        np.add(
+            self.req_states.num_computed_tokens_np[idx_mapping_np],
+            num_scheduled_tokens,
+            out=seq_lens_cpu_upper_bound_np[:num_reqs],
+        )
+        seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
+
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -814,6 +823,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=dcp_local_seq_lens,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
@@ -926,6 +936,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
+        )
+        # Advance the CPU mirror optimistically (assume all scheduled accepted).
+        self.req_states.num_computed_tokens_np[idx_mapping_np] += (
+            input_batch.num_scheduled_tokens
         )
 
     @torch.inference_mode()
@@ -1296,6 +1310,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
+        )
+        # Advance the CPU mirror optimistically (assume all scheduled accepted).
+        self.req_states.num_computed_tokens_np[idx_mapping_np] += (
+            input_batch.num_scheduled_tokens
         )
 
     ########### EPLB methods start ###########

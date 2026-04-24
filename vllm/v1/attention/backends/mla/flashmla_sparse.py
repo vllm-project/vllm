@@ -364,7 +364,10 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # For pure decode batches, prefill_request_id will be None
         # For mixed batches, it will have -1 for decode and request_id for prefill
         if num_prefills > 0:
-            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            # Upper bound is exact for prefill rows (the `[num_decodes:]`
+            # slice below), so no D2H sync is needed.
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
             seq_lens = common_attn_metadata.seq_lens
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
