@@ -136,7 +136,7 @@ def fused_topk_bias(
             )
             rocm_aiter_ops.biased_grouped_topk(
                 gating_output,
-                e_score_correction_bias.to(gating_output.dtype),
+                e_score_correction_bias,
                 topk_weights,
                 topk_ids,
                 num_expert_group=num_expert_group,
