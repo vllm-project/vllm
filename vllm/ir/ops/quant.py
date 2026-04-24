@@ -74,6 +74,15 @@ def static_quant_fp8(
     return _pad_token_dim(out_clamped, num_token_padding)
 
 
+@static_quant_fp8.register_input_generator
+def _(
+    num_tokens: int, hidden_size: int, dtype: torch.dtype, fp8_dtype: torch.dtype
+) -> tuple:
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    scale = torch.full((1,), 0.5, dtype=torch.float32)
+    return (x, scale, fp8_dtype)
+
+
 @register_op
 def static_group_quant_fp8(
     x: Tensor,
@@ -108,6 +117,21 @@ def static_group_quant_fp8(
     return _pad_token_dim(out, num_token_padding)
 
 
+@static_group_quant_fp8.register_input_generator
+def _(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    group_size: int,
+    fp8_dtype: torch.dtype,
+) -> tuple:
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    scale = torch.full(
+        (num_tokens, hidden_size // group_size), 0.5, dtype=torch.float32
+    )
+    return (x, scale, fp8_dtype)
+
+
 @register_op
 def dynamic_quant_fp8(
     x: Tensor,
@@ -135,6 +159,17 @@ def dynamic_quant_fp8(
         .to(fp8_dtype)
     )
     return _pad_token_dim(out, num_token_padding), scale
+
+
+@dynamic_quant_fp8.register_input_generator
+def _(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    per_token: bool,
+    fp8_dtype: torch.dtype,
+) -> tuple:
+    return (torch.randn(num_tokens, hidden_size, dtype=dtype), per_token, fp8_dtype)
 
 
 @register_op
@@ -178,3 +213,18 @@ def dynamic_group_quant_fp8(
     x_s.copy_(scales.squeeze(-1).reshape(x_s.shape))
 
     return x_quant, x_s
+
+
+@dynamic_group_quant_fp8.register_input_generator
+def _(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    group_shape: list[int],
+    column_major: bool,
+    use_ue8m0: bool,
+    fp8_dtype: torch.dtype,
+    scale_alignment: int = 1,
+) -> tuple:
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    return (x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment)

@@ -91,8 +91,12 @@ class TestStaticQuantFP8:
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     def test_native_semantics(self, dtype, n_tokens, hidden_size, num_token_padding):
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        scale = torch.full((1,), 0.5, dtype=torch.float32)
+        x, scale, _ = ir.ops.static_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            fp8_dtype=FP8_DTYPE,
+        )
         expected_tokens = (
             max(num_token_padding, n_tokens) if num_token_padding else n_tokens
         )
@@ -127,8 +131,12 @@ class TestStaticQuantFP8:
         if not impl.supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        scale = torch.full((1,), 0.5, dtype=torch.float32)
+        x, scale, _ = ir.ops.static_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            fp8_dtype=FP8_DTYPE,
+        )
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
         if provider == "aiter" and (
@@ -176,10 +184,12 @@ class TestStaticQuantFP8:
         if provider == "aiter" and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(f"aiter does not support dtype={dtype}")
 
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        scale = torch.full((1,), 0.5, dtype=torch.float32)
-
-        args = (x, scale, FP8_DTYPE, None)
+        args = ir.ops.static_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            fp8_dtype=FP8_DTYPE,
+        )
 
         with ir.ops.static_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.static_quant_fp8, args)
@@ -195,17 +205,17 @@ class TestStaticGroupQuantFP8:
     def setup_class(cls, **kwargs):
         torch.set_default_device(current_platform.device_type)
 
-    def _make_inputs(self, n_tokens, hidden_size, dtype, group_size):
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        n_groups = hidden_size // group_size
-        scale = torch.full((n_tokens, n_groups), 0.5, dtype=torch.float32)
-        return x, scale
-
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     def test_native_semantics(
         self, dtype, n_tokens, hidden_size, group_size, num_token_padding
     ):
-        x, scale = self._make_inputs(n_tokens, hidden_size, dtype, group_size)
+        x, scale, _ = ir.ops.static_group_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            group_size=group_size,
+            fp8_dtype=FP8_DTYPE,
+        )
         expected_tokens = (
             max(num_token_padding, n_tokens) if num_token_padding else n_tokens
         )
@@ -237,7 +247,13 @@ class TestStaticGroupQuantFP8:
         if not impl.supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x, scale = self._make_inputs(n_tokens, hidden_size, dtype, group_size)
+        x, scale, _ = ir.ops.static_group_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            group_size=group_size,
+            fp8_dtype=FP8_DTYPE,
+        )
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
         assert impl.supports_args(*args)
@@ -276,8 +292,13 @@ class TestStaticGroupQuantFP8:
         if not ir.ops.static_group_quant_fp8.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x, scale = self._make_inputs(n_tokens, hidden_size, dtype, group_size)
-        args = (x, scale, FP8_DTYPE, None)
+        args = ir.ops.static_group_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            group_size=group_size,
+            fp8_dtype=FP8_DTYPE,
+        )
 
         with ir.ops.static_group_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.static_group_quant_fp8, args)
@@ -297,7 +318,13 @@ class TestDynamicQuantFP8:
     def test_native_semantics(
         self, dtype, n_tokens, hidden_size, per_token, num_token_padding
     ):
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        x, _, _ = ir.ops.dynamic_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            per_token=per_token,
+            fp8_dtype=FP8_DTYPE,
+        )
         expected_tokens = (
             max(num_token_padding, n_tokens) if num_token_padding else n_tokens
         )
@@ -332,7 +359,13 @@ class TestDynamicQuantFP8:
         if not impl.supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        x, _, _ = ir.ops.dynamic_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            per_token=per_token,
+            fp8_dtype=FP8_DTYPE,
+        )
         args = (x, per_token, FP8_DTYPE, None, num_token_padding)
 
         if provider == "aiter" and (
@@ -388,8 +421,13 @@ class TestDynamicQuantFP8:
         if provider == "aiter" and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(f"aiter does not support dtype={dtype}")
 
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        args = (x, per_token, FP8_DTYPE, None, None)
+        args = ir.ops.dynamic_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            per_token=per_token,
+            fp8_dtype=FP8_DTYPE,
+        )
 
         with ir.ops.dynamic_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.dynamic_quant_fp8, args)
@@ -418,13 +456,20 @@ class TestDynamicGroupQuantFP8:
         scale_alignment,
         use_ue8m0,
     ):
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        group_shape = [group_size]
+        args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            group_shape=[group_size],
+            column_major=column_major,
+            use_ue8m0=use_ue8m0,
+            fp8_dtype=FP8_DTYPE,
+            scale_alignment=scale_alignment,
+        )
+        x = args[0]
         n_groups = hidden_size // group_size
 
-        x_q, x_s = dynamic_group_quant_fp8_native(
-            x, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment
-        )
+        x_q, x_s = dynamic_group_quant_fp8_native(*args)
 
         assert x_q.shape == x.shape
         assert x_q.dtype == FP8_DTYPE
@@ -464,10 +509,18 @@ class TestDynamicGroupQuantFP8:
         if not impl.supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        group_shape = [group_size]
+        args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            group_shape=[group_size],
+            column_major=column_major,
+            use_ue8m0=use_ue8m0,
+            fp8_dtype=FP8_DTYPE,
+            scale_alignment=scale_alignment,
+        )
+        x, group_shape = args[0], args[1]
         n_groups = hidden_size // group_size
-        args = (x, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
 
         if not impl.supports_args(*args):
             pytest.skip(
@@ -568,9 +621,16 @@ class TestDynamicGroupQuantFP8:
         if not ir.ops.dynamic_group_quant_fp8.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        group_shape = [group_size]
-        args = (x, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
+        args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            group_shape=[group_size],
+            column_major=column_major,
+            use_ue8m0=use_ue8m0,
+            fp8_dtype=FP8_DTYPE,
+            scale_alignment=scale_alignment,
+        )
 
         if not ir.ops.dynamic_group_quant_fp8.impls[provider].supports_args(*args):
             pytest.skip(f"{provider} does not support these args")
