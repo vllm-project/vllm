@@ -93,10 +93,13 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.config import get_current_vllm_config
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
+from vllm.v1.kv_cache_interface import DSAAttentionSpec, MomeSpec
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -141,85 +144,197 @@ class PanguSinkAttentionBase:
         param_data.copy_(loaded_weight)
 
 
-@CustomOp.register("AggregateConv")
-class AggregateConv(CustomOp):
+@CustomOp.register("MomeAttention")
+class MomeAttention(MambaBase, CustomOp):
+    """
+    MoME attention layer with vLLM KV cache management.
+    Handles 3-part convolution state (q, kv, o).
+    """
+
     def __init__(
         self,
-        hidden_size: int,
-        config: PretrainedConfig,
+        kernel_size: int,
+        num_spec_tokens: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        num_local_heads: int,
+        v_head_dim: int,
         vllm_config: VllmConfig,
-        output_parallel: bool,
-        attn_prefix: str
+        prefix: str,
     ):
         super().__init__()
-        # TODO: Current working format operations natively handled
-        self.hidden_size = hidden_size
-        self.output_parallel = output_parallel
-        self.router_sliding_window = getattr(config, 'router_sliding_window', 0)
-        self.merge_conv = torch.nn.Conv1d(
-            in_channels=hidden_size,
-            out_channels=hidden_size,
-            kernel_size=self.router_sliding_window,
-            groups=hidden_size,
-            bias=False,
-        )
-        self.attn_prefix = attn_prefix
-        set_weight_attrs(self.merge_conv.weight, {"weight_loader": self.weight_loader})
-        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.cache_length = self.router_sliding_window - 1
-        spec_token_num = 0
-        if vllm_config.speculative_config:
-            spec_token_num = vllm_config.speculative_config.num_speculative_tokens
-        self.cache_capacity = self.cache_length + spec_token_num
-        self.spec_token_num = spec_token_num
-        self.cache_states = torch.zeros((self.max_num_seqs + 1, self.cache_capacity, hidden_size), device=current_platform.device_type)
-        self.base_idx = torch.arange(self.cache_length, device=current_platform.device_type).unsqueeze(0)
+        self.kernel_size = kernel_size
+        self.num_spec_tokens = num_spec_tokens
+        self.dtype = vllm_config.model_config.dtype
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.num_local_heads = num_local_heads
+        self.v_head_dim = v_head_dim
+        self.o_dim = num_local_heads * v_head_dim
+        self.prefix = prefix
 
-    def forward(self, hidden_states: torch.Tensor, only_prefill=False, force_decode=False, short_prefill=False) -> torch.Tensor:
+        # 3 Conv1d weights for q, kv, o
+        # These names match the original weights in the checkpoint
+        self.qa_conv = nn.Conv1d(q_lora_rank,
+                                 q_lora_rank,
+                                 kernel_size,
+                                 groups=q_lora_rank,
+                                 bias=False,
+                                 dtype=self.dtype)
+        self.compresskv_conv = nn.Conv1d(kv_lora_rank,
+                                         kv_lora_rank,
+                                         kernel_size,
+                                         groups=kv_lora_rank,
+                                         bias=False,
+                                         dtype=self.dtype)
+        self.o_conv = nn.Conv1d(self.o_dim,
+                                self.o_dim,
+                                kernel_size,
+                                groups=self.o_dim,
+                                bias=False,
+                                dtype=self.dtype)
+
+        # Set weight loading attributes
+        set_weight_attrs(self.qa_conv.weight,
+                         {"weight_loader": self.weight_loader})
+        set_weight_attrs(self.compresskv_conv.weight,
+                         {"weight_loader": self.weight_loader})
+        set_weight_attrs(self.o_conv.weight, {
+            "weight_loader": self.weight_loader,
+            "output_parallel": True
+        })
+
+        # In v1, the KV cache tensors are set by the ModelRunner
+        self.kv_cache = (torch.tensor([]), torch.tensor([]), torch.tensor([]))
+
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+    @property
+    def mamba_type(self) -> str:
+        return "mome"
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return ((self.q_lora_rank, ), (self.kv_lora_rank, ), (self.o_dim, ))
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return (self.qa_conv.weight.dtype, ) * 3
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MomeSpec:
+        num_total_tokens = self.kernel_size - 1 + self.num_spec_tokens
+        return MomeSpec(
+            block_size=vllm_config.cache_config.block_size,
+            shapes=tuple((num_total_tokens, *s) for s in self.get_state_shape()),
+            dtypes=self.get_state_dtype(),
+            mamba_type=self.mamba_type,
+            kernel_size=self.kernel_size,
+            num_spec_tokens=self.num_spec_tokens,
+            page_size_padded=vllm_config.cache_config.mamba_page_size_padded,
+        )
+
+    def get_attn_backend(self) -> type:
+        from vllm.v1.attention.backends.mome_attn import MomeAttentionBackend
+        return MomeAttentionBackend
+
+    def forward(self, hidden_states: torch.Tensor,
+                state_indice: int) -> torch.Tensor:
         forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            # V1 profile run
+        if forward_context.attn_metadata is None:
             return hidden_states
-        attn_metadata = attn_metadata[self.attn_prefix]
-        if attn_metadata.num_prefills:
-            query_start_loc = attn_metadata.prefill.query_start_loc
-            batch_size = len(query_start_loc) - 1
+        mome_metadata = forward_context.attn_metadata[self.prefix]
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+
+        def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
+            # MOME only needs one persistent state slot per request.
+            # When prefix caching is globally enabled, vLLM may pass the full
+            # block table here; we use the first block as the request state.
+            if state_indices.ndim > 1:
+                return state_indices[:, 0]
+            return state_indices
+
+        if state_indice == 0:
+            conv_weight = self.qa_conv.weight
+            cache = self_kv_cache[0]
+            hidden_size = self.q_lora_rank
+        elif state_indice == 1:
+            conv_weight = self.compresskv_conv.weight
+            cache = self_kv_cache[1]
+            hidden_size = self.kv_lora_rank
+        else:
+            conv_weight = self.o_conv.weight
+            cache = self_kv_cache[2]
+            hidden_size = self.o_dim
+
+        conv_weight = conv_weight.to(hidden_states.dtype)
+        output_chunks = []
+
+        num_decodes = mome_metadata.num_decode_tokens
+        if num_decodes > 0:
+            decode_hidden_states = hidden_states[:num_decodes]
+            decode_state_indices = _get_request_state_indices(
+                mome_metadata.state_indices_tensor[:num_decodes])
+            prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
+                hidden_states.dtype)
+            conv_input = torch.cat(
+                [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
+            conv_output = torch.nn.functional.conv1d(
+                conv_input.permute(0, 2, 1),
+                conv_weight,
+                groups=hidden_size,
+            )
+            cache[decode_state_indices, :self.kernel_size -
+                  1] = conv_input[:, -(self.kernel_size - 1):]
+            output_chunks.append(
+                conv_output.permute(0, 2, 1).reshape(-1, hidden_size))
+
+        if mome_metadata.num_prefills > 0:
+            query_start_loc = mome_metadata.query_start_loc_p
+            assert query_start_loc is not None
+            prefill_hidden_states = hidden_states[num_decodes:num_decodes +
+                                                  mome_metadata.num_prefill_tokens]
+            prefill_state_indices = _get_request_state_indices(
+                mome_metadata.state_indices_tensor[
+                    num_decodes:num_decodes + mome_metadata.num_prefills])
             conv_output_list = []
-            for i in range(batch_size):
+            for i in range(mome_metadata.num_prefills):
                 s = query_start_loc[i]
                 e = query_start_loc[i + 1]
-                local_input = hidden_states[s: e]
-                conv_input = torch.cat([self.cache_states[i], local_input], dim=0)
-                conv_input_transpose = conv_input.transpose(1, 0)
-                conv_output = self.merge_conv(conv_input_transpose).transpose(1, 0)
-                self.cache_states[i + 1, :self.cache_length, :] = conv_input[-self.cache_length:, :]
-                conv_output[:self.cache_length] = 0
+                local_input = prefill_hidden_states[s:e]
+                state_idx = prefill_state_indices[i]
+                prev_cache = cache[state_idx, :self.kernel_size - 1].to(
+                    hidden_states.dtype)
+                conv_input = torch.cat([prev_cache, local_input], dim=0)
+                conv_output = torch.nn.functional.conv1d(
+                    conv_input.transpose(1, 0).unsqueeze(0),
+                    conv_weight,
+                    groups=hidden_size,
+                ).squeeze(0).transpose(1, 0)
+                cache[state_idx, :self.kernel_size - 1] = conv_input[
+                    -(self.kernel_size - 1):]
                 conv_output_list.append(conv_output)
-            if e < hidden_states.shape[0]:
-                conv_output_list.append(hidden_states[e:])
-            conv_output =  torch.cat(conv_output_list, dim=0)
-        else:
-            num_tokens = hidden_states.shape[0]
-            conv_input = torch.cat([self.cache_states[:num_tokens], hidden_states.unsqueeze(1)], dim=1)
-            conv_input_transpose = conv_input.permute(0, 2, 1)
-            conv_output = self.merge_conv(conv_input_transpose).permute(0, 2, 1).view(-1, self.hidden_size)
-            # idx 0 for new requests padding 0
-            self.cache_states[1: num_tokens + 1, :self.cache_length, :] = conv_input[:, -self.cache_length:, :]
-        return conv_output
+            output_chunks.append(torch.cat(conv_output_list, dim=0))
+
+        if len(output_chunks) == 1:
+            return output_chunks[0]
+        return torch.cat(output_chunks, dim=0)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
+        output_parallel = getattr(param, "output_parallel", False)
         param_data = param.data
-        if self.output_parallel:
-            loaded_weight = loaded_weight.narrow(0, tp_rank * self.hidden_size, self.hidden_size)
+        if output_parallel:
+            shard_size = param_data.shape[0]
+            loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size,
+                                                 shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
 
 class PanguIndexer(nn.Module):
     """
-    Pangu Indexer for DSA Attention, optimized for NPU.
+    Pangu Indexer for DSA Attention.
     """
     def __init__(
         self,
@@ -267,6 +382,23 @@ class PanguIndexer(nn.Module):
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
         self.sink_len = getattr(config, 'param_sink_number', 0)
         self.num_sink_blocks = self.sink_len // self.vllm_config.cache_config.block_size
+        self.kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> DSAAttentionSpec:
+        from vllm.v1.kv_cache_interface import DSAAttentionSpec
+        from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            cache_config.cache_dtype, model_config)
+        return DSAAttentionSpec(
+            block_size=cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_dim,
+            dtype=kv_cache_dtype,
+            page_size_padded=cache_config.mamba_page_size_padded,
+            cache_dtype_str=cache_config.cache_dtype,
+        )
 
     def forward(
         self,
@@ -308,8 +440,13 @@ class PanguIndexer(nn.Module):
         assert len(kv_cache) >= 3, (f"Expected kv_cache to have at least 3 elements, but got {len(kv_cache)}")
         
         if kv_cache[2] is not None:
-            # PyTorch native equivalent for NPU scatter
-            kv_cache[2].view(-1, k.shape[-1])[attn_metadata.slot_mapping] = k.view(-1, k.shape[-1])
+            # Multi-dimensional indexing is robust to padding between blocks.
+            block_size = self.vllm_config.cache_config.block_size
+            # Shape: [num_blocks, padded_tokens_per_block, head_dim]
+            q_cache = kv_cache[2].view(kv_cache[2].shape[0], -1, k.shape[-1])
+            block_ids = attn_metadata.slot_mapping // block_size
+            offsets = attn_metadata.slot_mapping % block_size
+            q_cache[block_ids, offsets] = k
 
         bs = q.shape[0]
         self.topk_indices_buffer[:bs] = self._apply_indexer(
@@ -347,8 +484,11 @@ class PanguIndexer(nn.Module):
             if len(valid_blocks) == 0:
                 continue
                 
-            valid_keys = key[valid_blocks]
-            flat_keys = valid_keys.view(-1, self.head_dim)
+            # Ensure we only pick valid tokens, skipping padding if any
+            block_size = self.vllm_config.cache_config.block_size
+            q_cache = key.view(key.shape[0], -1, self.head_dim)
+            valid_keys = q_cache[valid_blocks, :block_size]
+            flat_keys = valid_keys.reshape(-1, self.head_dim)
             
             token_q = query[i]  # [n_heads, head_dim]
             token_w = weights[i]  # [n_heads]
@@ -663,13 +803,21 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
         self.sliding_window = sliding_window
         # MOME
         if getattr(config, "use_mome", False):
-            self.qa_conv = AggregateConv(self.q_lora_rank, config, vllm_config, output_parallel=False, attn_prefix=f"{prefix}.attn")
-            self.compresskv_conv = AggregateConv(self.kv_lora_rank, config, vllm_config, output_parallel=False, attn_prefix=f"{prefix}.attn")
-            self.o_conv = AggregateConv(self.num_local_heads * self.v_head_dim, config, vllm_config, output_parallel=True, attn_prefix=f"{prefix}.attn")
+            spec_token_num = 0
+            if vllm_config.speculative_config:
+                spec_token_num = vllm_config.speculative_config.num_speculative_tokens
+            self.mome_attn = MomeAttention(
+                kernel_size=config.router_sliding_window,
+                num_spec_tokens=spec_token_num,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                num_local_heads=self.num_local_heads,
+                v_head_dim=self.v_head_dim,
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mome_attn",
+            )
         else:
-            self.qa_conv = None
-            self.compresskv_conv = None
-            self.o_conv = None
+            self.mome_attn = None
         mla_modules = MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -720,9 +868,7 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                 prefix,
                 sink_len=self.param_sink_number,
                 sliding_window=sliding_window,
-                qa_conv = self.qa_conv,
-                compresskv_conv = self.compresskv_conv,
-                o_conv = self.o_conv,
+                mome_attn=self.mome_attn,
             )
             self.param_sink_k_pe = torch.nn.Parameter(
                 torch.empty(
@@ -1788,8 +1934,21 @@ class OpenPanguModel(nn.Module):
                     name = name.replace(
                         "e_score_correction_bias", "gate.e_score_correction_bias"
                     )
-                if "_conv" in name:
-                    name = name.replace("_conv", "_conv.merge_conv")
+                if ".self_attn.qa_conv.weight" in name:
+                    name = name.replace(
+                        ".self_attn.qa_conv.weight",
+                        ".self_attn.mome_attn.qa_conv.weight",
+                    )
+                if ".self_attn.compresskv_conv.weight" in name:
+                    name = name.replace(
+                        ".self_attn.compresskv_conv.weight",
+                        ".self_attn.mome_attn.compresskv_conv.weight",
+                    )
+                if ".self_attn.o_conv.weight" in name:
+                    name = name.replace(
+                        ".self_attn.o_conv.weight",
+                        ".self_attn.mome_attn.o_conv.weight",
+                    )
                 if name is None:
                     continue
                 if is_pp_missing_parameter(name, self):
@@ -1883,6 +2042,19 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
 
 
 class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        config = vllm_config.model_config.hf_config
+        return (
+            (config.q_lora_rank, ),
+            (config.kv_lora_rank, ),
+            (config.num_attention_heads * config.v_head_dim, ),
+        )
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return (vllm_config.model_config.dtype, ) * 3
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
+import torch.nn as nn
 
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
@@ -198,9 +200,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         prefix: str = "",
         sink_len: int = 0,
         sliding_window: int | None = None,
-        qa_conv: None = None,
-        compresskv_conv: None = None,
-        o_conv: None = None,
+        mome_attn: Optional[nn.Module] = None,
         is_hybrid_kv: bool = False
     ) -> None:
         super().__init__(
@@ -217,9 +217,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             quant_config=quant_config,
             prefix=prefix,
         )
-        self.qa_conv = qa_conv
-        self.compresskv_conv = compresskv_conv
-        self.o_conv = o_conv
+        self.mome_attn = mome_attn
 
         from vllm.model_executor.layers.attention.static_sink_attention import StaticSinkMLAAttention
         self.mla_attn = StaticSinkMLAAttention(
@@ -265,8 +263,8 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            if self.qa_conv is not None:
-                q_c = self.qa_conv(q_c) + q_c
+            if self.mome_attn is not None:
+                q_c = self.mome_attn(q_c, state_indice=0) + q_c
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
@@ -280,8 +278,8 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             q = self.q_proj(hidden_states)[0]
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        if self.compresskv_conv is not None:
-            kv_c = self.compresskv_conv(kv_c) + kv_c
+        if self.mome_attn is not None:
+            kv_c = self.mome_attn(kv_c, state_indice=1) + kv_c
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
@@ -309,6 +307,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
 
-        if self.o_conv is not None:
-            attn_out = self.o_conv(attn_out) + attn_out
+        if self.mome_attn is not None:
+            attn_out = self.mome_attn(attn_out, state_indice=2) + attn_out
         return self.o_proj(attn_out)[0]

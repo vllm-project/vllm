@@ -592,6 +592,32 @@ class MambaSpec(KVCacheSpec):
 
 
 @dataclass(frozen=True)
+class MomeSpec(MambaSpec):
+    """
+    A spec for MoME (Mixture of MoME Experts) conv states.
+    Stores representations of `kernel_size - 1 + num_spec_tokens` tokens per block,
+    with 3 state components: q_cache, kv_cache, o_cache.
+    """
+    kernel_size: int = 0
+    num_spec_tokens: int = 0
+
+    @property
+    def num_total_tokens(self) -> int:
+        return self.kernel_size - 1 + self.num_spec_tokens
+
+    def __post_init__(self):
+        if len(self.shapes) != 3:
+            raise ValueError(
+                f"MoME has 3 components but got {len(self.shapes)} shapes.")
+        if len(self.dtypes) != 3:
+            raise ValueError(
+                f"MoME has 3 components but got {len(self.dtypes)} dtypes.")
+        if self.kernel_size <= 0:
+            raise ValueError(
+                f"kernel_size must be positive, got {self.kernel_size}.")
+
+
+@dataclass(frozen=True)
 class EncoderOnlyAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # Encoder-only layers do not need KV cache
@@ -661,6 +687,44 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             "layers is not supported."
         )
         return merged_spec
+
+
+@dataclass(frozen=True)
+class DSAAttentionSpec(AttentionSpec):
+    # TODO(Lucas/Chen): less hacky way to do this
+    cache_dtype_str: str | None = None
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        if self.cache_dtype_str == "fp8_ds_mla":
+            # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
+            # 512 bf16 + 64 bf16 + 4 fp32 + 128 int8 + 1 bf16
+            return self.block_size * (656 + 128 + 2)
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * self.head_size
+            * get_dtype_size(self.dtype)
+        )
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, DSAAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be DSAAttentionSpec."
+        )
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "quantization method."
+        )
+        return cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            dtype=specs[0].dtype,
+            page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=cache_dtype_str_set.pop(),
+        )
 
 
 @dataclass(frozen=True)
@@ -858,8 +922,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             )
         elif isinstance(one_spec, MambaSpec):
             return all(
-                isinstance(spec, MambaSpec)
+                isinstance(spec, (MambaSpec, MomeSpec))
+                and type(spec) is type(one_spec)
                 and spec.num_speculative_blocks == one_spec.num_speculative_blocks
+                for spec in kv_cache_specs.values()
+            )
+        elif isinstance(one_spec, DSAAttentionSpec):
+            return all(
+                isinstance(spec, DSAAttentionSpec)
                 for spec in kv_cache_specs.values()
             )
         else:

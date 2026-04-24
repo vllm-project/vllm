@@ -266,7 +266,7 @@ direct_register_custom_op(
 
 
 class StaticSinkMLAAttention(MLAAttention):
-    """MLAAttention with static sink tokens for NPU."""
+    """MLAAttention with static sink tokens."""
 
     def __init__(
         self,
@@ -377,15 +377,19 @@ class StaticSinkMLAAttention(MLAAttention):
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        # Use max_sliding_window for KV management grouping
+        max_sliding_window = getattr(vllm_config.model_config.hf_config, "max_sliding_window", self.sliding_window)
         if self.sink_len > 0 and self.sliding_window is not None:
             return SinkMLASlidingWindowSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=self.head_size,
                 dtype=kv_cache_dtype,
+                page_size_padded=page_size_padded,
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
                 sink_len=self.sink_len,
-                sliding_window=self.sliding_window,
+                sliding_window=max_sliding_window,
             )
         if self.sink_len > 0:
             return SinkMLAAttentionSpec(
@@ -393,6 +397,7 @@ class StaticSinkMLAAttention(MLAAttention):
                 num_kv_heads=1,
                 head_size=self.head_size,
                 dtype=kv_cache_dtype,
+                page_size_padded=page_size_padded,
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
                 sink_len=self.sink_len,
             )
@@ -401,5 +406,6 @@ class StaticSinkMLAAttention(MLAAttention):
                 num_kv_heads=1,
                 head_size=self.head_size,
                 dtype=kv_cache_dtype,
+                page_size_padded=page_size_padded,
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
             )
