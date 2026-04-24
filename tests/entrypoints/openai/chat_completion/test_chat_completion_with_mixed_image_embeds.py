@@ -18,9 +18,9 @@ from vllm.utils.serial_utils import tensor2base64
 
 LLAVA_MODEL = "llava-hf/llava-1.5-7b-hf"
 
-# Use the model's native dtype to avoid mixed-precision casting warnings.
-# `safe_load_prompt_embeds` validates that the input embedding tensors dtype matches
-# `ModelConfig.dtype`, so fixture tensors must use the same value.
+# Use the model's native dtype to avoid an implicit cast inside
+# `safe_load_prompt_embeds` (mismatched floating-point dtypes are cast to the
+# model's dtype automatically, matching here just skips the conversion).
 LLAVA_DTYPE = torch.float16
 
 

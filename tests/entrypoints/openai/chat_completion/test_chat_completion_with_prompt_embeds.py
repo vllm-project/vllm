@@ -16,8 +16,9 @@ from tests.utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "facebook/opt-125m"
 CHAT_TEMPLATE = VLLM_PATH / "examples/template_chatml.jinja"
-# Must match `--dtype` in `server_args`, `safe_load_prompt_embeds` rejects
-# embedding tensors whose dtype doesn't match the loaded model.
+# Matches `--dtype` in `server_args` to avoid an implicit cast in
+# `safe_load_prompt_embeds` (mismatched floating-point dtypes are cast to the
+# model's dtype automatically, we match here just to skip the conversion).
 SERVER_DTYPE: torch.dtype = torch.bfloat16
 
 
@@ -62,7 +63,9 @@ def prompt_embeds_b64(hf_runner) -> list[str]:
     prompts = ["Hello, my name is", "What is an LLM?"]
     with hf_runner(MODEL_NAME) as hf_model:
         embeddings = hf_model.get_prompt_embeddings(prompts)
-    # Cast to the server's dtype so `safe_load_prompt_embeds` accepts them.
+    # Cast to the server's dtype so `safe_load_prompt_embeds` doesn't need to
+    # convert on its own, the function accepts any floating-point dtype and
+    # will cast to the model's dtype, but matching up front skips the work.
     return [_encode_embeds(e.to(SERVER_DTYPE)) for e in embeddings]
 
 

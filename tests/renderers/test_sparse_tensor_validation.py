@@ -150,14 +150,27 @@ class TestPromptEmbedsValidation:
         with pytest.raises(VLLMValidationError, match="hidden_size"):
             safe_load_prompt_embeds(model_config, encoded)
 
-    def test_dtype_mismatch_rejected(self, model_config):
-        """Tensors whose dtype doesn't match the model's dtype must be
-        rejected at parse time."""
+    def test_float_dtype_mismatch_cast_to_model_dtype(self, model_config):
+        """Tensors whose dtype doesn't match the model's dtype but are still
+        floating-point are cast, since API clients generally can't know the
+        server's `--dtype` setting ahead of time."""
         # Fixture pins model dtype to float32, upload a bfloat16 tensor.
-        wrong_dtype = torch.randn(10, 768, dtype=torch.bfloat16)
-        encoded = _encode_tensor(wrong_dtype)
+        mismatched_float = torch.randn(10, 768, dtype=torch.bfloat16)
+        encoded = _encode_tensor(mismatched_float)
 
-        with pytest.raises(VLLMValidationError, match="dtype"):
+        result = safe_load_prompt_embeds(model_config, encoded)
+
+        assert result.dtype == torch.float32
+        assert result.shape == mismatched_float.shape
+
+    def test_non_float_dtype_rejected(self, model_config):
+        """Non-floating-point dtypes cannot be safely cast for embeddings
+        (e.g. integer tensors almost certainly indicate caller confusion),
+        so they are rejected at parse time."""
+        non_float = torch.randint(0, 100, (10, 768), dtype=torch.int32)
+        encoded = _encode_tensor(non_float)
+
+        with pytest.raises(VLLMValidationError, match="floating-point"):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_non_2d_tensor_rejected(self, model_config):

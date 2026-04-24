@@ -47,7 +47,7 @@ def safe_load_prompt_embeds(
             parameter="prompt_embeds",
         )
 
-    # Pin each tensor to the model's hidden_size and dtype. Validating here
+    # Pin each tensor to the model's hidden_size. Validating here
     # also transitively guarantees cross-tensor consistency for requests that
     # include multiple `prompt_embeds` parts, which is required by downstream
     # concatenation in `_build_mixed_prompt_embeds`.
@@ -59,13 +59,20 @@ def safe_load_prompt_embeds(
             parameter="prompt_embeds",
         )
 
+    # Cast to the model's dtype so API clients don't need to know the server's
+    # `--dtype` setting ahead of time. Only floating-point source dtypes are
+    # allowed. integer / bool / complex inputs almost certainly indicate caller
+    # error (e.g. quantized payloads, wrong tensor), and a silent `.to()`
+    # could hide a real mistake.
     expected_dtype = model_config.dtype
     if tensor.dtype != expected_dtype:
-        raise VLLMValidationError(
-            f"`prompt_embeds` dtype {tensor.dtype} does not match "
-            f"the model's dtype {expected_dtype}.",
-            parameter="prompt_embeds",
-        )
+        if not tensor.is_floating_point():
+            raise VLLMValidationError(
+                f"`prompt_embeds` dtype {tensor.dtype} is not a floating-point "
+                f"type, cannot safely cast to the model's dtype {expected_dtype}.",
+                parameter="prompt_embeds",
+            )
+        tensor = tensor.to(expected_dtype)
 
     return tensor
 
