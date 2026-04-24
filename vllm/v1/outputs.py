@@ -191,6 +191,11 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
 
+    # req_id -> mean-pooled prompt hidden states (CPU tensor, [hidden_size]).
+    # Populated only for opted-in generative requests on the step that
+    # finalises their prompt. See AuxPoolState in worker.
+    aux_pooled_output: dict[str, torch.Tensor] | None = None
+
     kv_connector_output: KVConnectorOutput | None = None
 
     ec_connector_output: ECConnectorOutput | None = None
