@@ -160,151 +160,230 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
   return make_float4(dat0, dat1, dat2, dat3);
 }
 
-// TBlock fetches entire rows of A, and entire col of B (K dimension); assume
-// N=1 for time being grid is M/A_NUM_ROWS blocks
-template <typename scalar_t, int NUM_A_ROWS_PER_BLOCK>
-__global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
-                               scalar_t* out_c, const int K) {
-  using scalar2_t = typename scalar2<scalar_t>::type;
-  auto af4 = reinterpret_cast<const float4*>(in_a);
-  auto bf4 = reinterpret_cast<const scalar2_t*>(in_b);
-  auto c = reinterpret_cast<scalar2_t*>(out_c);
-  __shared__ float red_smem[NUM_A_ROWS_PER_BLOCK][WARP_SIZE];
-  const int row_addr = blockIdx.x * NUM_A_ROWS_PER_BLOCK * K / 8;
-  const int threadid = threadIdx.x;
-  const int warp = threadIdx.x / WARP_SIZE;
-  const int lane = threadIdx.x % WARP_SIZE;
-  const int num_warps = blockDim.x / WARP_SIZE;
-  const int qwarpid = threadid / 16;
-  const int qthreadid = threadid % 16;
-  float4 rowA_elem4[NUM_A_ROWS_PER_BLOCK];
-  scalar2_t colB_elem4x, colB_elem4y, colB_elem4z, colB_elem4w;
-  float acc[NUM_A_ROWS_PER_BLOCK];
-  scalar2_t acch2;
-  scalar2_t oval;
-
-  // As we later use warp shuffle operations, we may have more threads in the
-  // block than the actual available data, hence the if guard here.
-  if (threadid * 8 < K) {
+template <typename scalar_t, typename scalar2_t, int ROWS_PER_BLOCK>
+__device__ __forceinline__ void load_tile(
+    const float4* mat_f4, const scalar2_t* vec_h2, int thread_id,
+    int block_base_addr, int K, float4 mat_chunk[ROWS_PER_BLOCK],
+    scalar2_t& vec_h2x, scalar2_t& vec_h2y, scalar2_t& vec_h2z,
+    scalar2_t& vec_h2w) {
+  constexpr int ELEMS_PER_FLOAT4 = sizeof(float4) / sizeof(scalar_t);
+  constexpr int PAIRS_PER_FLOAT4 = sizeof(float4) / sizeof(scalar2_t);
+  if (thread_id * ELEMS_PER_FLOAT4 < K) {
 #pragma unroll
-    for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
-      // rowA_elem4[i] holds 8 * half numbers seen as a single float4.
-      rowA_elem4[i] = load_ntmprl(&af4[row_addr + threadid + K / 8 * i]);
+    for (int i = 0; i < ROWS_PER_BLOCK; i++) {
+      // block_base_addr: first float4 of row 0 for this block
+      // thread_id: this thread's column chunk within a row
+      // K / ELEMS_PER_FLOAT4 * i: row stride to row i
+      mat_chunk[i] = load_ntmprl(
+          &mat_f4[block_base_addr + thread_id + K / ELEMS_PER_FLOAT4 * i]);
     }
-    colB_elem4x = bf4[threadid * 4 + 0];
-    colB_elem4y = bf4[threadid * 4 + 1];
-    colB_elem4z = bf4[threadid * 4 + 2];
-    colB_elem4w = bf4[threadid * 4 + 3];
+    vec_h2x = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 0];
+    vec_h2y = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 1];
+    vec_h2z = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 2];
+    vec_h2w = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 3];
   }
+}
 
-  scalar2_t Af2;
-  float2 S;
+template <typename scalar2_t>
+__device__ __forceinline__ float dot_row(scalar2_t* mat_row_ptr,
+                                         scalar2_t vec_h2x, scalar2_t vec_h2y,
+                                         scalar2_t vec_h2z, scalar2_t vec_h2w) {
+  scalar2_t acc_h2 = __hmul2(*mat_row_ptr, vec_h2x);
+  acc_h2 = __hfma2(*(mat_row_ptr + 1), vec_h2y, acc_h2);
+  acc_h2 = __hfma2(*(mat_row_ptr + 2), vec_h2z, acc_h2);
+  acc_h2 = __hfma2(*(mat_row_ptr + 3), vec_h2w, acc_h2);
+  float2 sum = __s22float2(acc_h2);
+  return sum.x + sum.y;
+}
 
-  auto Ah2ptr = reinterpret_cast<scalar2_t*>(&rowA_elem4);
-  scalar2_t* ah2lptr;
-
-#pragma unroll
-  for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
-    // Multiply-add on 8 scalar_t.
-    ah2lptr = Ah2ptr + i * 4;
-    Af2 = *(ah2lptr);
-    acch2 = __hmul2(Af2, colB_elem4x);
-    Af2 = *(ah2lptr + 1);
-    acch2 = __hfma2(Af2, colB_elem4y, acch2);
-    Af2 = *(ah2lptr + 2);
-    acch2 = __hfma2(Af2, colB_elem4z, acch2);
-    Af2 = *(ah2lptr + 3);
-    acch2 = __hfma2(Af2, colB_elem4w, acch2);
-    S = __s22float2(acch2);
-
-    // See comment above concerning the if guard.
-    acc[i] = (threadid * 8 < K ? S.x + S.y : 0.f);
-  }
-
-// all reduce across warp.
+template <int ROWS_PER_BLOCK>
+__device__ __forceinline__ void warp_reduce(float acc[ROWS_PER_BLOCK]) {
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
 #pragma unroll
-    for (int i = 0; i < NUM_A_ROWS_PER_BLOCK; i++) {
+    for (int i = 0; i < ROWS_PER_BLOCK; i++) {
       acc[i] += __shfl_xor(acc[i], mask);
-    }
-  }
-
-  // Warp leaders store the data to shared memory.
-  if (lane < NUM_A_ROWS_PER_BLOCK) {
-    red_smem[lane][warp] = acc[lane];
-  }
-
-  // Make sure the data is in shared memory.
-  __syncthreads();
-
-  if (qwarpid < NUM_A_ROWS_PER_BLOCK) {
-    acc[qwarpid] = qthreadid < num_warps ? red_smem[qwarpid][qthreadid] : 0.f;
-#pragma unroll
-    for (int mask = 16 / 2; mask >= 1; mask /= 2) {
-      acc[qwarpid] += __shfl_xor(acc[qwarpid], mask);
-    }
-    float oval2 = __shfl_xor(acc[qwarpid], 16);
-
-    if (lane % 32 == 0) {
-      oval = __float22s2_rn<scalar2_t>(make_float2(acc[qwarpid], oval2));
-      c[blockIdx.x * NUM_A_ROWS_PER_BLOCK / 2 + qwarpid / 2] = oval;
     }
   }
 }
 
-torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
-                    const int64_t rows_per_block) {
-  auto M = in_a.size(0);
-  auto K = in_a.size(1);
-  auto N = in_b.size(0);
+// Computes mat (M x K) * vec (1 x K) -> out (1 x M): one dot product per row of
+// mat. Grid: (M / ROWS_PER_BLOCK) blocks; each block owns ROWS_PER_BLOCK
+// consecutive rows.
+//
+// Four stages:
+//   Stage 1 — partial dot products: each thread loads one float4 per row
+//   (ROWS_PER_BLOCK rows
+//             total) from mat and one float4 from vec, accumulating partial dot
+//             products into acc[].
+//   Stage 2 — intra-warp butterfly: warp_reduce gives all lanes the same acc[];
+//   lanes
+//             0..ROWS_PER_BLOCK-1 each write their row's partial sum to smem in
+//             parallel.
+//   Stage 3 — cross-warp reduction: ROWS_PER_BLOCK row groups each stride smem
+//   columns
+//             (one per warp) then butterfly-reduce so all threads in the group
+//             hold the same scalar for that row.
+//   Stage 4 — output write: adjacent row groups exchange scalars via shfl_xor;
+//   the group
+//             leader packs the pair into a half2 and writes to out.
+template <typename scalar_t, int ROWS_PER_BLOCK>
+__global__ void vecMatMul_kernel(const scalar_t* mat, const scalar_t* vec,
+                                 scalar_t* out, const int K) {
+  using scalar2_t = typename scalar2<scalar_t>::type;
+  // Packing constants: data is stored as packed halves loaded via float4.
+  constexpr int ELEMS_PER_FLOAT4 =
+      sizeof(float4) / sizeof(scalar_t);  // 8 halves per float4
+  constexpr int PAIRS_PER_FLOAT4 =
+      sizeof(float4) / sizeof(scalar2_t);  // 4 half2 pairs per float4
+  // Threads per row group: one group per output row in the second-stage
+  // reduction.
+  constexpr int THREADS_PER_ROW_GROUP = WARP_SIZE / ROWS_PER_BLOCK;
+  auto mat_f4 = reinterpret_cast<const float4*>(mat);
+  auto vec_h2 = reinterpret_cast<const scalar2_t*>(vec);
+  auto out_h2 = reinterpret_cast<scalar2_t*>(out);
+  __shared__ float reduction_smem[ROWS_PER_BLOCK][WARP_SIZE];
+  // Base offset into mat_f4 for the first float4 of the first row this block
+  // owns.
+  const int block_base_addr =
+      blockIdx.x * ROWS_PER_BLOCK * K / ELEMS_PER_FLOAT4;
+  const int thread_id = threadIdx.x;
+  const int warp_id = thread_id / WARP_SIZE;
+  const int lane = thread_id % WARP_SIZE;
+  // Which output row group this thread belongs to (shared by all threads in the
+  // group).
+  const int row_group_id = thread_id / THREADS_PER_ROW_GROUP;
+  // This thread's position within its row group; determines which smem columns
+  // it reads.
+  const int row_group_thread_id = thread_id % THREADS_PER_ROW_GROUP;
+  scalar2_t vec_h2x, vec_h2y, vec_h2z, vec_h2w;
+  float acc[ROWS_PER_BLOCK];
+  float4 mat_chunk[ROWS_PER_BLOCK];
+  scalar2_t out_val;
 
-  TORCH_CHECK(N == 1, "Row number of activation tensor must be 1.");
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(in_b.dtype() == torch::kFloat16 ||
-              in_b.dtype() == torch::kBFloat16);
+  // Stage 1: each thread loads one float4 per row (ROWS_PER_BLOCK rows total)
+  // from mat and one float4 from vec, then computes a partial dot product per
+  // row into acc[].
+  //
+  // Threads beyond K/8 diverge in load_tile's if guard (skipping the load) and
+  // are zeroed by the ternary below; their dot_row result is discarded.
+  load_tile<scalar_t, scalar2_t, ROWS_PER_BLOCK>(
+      mat_f4, vec_h2, thread_id, block_base_addr, K, mat_chunk, vec_h2x,
+      vec_h2y, vec_h2z, vec_h2w);
 
-  auto out_c = torch::empty(
-      {N, M}, torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+  auto mat_h2_ptr = reinterpret_cast<scalar2_t*>(&mat_chunk);
 
-  // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
-  // operations.
+#pragma unroll
+  for (int i = 0; i < ROWS_PER_BLOCK; i++) {
+    float val = dot_row(mat_h2_ptr + i * PAIRS_PER_FLOAT4, vec_h2x, vec_h2y,
+                        vec_h2z, vec_h2w);
+    acc[i] = (thread_id * ELEMS_PER_FLOAT4 < K ? val : 0.f);
+  }
+
+  // Stage 2: intra-warp butterfly — reduces each acc[i] across all lanes in the
+  // warp.
+  warp_reduce<ROWS_PER_BLOCK>(acc);
+
+  // All lanes hold the same acc[] after the butterfly; lanes
+  // 0..ROWS_PER_BLOCK-1 each write their row's partial sum to smem in parallel
+  // (lane i writes row i).
+  if (lane < ROWS_PER_BLOCK) {
+    reduction_smem[lane][warp_id] = acc[lane];
+  }
+  __syncthreads();
+
+  // Stage 3: cross-warp reduction.
+  // Threads are divided into ROWS_PER_BLOCK row groups of THREADS_PER_ROW_GROUP
+  // threads. Each group strides smem columns (one per warp) accumulating
+  // partial sums for its row, then butterfly-reduces within the group so all
+  // threads hold the same scalar. Striding handles the case where num_warps >
+  // THREADS_PER_ROW_GROUP (e.g. large K on WARP_SIZE=32 GPUs).
+  const int num_warps = blockDim.x / WARP_SIZE;
+  if (row_group_id < ROWS_PER_BLOCK) {
+    float partial = 0.f;
+    for (int w = row_group_thread_id; w < num_warps;
+         w += THREADS_PER_ROW_GROUP) {
+      partial += reduction_smem[row_group_id][w];
+    }
+#pragma unroll
+    for (int mask = THREADS_PER_ROW_GROUP / 2; mask >= 1; mask /= 2) {
+      partial += __shfl_xor(partial, mask);
+    }
+
+    // Stage 4: adjacent row groups (row i, row i+1) exchange their scalars so
+    // the group leader can pack both into a single half2 write.
+    float out_val2 = __shfl_xor(partial, THREADS_PER_ROW_GROUP);
+    if (lane % (2 * THREADS_PER_ROW_GROUP) == 0) {
+      out_val = __float22s2_rn<scalar2_t>(make_float2(partial, out_val2));
+      out_h2[blockIdx.x * ROWS_PER_BLOCK / 2 + row_group_id / 2] = out_val;
+    }
+  }
+}
+
+// Computes mat (M x K) * vec (1 x K) -> out (1 x M): one dot product per row of
+// mat against the single vec vector. Optimized for the N=1 (single token) case.
+torch::Tensor vecMatMul(at::Tensor& mat, at::Tensor& vec,
+                        const int64_t rows_per_block) {
+  TORCH_CHECK(vec.size(0) == 1, "Row number of activation tensor must be 1.");
+  TORCH_CHECK(mat.size(1) == vec.size(1),
+              "K dimension mismatch between mat and vec.");
+  TORCH_CHECK(mat.dtype() == vec.dtype());
+  TORCH_CHECK(vec.dtype() == torch::kFloat16 ||
+              vec.dtype() == torch::kBFloat16);
+  TORCH_CHECK(rows_per_block <= WARP_SIZE,
+              "rows_per_block must not exceed WARP_SIZE (", WARP_SIZE, ").");
+
+  auto M = mat.size(0);
+  auto K = mat.size(1);
+
+  auto out = torch::empty(
+      {1, M}, torch::TensorOptions().dtype(vec.dtype()).device(vec.device()));
+
+  // NUM_THREADS needs to be a multiple of WARP_SIZE, as we are using warp
+  // shuffle operations.
   const int NUM_THREADS =
-      max(rows_per_block * 16,
-          K * 2 / 16 % WARP_SIZE == 0
-              ? K * 2 / 16
-              : K * 2 / 16 + (WARP_SIZE - K * 2 / 16 % WARP_SIZE));
+      max(rows_per_block * (int)sizeof(float4),
+          K * 2 / (int)sizeof(float4) % WARP_SIZE == 0
+              ? K * 2 / (int)sizeof(float4)
+              : K * 2 / (int)sizeof(float4) +
+                    (WARP_SIZE - K * 2 / (int)sizeof(float4) % WARP_SIZE));
 
   int NUM_BLOCKS = M / rows_per_block;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_b));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // call the kernel function...
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "LLGemm1", [&] {
-    auto a_ptr = in_a.data_ptr<scalar_t>();
-    auto b_ptr = in_b.data_ptr<scalar_t>();
-    auto c_ptr = out_c.data_ptr<scalar_t>();
-    if (rows_per_block == 2) {
-      LLGemm1_kernel<scalar_t, 2>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else if (rows_per_block == 4) {
-      LLGemm1_kernel<scalar_t, 4>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else if (rows_per_block == 8) {
-      LLGemm1_kernel<scalar_t, 8>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else if (rows_per_block == 16) {
-      LLGemm1_kernel<scalar_t, 16>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else {
-      NUM_BLOCKS = M / 4;
-      LLGemm1_kernel<scalar_t, 4>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(vec.scalar_type(), "vecMatMul", [&] {
+    auto mat_ptr = mat.data_ptr<scalar_t>();
+    auto vec_ptr = vec.data_ptr<scalar_t>();
+    auto out_ptr = out.data_ptr<scalar_t>();
+
+    switch (rows_per_block) {
+      case 2:
+        vecMatMul_kernel<scalar_t, 2><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+            mat_ptr, vec_ptr, out_ptr, K);
+        break;
+      case 4:
+        vecMatMul_kernel<scalar_t, 4><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+            mat_ptr, vec_ptr, out_ptr, K);
+        break;
+      case 8:
+        vecMatMul_kernel<scalar_t, 8><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+            mat_ptr, vec_ptr, out_ptr, K);
+        break;
+      case 16:
+        vecMatMul_kernel<scalar_t, 16><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+            mat_ptr, vec_ptr, out_ptr, K);
+        break;
+      default:
+        NUM_BLOCKS = M / 4;
+        vecMatMul_kernel<scalar_t, 4><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
+            mat_ptr, vec_ptr, out_ptr, K);
+        break;
     }
   });
 
-  return out_c;
+  return out;
 }
 
 #if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)

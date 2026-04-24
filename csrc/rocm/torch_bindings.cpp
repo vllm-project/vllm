@@ -16,9 +16,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(
-      "LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> "
+      "vecMatMul(Tensor mat, Tensor vec, int rows_per_block) -> "
       "Tensor");
-  rocm_ops.impl("LLMM1", torch::kCUDA, &LLMM1);
+  rocm_ops.impl("vecMatMul", torch::kCUDA, &vecMatMul);
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
