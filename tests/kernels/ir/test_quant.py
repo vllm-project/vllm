@@ -92,12 +92,8 @@ class TestStaticQuantFP8:
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     def test_native_semantics(self, dtype, n_tokens, hidden_size, num_token_padding):
-        x, scale, _ = ir.ops.static_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            fp8_dtype=FP8_DTYPE,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        scale = torch.full((1,), 0.5, dtype=torch.float32)
         expected_tokens = (
             max(num_token_padding, n_tokens) if num_token_padding else n_tokens
         )
@@ -130,20 +126,12 @@ class TestStaticQuantFP8:
     def test_impls(self, dtype, n_tokens, hidden_size, num_token_padding, provider):
         impl = ir.ops.static_quant_fp8.impls[provider]
 
-        x, scale, _ = ir.ops.static_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            fp8_dtype=FP8_DTYPE,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        scale = torch.full((1,), 0.5, dtype=torch.float32)
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
-        if provider == "aiter" and (
-            dtype not in (torch.float16, torch.bfloat16)
-            or num_token_padding is not None
-        ):
-            assert not impl.supports_args(*args)
-            return
+        if not impl.supports_args(*args):
+            pytest.skip(f"{provider} does not support args")
 
         assert impl.supports_args(*args)
 
@@ -180,15 +168,11 @@ class TestStaticQuantFP8:
         "provider", supported_providers(ir.ops.static_quant_fp8) + ["native"]
     )
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, provider):
-        if provider == "aiter" and dtype not in (torch.float16, torch.bfloat16):
-            pytest.skip(f"aiter does not support dtype={dtype}")
-
-        args = ir.ops.static_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            fp8_dtype=FP8_DTYPE,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        scale = torch.full((1,), 0.5, dtype=torch.float32)
+        args = (x, scale, FP8_DTYPE)
+        if not ir.ops.static_quant_fp8.impls[provider].supports_args(*args):
+            pytest.skip(f"{provider} does not support args")
 
         with ir.ops.static_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.static_quant_fp8, args)
@@ -208,12 +192,9 @@ class TestStaticGroupQuantFP8:
     def test_native_semantics(
         self, dtype, n_tokens, hidden_size, group_size, num_token_padding
     ):
-        x, scale, _ = ir.ops.static_group_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            group_size=group_size,
-            fp8_dtype=FP8_DTYPE,
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        scale = torch.full(
+            (n_tokens, hidden_size // group_size), 0.5, dtype=torch.float32
         )
         expected_tokens = (
             max(num_token_padding, n_tokens) if num_token_padding else n_tokens
@@ -246,12 +227,9 @@ class TestStaticGroupQuantFP8:
     ):
         impl = ir.ops.static_group_quant_fp8.impls[provider]
 
-        x, scale, _ = ir.ops.static_group_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            group_size=group_size,
-            fp8_dtype=FP8_DTYPE,
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        scale = torch.full(
+            (n_tokens, hidden_size // group_size), 0.5, dtype=torch.float32
         )
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
@@ -290,13 +268,11 @@ class TestStaticGroupQuantFP8:
         "provider", supported_providers(ir.ops.static_group_quant_fp8) + ["native"]
     )
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, group_size, provider):
-        args = ir.ops.static_group_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            group_size=group_size,
-            fp8_dtype=FP8_DTYPE,
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        scale = torch.full(
+            (n_tokens, hidden_size // group_size), 0.5, dtype=torch.float32
         )
+        args = (x, scale, FP8_DTYPE)
 
         with ir.ops.static_group_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.static_group_quant_fp8, args)
@@ -316,13 +292,7 @@ class TestDynamicQuantFP8:
     def test_native_semantics(
         self, dtype, n_tokens, hidden_size, per_token, num_token_padding
     ):
-        x, _, _ = ir.ops.dynamic_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            per_token=per_token,
-            fp8_dtype=FP8_DTYPE,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         expected_tokens = (
             max(num_token_padding, n_tokens) if num_token_padding else n_tokens
         )
@@ -355,21 +325,11 @@ class TestDynamicQuantFP8:
     ):
         impl = ir.ops.dynamic_quant_fp8.impls[provider]
 
-        x, _, _ = ir.ops.dynamic_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            per_token=per_token,
-            fp8_dtype=FP8_DTYPE,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         args = (x, per_token, FP8_DTYPE, None, num_token_padding)
 
-        if provider == "aiter" and (
-            dtype not in (torch.float16, torch.bfloat16)
-            or num_token_padding is not None
-        ):
-            assert not impl.supports_args(*args)
-            return
+        if not impl.supports_args(*args):
+            pytest.skip(f"{provider} does not support args")
 
         assert impl.supports_args(*args)
 
@@ -414,16 +374,10 @@ class TestDynamicQuantFP8:
         "provider", supported_providers(ir.ops.dynamic_quant_fp8) + ["native"]
     )
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, per_token, provider):
-        if provider == "aiter" and dtype not in (torch.float16, torch.bfloat16):
-            pytest.skip(f"aiter does not support dtype={dtype}")
-
-        args = ir.ops.dynamic_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            per_token=per_token,
-            fp8_dtype=FP8_DTYPE,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        args = (x, per_token, FP8_DTYPE)
+        if not ir.ops.dynamic_quant_fp8.impls[provider].supports_args(*args):
+            pytest.skip(f"{provider} does not support args")
 
         with ir.ops.dynamic_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.dynamic_quant_fp8, args)
@@ -452,20 +406,12 @@ class TestDynamicGroupQuantFP8:
         scale_alignment,
         use_ue8m0,
     ):
-        args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            group_shape=[group_size],
-            column_major=column_major,
-            use_ue8m0=use_ue8m0,
-            fp8_dtype=FP8_DTYPE,
-            scale_alignment=scale_alignment,
-        )
-        x = args[0]
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         n_groups = hidden_size // group_size
 
-        x_q, x_s = dynamic_group_quant_fp8_native(*args)
+        x_q, x_s = dynamic_group_quant_fp8_native(
+            x, [group_size], column_major, use_ue8m0, FP8_DTYPE, scale_alignment
+        )
 
         assert x_q.shape == x.shape
         assert x_q.dtype == FP8_DTYPE
@@ -505,18 +451,9 @@ class TestDynamicGroupQuantFP8:
     ):
         impl = ir.ops.dynamic_group_quant_fp8.impls[provider]
 
-        args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            group_shape=[group_size],
-            column_major=column_major,
-            use_ue8m0=use_ue8m0,
-            fp8_dtype=FP8_DTYPE,
-            scale_alignment=scale_alignment,
-        )
-        x, group_shape = args[0], args[1]
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         n_groups = hidden_size // group_size
+        args = (x, [group_size], column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
 
         if not impl.supports_args(*args):
             pytest.skip(
@@ -564,41 +501,12 @@ class TestDynamicGroupQuantFP8:
         )
 
         # Different inputs must produce different outputs
-        args_diff = (
-            x + 1,
-            group_shape,
-            column_major,
-            use_ue8m0,
-            FP8_DTYPE,
-            scale_alignment,
+        x_q_impl_diff, _ = impl.impl_fn(
+            x + 1, [group_size], column_major, use_ue8m0, FP8_DTYPE, scale_alignment
         )
-        x_q_impl_diff, _ = impl.impl_fn(*args_diff)
         assert not torch.all(
             x_q_impl.to(torch.float32) == x_q_impl_diff.to(torch.float32)
         )
-
-        # Verify key supports_args rejections per provider
-        if provider == "aiter":
-            # aiter requires group_size == 128
-            assert not impl.supports_args(
-                x, [64], column_major, use_ue8m0, FP8_DTYPE, scale_alignment
-            )
-        if provider == "triton":
-            # triton rejects fnuz dtype
-            assert not impl.supports_args(
-                x,
-                group_shape,
-                column_major,
-                use_ue8m0,
-                torch.float8_e4m3fnuz,
-                scale_alignment,
-            )
-        if provider == "vllm_c":
-            # vllm_c rejects non-contiguous inputs
-            x_nc = x.t().contiguous().t()
-            assert not impl.supports_args(
-                x_nc, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment
-            )
 
     @pytest.mark.parametrize(
         "provider", supported_providers(ir.ops.dynamic_group_quant_fp8) + ["native"]
@@ -614,19 +522,163 @@ class TestDynamicGroupQuantFP8:
         use_ue8m0,
         provider,
     ):
-        args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            group_shape=[group_size],
-            column_major=column_major,
-            use_ue8m0=use_ue8m0,
-            fp8_dtype=FP8_DTYPE,
-            scale_alignment=scale_alignment,
-        )
+        x = torch.randn(n_tokens, hidden_size, dtype=dtype)
+        args = (x, [group_size], column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
 
         if not ir.ops.dynamic_group_quant_fp8.impls[provider].supports_args(*args):
             pytest.skip(f"{provider} does not support these args")
 
         with ir.ops.dynamic_group_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.dynamic_group_quant_fp8, args)
+
+
+@pytest.mark.skipif(not IS_ROCM, reason="aiter is only supported on ROCm")
+def test_aiter_static_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.static_quant_fp8.impls["aiter"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    scale = torch.full((1,), 0.5, dtype=torch.float32)
+    assert not impl.supports_args(x.to(torch.float32), scale, FP8_DTYPE, None), (
+        "aiter should reject float32"
+    )
+    assert not impl.supports_args(x, scale, FP8_DTYPE, 16), (
+        "aiter should reject num_token_padding"
+    )
+
+
+@pytest.mark.skipif(not IS_ROCM, reason="aiter is only supported on ROCm")
+def test_aiter_dynamic_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.dynamic_quant_fp8.impls["aiter"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    assert not impl.supports_args(x.to(torch.float32), True, FP8_DTYPE, None, None), (
+        "aiter should reject float32"
+    )
+    assert not impl.supports_args(x, True, FP8_DTYPE, None, 16), (
+        "aiter should reject num_token_padding"
+    )
+    assert not impl.supports_args(x, True, FP8_DTYPE, torch.tensor(1.0), None), (
+        "aiter should reject scale_ub"
+    )
+
+
+@pytest.mark.skipif(not IS_ROCM, reason="aiter is only supported on ROCm")
+def test_aiter_dynamic_group_quant_fp8_rejects_group_size_64():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.dynamic_group_quant_fp8.impls["aiter"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    assert not impl.supports_args(x, [64], False, False, FP8_DTYPE, 1), (
+        "aiter should reject group_size=64"
+    )
+    assert not impl.supports_args(
+        x.to(torch.float32), [128], False, False, FP8_DTYPE, 1
+    ), "aiter should reject float32"
+    assert not impl.supports_args(
+        x.t().contiguous().t(), [128], False, False, FP8_DTYPE, 1
+    ), "aiter should reject non-contiguous"
+    assert not impl.supports_args(x, [128], True, False, FP8_DTYPE, 1), (
+        "aiter should reject column_major"
+    )
+    assert not impl.supports_args(x, [128], False, True, FP8_DTYPE, 1), (
+        "aiter should reject use_ue8m0"
+    )
+
+
+@pytest.mark.skipif(
+    not IS_CUDA_ALIKE, reason="triton is only supported on CUDA-like platforms"
+)
+def test_triton_dynamic_group_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.dynamic_group_quant_fp8.impls["triton"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    assert not impl.supports_args(x, [128], False, False, torch.float8_e4m3fnuz, 1), (
+        "triton should reject fnuz dtype"
+    )
+    assert not impl.supports_args(x, [128], False, False, FP8_DTYPE, 4), (
+        "triton should reject row-major with scale_alignment=4"
+    )
+    assert not impl.supports_args(
+        x.t().contiguous().t(), [128], False, False, FP8_DTYPE, 1
+    ), "triton should reject non-contiguous last dim"
+
+
+@pytest.mark.skipif(
+    not IS_GPGPU, reason="vllm_c is only supported on CUDA-like and XPU"
+)
+def test_vllm_c_static_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.static_quant_fp8.impls["vllm_c"]
+    x_3d = torch.randn(2, 8, 2048, dtype=torch.float16)
+    scale = torch.full((1,), 0.5, dtype=torch.float32)
+    assert not impl.supports_args(x_3d, scale, FP8_DTYPE, None), (
+        "vllm_c should reject non-2D input"
+    )
+
+
+@pytest.mark.skipif(
+    not IS_GPGPU, reason="vllm_c is only supported on CUDA-like and XPU"
+)
+def test_vllm_c_static_group_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.static_group_quant_fp8.impls["vllm_c"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    scale_2d = torch.full((8, 2048 // 128), 0.5, dtype=torch.float32)
+    scale_1d = torch.full((2048 // 128,), 0.5, dtype=torch.float32)
+    x_3d = torch.randn(2, 8, 2048, dtype=torch.float16)
+    assert not impl.supports_args(x, scale_1d, FP8_DTYPE, None), (
+        "vllm_c should reject 1D scale"
+    )
+    assert not impl.supports_args(x_3d, scale_2d, FP8_DTYPE, None), (
+        "vllm_c should reject non-2D input"
+    )
+
+
+@pytest.mark.skipif(
+    not IS_GPGPU, reason="vllm_c is only supported on CUDA-like and XPU"
+)
+def test_vllm_c_dynamic_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.dynamic_quant_fp8.impls["vllm_c"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    x_3d = torch.randn(2, 8, 2048, dtype=torch.float16)
+    scale_ub = torch.tensor(1.0)
+    assert not impl.supports_args(x, False, FP8_DTYPE, scale_ub, None), (
+        "vllm_c should reject per_tensor with scale_ub"
+    )
+    assert not impl.supports_args(x_3d, True, FP8_DTYPE, None, None), (
+        "vllm_c should reject non-2D input"
+    )
+
+
+@pytest.mark.skipif(
+    not IS_CUDA, reason="vllm_c dynamic_group_quant_fp8 is only supported on CUDA"
+)
+def test_vllm_c_dynamic_group_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.dynamic_group_quant_fp8.impls["vllm_c"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    assert not impl.supports_args(
+        x.t().contiguous().t(), [128], False, False, FP8_DTYPE, 1
+    ), "vllm_c should reject non-contiguous"
+    assert not impl.supports_args(x, [128], False, False, FP8_DTYPE, 2), (
+        "vllm_c should reject scale_alignment=2"
+    )
+    assert not impl.supports_args(x, [96], False, False, FP8_DTYPE, 1), (
+        "vllm_c should reject hidden not divisible by group_size"
+    )
+
+
+@pytest.mark.skipif(not IS_XPU, reason="xpu_kernels is only supported on XPU")
+def test_xpu_kernels_dynamic_group_quant_fp8_rejects_unsupported_args():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.dynamic_group_quant_fp8.impls["xpu_kernels"]
+    x = torch.randn(8, 2048, dtype=torch.float16)
+    assert not impl.supports_args(
+        x.t().contiguous().t(), [128], False, False, FP8_DTYPE, 1
+    ), "xpu_kernels should reject non-contiguous"
+    assert not impl.supports_args(x, [128], False, False, FP8_DTYPE, 4), (
+        "xpu_kernels should reject scale_alignment=4"
+    )
+    assert not impl.supports_args(x, [96], False, False, FP8_DTYPE, 1), (
+        "xpu_kernels should reject hidden not divisible by group_size"
+    )
