@@ -640,8 +640,6 @@ opencensus-context==0.1.3
     # via opencensus
 opencv-python-headless==4.13.0.92
     # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   albumentations
     #   mistral-common

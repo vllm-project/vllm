@@ -1179,7 +1179,7 @@ setup(
             "soundfile",
             "mistral_common[audio]",
         ],  # Required for audio processing
-        "video": [],  # Kept for backwards compatibility
+        "video": ["opencv-python-headless>=4.13.0"],
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:

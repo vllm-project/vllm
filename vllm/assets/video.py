@@ -11,6 +11,7 @@ from PIL import Image
 
 from vllm.multimodal.media.audio import load_audio_pyav
 from vllm.transformers_utils.repo_utils import hf_api
+from vllm.utils.import_utils import PlaceholderModule
 
 from .base import get_cache_dir
 
@@ -37,7 +38,10 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
-    import cv2
+    try:
+        import cv2
+    except ImportError:
+        cv2 = PlaceholderModule("cv2")  # type: ignore[assignment]
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -74,7 +78,10 @@ def video_to_pil_images_list(path: str, num_frames: int = -1) -> list[Image.Imag
 
 
 def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
-    import cv2
+    try:
+        import cv2
+    except ImportError:
+        cv2 = PlaceholderModule("cv2")  # type: ignore[assignment]
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():

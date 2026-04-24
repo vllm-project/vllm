@@ -364,7 +364,6 @@ openai-harmony==0.0.8
     #   gpt-oss
 opencv-python-headless==4.13.0.92
     # via
-    #   -c requirements/common.txt
     #   albumentations
     #   mistral-common
 packaging==26.0

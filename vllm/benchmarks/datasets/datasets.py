@@ -947,7 +947,10 @@ class RandomMultiModalDataset(RandomDataset):
         Creates a video with random pixel values, encodes it to MP4 format,
         and returns the content as bytes.
         """
-        import cv2
+        try:
+            import cv2
+        except ImportError:
+            cv2 = PlaceholderModule("cv2")  # type: ignore[assignment]
 
         random_pixels = self._rng.integers(
             0,

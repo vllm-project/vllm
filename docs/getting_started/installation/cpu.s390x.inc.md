@@ -11,7 +11,7 @@ Currently, the CPU implementation for s390x architecture supports FP32, BF16 and
 - OS: `Linux`
 - SDK: `gcc/g++ >= 14.0.0` or later with Command Line Tools
 - Instruction Set Architecture (ISA): VXE support is required. Works with Z14 and above.
-- Build install python packages: `torchvision`, `llvmlite`, `numba`, `pyarrow (for testing)`, `opencv-headless`
+- Build install python packages: `torchvision`, `llvmlite`, `numba`, `pyarrow (for testing)`, `opencv-headless` (optional, only needed for the OpenCV video backend: `pip install vllm[video]`)
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
@@ -44,7 +44,7 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 Execute the following commands to build and install vLLM from source.
 
 !!! tip
-    Please build the following dependencies, `torchvision`, `llvmlite`, `numba`, `llguidance`, `pyarrow`, `opencv-headless` from source before building vLLM.
+    Please build the following dependencies, `torchvision`, `llvmlite`, `numba`, `llguidance`, `pyarrow` from source before building vLLM. If you need the OpenCV video backend, also build `opencv-headless` from source and install with `pip install vllm[video]`.
 
 ```bash
     uv pip install -v \
