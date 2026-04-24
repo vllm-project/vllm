@@ -311,6 +311,9 @@ def set_default_device_from_mark(request):
     marker = request.node.get_closest_marker("device_type")
 
     if marker:
+        if not marker.args:
+            yield
+            return
         # The first argument passed to the marker (e.g., 'cuda' or 'cpu')
         device = marker.args[0]
 
