@@ -60,6 +60,10 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
+        # Note : this flag is kept disabled because the overhead of
+        # dynamic mxfp4 quantization negates the performance gains
+        # that come from shifting to mxfp4. It is left here in case
+        # we want to re-enable it in the future.
         self.dynamic_mxfp4_quant = False
 
     def get_linear_method(self) -> "QuarkLinearMethod":
