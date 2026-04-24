@@ -51,10 +51,7 @@ class AllPool(TokenPoolingMethod):
         # doesn't trigger a GPU->CPU sync. torch.split produces the same
         # consecutive slices as indexing with first/last per-sequence indices.
         hidden_states_lst = list(
-            torch.split(
-                hidden_states,
-                pooling_cursor.num_scheduled_tokens_cpu.tolist(),
-            )
+            torch.split(hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
 
         if not self.enable_chunked_prefill:

@@ -159,10 +159,7 @@ def _synchronize_dp_ranks(
 
         # Pad all DP ranks up to the maximum token count across ranks if
         # should_dp_pad is True
-        num_tokens_after_padding = _post_process_dp_padding(
-            tensor,
-            should_dp_pad,
-        )
+        num_tokens_after_padding = _post_process_dp_padding(tensor, should_dp_pad)
 
     return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 

@@ -18,7 +18,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -49,8 +48,6 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
-
-PIN_MEMORY = is_pin_memory_available()
 
 
 @dataclass
@@ -121,7 +118,7 @@ class TritonAttentionMetadata:
             padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
             padded.append(padded_r)
         # Build on pinned CPU memory so the H2D transfer is non-blocking.
-        padded_cpu = torch.tensor(padded, dtype=torch.int32, pin_memory=PIN_MEMORY)
+        padded_cpu = torch.tensor(padded, dtype=torch.int32, pin_memory=True)
         return padded_cpu.to(device, non_blocking=True).view(num_seqs, max_ranges, 2)
 
 
