@@ -21,7 +21,10 @@ from vllm.model_executor.layers.fla.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -351,8 +354,8 @@ class BailingMoeV25(nn.Module):
         else:
             self.shared_experts = None
 
-        # Routed experts using SharedFusedMoE
-        self.experts = SharedFusedMoE(
+        # Routed experts using FusedMoE
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -990,7 +993,7 @@ class BailingMoeV25Model(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """Get expert parameter mapping for MoE layers."""
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

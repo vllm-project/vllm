@@ -23,8 +23,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -372,7 +374,7 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.share_expert,
             gate=self.gate,
             num_experts=config.moe_num_experts,
@@ -638,7 +640,7 @@ class Step3p5Model(nn.Module):
         ]
 
         # New per-expert format: .moe.experts.E.gate_proj.weight_packed [out, in]
-        per_expert_mapping = FusedMoE.make_expert_params_mapping(
+        per_expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
