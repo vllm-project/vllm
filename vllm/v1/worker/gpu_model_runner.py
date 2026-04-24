@@ -1500,7 +1500,7 @@ class GPUModelRunner(
         num_tokens: np.ndarray,
         cumsum_dtype: np.dtype | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        # When a batch contains a mix of DCP requests and normal requests, 
+        # When a batch contains a mix of DCP requests and normal requests,
         # it is possible for either dcp_tokens or normal_tokens to be empty.
         # when num_tokens is empty, return empty arrays
         if len(num_tokens) == 0:
@@ -2000,7 +2000,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
-            num_dycp_reqs=num_dycp_reqs,    
+            num_dycp_reqs=num_dycp_reqs,
         )
 
         if self.dcp_world_size > 1:

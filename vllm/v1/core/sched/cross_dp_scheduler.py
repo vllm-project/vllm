@@ -89,12 +89,7 @@ class RequestManager:
             ]
         else:
             # Get the the dp with the least number of requests
-            # best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
-            best_dp = self.balancer.dispatch_task_without_id(num_new_tokens)
-            if rank_budgets[best_dp] < num_new_tokens:
-                if num_new_tokens not in rank_budgets:
-                    return None
-                best_dp = rank_budgets.index(num_new_tokens)
+            best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
             return [best_dp]
 
     def add_req(self, request: Request) -> None:
@@ -689,7 +684,7 @@ class CrossDPScheduler(Scheduler):
         # Per-rank token budgets: each rank can process up to
         # max_num_scheduled_tokens.  CP requests split tokens across ranks,
         # so their per-rank cost is num_tokens / cp_size.
-        rank_budgets = [self.max_num_scheduled_tokens] * self.cp_world_size
+        rank_budgets = [self.max_num_scheduled_tokens / self.cp_world_size] * self.cp_world_size
 
         def _get_effective_budget(is_long_seq: bool, cp_ranks: list[int] | None = None) -> int:
             """Return the max tokens a request on *cp_ranks* can schedule."""
@@ -719,6 +714,8 @@ class CrossDPScheduler(Scheduler):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+
+        self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1020,15 +1017,15 @@ class CrossDPScheduler(Scheduler):
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
-                        num_new_tokens,
-                        rank_budgets,
+                        # num_new_tokens,
+                        # rank_budgets,
                     )
                 else:
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
-                        num_new_tokens,
-                        rank_budgets,
+                        # num_new_tokens,
+                        # rank_budgets,
                     )
                 if selected_dp is None:
                     break
@@ -1206,12 +1203,18 @@ class CrossDPScheduler(Scheduler):
         none_tokens_in_peer_sched = all([sum(num_scheduled_tokens[idx].values()) == 0 for idx in range(self.cp_world_size)])
 
         for idx in range(self.cp_world_size):
+            new_block_ids_to_zero = (
+                (self.kv_cache_manager.take_new_block_ids(idx) or None)
+                if self.needs_kv_cache_zeroing
+                else None
+            )
 
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 scheduler_output = SchedulerOutput.make_empty()
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
                 scheduler_output.req_id_to_cp_size = req_id_to_cp_size
                 scheduler_output.cp_rank_to_req_id = cp_rank_to_req_id[idx]    # revised
+                scheduler_output.new_block_ids_to_zero = new_block_ids_to_zero
                 total_scheduler_output.append(scheduler_output)
             else:
                 total_scheduler_output.append(
@@ -1230,6 +1233,7 @@ class CrossDPScheduler(Scheduler):
                         # the previous and the current steps.
                         finished_req_ids=self.finished_req_ids[idx],
                         free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+                        new_block_ids_to_zero=new_block_ids_to_zero,
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
