@@ -628,6 +628,12 @@ class DelegatingParser(Parser):
                 state.previous_token_ids = []
                 delta_text = current_text
                 delta_token_ids = current_token_ids
+            # Preserve any reasoning text produced by extract_reasoning_streaming
+            # in the same delta as the reasoning→tool-call transition.  Without
+            # this, the assignment below would silently drop that last fragment.
+            reasoning_from_transition = (
+                delta_message.reasoning if delta_message is not None else None
+            )
             delta_message = self.extract_tool_calls_streaming(
                 previous_text=state.previous_text,
                 current_text=current_text,
@@ -637,6 +643,11 @@ class DelegatingParser(Parser):
                 delta_token_ids=delta_token_ids,
                 request=request,  # type: ignore[arg-type]
             )
+            if reasoning_from_transition:
+                if delta_message is not None:
+                    delta_message.reasoning = reasoning_from_transition
+                else:
+                    delta_message = DeltaMessage(reasoning=reasoning_from_transition)
 
         # No parsers: pass through as content
         if self._reasoning_parser is None and self._tool_parser is None:

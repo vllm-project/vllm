@@ -64,24 +64,14 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
         tool_call_token_id = self._tool_call_token_id
-        tool_call_end_token_id = self._tool_call_end_token_id
 
         for i in range(len(input_ids) - 1, -1, -1):
             token_id = input_ids[i]
             if token_id == start_token_id:
-                # Found <think> before </think> or <tool_call>
                 return False
             if token_id == end_token_id:
                 return True
             if tool_call_token_id is not None and token_id == tool_call_token_id:
-                # Only treat as implicit reasoning end if this <tool_call>
-                # is NOT followed by </tool_call>.  Paired occurrences are
-                # template examples in the prompt, not model output.
-                if tool_call_end_token_id is not None and any(
-                    input_ids[j] == tool_call_end_token_id
-                    for j in range(i + 1, len(input_ids))
-                ):
-                    continue
                 return True
         return False
 
