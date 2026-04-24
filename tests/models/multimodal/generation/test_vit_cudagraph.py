@@ -44,8 +44,7 @@ def qwen_vl_chat_template(content: str) -> str:
 
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "qwen3_vl": VitCudagraphTestConfig(
-        # model="Qwen/Qwen3-VL-2B-Instruct",
-        model="/shared/models/modelscope/models/Qwen/Qwen3-VL-8B-Instruct",
+        model="Qwen/Qwen3-VL-2B-Instruct",
         image_prompt=qwen_vl_chat_template(
             "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
         ),
