@@ -30,7 +30,7 @@ When a mixture of `'prompt_embeds'` and `'prompt'` inputs are provided in a sing
 
 Prompt embeddings are passed in as base64 encoded torch tensors.
 
-The Completions endpoint does **not** apply a chat template to `prompt_embeds`. The caller is responsible for producing embeddings for the full, already-templated prompt: apply the chat template, then embed the resulting token IDs. Anything the model would normally need (system prompt, role markers, generation prompt, etc.) must already be baked into the embedded tokens.
+The Completions endpoint does **not** apply a chat template to `prompt_embeds`. If the model assumes some chat template, the caller is responsible for producing embeddings for the full, already-templated prompt: apply the chat template, then embed the resulting token IDs. Anything the model would normally need (system prompt, role markers, generation prompt, etc.) must already be baked into the embedded tokens.
 
 ### Chat Completions API
 
