@@ -316,7 +316,9 @@ class LlavaOnevisionMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            # Only consumed as Python ints via `.tolist()` for grid-shape math;
+            # keep CPU-resident to avoid D2H syncs.
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
         )

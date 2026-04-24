@@ -247,7 +247,11 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches
             ),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            # Only consumed as Python split sizes in `_process_vision_input`;
+            # keep CPU-resident to avoid D2H syncs.
+            image_num_patches=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             image_embeds=MultiModalFieldConfig.batched("image"),
             # Scalar metadata consumed only as a Python int (via .item()) by
             # `_parse_and_validate_image_input`; keep on CPU to avoid a
@@ -480,7 +484,10 @@ class InternVLMultiModalProcessor(
             pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches
             ),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
+            # Only consumed as Python split sizes; keep CPU-resident.
+            video_num_patches=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
             video_token_id=MultiModalFieldConfig.shared("video", num_videos),
         )
 

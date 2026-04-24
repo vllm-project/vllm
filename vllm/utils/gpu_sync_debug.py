@@ -24,6 +24,49 @@ def enable_gpu_sync_check() -> None:
     first-compile is complete."""
     global _sync_check_enabled
     _sync_check_enabled = True
+    _install_compile_time_sync_suppressors()
+
+
+_compile_time_suppressors_installed: bool = False
+
+
+def _install_compile_time_sync_suppressors() -> None:
+    """Wrap torch inductor/aot_autograd compile entry points so the
+    synchronizing ops those passes perform (e.g. `constant_fold_uniform_value`
+    calling `.item()` on uniform-valued constants) don't trip the
+    sync-check mode we set around `execute_model` / `sample_tokens`.
+
+    Warmup-time compiles already run under the gate (before
+    `enable_gpu_sync_check`), but post-warmup compiles (runtime
+    recompiles from dynamic shape variants, pipeline-parallel fresh
+    compile cache, etc.) fire inside `execute_model`. We intentionally
+    only want to flag *model-execution* syncs — compile-time work is
+    third-party and unavoidable.
+    """
+    global _compile_time_suppressors_installed
+    if _compile_time_suppressors_installed:
+        return
+    _compile_time_suppressors_installed = True
+
+    try:  # noqa: BLE001
+        from torch._inductor.fx_passes import joint_graph as _jg
+
+        _orig_joint = _jg.joint_graph_passes
+
+        @functools.wraps(_orig_joint)
+        def _wrapped_joint(*args, **kwargs):
+            prev_mode = torch.cuda.get_sync_debug_mode()
+            if not prev_mode:
+                return _orig_joint(*args, **kwargs)
+            torch.cuda.set_sync_debug_mode(0)
+            try:
+                return _orig_joint(*args, **kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode(prev_mode)
+
+        _jg.joint_graph_passes = _wrapped_joint
+    except Exception:  # pragma: no cover
+        pass
 
 
 @contextmanager

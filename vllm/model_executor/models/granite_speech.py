@@ -143,7 +143,8 @@ class GraniteSpeechMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
-            audio_embed_sizes=MultiModalFieldConfig.batched("audio"),
+            # Only consumed as Python split sizes / scalars; keep CPU-resident.
+            audio_embed_sizes=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -717,13 +718,17 @@ class GraniteSpeechForConditionalGeneration(
             torch.Tensor: Mask of shape (bsz, num_features) to be applied to
             the audio features prior to splitting the audio embeddings.
         """
-        most_audio_features = torch.max(audio_embed_sizes).item()
-        mask_indices = torch.arange(
-            most_audio_features,
-            device=audio_embed_sizes.device,
-        ).view(1, -1)
+        # `audio_embed_sizes` is CPU-resident (see `_get_mm_fields_config`).
+        # Build the mask on CPU and pin+non-blocking upload to the encoder's
+        # device — the boolean mask is later used to index GPU
+        # `projected_embeds` in `_process_audio_input`.
+        most_audio_features = int(torch.max(audio_embed_sizes))
+        mask_indices = torch.arange(most_audio_features).view(1, -1)
         input_features_mask = mask_indices < audio_embed_sizes.view(-1, 1)
-        return input_features_mask
+        target_device = self.encoder.input_linear.weight.device
+        if target_device == input_features_mask.device:
+            return input_features_mask
+        return input_features_mask.pin_memory().to(target_device, non_blocking=True)
 
     def _pad_and_stack_input_features(
         self,

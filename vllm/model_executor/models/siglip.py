@@ -1116,13 +1116,17 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         position_diffs = position_ids[1:] - position_ids[:-1]
         boundary_mask = position_diffs <= 0
 
-        boundary_indices = torch.cat(
-            [
-                torch.tensor([0], device=features.device),
-                torch.where(boundary_mask)[0] + 1,
-                torch.tensor([len(features)], device=features.device),
-            ]
+        # Use `torch.zeros` / `torch.full` with a Python-scalar fill value to
+        # avoid the synchronous H2D copy that `torch.tensor([x], device=cuda)`
+        # would force.
+        boundary_mid = torch.where(boundary_mask)[0] + 1
+        zero_tensor = torch.zeros(
+            1, dtype=boundary_mid.dtype, device=features.device
         )
+        end_tensor = torch.full(
+            (1,), len(features), dtype=boundary_mid.dtype, device=features.device
+        )
+        boundary_indices = torch.cat([zero_tensor, boundary_mid, end_tensor])
 
         # For each sequence [start, end), position i flips to: start + end - 1 - i
         lengths = boundary_indices[1:] - boundary_indices[:-1]

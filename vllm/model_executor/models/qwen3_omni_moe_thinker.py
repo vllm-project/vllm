@@ -427,11 +427,17 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        # Compute chunk information
+        # Compute chunk information. `feature_lens` is small (per-audio) so
+        # pull to CPU once to compute total chunk count and split sizes
+        # without per-iteration D2H syncs.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
+        with gpu_sync_allowed():
+            total_chunks = int(chunk_num.sum())
         chunk_lengths = torch.tensor(
-            [self.n_window * 2] * chunk_num.sum(),
+            [self.n_window * 2] * total_chunks,
             dtype=torch.long,
             device=feature_lens.device,
         )
@@ -440,7 +446,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         chunk_lengths[chunk_lengths == 0] = self.n_window * 2
 
         # Split input features into chunks and pad
-        chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
+        with gpu_sync_allowed():
+            chunk_lengths_list = chunk_lengths.tolist()
+        chunk_list = input_features.T.split(chunk_lengths_list, dim=0)
         padded_feature = nn.utils.rnn.pad_sequence(
             chunk_list, batch_first=True
         ).transpose(1, 2)
