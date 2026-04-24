@@ -23,7 +23,7 @@ def _temperature_kernel(
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
     if temperature == 0.0 or temperature == 1.0:
-        # Early return to avoid loading logits.
+        # Greedy or no-op rescale: avoid loading logits at all.
         return
 
     block_idx = tl.program_id(1)
@@ -87,27 +87,22 @@ def gumbel_block_argmax(
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
-        # Apply temperature.
         # NOTE(woosuk): Match the behavior of _temperature_kernel.
         # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
 
     if processed_logits_ptr is not None:
-        # Store the temperature-applied logits.
         tl.store(
             processed_logits_ptr + req_state_idx * processed_logits_stride + block,
             logits,
             mask=mask,
         )
 
-    # Promote to the reduction dtype. fp32 is the default — on H100/Ada/Blackwell
-    # fp64 has 1/32x-1/64x throughput of fp32, and the Gumbel-max result does not
-    # benefit from the extra precision in any measurable way. The fp64 branch is
-    # retained behind VLLM_SAMPLER_FP64_GUMBEL=1 for statistical validation.
+    # fp32 is the default reduction dtype; fp64 is ~1/32–1/64x the throughput
+    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
     if USE_FP64:
         logits = logits.to(tl.float64)
     if temp != 0.0:
-        # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
         pos = tl.load(pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
