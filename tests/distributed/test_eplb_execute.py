@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import random
 
 import pytest
@@ -361,16 +360,14 @@ def _test_async_transfer_layer_without_mtp_worker(
         communicator.set_stream(cuda_stream)
 
         for layer_idx in range(num_layers):
-            transfer_metadata = asyncio.run(
-                transfer_layer(
-                    old_layer_indices=old_indices_cpu[layer_idx],
-                    new_layer_indices=new_indices_cpu[layer_idx],
-                    expert_weights=expert_weights[layer_idx],
-                    expert_weights_buffer=expert_buffer,
-                    ep_group=ep_group,
-                    communicator=communicator,
-                    cuda_stream=cuda_stream,
-                )
+            transfer_metadata = transfer_layer(
+                old_layer_indices=old_indices_cpu[layer_idx],
+                new_layer_indices=new_indices_cpu[layer_idx],
+                expert_weights=expert_weights[layer_idx],
+                expert_weights_buffer=expert_buffer,
+                ep_group=ep_group,
+                communicator=communicator,
+                cuda_stream=cuda_stream,
             )
             cuda_stream.synchronize()
             move_from_buffer(

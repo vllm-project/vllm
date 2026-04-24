@@ -933,3 +933,64 @@ def test_sample_recovered_tokens(
         device=DEVICE_TYPE,
     )
     assert torch.equal(recovered_token_ids, ref_recovered_token_ids)
+
+
+########################### Tests for Synthetic Rejection Sampling #########
+
+
+def _make_synthetic_sampler(rates: list[float]) -> RejectionSampler:
+    mock_sampler = Mock(spec=Sampler)
+    mock_sampler.logprobs_mode = "raw_logprobs"
+    spec_config = Mock()
+    spec_config.rejection_sample_method = "synthetic"
+    spec_config.synthetic_acceptance_rates = rates
+    return RejectionSampler(mock_sampler, spec_config, torch.device(DEVICE_TYPE))
+
+
+def _make_sampling_metadata(all_greedy: bool) -> SamplingMetadata:
+    temperature = None if all_greedy else torch.tensor([1.0, 1.0], device=DEVICE_TYPE)
+    return create_sampling_metadata(all_greedy=all_greedy, temperature=temperature)
+
+
+@pytest.mark.parametrize("all_greedy", [True, False])
+def test_synthetic_all_accepted(all_greedy: bool):
+    """With all rates=1.0, every draft token is accepted."""
+    sampler = _make_synthetic_sampler([1.0, 1.0])
+    spec_tokens = [[1, 2], [3]]
+    output_tokens = [[10, 20, 50], [30, 40]]
+
+    metadata = _make_sampling_metadata(all_greedy)
+    logits = create_logits_tensor(output_tokens)
+    bonus = torch.tensor([50, 40], device=DEVICE_TYPE)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(sampler, bonus)
+    output = sampler(spec_decode_metadata, None, logits, metadata)
+    expected = torch.tensor(
+        [[1, 2, 50], [3, 40, PLACEHOLDER_TOKEN_ID]],
+        dtype=torch.int,
+        device=DEVICE_TYPE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+@pytest.mark.parametrize("all_greedy", [True, False])
+def test_synthetic_all_rejected(all_greedy: bool):
+    """With all rates=0.0, the first token is always rejected."""
+    sampler = _make_synthetic_sampler([0.0, 0.0])
+    spec_tokens = [[1, 2], [3]]
+    output_tokens = [[10, 20, 50], [30, 40]]
+
+    metadata = _make_sampling_metadata(all_greedy)
+    logits = create_logits_tensor(output_tokens)
+    bonus = torch.tensor([50, 40], device=DEVICE_TYPE)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(sampler, bonus)
+    output = sampler(spec_decode_metadata, None, logits, metadata)
+    result = output.sampled_token_ids
+    # Exactly one token emitted per sequence (the rejection fallback),
+    # followed by placeholders.
+    for row in result:
+        assert row[0] != PLACEHOLDER_TOKEN_ID
+        assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()

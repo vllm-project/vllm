@@ -61,9 +61,9 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     return EagleProposer(vllm_config=vllm_config, device=DEVICE_TYPE)
 
 
-@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.eagle.get_model")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_group):
     """Test MTP-specific model loading with unified model approach."""
 
