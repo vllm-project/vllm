@@ -84,6 +84,9 @@ def transfer_run_periodically(
 ) -> None:
     while True:
         state.rearrange_event.wait(stream=cuda_stream)
+        if state.stop_requested:
+            logger.info("async worker stopping (stop_requested set)")
+            return
         logger.info("async worker woke up for EPLB transfer")
 
         assert state.is_async
@@ -142,6 +145,12 @@ def transfer_run_periodically(
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=cuda_stream)
+                if state.stop_requested:
+                    logger.info(
+                        "async worker stopping during layer %d transfer",
+                        layer_idx,
+                    )
+                    return
                 logger.debug("Layer %d transfer complete", layer_idx)
                 assert model_state.pending_result is None
                 layer_idx += 1

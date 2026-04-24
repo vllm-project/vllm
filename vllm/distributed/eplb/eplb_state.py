@@ -266,6 +266,12 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.stop_requested: bool = False
+        """
+        Flag to signal the async worker thread to stop. Set by
+        stop_async_worker(); checked by the async thread after each blocking
+        wait in transfer_run_periodically.
+        """
         self.cuda_device_index: int | None = None
         """
         CUDA device index for the async EPLB worker thread.
@@ -818,6 +824,44 @@ class EplbState:
                 self,
                 is_profile=is_profile,
             )
+
+    def stop_async_worker(self) -> None:
+        """
+        Signal the async EPLB worker to stop and block until it exits.
+
+        Sets stop_requested, then unblocks the worker regardless of which wait
+        it is currently blocked on — either the idle rearrange_event.wait() or
+        the per-layer consumed_event.wait() mid-transfer. Raises TimeoutError
+        if the thread does not exit within the timeout. No-op if no worker is
+        running.
+        """
+        if self.async_worker is None:
+            return
+        self.stop_requested = True
+
+        # Unblock the async worker if vLLM is in between EPLB runs
+        if not self.rearrange_event.is_recorded():
+            self.rearrange_event.record()
+
+        # Unblock the async worker if it is waiting for the main thread to consume the
+        # intermediate buffer
+        for model_state in self.model_states.values():
+            if model_state.pending_result is not None:
+                model_state.pending_result.consumed_event.record()
+            model_state.rebalanced = False
+            model_state.pending_result = None
+
+        # Terminate the async_worker thread
+        _STOP_TIMEOUT = 5.0
+        self.async_worker.join(timeout=_STOP_TIMEOUT)
+        if self.async_worker.is_alive():
+            raise TimeoutError(
+                f"Async EPLB worker did not stop within {_STOP_TIMEOUT}s; "
+                "state may be corrupted."
+            )
+        self.async_worker = None
+
+        self.stop_requested = False
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()

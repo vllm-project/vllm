@@ -45,6 +45,14 @@ class CpuGpuEvent:
         self._event.wait(stream)
         self._recorded.clear()
 
+    def is_recorded(self) -> bool:
+        """
+        Returns True if record() has been called and wait() has not yet
+        consumed it. Returns False if the event is idle (either wait() already
+        consumed the last record(), or record() has never been called).
+        """
+        return self._recorded.is_set()
+
     def record(self, stream: torch.cuda.Stream | None = None):
         """
         Unblocks the waiting thread after calling event.record().

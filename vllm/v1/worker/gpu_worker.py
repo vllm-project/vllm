@@ -1015,6 +1015,11 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        if (runner := getattr(self, "model_runner", None)) is not None and (
+            eplb_state := getattr(runner, "eplb_state", None)
+        ) is not None:
+            eplb_state.stop_async_worker()
+
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
