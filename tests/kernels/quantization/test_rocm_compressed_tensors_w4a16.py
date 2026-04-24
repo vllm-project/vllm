@@ -27,9 +27,11 @@ def test_rocm_compressed_tensors_w4a16_e2e(
     vllm_runner, example_prompts, model_path, max_tokens
 ):
     # Use fp16 activations for maximum compatibility.
-    # gpu_memory_utilization lowered to work on shared nodes.
+    # gpu_memory_utilization=0.5: 0.3 left a negative KV-cache budget on the
+    # gfx11 CI runner (Available KV cache memory: -0.53 GiB) because torch +
+    # MIOpen reserve ~hundreds of MB on top of the weights.
     with vllm_runner(
-        model_path, dtype="float16", gpu_memory_utilization=0.3
+        model_path, dtype="float16", gpu_memory_utilization=0.5
     ) as vllm_model:
         # Note: we cannot assert HybridW4A16LinearKernel is selected here
         # because V1 engine runs the model in a subprocess and apply_model
