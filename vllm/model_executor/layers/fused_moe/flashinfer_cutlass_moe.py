@@ -129,7 +129,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             and (
                 p.is_device_capability(90)
                 or p.is_device_capability_family(100)
-                or p.is_device_capability_family(110)
+                # SM110 excluded: flashinfer-ai/flashinfer#3134
                 or p.is_device_capability_family(120)
             )
             and has_flashinfer_cutlass_fused_moe()
