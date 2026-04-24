@@ -107,7 +107,7 @@ def backend_to_kernel_cls(
         return [FlashInferCuteDSLBatchedExperts]
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassExpertsFp4,
         )
 
@@ -168,10 +168,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
 
-    # NOTE(rob): this is kind of a hack. We need to peak into
-    # the prepare-finalize selection to determine if we are using
-    # the batched or standard expert format.
-    use_batched = config.moe_parallel_config.use_deepep_ll_kernels
+    use_batched = config.moe_parallel_config.use_batched_activation_format
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if use_batched
@@ -252,12 +249,10 @@ def select_nvfp4_moe_backend(
                         activation_format,
                     )
                     if supported:
-                        logger.info_once(_make_log_backend(backend), scope="local")
+                        logger.info_once(_make_log_backend(backend))
                         return backend, k_cls
                     else:
-                        logger.debug_once(
-                            _make_log_unsupported(backend, reason), scope="local"
-                        )
+                        logger.debug_once(_make_log_unsupported(backend, reason))
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
@@ -282,10 +277,10 @@ def select_nvfp4_moe_backend(
             )
 
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
             else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
