@@ -53,11 +53,11 @@ def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
 
 @dataclass(frozen=True)
 class RegionPlan:
-    """Pre-computed plan for one descriptor region.
+    """Geometry for one descriptor region.
 
     Everything needed to build NIXL descriptors and compute descriptor
-    IDs is baked in.  The executor plugs in per-rank ``base_addr`` and
-    ``device_id`` from NixlAgentMetadata.
+    IDs is baked in.  The caller plugs in ``base_addr`` and
+    ``device_id`` when constructing the final descriptor tuples.
     """
 
     layer_idx: int
@@ -355,13 +355,19 @@ def generate_mamba_plan(
     conv_size_remote = remote_ssm_sizes[0]
     ssm_num_blocks = remote_meta.num_blocks // remote_phys_ratio
 
+    # Mamba conv state is always TP-sharded, even when attention KV
+    # is replicated (num_kv_heads < tp_size).
     if tp_size >= remote_tp_size:
+        # D_TP >= P_TP: P page is larger, D reads its slice.
         conv_offsets = conv_decomp.remote_conv_offsets(
             local_offset,
             effective_ratio,
         )
         ssm_read_size = ssm_sizes[1]
     else:
+        # NOTE (ZhanqiuHu): P_TP > D_TP, so P pages are smaller
+        # than D's.  conv_decomp has D-sized dimensions, but we
+        # need P-sized offsets.  Scale down by abs_ratio.
         abs_ratio = remote_tp_size // tp_size
         xb_p = conv_decomp.x_bytes // abs_ratio
         bb_p = conv_decomp.b_bytes // abs_ratio
@@ -372,6 +378,8 @@ def generate_mamba_plan(
         ]
         ssm_read_size = remote_ssm_sizes[1]
 
+    # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0],
+    # in case block lengths vary across layers (e.g. MLA).
     ssm_regions: list[RegionPlan] = []
     for i in range(len(remote_block_lens)):
         page_stride = remote_block_lens[i] * remote_phys_ratio
@@ -413,54 +421,57 @@ def generate_mamba_plan(
 # ======================================================================
 
 
-def build_fa_local_descs(
-    base_addresses: list[int],
-    device_id: int,
+def build_fa_local_regions(
     num_blocks: int,
     block_size_ratio: int,
     block_len_per_layer: list[int],
     is_blocks_first: bool,
-) -> list[tuple[int, int, int]]:
-    """Build FA local descriptors for NIXL registration."""
-    result: list[tuple[int, int, int]] = []
+) -> list[RegionPlan]:
+    """Build FA local region specs for NIXL registration."""
+    regions: list[RegionPlan] = []
     n_blocks = num_blocks * block_size_ratio
-    for i, base_addr in enumerate(base_addresses):
+    for i in range(len(block_len_per_layer)):
         kv_block_len = (
             _get_kv_block_len(i, block_len_per_layer, is_blocks_first)
             // block_size_ratio
         )
         page_stride = block_len_per_layer[i] // block_size_ratio
-        for block_id in range(n_blocks):
-            result.append(
-                (
-                    base_addr + block_id * page_stride,
-                    kv_block_len,
-                    device_id,
-                )
+        regions.append(
+            RegionPlan(
+                layer_idx=i,
+                descriptor_bytes=kv_block_len,
+                offset_in_page=0,
+                page_stride=page_stride,
+                num_blocks=n_blocks,
             )
+        )
         if is_blocks_first:
             second_split = _get_kv_block_len(
                 i,
                 block_len_per_layer,
                 is_blocks_first,
             )
-            for block_id in range(n_blocks):
-                v_addr = base_addr + block_id * page_stride + kv_block_len
-                result.append((v_addr, second_split, device_id))
-    return result
+            regions.append(
+                RegionPlan(
+                    layer_idx=i,
+                    descriptor_bytes=second_split,
+                    offset_in_page=kv_block_len,
+                    page_stride=page_stride,
+                    num_blocks=n_blocks,
+                )
+            )
+    return regions
 
 
-def build_mamba_local_descs(
-    base_addresses: list[int],
+def build_mamba_local_regions(
     block_len_per_layer: list[int],
     logical_num_blocks: int,
     block_size_ratio: int,
-    device_id: int,
     conv_decomp: MambaConvSplitInfo,
     ssm_sizes: tuple[int, int],
     physical_blocks_per_logical: int,
-) -> list[tuple[int, int, int]]:
-    """Build 4 SSM descriptor regions (x, B, C, ssm) per layer."""
+) -> list[RegionPlan]:
+    """Build 4 SSM region specs (x, B, C, ssm) per layer."""
     assert block_size_ratio == 1, (
         "Mamba 3-read transfer with block_size_ratio != 1 "
         f"is not tested. Got {block_size_ratio=}."
@@ -470,24 +481,27 @@ def build_mamba_local_descs(
     n_blocks = logical_num_blocks * block_size_ratio
     phys_ratio = physical_blocks_per_logical
 
-    result: list[tuple[int, int, int]] = []
-    for i, base_addr in enumerate(base_addresses):
+    regions: list[RegionPlan] = []
+    for i in range(len(block_len_per_layer)):
         page_stride = block_len_per_layer[i] // block_size_ratio * phys_ratio
         for off, sz in conv_offsets:
-            for blk in range(n_blocks):
-                result.append(
-                    (
-                        base_addr + blk * page_stride + off,
-                        sz,
-                        device_id,
-                    )
-                )
-        for blk in range(n_blocks):
-            result.append(
-                (
-                    base_addr + blk * page_stride + conv_size,
-                    ssm_size,
-                    device_id,
+            regions.append(
+                RegionPlan(
+                    layer_idx=i,
+                    descriptor_bytes=sz,
+                    offset_in_page=off,
+                    page_stride=page_stride,
+                    num_blocks=n_blocks,
                 )
             )
-    return result
+        # SSM temporal state follows the conv state.
+        regions.append(
+            RegionPlan(
+                layer_idx=i,
+                descriptor_bytes=ssm_size,
+                offset_in_page=conv_size,
+                page_stride=page_stride,
+                num_blocks=n_blocks,
+            )
+        )
+    return regions
