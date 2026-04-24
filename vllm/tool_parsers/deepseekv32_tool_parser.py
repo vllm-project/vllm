@@ -305,10 +305,10 @@ class DeepSeekV32ToolParser(ToolParser):
             self.is_tool_call_started = True
             start_idx = current_text.index(self.tool_call_start_token)
             content_before = current_text[len(previous_text) : start_idx] or None
-        # elif self._is_potential_tool_call_prefix(current_text):
-        #     # The start token may be split across chunks; buffer instead of
-        #     # emitting partial sentinel characters as content.
-        #     return None
+        elif self._is_potential_tool_call_prefix(current_text):
+            # The start token may be split across chunks; buffer instead of
+            # emitting partial sentinel characters as content.
+            return None
         else:
             # Still in plain-text region, forward as content.
             return DeltaMessage(content=delta_text) if delta_text else None
