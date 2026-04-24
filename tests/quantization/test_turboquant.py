@@ -543,7 +543,7 @@ class TestStoreDecodeRoundTrip:
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
 
-    @pytest.mark.parametrize("kv_group_size", [4, 8])
+    @pytest.mark.parametrize("kv_group_size", [4, 8, 24])
     def test_gqa_roundtrip_k8v4(self, kv_group_size):
         """GQA round-trip for the grouped decode kernel path.
 
@@ -573,9 +573,7 @@ class TestStoreDecodeRoundTrip:
 
         device = torch.device(DEVICE_TYPE)
 
-        H = _build_hadamard(D, DEVICE_TYPE)
-        PiT = H
-        Pi = H
+        PiT = _build_hadamard(D, DEVICE_TYPE)
 
         centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
         centroids = centroids.float().to(device)
@@ -634,7 +632,7 @@ class TestStoreDecodeRoundTrip:
             kv_cache=kv_cache,
             block_table=block_table,
             seq_lens=seq_lens,
-            Pi=Pi,
+            Pi=PiT,
             centroids=centroids,
             scale=1.0 / math.sqrt(D),
             mse_bits=cfg.key_mse_bits,
@@ -708,8 +706,7 @@ class TestStoreDecodeRoundTrip:
         NUM_KV_SPLITS = 8
         device = torch.device(DEVICE_TYPE)
 
-        H = _build_hadamard(D, DEVICE_TYPE)
-        PiT = H
+        PiT = _build_hadamard(D, DEVICE_TYPE)
 
         centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
         centroids = centroids.float().to(device)
@@ -836,8 +833,8 @@ class TestStoreDecodeRoundTrip:
         import triton as _triton
 
         BLOCK_H = 16
-        VALID_BH = min(BLOCK_H, kv_group_size)
-        head_groups = _triton.cdiv(Hq, VALID_BH)
+        heads_per_kv_head = _triton.cdiv(kv_group_size, BLOCK_H)
+        head_groups = Hk * heads_per_kv_head
 
         mid_o_grouped = torch.empty(
             B,
@@ -853,7 +850,6 @@ class TestStoreDecodeRoundTrip:
             kv_cache,
             block_table,
             seq_lens,
-            centroids,
             mid_o_grouped,
             q_rot.stride(0),
             q_rot.stride(1),
@@ -864,14 +860,11 @@ class TestStoreDecodeRoundTrip:
             mid_o_grouped.stride(0),
             mid_o_grouped.stride(1),
             mid_o_grouped.stride(2),
-            NUM_KV_HEADS=Hk,
             HEAD_DIM=D,
             BLOCK_SIZE=block_size,
             NUM_KV_SPLITS=NUM_KV_SPLITS,
             KV_GROUP_SIZE=kv_group_size,
             Q_HEAD_NUM=Hq,
-            MSE_BITS=cfg.key_mse_bits,
-            MSE_BYTES=layout["mse_bytes"],
             KPS=cfg.key_packed_size,
             VQB=cfg.effective_value_quant_bits,
             VAL_DATA_BYTES=layout["val_data_bytes"],
@@ -879,8 +872,6 @@ class TestStoreDecodeRoundTrip:
             BLOCK_D=layout["BLOCK_D"],
             BLOCK_KV=16,
             BLOCK_H=BLOCK_H,
-            KEY_FP8=1 if cfg.key_fp8 else 0,
-            NORM_CORRECTION=1 if cfg.norm_correction else 0,
             FP8_E4B15=fp8_e4b15,
             num_warps=4,
             num_stages=2,
