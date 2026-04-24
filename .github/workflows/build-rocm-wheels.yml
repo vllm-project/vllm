@@ -164,9 +164,10 @@ jobs:
           echo "=== id ==="
           id
           echo ""
-          echo "=== rocm-smi ==="
+          echo "=== rocm-smi (product + VRAM/GTT) ==="
           if command -v rocm-smi >/dev/null 2>&1; then
             rocm-smi --showproductname --showid
+            rocm-smi --showmeminfo vram gtt
           else
             echo "rocm-smi not found"
           fi
@@ -178,9 +179,10 @@ jobs:
             echo "rocminfo not found"
           fi
           echo ""
-          echo "=== amd-smi ==="
+          echo "=== amd-smi (product + memory) ==="
           if command -v amd-smi >/dev/null 2>&1; then
             amd-smi list || true
+            amd-smi static --asic --vram || true
           else
             echo "amd-smi not found"
           fi
