@@ -182,9 +182,7 @@ def test_rms_norm_3d_input(
     eps = 1e-6
 
     torch.manual_seed(42)
-    input_tensor = torch.randn(
-        batch_size, seq_len, hidden_size, dtype=dtype
-    )
+    input_tensor = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype)
     weight = torch.randn(hidden_size, dtype=dtype)
 
     # Standard implementation
