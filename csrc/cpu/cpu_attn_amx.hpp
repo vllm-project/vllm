@@ -401,6 +401,9 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
 
   float get_output_v_scale() const noexcept {
     if constexpr (fp8_kv) {
+      // AMX dequant places FP8 payload into a BF16 field (exponent bias 127).
+      // Correction = 2^(127 - FP8_bias): E4M3 bias=7 → 2^120, E5M2 bias=15 →
+      // 2^112.
       constexpr float bias =
           std::is_same_v<kv_cache_t, c10::Float8_e5m2> ? 0x1p112f : 0x1p120f;
       return v_scale * bias;
@@ -411,8 +414,9 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
     if constexpr (fp8_kv) {
-      // Compensates for unscaled BF16 from direct FP8→BF16 dequant (2^120 E4M3,
-      // 2^112 E5M2).
+      // Same bias correction as get_output_v_scale: AMX FP8→BF16 dequant
+      // shifts the exponent bias from FP8 to BF16 (127), so we multiply by
+      // 2^(127-FP8_bias) to recover the true value. E4M3: 2^120, E5M2: 2^112.
       const float bias =
           std::is_same_v<kv_cache_t, c10::Float8_e5m2> ? 0x1p112f : 0x1p120f;
       scale *= k_scale * bias;

@@ -10,6 +10,7 @@ typedef uint32_t __attribute__((__may_alias__)) u32_alias_t;
 typedef uint16_t __attribute__((__may_alias__)) u16_alias_t;
 typedef float __attribute__((__may_alias__)) f32_alias_t;
 
+// Reference scalar dequant — used to verify vectorized AMX dequant.
 inline float fp8e4m3_to_float_scalar(uint8_t b, float scale) noexcept {
   // NaN encoding in E4M3
   if ((b & 0x7F) == 0x7F) return std::numeric_limits<float>::quiet_NaN();
@@ -37,18 +38,6 @@ inline uint8_t float_to_fp8e4m3_scalar(float v, float inv_scale) noexcept {
   if (payload == 0) return sign;
   payload = std::min<uint8_t>(payload, 0x7E);  // keep 0x7F as NaN encoding
   return static_cast<uint8_t>(sign | payload);
-}
-
-template <typename scalar_t>
-inline void quant_to_fp8(const scalar_t* src, uint8_t* dst, int n,
-                         float inv_scale) {
-  for (int i = 0; i < n; ++i)
-    dst[i] = float_to_fp8e4m3_scalar(static_cast<float>(src[i]), inv_scale);
-}
-
-inline void deq_fp8_to_fp32(const uint8_t* src, float* dst, int n,
-                            float scale) {
-  for (int i = 0; i < n; ++i) dst[i] = fp8e4m3_to_float_scalar(src[i], scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,24 +110,11 @@ inline void reshape_and_cache_fp8_amx_impl(
   }
 }
 
-template <typename scalar_t>
-inline void reshape_and_cache_fp8_amx_typed(
-    const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
-    uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
-    int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
-    int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
-    int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
-    float v_inv) {
-  reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e4m3_scalar>(
-      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
-      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
-      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
-}
-
 // ---------------------------------------------------------------------------
 // FP8 E5M2 scalar helpers
 // ---------------------------------------------------------------------------
 
+// Reference scalar dequant — used to verify vectorized AMX dequant.
 // FP8 E5M2: s[7] e[6:2] m[1:0], exponent bias = 15 (same as FP16).
 // Byte b → FP16 bits = b << 8 (no bias correction needed).
 inline float fp8e5m2_to_float_scalar(uint8_t b, float scale) noexcept {
@@ -184,18 +160,6 @@ inline uint8_t float_to_fp8e5m2_scalar(float v, float inv_scale) noexcept {
   return sign | (exp5 << 2) | mant2;
 }
 
-template <typename scalar_t>
-inline void quant_to_fp8e5m2(const scalar_t* src, uint8_t* dst, int n,
-                             float inv_scale) {
-  for (int i = 0; i < n; ++i)
-    dst[i] = float_to_fp8e5m2_scalar(static_cast<float>(src[i]), inv_scale);
-}
-
-inline void deq_fp8e5m2_to_fp32(const uint8_t* src, float* dst, int n,
-                                float scale) {
-  for (int i = 0; i < n; ++i) dst[i] = fp8e5m2_to_float_scalar(src[i], scale);
-}
-
 // ---------------------------------------------------------------------------
 // VEC reshape impl — parameterised on the quantisation function.
 // Writes key (column-major) and value (row-major) into uint8 FP8 KV cache.
@@ -233,55 +197,4 @@ inline void reshape_and_cache_fp8_vec_impl(
         vdst[i] = quant_fn(static_cast<float>(vsrc[i]), v_inv);
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// E5M2 reshape helpers (VEC layout — identical structure to E4M3 variants)
-// ---------------------------------------------------------------------------
-
-template <typename scalar_t>
-inline void reshape_and_cache_fp8_e5m2_typed(
-    const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
-    uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
-    int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
-    int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
-    int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
-    float v_inv) {
-  reshape_and_cache_fp8_vec_impl<scalar_t, float_to_fp8e5m2_scalar>(
-      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
-      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
-      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
-}
-
-// AMX-layout E5M2 reshape — same halfword-packed K / sub-group V layout as
-// E4M3; only the quantization function differs.
-template <typename scalar_t>
-inline void reshape_and_cache_fp8_amx_e5m2_typed(
-    const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
-    uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
-    int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
-    int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
-    int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
-    float v_inv) {
-  reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e5m2_scalar>(
-      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
-      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
-      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
-}
-
-// Writes key (column-major) and value (row-major) into uint8 FP8 KV cache.
-// The pragma omp must live outside VLLM_DISPATCH_FLOATING_TYPES because
-// #pragma cannot appear inside variadic macro arguments.
-template <typename scalar_t>
-inline void reshape_and_cache_fp8_typed(
-    const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
-    uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
-    int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
-    int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
-    int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
-    float v_inv) {
-  reshape_and_cache_fp8_vec_impl<scalar_t, float_to_fp8e4m3_scalar>(
-      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
-      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
-      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
 }

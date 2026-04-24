@@ -163,6 +163,9 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_scalar_t> {
 
   float get_output_v_scale() const noexcept {
     if constexpr (fp8_kv) {
+      // VEC dequant unpacks FP8 into a pseudo-FP16 layout (exponent bias 15).
+      // E4M3 (bias=7) needs correction 2^(15-7) = 2^8; E5M2 bias matches FP16
+      // so no correction.
       if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
         return v_scale;
       } else {
@@ -175,6 +178,9 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_scalar_t> {
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
     if constexpr (fp8_kv) {
+      // Same bias correction as get_output_v_scale: VEC FP8→pseudo-FP16 dequant
+      // uses bias 15; E4M3 (bias=7) needs ×2^8, E5M2 (bias=15) needs no
+      // correction.
       if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
         scale *= k_scale;
       } else {
