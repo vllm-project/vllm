@@ -451,7 +451,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args,
             )
-
         else:
             scales = GroupQuantScaleParameter(
                 output_dim=1, input_dim=0, **weight_scale_args
@@ -473,7 +472,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             mp_linear_kernel_config,
             w_q_param_name="qweight",
             w_s_param_name="scales",
-            w_zp_param_name="qzeros",
+            w_zp_param_name=None,
             w_gidx_param_name="g_idx",
         )
 
