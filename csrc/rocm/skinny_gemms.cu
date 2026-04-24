@@ -347,19 +347,6 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
     }
 #endif
 
-// GFX11 (RDNA, wave32) butterfly reduction: sum all 32 lanes within one
-// wavefront.  Every lane gets the result.
-#if defined(__GFX11__)
-  #define REDUCE_SUM_WAVE32(val)  \
-    do {                          \
-      val += __shfl_xor(val, 1);  \
-      val += __shfl_xor(val, 2);  \
-      val += __shfl_xor(val, 4);  \
-      val += __shfl_xor(val, 8);  \
-      val += __shfl_xor(val, 16); \
-    } while (0)
-#endif
-
 // To avoid LLVM silently upcasting to double
 __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
@@ -497,28 +484,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // Final reduction step using shuffle
     //----------------------------------------------------
     if constexpr (!use_mfma) {
-  #if defined(__GFX11__)
-      // Wave32: butterfly reduce within the single wavefront per row
-      for (int n = 0; n < N; n++)
-        for (int y = 0; y < YTILE; y++) REDUCE_SUM_WAVE32(sum[n][y]);
-
-      // Lane 0 has the complete sum; write the result
-      if (threadIdx.x == 0) {
-        for (int n = 0; n < N; n++) {
-          for (int i = 0; i < YTILE; i++) {
-            if constexpr (std::is_same_v<scalar_t, half>) {
-              if (BIAS)
-                sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
-            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              if (BIAS)
-                sum[n][i] +=
-                    __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
-            }
-            C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
-          }
-        }
-      }
-  #else  // GFX9 wave64 path
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
@@ -529,14 +494,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                                                 1);  // row_shr2
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
                                                 1);  // row_shr1
-    #if defined(__HIP__GFX9__)
+  #if defined(__HIP__GFX9__)
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
                                                 1);  // ROW_BCAST15
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
                                                 1);  // ROW_BCAST31
-    #else
+  #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-    #endif
+  #endif
         }
       }
 
@@ -559,7 +524,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-  #endif  // defined(__GFX11__)
     } else {
   #ifdef __HIP__GFX9__
     #pragma unroll
@@ -741,30 +705,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // Final reduction step using shuffle
     //----------------------------------------------------
     if constexpr (!use_mfma) {
-  #if defined(__GFX11__)
-      // Wave32: butterfly reduce within the single wavefront per row
-      for (int n = 0; n < N; n++)
-        for (int y = 0; y < YTILE; y++) REDUCE_SUM_WAVE32(sum[n][y]);
-
-      // Lane 0 has the complete sum; write the result
-      if (threadIdx.x == 0) {
-        for (int n = 0; n < N; n++) {
-          for (int i = 0; i < YTILE; i++) {
-            if (commitColumn[i]) {
-              if constexpr (std::is_same_v<scalar_t, half>) {
-                if (BIAS)
-                  sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
-              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                if (BIAS)
-                  sum[n][i] +=
-                      __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
-              }
-              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
-            }
-          }
-        }
-      }
-  #else  // GFX9 wave64 path
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
@@ -775,14 +715,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                                                 1);  // row_shr2
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
                                                 1);  // row_shr1
-    #if defined(__HIP__GFX9__)
+  #if defined(__HIP__GFX9__)
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
                                                 1);  // ROW_BCAST15
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
                                                 1);  // ROW_BCAST31
-    #else
+  #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-    #endif
+  #endif
         }
       }
 
@@ -807,7 +747,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-  #endif  // defined(__GFX11__)
     } else {
   #ifdef __HIP__GFX9__
     #pragma unroll
@@ -1119,30 +1058,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // Final reduction step using shuffle
     //----------------------------------------------------
     if constexpr (!use_mfma) {
-  #if defined(__GFX11__)
-      // Wave32: butterfly reduce within the single wavefront per row
-      for (int n = 0; n < N; n++)
-        for (int y = 0; y < YTILE; y++) REDUCE_SUM_WAVE32(sum[n][y]);
-
-      // Lane 0 has the complete sum; write the result
-      if (threadIdx.x == 0) {
-        for (int n = 0; n < N; n++) {
-          for (int i = 0; i < YTILE; i++) {
-            if (commitColumn[i]) {
-              if constexpr (std::is_same_v<scalar_t, half>) {
-                if (BIAS)
-                  sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
-              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                if (BIAS)
-                  sum[n][i] +=
-                      __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
-              }
-              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
-            }
-          }
-        }
-      }
-  #else  // GFX9 wave64 path
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
@@ -1153,14 +1068,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                                                 1);  // row_shr2
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
                                                 1);  // row_shr1
-    #if defined(__HIP__GFX9__)
+  #if defined(__HIP__GFX9__)
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
                                                 1);  // ROW_BCAST15
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
                                                 1);  // ROW_BCAST31
-    #else
+  #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-    #endif
+  #endif
         }
       }
 
@@ -1185,7 +1100,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-  #endif  // defined(__GFX11__)
     } else {
   #ifdef __HIP__GFX9__
     #pragma unroll
