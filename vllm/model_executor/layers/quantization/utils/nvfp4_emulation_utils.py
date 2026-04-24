@@ -53,7 +53,6 @@ def _dequantize_nvfp4_kernel(
     scale_ptr,
     global_scale_ptr,
     output_ptr,
-    e2m1_lut_ptr,
     rows_per_batch: tl.constexpr,
     num_blocks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -222,6 +221,12 @@ def _triton_nvfp4_quant_dequant(
 ) -> torch.Tensor:
     """Triton-accelerated NVFP4 quantize-dequantize."""
     x_m, x_k = x.shape
+
+    if not torch.compiler.is_compiling():
+        assert x_k % block_size == 0, (
+            f"Weight shape K={x_k} is not divisible by block_size={block_size}"
+        )
+
     output_dtype = x.dtype
     num_blocks = x_k // block_size
 
@@ -305,7 +310,6 @@ def _triton_dequantize_nvfp4(
         scale_raw,
         global_scale,
         output,
-        kE2M1ToFloat_handle.val,
         m_per_batch,
         num_blocks,
         block_size,
