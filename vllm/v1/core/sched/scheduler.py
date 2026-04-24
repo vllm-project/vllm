@@ -339,6 +339,47 @@ class Scheduler(SchedulerInterface):
             return 0
         return aligned_end - num_computed_tokens
 
+    def _mamba_chunk_invariant_align_external_computed_tokens(
+        self,
+        request: Request,
+        num_new_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> int:
+        """Align external KV hits so resumed prefill starts on a Mamba chunk.
+
+        Local prefix-cache hits should already be chunk-aligned by construction
+        because their cache block size is aligned to mamba_chunk_size. External
+        connectors may report arbitrary hit lengths, so truncate them before
+        scheduling any following prefill work.
+        """
+        chunk_size = self.mamba_chunk_size
+        assert chunk_size is not None
+        if (
+            0 < num_new_local_computed_tokens < request.num_tokens
+            and num_new_local_computed_tokens % chunk_size != 0
+        ):
+            raise ValueError(
+                "Local prefix-cache hit length "
+                f"({num_new_local_computed_tokens}) is not aligned to "
+                f"mamba_chunk_size ({chunk_size})."
+            )
+
+        if num_external_computed_tokens == 0:
+            return 0
+
+        total_computed_tokens = (
+            num_new_local_computed_tokens + num_external_computed_tokens
+        )
+        # Match local prefix-cache behavior: even when all prompt tokens hit,
+        # the final prompt token must be recomputed to produce logits.
+        max_resumable_tokens = max(request.num_tokens - 1, 0)
+        total_computed_tokens = min(total_computed_tokens, max_resumable_tokens)
+
+        aligned_total_computed_tokens = (
+            total_computed_tokens // chunk_size
+        ) * chunk_size
+        return max(0, aligned_total_computed_tokens - num_new_local_computed_tokens)
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -687,6 +728,18 @@ class Scheduler(SchedulerInterface):
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
+                        connector_prefix_cache_hits = num_external_computed_tokens
+
+                    if self.need_mamba_chunk_invariant_split:
+                        num_external_computed_tokens = (
+                            self._mamba_chunk_invariant_align_external_computed_tokens(
+                                request,
+                                num_new_local_computed_tokens,
+                                num_external_computed_tokens,
+                            )
+                        )
+                        if num_external_computed_tokens == 0:
+                            load_kv_async = False
                         connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).

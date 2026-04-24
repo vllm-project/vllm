@@ -226,6 +226,7 @@ def test_logprobs_chunked_prefill_batch_invariance(backend: str):
         max_num_seqs=128,
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens,
+        enable_prefix_caching=False,
         dtype="bfloat16",
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,

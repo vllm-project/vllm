@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -23,6 +24,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -874,6 +876,111 @@ def test_mamba_chunk_invariant_defers_long_schedules_short_same_step(
     assert output.num_scheduled_tokens["short"] == 10
     assert "long" not in output.num_scheduled_tokens
     assert {r.req_id for r in output.scheduled_new_reqs} == {"medium", "short"}
+
+
+def test_mamba_chunk_invariant_platform_alignment_uses_lcm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(scheduler_mod.envs, "VLLM_BATCH_INVARIANT", True)
+    cache_config = SimpleNamespace(
+        enable_prefix_caching=True,
+        mamba_block_size=384,
+        block_size=128,
+        mamba_cache_mode="all",
+    )
+    model_config = SimpleNamespace(
+        has_inner_state=True,
+        get_mamba_chunk_size=lambda: 256,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        model_config=model_config,
+    )
+
+    Platform._ensure_batch_invariant_chunk_alignment(vllm_config)
+
+    assert cache_config.mamba_block_size == 768
+    assert cache_config.block_size == 128
+
+
+def test_mamba_chunk_invariant_platform_alignment_updates_align_block_size(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(scheduler_mod.envs, "VLLM_BATCH_INVARIANT", True)
+    cache_config = SimpleNamespace(
+        enable_prefix_caching=True,
+        mamba_block_size=384,
+        block_size=384,
+        mamba_cache_mode="align",
+    )
+    model_config = SimpleNamespace(
+        has_inner_state=True,
+        get_mamba_chunk_size=lambda: 256,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        model_config=model_config,
+    )
+
+    Platform._ensure_batch_invariant_chunk_alignment(vllm_config)
+
+    assert cache_config.mamba_block_size == 768
+    assert cache_config.block_size == 768
+
+
+def test_mamba_chunk_invariant_truncates_external_kv_hit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = _create_mamba_chunk_invariant_scheduler(
+        monkeypatch,
+        invariant_enabled=True,
+        chunk_size=256,
+        max_num_batched_tokens=512,
+        max_num_seqs=8,
+        max_model_len=8192,
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=500, req_ids=["external"])
+    assert (
+        scheduler._mamba_chunk_invariant_align_external_computed_tokens(req, 0, 500)
+        == 256
+    )
+    connector = Mock()
+    connector.get_num_new_matched_tokens.return_value = (300, False)
+    connector.build_connector_meta.return_value = None
+    scheduler.connector = connector
+
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["external"] == 244
+    connector.update_state_after_alloc.assert_called_once()
+    assert connector.update_state_after_alloc.call_args.args[2] == 256
+
+
+def test_mamba_chunk_invariant_ignores_tiny_async_external_kv_hit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = _create_mamba_chunk_invariant_scheduler(
+        monkeypatch,
+        invariant_enabled=True,
+        chunk_size=256,
+        max_num_batched_tokens=512,
+        max_num_seqs=8,
+        max_model_len=8192,
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=500, req_ids=["external"])
+    connector = Mock()
+    connector.get_num_new_matched_tokens.return_value = (128, True)
+    connector.build_connector_meta.return_value = None
+    scheduler.connector = connector
+
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["external"] == 500
+    assert req.status == RequestStatus.RUNNING
+    connector.update_state_after_alloc.assert_called_once()
+    assert connector.update_state_after_alloc.call_args.args[2] == 0
 
 
 def test_preempt_during_execution():
