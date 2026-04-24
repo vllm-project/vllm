@@ -468,7 +468,8 @@ def test_extract_reasoning_streaming_fragmented_tool_call(qwen3_tokenizer):
         delta_token_ids=[3],
     )
     assert msg1 is not None
-    assert msg1.reasoning == "<to"
+    # Tag fragments should NOT be reasoning
+    assert msg1.reasoning is None
     assert msg1.content is None
 
     # Delta 2: "ol_"
@@ -483,7 +484,8 @@ def test_extract_reasoning_streaming_fragmented_tool_call(qwen3_tokenizer):
         delta_token_ids=[4],
     )
     assert msg2 is not None
-    assert msg2.reasoning == "ol_"
+    # Tag fragments should NOT be reasoning
+    assert msg2.reasoning is None
     assert msg2.content is None
 
     # Delta 3: "call>\n<function=bash>"
