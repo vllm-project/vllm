@@ -173,8 +173,8 @@ class StreamingXMLToolCallParser:
             return result_delta
         else:
             # No complete elements, check if there's unoutput text content
-            if self.text_content_buffer and self.tool_call_index == 0:
-                # Has text content but no tool_call yet, output text content
+            if self.text_content_buffer:
+                # Output buffered text content
                 text_delta = DeltaMessage(content=self.text_content_buffer)
                 self._emit_delta(text_delta)
                 # Clear buffer to avoid duplicate output

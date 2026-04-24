@@ -120,8 +120,12 @@ class TestQwen3xmlToolParser(ToolParserTests):
 
         # Check that the free text is emitted BEFORE London's arguments are emitted.
         found_early = False
+        accumulated_content = ""
         for i, msg in enumerate(emitted_messages):
-            if msg.content and "Next, I will check the weather for London" in msg.content:
+            if msg.content:
+                accumulated_content += msg.content
+            
+            if "Next, I will check the weather for London" in accumulated_content:
                 # Check if we already saw "London" in any previous or current tool call arguments
                 is_london_emitted = any(
                     tc.function.arguments and "London" in tc.function.arguments 
@@ -133,3 +137,44 @@ class TestQwen3xmlToolParser(ToolParserTests):
                 break
         
         assert found_early, "Free text between tool calls should be emitted as soon as the second tool call starts, not delayed."
+
+    def test_qwen3xml_streaming_text_after_tool_call(self, qwen3_tokenizer):
+        parser = Qwen3XMLToolParser(qwen3_tokenizer)
+        
+        # Tool call followed by free text
+        text_to_stream = (
+            "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
+            "\nI hope this helps!"
+        )
+        
+        request = ChatCompletionRequest(messages=[], model="test")
+        emitted_messages = []
+        previous_text = ""
+        previous_tokens = []
+        token_ids = qwen3_tokenizer.encode(text_to_stream, add_special_tokens=False)
+        
+        for i in range(1, len(token_ids) + 1):
+            current_token_ids = token_ids[:i]
+            current_text = qwen3_tokenizer.decode(current_token_ids)
+            delta_text = current_text[len(previous_text):]
+            token_delta = current_token_ids[len(previous_tokens):]
+            
+            delta = parser.extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_tokens,
+                current_token_ids,
+                token_delta,
+                request
+            )
+            if delta is not None:
+                emitted_messages.append(delta)
+                
+            previous_text = current_text
+            previous_tokens = current_token_ids
+
+        # Aggregate all emitted content
+        all_content = "".join([m.content for m in emitted_messages if m.content])
+        
+        assert "I hope this helps!" in all_content, "Free text after the last tool call should be emitted."
