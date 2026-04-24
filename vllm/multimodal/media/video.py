@@ -92,14 +92,48 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
-            duration = total / fps if fps > 0 else 0.0
+
+            # validate and extract frames_indices
+            frames_indices = self.kwargs.get("frames_indices")
+            if frames_indices is not None:
+                if not (
+                    isinstance(frames_indices, list)
+                    and all(isinstance(i, int) for i in frames_indices)
+                ):
+                    raise ValueError("frames_indices must be a list of integers")
+                if len(frames_indices) != total:
+                    raise ValueError(
+                        f"frames_indices length ({len(frames_indices)}) must "
+                        f"match number of frames sent ({total})"
+                    )
+            else:
+                frames_indices = list(range(total))
+
+            # validate and extract total_num_frames
+            total_num_frames = self.kwargs.get("total_num_frames", total)
+            if not isinstance(total_num_frames, int) or total_num_frames < 1:
+                raise ValueError("total_num_frames must be a positive integer")
+            if total_num_frames < total:
+                raise ValueError(
+                    f"total_num_frames ({total_num_frames}) must be >= "
+                    f"number of frames sent ({total})"
+                )
+
+            # validate and extract duration
+            duration = self.kwargs.get("duration")
+            if duration is not None:
+                if not isinstance(duration, (int, float)) or duration < 0:
+                    raise ValueError("duration must be a non-negative number")
+            else:
+                duration = total_num_frames / fps if fps > 0 else 0.0
+
             metadata = {
-                "total_num_frames": total,
+                "total_num_frames": total_num_frames,
                 "fps": fps,
                 "duration": duration,
                 "video_backend": "jpeg_sequence",
-                "frames_indices": list(range(total)),
-                "do_sample_frames": False,
+                "frames_indices": frames_indices,
+                "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
             return frames, metadata
 

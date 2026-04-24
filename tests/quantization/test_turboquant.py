@@ -18,9 +18,6 @@ from vllm.model_executor.layers.quantization.turboquant.config import (
     TQ_PRESETS,
     TurboQuantConfig,
 )
-from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-    generate_wht_signs,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
@@ -393,7 +390,7 @@ class TestRotationMatrix:
 
 
 # ============================================================================
-# WHT rotation tests (serving path: generate_wht_signs + _build_hadamard)
+# Hadamard rotation tests (serving path: _build_hadamard)
 # ============================================================================
 
 
@@ -406,49 +403,25 @@ def _build_hadamard(d: int, device: str = "cpu") -> torch.Tensor:
 
 
 @pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
-class TestWHTRotation:
-    """Tests for the WHT rotation actually used in serving."""
+class TestHadamardRotation:
+    """Tests for the Hadamard rotation used in serving."""
 
     @pytest.mark.parametrize("dim", [64, 128, 256])
-    def test_wht_orthonormal(self, dim):
-        """signs * H must be orthonormal: (signs*H) @ (signs*H)^T = I."""
-        signs = generate_wht_signs(dim, seed=42, device=DEVICE_TYPE)
+    def test_hadamard_orthonormal(self, dim):
+        """H must be orthonormal: H @ H^T = I."""
         H = _build_hadamard(dim, DEVICE_TYPE)
-        PiT = (signs.unsqueeze(1) * H).contiguous()
-        eye = PiT @ PiT.T
+        eye = H @ H.T
         assert torch.allclose(eye, torch.eye(dim, device=DEVICE_TYPE), atol=1e-5), (
-            f"WHT rotation not orthonormal for dim={dim}"
+            f"Hadamard not orthonormal for dim={dim}"
         )
 
     @pytest.mark.parametrize("dim", [64, 128, 256])
-    def test_wht_self_inverse(self, dim):
-        """PiT should be self-inverse: PiT @ PiT = I (up to sign flip)."""
-        signs = generate_wht_signs(dim, seed=42, device=DEVICE_TYPE)
+    def test_hadamard_symmetric(self, dim):
+        """Sylvester Hadamard must be symmetric: H = H^T."""
         H = _build_hadamard(dim, DEVICE_TYPE)
-        PiT = (signs.unsqueeze(1) * H).contiguous()
-        Pi = PiT.T.contiguous()
-        # Pi @ PiT should be identity (rotation then inverse)
-        result = Pi @ PiT
-        assert torch.allclose(result, torch.eye(dim, device=DEVICE_TYPE), atol=1e-5), (
-            f"WHT rotation not self-inverse for dim={dim}"
+        assert torch.allclose(H, H.T, atol=1e-6), (
+            f"Hadamard not symmetric for dim={dim}"
         )
-
-    def test_wht_signs_deterministic(self):
-        """Same seed must produce identical signs."""
-        s1 = generate_wht_signs(128, seed=42)
-        s2 = generate_wht_signs(128, seed=42)
-        assert torch.equal(s1, s2)
-
-    def test_wht_signs_different_seeds(self):
-        """Different seeds must produce different signs."""
-        s1 = generate_wht_signs(128, seed=42)
-        s2 = generate_wht_signs(128, seed=99)
-        assert not torch.equal(s1, s2)
-
-    def test_wht_signs_are_pm1(self):
-        """All sign values must be exactly +1 or -1."""
-        signs = generate_wht_signs(128, seed=42)
-        assert torch.all(signs.abs() == 1.0)
 
 
 # ============================================================================
@@ -491,11 +464,10 @@ class TestStoreDecodeRoundTrip:
 
         device = torch.device(DEVICE_TYPE)
 
-        # Generate rotation
-        signs = generate_wht_signs(D, seed=42, device=device)
+        # Pure Hadamard rotation (symmetric: H = H^T, so Pi = PiT = H)
         H = _build_hadamard(D, DEVICE_TYPE)
-        PiT = (signs.unsqueeze(1) * H).contiguous().float()
-        Pi = PiT.T.contiguous()
+        PiT = H
+        Pi = H
 
         # Generate centroids
         centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
