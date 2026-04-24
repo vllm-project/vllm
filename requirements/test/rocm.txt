@@ -559,7 +559,7 @@ llguidance==1.3.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-llvmlite==0.44.0
+llvmlite==0.47.0
     # via numba
 lm-eval==0.4.11
     # via -r requirements/test/rocm.in
@@ -655,7 +655,7 @@ nltk==3.9.3
     # via rouge-score
 num2words==0.5.14
     # via -r requirements/test/rocm.in
-numba==0.61.2
+numba==0.65.0
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -811,7 +811,7 @@ orjson==3.11.7
     # via
     #   genai-perf
     #   kaleido
-outlines-core==0.2.11
+outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
