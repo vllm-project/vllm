@@ -737,6 +737,9 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
                 metrics.num_generation_tokens
             ),
+            SpanAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS: (
+                req_state.num_cached_tokens
+            ),
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: prefill_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
