@@ -114,6 +114,7 @@ def new_kv_cache_spec(
 ):
     return FullAttentionSpec(
         block_size=block_size,
+        num_q_heads=num_kv_heads,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
@@ -133,6 +134,7 @@ def new_sliding_window_spec(
 ):
     return SlidingWindowSpec(
         block_size=block_size,
+        num_q_heads=num_kv_heads,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
@@ -151,6 +153,7 @@ def new_chunked_local_attention_spec(
 ):
     return ChunkedLocalAttentionSpec(
         block_size=block_size,
+        num_q_heads=num_kv_heads,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
@@ -1227,6 +1230,7 @@ def test_merge_kv_cache_spec():
         full_spec,
         SlidingWindowSpec(
             block_size=full_spec.block_size,
+            num_q_heads=full_spec.num_q_heads,
             num_kv_heads=full_spec.num_kv_heads,
             head_size=full_spec.head_size,
             dtype=full_spec.dtype,
@@ -1331,6 +1335,7 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         layer_name = f"layer_{i}"
         kv_cache_spec[layer_name] = FullAttentionSpec(
             block_size=16,
+            num_q_heads=32,
             num_kv_heads=32,
             head_size=128,
             dtype=torch.float16,
@@ -1366,6 +1371,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     full_attention_spec = FullAttentionSpec(
         block_size=16,
+        num_q_heads=32,
         num_kv_heads=32,
         head_size=128,
         dtype=torch.float16,
@@ -1373,6 +1379,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     sliding_window_spec = SlidingWindowSpec(
         block_size=16,
+        num_q_heads=32,
         num_kv_heads=32,
         head_size=128,
         dtype=torch.float16,
@@ -1857,6 +1864,7 @@ def test_generate_scheduler_kv_cache_config():
 def new_mla_spec(cache_dtype_str=None):
     return MLAAttentionSpec(
         block_size=16,
+        num_q_heads=16,
         num_kv_heads=16,
         head_size=64,
         dtype=torch.float32,

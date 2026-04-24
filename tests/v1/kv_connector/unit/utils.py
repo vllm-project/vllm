@@ -159,6 +159,7 @@ def create_scheduler(
                     ["layer"],
                     FullAttentionSpec(
                         block_size=block_size,
+                        num_q_heads=1,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
@@ -436,6 +437,7 @@ def make_kv_cache_config(
             ["layer0", "layer2"],
             FullAttentionSpec(
                 block_size=block_size,
+                num_q_heads=4,
                 num_kv_heads=4,
                 head_size=16,
                 dtype=torch.float16,
@@ -448,6 +450,7 @@ def make_kv_cache_config(
                 ["layer1", "layer3"],
                 SlidingWindowSpec(
                     block_size=block_size,
+                    num_q_heads=4,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,

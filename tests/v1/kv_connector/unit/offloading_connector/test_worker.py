@@ -162,12 +162,14 @@ def test_register_kv_caches(mock_get_layers, backend):
 
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
+        num_q_heads=NUM_KV_HEADS,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
     mla_spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=MLA_HEAD_SIZE,
         dtype=DTYPE,
@@ -381,12 +383,14 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
     layer_b = "model.layers.1.self_attn"
     spec_a = FullAttentionSpec(
         block_size=BLOCK_SIZE,
+        num_q_heads=NUM_KV_HEADS,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
     spec_b = FullAttentionSpec(
         block_size=BLOCK_SIZE,
+        num_q_heads=NUM_KV_HEADS * 2,
         num_kv_heads=NUM_KV_HEADS * 2,
         head_size=HEAD_SIZE,
         dtype=DTYPE,

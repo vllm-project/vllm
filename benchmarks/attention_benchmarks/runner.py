@@ -220,6 +220,7 @@ def _create_backend_impl(
 
     kv_cache_spec = FullAttentionSpec(
         block_size=config.block_size,
+        num_q_heads=config.num_q_heads,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
         dtype=dtype,
@@ -527,6 +528,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
             kv_cache_spec = FullAttentionSpec(
                 block_size=config.block_size,
+                num_q_heads=config.num_q_heads,
                 num_kv_heads=config.num_kv_heads,
                 head_size=config.head_dim,
                 dtype=dtype,

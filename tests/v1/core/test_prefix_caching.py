@@ -99,6 +99,7 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
                 ["layer"],
                 FullAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -117,6 +118,7 @@ def make_kv_cache_config_hybrid_model(
     if second_spec_type == "sliding_window":
         second_spec = SlidingWindowSpec(
             block_size=block_size,
+            num_q_heads=1,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
@@ -137,6 +139,7 @@ def make_kv_cache_config_hybrid_model(
                 ["layer1"],
                 FullAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -166,6 +169,7 @@ def make_kv_cache_config_three_types(
     elif third_spec_type == "sliding_window":
         third_spec = SlidingWindowSpec(
             block_size=block_size,
+            num_q_heads=1,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
@@ -180,6 +184,7 @@ def make_kv_cache_config_three_types(
                 ["layer1"],
                 FullAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -189,6 +194,7 @@ def make_kv_cache_config_three_types(
                 ["layer2"],
                 SlidingWindowSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -721,12 +727,14 @@ def _make_hybrid_kv_cache_config(
     spec_map = {
         "full": lambda: FullAttentionSpec(
             block_size=block_size,
+            num_q_heads=1,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
         ),
         "sliding_window": lambda: SlidingWindowSpec(
             block_size=block_size,
+            num_q_heads=1,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
@@ -734,6 +742,7 @@ def _make_hybrid_kv_cache_config(
         ),
         "sliding_window_large": lambda: SlidingWindowSpec(
             block_size=block_size,
+            num_q_heads=1,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
@@ -2304,6 +2313,7 @@ def test_eagle_with_sliding_window():
     block_size = 16
     sliding_window_spec = SlidingWindowSpec(
         block_size=block_size,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -2377,6 +2387,7 @@ def test_different_block_size():
                 ["layer1"],
                 FullAttentionSpec(
                     block_size=block_size * 2,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
@@ -2386,6 +2397,7 @@ def test_different_block_size():
                 ["layer2"],
                 SlidingWindowSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,

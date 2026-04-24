@@ -616,6 +616,7 @@ def _create_backend_impl(
 
     kv_cache_spec = FullAttentionSpec(
         block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
+        num_q_heads=1,
         num_kv_heads=1,  # MLA uses 1 KV head
         head_size=576,  # MLA head dim
         dtype=torch.bfloat16,

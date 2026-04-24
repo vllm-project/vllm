@@ -54,6 +54,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
     """
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
+        num_q_heads=runner.model_config.get_num_attention_heads(runner.parallel_config),
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
@@ -200,7 +201,9 @@ def _make_mock_backend_for_kernel_block_size(
 
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+    return FullAttentionSpec(
+        block_size=1, num_q_heads=1, num_kv_heads=1, head_size=1, dtype="float16"
+    )
 
 
 def test_select_common_block_size_prefers_manager_block_size():
@@ -959,7 +962,11 @@ def test_update_hybrid_attention_mamba_layout_with_num_block_2_rewrites_stride()
     assert ambiguous_cache.stride()[:2] == (2 * hidden_size, hidden_size)
 
     attention_spec = AttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.float16
+        block_size=BLOCK_SIZE,
+        num_q_heads=1,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
     )
     runner_stub = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
@@ -1088,6 +1095,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     # Initialize KV cache with configuration
     attn_spec = FullAttentionSpec(
         block_size=16,  # Use kernel block size directly
+        num_q_heads=runner.model_config.get_num_attention_heads(runner.parallel_config),
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,

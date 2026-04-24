@@ -327,6 +327,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # whereas FullAttentionSpec will add an additional factor of 2
         return MLAAttentionSpec(
             block_size=self.block_size,
+            num_q_heads=self.num_heads,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,

@@ -121,6 +121,7 @@ class ChunkedLocalAttention(Attention):
         assert self.attention_chunk_size
         return ChunkedLocalAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
+            num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,

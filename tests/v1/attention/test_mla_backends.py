@@ -1050,6 +1050,9 @@ def test_backend_correctness(
         # Create kv_cache_spec with the correct block_size for this backend
         backend_kv_cache_spec = MLAAttentionSpec(
             block_size=block_size,
+            num_q_heads=vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            ),
             num_kv_heads=vllm_config.model_config.get_num_kv_heads(
                 vllm_config.parallel_config
             ),
