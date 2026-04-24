@@ -143,4 +143,4 @@ More examples can be found here: [examples/pooling/reward](../../../examples/poo
 
 ### `LLM.reward`
 
-`llm.reward` api is deprecated and will be removed in v0.22. Please use `LLM.encode` with `pooling_task="classify"` or `pooling_task="token_classify"` instead.
+`llm.reward` api is deprecated and will be removed in v0.23. Please use `LLM.encode` with `pooling_task="classify"` or `pooling_task="token_classify"` instead.

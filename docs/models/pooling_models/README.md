@@ -78,7 +78,7 @@ The scoring models is designed to compute similarity scores between two input pr
 |-----------------------|---------------|----------------------------------------------|--------------------|--------------------------|
 | `classify` (see note) | Sequence-wise | reranker score for each sequence             | `cross-encoder`    | linear classifier        |
 | `embed`               | Sequence-wise | vector representations for each sequence     | `bi-encoder`       | cosine similarity        |
-| `token_classify`      | Token-wise    | probability vector of classes for each token | nan                | nan                      |
+| `token_classify`      | Token-wise    | probability vector of classes for each token | N/A                | N/A                      |
 | `token_embed`         | Token-wise    | vector representations for each token        | `late-interaction` | late interaction(MaxSim) |
 
 !!! note
@@ -120,11 +120,11 @@ enabling the corresponding APIs.
 |-----------------------------|---------------------|-----------------------------------|----------------------------|--------------------------|
 | Classification Usages       | `LLM.classify(...)` | `classify`                        | `cross-encoder` (see note) | linear classifier        |
 | Embedding Usages            | `LLM.embed(...)`    | `embed`                           | `bi-encoder`               | cosine similarity        |
-| Token Classification Usages | nan                 | `token_classify`                  | nan                        | nan                      |
-| Token Embedding Usages      | nan                 | `token_embed`                     | `late-interaction`         | late interaction(MaxSim) |
-| Reward Usages               | nan                 | `classify` & `token_classify`     | nan                        | nan                      |
-| Scoring Usages              | `LLM.score(...)`    | nan                               | nan                        | nan                      |
-| Plugins Usages              | nan                 | `plugin`                          | nan                        | nan                      |
+| Token Classification Usages | N/A                 | `token_classify`                  | N/A                        | N/A                      |
+| Token Embedding Usages      | N/A                 | `token_embed`                     | `late-interaction`         | late interaction(MaxSim) |
+| Reward Usages               | N/A                 | `classify` & `token_classify`     | N/A                        | N/A                      |
+| Scoring Usages              | `LLM.score(...)`    | N/A                               | N/A                        | N/A                      |
+| Plugins Usages              | N/A                 | `plugin`                          | N/A                        | N/A                      |
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.

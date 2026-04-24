@@ -1338,7 +1338,7 @@ class LLM:
             pooled hidden states in the same order as the input prompts.
         """
         logger.warning_once(
-            "`llm.reward` api is deprecated and will be removed in v0.22. "
+            "`llm.reward` api is deprecated and will be removed in v0.23. "
             'Please use `LLM.encode` with `pooling_task="classify"` or '
             '`pooling_task="token_classify"` instead.'
         )
