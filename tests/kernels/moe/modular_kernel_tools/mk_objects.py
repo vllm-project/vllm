@@ -223,7 +223,7 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
     )
 
 if has_mori():
-    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
 
