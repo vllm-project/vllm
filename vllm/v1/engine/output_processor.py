@@ -679,7 +679,12 @@ class OutputProcessor:
                         req_state, finish_reason, iteration_stats
                     )
                     if self.tracing_enabled:
-                        self.do_tracing(engine_core_output, req_state, iteration_stats)
+                        self.do_tracing(
+                            engine_core_output,
+                            req_state,
+                            iteration_stats,
+                            finish_reason,
+                        )
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -708,6 +713,7 @@ class OutputProcessor:
         engine_core_output: EngineCoreOutput,
         req_state: RequestState,
         iteration_stats: IterationStats | None,
+        finish_reason: FinishReason | None,
     ) -> None:
         assert req_state.stats is not None
         assert iteration_stats is not None
@@ -734,9 +740,11 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
             SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
+            SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS: prompt_length,
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
                 metrics.num_generation_tokens
             ),
+            SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS: (metrics.num_generation_tokens),
             SpanAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS: (
                 req_state.num_cached_tokens
             ),
@@ -744,6 +752,11 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
+            SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS: (
+                # Note: Only supports n=1. For n>1, each completion would have
+                # its own finish reason that should be collected separately.
+                [finish_reason.name.lower()] if finish_reason else []
+            ),
         }
 
         # Add optional request parameters
