@@ -96,9 +96,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             self._tool_call_token_id is not None
             and self._tool_call_token_id in input_ids
         ):
-            tool_call_index = (
-                len(input_ids) - 1 - input_ids[::-1].index(self._tool_call_token_id)
-            )
+            tool_call_index = input_ids.index(self._tool_call_token_id)
             return input_ids[tool_call_index:]
         return []
 
@@ -228,7 +226,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                     content = delta_text[reasoning_len:]
                 else:
                     reasoning = None
-                    content = delta_text
+                    content = current_text[tag_start_idx:]
                 return DeltaMessage(
                     reasoning=reasoning if reasoning else None,
                     content=content if content else None,

@@ -616,3 +616,70 @@ def test_reasoning_swallows_post_think_content(qwen3_tokenizer):
     assert msg2.reasoning is None, f"Parser incorrectly swallowed post-think text into reasoning: {msg2.reasoning}"
     assert "I will use a tool" in msg2.content
 
+
+def test_extract_content_ids_multiple_tool_calls(qwen3_tokenizer):
+    """
+    Regression test: extract_content_ids should retain ALL tool calls when
+    reasoning implicitly ends with <tool_call>.
+    Previously, it searched backwards and discarded all but the LAST tool call.
+    """
+    parser = ReasoningParserManager.get_reasoning_parser("qwen3")(qwen3_tokenizer)
+    vocab = qwen3_tokenizer.get_vocab()
+    tool_call_id = vocab["<tool_call>"]
+    
+    # input_ids: [..., tool_call, ..., tool_call, ...] without </think>
+    input_ids = [1, 2, tool_call_id, 3, 4, tool_call_id, 5, 6]
+    
+    content_ids = parser.extract_content_ids(input_ids)
+    
+    # Content should start at the FIRST tool call, retaining both.
+    assert content_ids == [tool_call_id, 3, 4, tool_call_id, 5, 6], \
+        "extract_content_ids deleted the first tool call by searching backwards."
+
+
+def test_extract_reasoning_streaming_fragmented_end_and_tool_call(qwen3_tokenizer):
+    """
+    Regression test: When the end token (</think>) or tool call tag is fragmented
+    across deltas, the parser incorrectly swallows parts of the tag into reasoning,
+    corrupting the content sent to the tool parser.
+    """
+    parser = ReasoningParserManager.get_reasoning_parser("qwen3")(qwen3_tokenizer)
+    
+    # Delta 1: ends thinking but incomplete
+    prev_text_1 = "<think> reasoning "
+    delta_text_1 = "</think>\n<to"
+    curr_text_1 = prev_text_1 + delta_text_1
+    
+    msg1 = parser.extract_reasoning_streaming(
+        previous_text=prev_text_1,
+        current_text=curr_text_1,
+        delta_text=delta_text_1,
+        previous_token_ids=[1, 2],
+        current_token_ids=[1, 2, 3],
+        delta_token_ids=[3],
+    )
+    
+    # Since parser cannot know if <to will complete, it has to be handled carefully,
+    # but the bug manifests when the tag COMPLETES in the next delta.
+    
+    # Delta 2: completes tool call
+    prev_text_2 = curr_text_1
+    delta_text_2 = "ol_call>\n<function="
+    curr_text_2 = prev_text_2 + delta_text_2
+    
+    msg2 = parser.extract_reasoning_streaming(
+        previous_text=prev_text_2,
+        current_text=curr_text_2,
+        delta_text=delta_text_2,
+        previous_token_ids=[1, 2, 3],
+        current_token_ids=[1, 2, 3, 4],
+        delta_token_ids=[4],
+    )
+    
+    # If the parser split blindly at the point the tag completed in current_text,
+    # it would return 'ol_call>\n<function=' as content, missing the '<to' part.
+    if msg2 and msg2.content:
+        assert msg2.content != "ol_call>\n<function=", \
+            "Parser corrupted the tool call tag by splitting it across reasoning and content."
+
+
