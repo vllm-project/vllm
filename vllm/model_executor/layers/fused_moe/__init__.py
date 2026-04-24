@@ -73,14 +73,14 @@ __all__ = [
 
 if HAS_TRITON:
     # import to register the custom ops
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+        BatchedDeepGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
         CutlassExpertsW4A8Fp8,
         cutlass_moe_w4a8_fp8,
-    )
-    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
-        BatchedDeepGemmExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         DeepGemmExperts,
