@@ -436,11 +436,13 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         with gpu_sync_allowed():
             total_chunks = int(chunk_num.sum())
+        # `torch.tensor([...], device=cuda)` forces a blocking H2D; use
+        # pinned CPU + non-blocking upload instead.
         chunk_lengths = torch.tensor(
             [self.n_window * 2] * total_chunks,
             dtype=torch.long,
-            device=feature_lens.device,
-        )
+            pin_memory=True,
+        ).to(feature_lens.device, non_blocking=True)
         tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
         chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
         chunk_lengths[chunk_lengths == 0] = self.n_window * 2

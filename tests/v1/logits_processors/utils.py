@@ -86,17 +86,25 @@ class DummyLogitsProcessor(LogitsProcessor):
         if not self.req_info:
             return logits
 
-        # Save target values before modification
+        # Save target values before modification. Build on pinned CPU then
+        # non-blocking upload to avoid a synchronous H2D copy.
         cols = torch.tensor(
-            list(self.req_info.values()), dtype=torch.long, device=logits.device
-        )
+            list(self.req_info.values()), dtype=torch.long, pin_memory=True
+        ).to(logits.device, non_blocking=True)
         rows = torch.tensor(
-            list(self.req_info.keys()), dtype=torch.long, device=logits.device
-        )
+            list(self.req_info.keys()), dtype=torch.long, pin_memory=True
+        ).to(logits.device, non_blocking=True)
         values_to_keep = logits[rows, cols].clone()
 
-        # Mask all but target tokens
-        logits[rows] = float("-inf")
+        # Mask all but target tokens. Use an on-device fill tensor so the
+        # scatter doesn't force a synchronizing scalar H2D.
+        fill = torch.full(
+            (rows.numel(), logits.size(-1)),
+            float("-inf"),
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        logits[rows] = fill
         logits[rows, cols] = values_to_keep
 
         return logits

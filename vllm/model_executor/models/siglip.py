@@ -1112,17 +1112,17 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if len(features) == 1:
             return features
 
-        # Detect sequence boundaries where position_ids decrease
+        # Detect sequence boundaries where position_ids decrease.
+        # `torch.where(boundary_mask)` has a data-dependent output shape and
+        # always syncs on CUDA. Called once per pooling invocation — allow.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
         position_diffs = position_ids[1:] - position_ids[:-1]
         boundary_mask = position_diffs <= 0
 
-        # Use `torch.zeros` / `torch.full` with a Python-scalar fill value to
-        # avoid the synchronous H2D copy that `torch.tensor([x], device=cuda)`
-        # would force.
-        boundary_mid = torch.where(boundary_mask)[0] + 1
-        zero_tensor = torch.zeros(
-            1, dtype=boundary_mid.dtype, device=features.device
-        )
+        with gpu_sync_allowed():
+            boundary_mid = torch.where(boundary_mask)[0] + 1
+        zero_tensor = torch.zeros(1, dtype=boundary_mid.dtype, device=features.device)
         end_tensor = torch.full(
             (1,), len(features), dtype=boundary_mid.dtype, device=features.device
         )

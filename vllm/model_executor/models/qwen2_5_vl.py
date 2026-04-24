@@ -933,7 +933,9 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
+            # Only consumed as Python scalars via `.item()` in the EVS path;
+            # keep CPU-resident.
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _call_hf_processor(

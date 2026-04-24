@@ -484,9 +484,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # (populated in the builder) to compute the prefill sub-batch
             # max without a GPU→CPU sync.
             if attn_metadata.seq_lens_cpu is not None:
-                prefill_max_seq = int(
-                    attn_metadata.seq_lens_cpu[num_decodes:].max()
-                )
+                prefill_max_seq = int(attn_metadata.seq_lens_cpu[num_decodes:].max())
             else:
                 prefill_max_seq = attn_metadata.max_seq_len
             prefill_qsl = (
@@ -495,8 +493,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             prefill_qsl_cpu = None
             if attn_metadata.query_start_loc_cpu is not None:
                 prefill_qsl_cpu = (
-                    attn_metadata.query_start_loc_cpu[num_decodes:]
-                    - num_decode_tokens
+                    attn_metadata.query_start_loc_cpu[num_decodes:] - num_decode_tokens
                 )
             prefill_meta = TurboQuantMetadata(
                 seq_lens=prefill_seq_lens,
@@ -641,7 +638,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
                 if _HAS_FLASH_ATTN:
-                    self._cu_2[1] = q_len
+                    # Assign to slice to avoid gpu/cpu sync.
+                    self._cu_2[1:2] = q_len
                     cu = self._cu_2
                     out = self._flash_attn_varlen(
                         q=q_seq,
@@ -820,8 +818,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if not hasattr(self, "_cu_2_q"):
                 self._cu_2_q = torch.zeros(2, device=device, dtype=torch.int32)
                 self._cu_2_k = torch.zeros(2, device=device, dtype=torch.int32)
-            self._cu_2_q[1] = q_len
-            self._cu_2_k[1] = seq_len
+            # Assigning to slice uses _fill which avoids cpu/gpu sync.
+            self._cu_2_q[1:2] = q_len
+            self._cu_2_k[1:2] = seq_len
             cu_seqlens_q = self._cu_2_q
             cu_seqlens_k = self._cu_2_k
             return self._flash_attn_varlen(

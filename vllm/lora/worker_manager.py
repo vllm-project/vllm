@@ -216,7 +216,11 @@ class WorkerLoRAManager:
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        return self._adapter_manager.remove_adapter(adapter_id)
+        # Adapter removal calls `reset_lora` which does small per-adapter
+        # scalar-index writes on GPU buffers (e.g. `adapter_enabled[i] = 0`);
+        # one-time per adapter.
+        with gpu_sync_allowed():
+            return self._adapter_manager.remove_adapter(adapter_id)
 
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
@@ -281,22 +285,24 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
-            # Adapter loading may sync (e.g. tensorizer's H2D weight copy);
-            # it's a one-time-per-adapter event, so allow it.
+            # Adapter loading may sync (e.g. tensorizer's H2D weight copy) and
+            # the subsequent `reset_lora` / `set_lora` bookkeeping does small
+            # per-adapter scalar writes to GPU buffers. These are one-time
+            # per adapter lifecycle event, so allow syncs for the whole block.
             with gpu_sync_allowed():
                 lora = self._load_adapter(lora_request)
 
-            # Remove the existing adapter if it exists
-            # Use case for LoRA inplace
-            self._adapter_manager.remove_adapter(lora.id)
+                # Remove the existing adapter if it exists
+                # Use case for LoRA inplace
+                self._adapter_manager.remove_adapter(lora.id)
 
-            # Loading succeeded, now check if we will exceed cache capacity and
-            # evict if the oldest adapter if so
-            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
-                self._adapter_manager.remove_oldest_adapter()
-            # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
+                # Loading succeeded, now check if we will exceed cache capacity
+                # and evict if the oldest adapter if so
+                if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
+                    assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
+                    self._adapter_manager.remove_oldest_adapter()
+                # Then add the new adapter to the cache
+                loaded = self._adapter_manager.add_adapter(lora)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches

@@ -960,12 +960,20 @@ class Qwen2_5OmniConditionalGenerationMixin:
             self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
         )
 
-        audio_outputs = self.audio_tower(
-            input_features.to(self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_feat_lengths,
-        )
-        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
+        # Upstream transformers `qwen2_5_omni` audio tower does
+        # `torch.full((chunk_num.sum(),), ...)` which syncs on a GPU scalar
+        # reduction. Third-party; suppress at the integration boundary. The
+        # subsequent `.tolist()` on GPU output lengths is also unavoidable.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+        with gpu_sync_allowed():
+            audio_outputs = self.audio_tower(
+                input_features.to(self.audio_tower.dtype),
+                feature_lens=audio_feature_lengths,
+                aftercnn_lens=audio_feat_lengths,
+            )
+            split_sizes = audio_output_lengths.tolist()
+        return audio_outputs.last_hidden_state.split(split_sizes)
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
@@ -1450,12 +1458,19 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
-        input_ids_cpu = input_ids.cpu()
-        is_video = is_multimodal & (input_ids_cpu == video_token_id)
-        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        # Branch on a Python scalar below; the `input_ids.cpu()` and
+        # `.item()` reductions are unavoidable without refactoring the
+        # interleave-merge to be fully GPU-resident. Run under an
+        # allowed-sync block since this happens once per MM embed call.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
-        num_video = is_video.sum().item()
-        num_audio = is_audio.sum().item()
+        with gpu_sync_allowed():
+            input_ids_cpu = input_ids.cpu()
+            is_video = is_multimodal & (input_ids_cpu == video_token_id)
+            is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+
+            num_video = is_video.sum().item()
+            num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
             inputs_embeds = self._embed_text_input_ids(

@@ -64,7 +64,28 @@ def _install_compile_time_sync_suppressors() -> None:
             finally:
                 torch.cuda.set_sync_debug_mode(prev_mode)
 
-        _jg.joint_graph_passes = _wrapped_joint
+        # `compile_fx` does `from .fx_passes.joint_graph import
+        # joint_graph_passes`, which binds the *function object* at import
+        # time. Patching just the module attribute won't update that rebind,
+        # so patch every already-imported reference we can find. Restrict
+        # the scan to torch's compile-time modules — iterating all of
+        # `sys.modules` triggers `__getattr__` shims on third-party packages
+        # (e.g. transformers image_processing modules emit a deprecation
+        # warning on every attribute access).
+        import sys as _sys
+
+        setattr(_jg, "joint_graph_passes", _wrapped_joint)  # noqa: B010
+        for _name, _mod in list(_sys.modules.items()):
+            if _mod is None:
+                continue
+            if not (
+                _name.startswith("torch._inductor")
+                or _name.startswith("torch._functorch")
+                or _name.startswith("torch._dynamo")
+            ):
+                continue
+            if getattr(_mod, "joint_graph_passes", None) is _orig_joint:
+                setattr(_mod, "joint_graph_passes", _wrapped_joint)  # noqa: B010
     except Exception:  # pragma: no cover
         pass
 

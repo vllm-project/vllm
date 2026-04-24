@@ -123,7 +123,11 @@ class Idefics2VisionEmbeddings(nn.Module):
                 bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
             ).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1)] = pos_ids
-        position_ids = position_ids.to(self.position_embedding.weight.device)
+        # `position_ids` is a CPU tensor built above; pin+non_blocking upload
+        # to avoid a synchronous H2D copy.
+        position_ids = position_ids.to(
+            self.position_embedding.weight.device, non_blocking=True
+        )
         embeddings += self.position_embedding(position_ids)
         return embeddings
 
