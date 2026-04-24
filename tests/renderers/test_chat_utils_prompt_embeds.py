@@ -19,6 +19,7 @@ from transformers import AutoTokenizer
 from vllm.entrypoints.chat_utils import (
     _ENABLE_PROMPT_EMBEDS_ERROR,
     _PROMPT_EMBEDS_MISSING_DATA_ERROR,
+    _RESERVED_PLACEHOLDER_IN_TEXT_ERROR,
     MM_PARSER_MAP,
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
@@ -288,6 +289,51 @@ def test_parse_chat_messages_rejects_missing_data():
             mc,
             content_format="openai",
         )
+
+
+# Reserved placeholder guard: when `enable_prompt_embeds=True` the tokenizer is
+# mutated to make `<prompt_embeds>` a single unsplittable token. Any user text
+# containing that literal sequence would tokenize to the same sentinel ID and
+# be mistaken for a splice point, so we reject it at parse time.
+_PLACEHOLDER_ERROR_PATTERN: Final[str] = re.sub(
+    r"\\{[^}]*\\}", ".*", re.escape(_RESERVED_PLACEHOLDER_IN_TEXT_ERROR)
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Case: Top-level string content (wrapped as a single text part).
+        f"hello {PROMPT_EMBEDS_PLACEHOLDER_TOKEN} world",
+        # Case: List with a typed text part containing the placeholder.
+        [{"type": "text", "text": f"leading {PROMPT_EMBEDS_PLACEHOLDER_TOKEN}"}],
+        # Case: List with a plain-string part (no wrapping dict).
+        [f"raw string {PROMPT_EMBEDS_PLACEHOLDER_TOKEN}"],
+    ],
+    ids=["top-level-string", "typed-text-part", "plain-string-part"],
+)
+def test_parse_chat_messages_rejects_placeholder_in_user_text(content):
+    mc = _make_mock_model_config()  # enable_prompt_embeds=True by default
+    messages = [{"role": "user", "content": content}]
+    with pytest.raises(ValueError, match=_PLACEHOLDER_ERROR_PATTERN):
+        parse_chat_messages(messages, mc, content_format="openai")
+
+
+def test_parse_chat_messages_allows_placeholder_in_text_when_feature_disabled():
+    # When `enable_prompt_embeds=False` the tokenizer is never mutated, so the
+    # literal `<prompt_embeds>` is just ordinary text and must pass through.
+    mc = _make_mock_model_config(enable_prompt_embeds=False)
+    messages = [
+        {
+            "role": "user",
+            "content": f"benign mention of {PROMPT_EMBEDS_PLACEHOLDER_TOKEN} here",
+        }
+    ]
+    conv, mm_data, _ = parse_chat_messages(messages, mc, content_format="openai")
+    assert mm_data is None or "prompt_embeds" not in mm_data
+    # Text reaches the rendered conversation unchanged.
+    texts = [p["text"] for p in conv[0]["content"]]
+    assert PROMPT_EMBEDS_PLACEHOLDER_TOKEN in "".join(texts)
 
 
 # Token-stream spec: ints are regular token IDs, tuples `(N,)` expand to

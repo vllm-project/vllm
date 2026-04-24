@@ -129,6 +129,12 @@ _PROMPT_EMBEDS_MISSING_DATA_ERROR: Final[str] = (
     "with base64-encoded tensor bytes."
 )
 
+_RESERVED_PLACEHOLDER_IN_TEXT_ERROR: Final[str] = (
+    "Text content may not contain the reserved placeholder {token!r}. "
+    "This placeholder is used internally to mark `prompt_embeds` splice "
+    "positions in the tokenized prompt."
+)
+
 
 class AudioURL(TypedDict, total=False):
     url: Required[str]
@@ -853,6 +859,11 @@ class BaseMultiModalContentParser(ABC):
         #   "<##PROMPT_EMBEDS##>": ["<prompt_embeds>", "<prompt_embeds>"]
         # }
         self._placeholder_storage: dict[str, list] = defaultdict(list)
+
+    @property
+    @abstractmethod
+    def model_config(self) -> ModelConfig:
+        raise NotImplementedError
 
     def _add_placeholder(self, modality: ModalityStr, placeholder: str | None):
         mod_placeholder = MODALITY_PLACEHOLDERS_MAP[modality]
@@ -1596,6 +1607,24 @@ def _parse_chat_message_content_parts(
     return [ConversationMessage(role=role, content=text_prompt)]
 
 
+def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -> None:
+    """Reject user-supplied text parts that contains the reserved `prompt_embeds`
+    placeholder sentinel.
+
+    When the server accepts `prompt_embeds`, the placeholder token is
+    registered as a single unsplittable special token on the tokenizer. Any
+    user text that happens to contain the literal sequence would tokenize to
+    the same ID and be mistaken for a splice point by the renderer, letting a
+    caller move or inject splice positions via plain text content.
+    """
+    if model_config.enable_prompt_embeds and PROMPT_EMBEDS_PLACEHOLDER_TOKEN in text:
+        raise ValueError(
+            _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
+                token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
+            )
+        )
+
+
 def _parse_chat_message_content_part(
     part: ChatCompletionContentPartParam,
     mm_parser: BaseMultiModalContentParser,
@@ -1611,6 +1640,7 @@ def _parse_chat_message_content_part(
     with multimodal placeholders.
     """
     if isinstance(part, str):  # Handle plain text parts
+        _reject_reserved_placeholder_in_text(part, mm_parser.model_config)
         if wrap_dicts:
             return {"type": "text", "text": part}
         return part
@@ -1629,6 +1659,7 @@ def _parse_chat_message_content_part(
 
     if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
         str_content = cast(str, content)
+        _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
             return {"type": "text", "text": str_content}
         else:
