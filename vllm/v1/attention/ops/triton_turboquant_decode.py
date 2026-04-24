@@ -324,7 +324,6 @@ def _tq_grouped_decode_stage1(
     KV_cache_ptr,
     Block_table_ptr,
     Seq_lens_ptr,
-    Centroids_ptr,
     Mid_o_ptr,
     stride_qb,
     stride_qh,
@@ -335,14 +334,11 @@ def _tq_grouped_decode_stage1(
     stride_mid_b,
     stride_mid_h,
     stride_mid_s,
-    NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     NUM_KV_SPLITS: tl.constexpr,
     KV_GROUP_SIZE: tl.constexpr,
     Q_HEAD_NUM: tl.constexpr,
-    MSE_BITS: tl.constexpr,
-    MSE_BYTES: tl.constexpr,
     KPS: tl.constexpr,
     VQB: tl.constexpr,
     VAL_DATA_BYTES: tl.constexpr,
@@ -350,25 +346,31 @@ def _tq_grouped_decode_stage1(
     BLOCK_D: tl.constexpr,
     BLOCK_KV: tl.constexpr,
     BLOCK_H: tl.constexpr,
-    KEY_FP8: tl.constexpr,
-    NORM_CORRECTION: tl.constexpr = 0,
     FP8_E4B15: tl.constexpr = 0,
 ):
-    """GQA-grouped TQ decode stage1.
+    """GQA-grouped TQ decode stage1 for the FP8 key path (k8v4).
 
-    Each CTA processes min(BLOCK_H, KV_GROUP_SIZE) Q heads that share
-    one KV head, loading K/V once and computing scores via tl.dot.
+    Each CTA processes up to BLOCK_H Q heads that share one KV head,
+    loading K/V once and computing scores via `tl.dot`.
+
+    Scoped to FP8 keys + 4-bit values: the MSE-quantized key presets
+    (`turboquant_{4bit,k3v4,3bit}_nc`) retain the original scalar
+    kernel because their per-token dequant regresses with BLOCK_KV=16.
     """
     bid = tl.program_id(0)
     head_group_id = tl.program_id(1)
     sid = tl.program_id(2)
 
-    # Map head_group_id → KV head + Q head range
-    VALID_BLOCK_H: tl.constexpr = BLOCK_H if KV_GROUP_SIZE > BLOCK_H else KV_GROUP_SIZE
-    kv_head = head_group_id // tl.cdiv(KV_GROUP_SIZE, BLOCK_H)
-    cur_head = head_group_id * VALID_BLOCK_H + tl.arange(0, BLOCK_H)
-    mask_h = cur_head < (head_group_id + 1) * VALID_BLOCK_H
-    mask_h = mask_h & (cur_head < Q_HEAD_NUM)
+    # Map head_group_id → KV head + Q head range.
+    # CTAs are partitioned per KV head: each KV head owns
+    # `heads_per_kv_head = ceil(KV_GROUP_SIZE / BLOCK_H)` consecutive CTAs.
+    # This keeps every CTA confined to a single KV head even when
+    # KV_GROUP_SIZE > BLOCK_H and not a multiple of it.
+    heads_per_kv_head: tl.constexpr = tl.cdiv(KV_GROUP_SIZE, BLOCK_H)
+    kv_head = head_group_id // heads_per_kv_head
+    group_idx = head_group_id % heads_per_kv_head
+    cur_head = kv_head * KV_GROUP_SIZE + group_idx * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask_h = (cur_head < (kv_head + 1) * KV_GROUP_SIZE) & (cur_head < Q_HEAD_NUM)
 
     seq_len = tl.load(Seq_lens_ptr + bid)
     split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
@@ -392,18 +394,6 @@ def _tq_grouped_decode_stage1(
         mask=mask_h[:, None] & d_mask[None, :],
         other=0.0,
     ).to(tl.float32)
-
-    # Precompute MSE bit/byte index vectors (loop-invariant)
-    if not KEY_FP8:
-        mse_bit_off = d_offs * MSE_BITS
-        mse_byte_idx = mse_bit_off // 8
-        mse_bit_shift = mse_bit_off % 8
-        mse_mask = (1 << MSE_BITS) - 1
-
-    if VQB == 3:
-        val_bit_off = d_offs * 3
-        val_byte_idx = val_bit_off // 8
-        val_bit_shift = val_bit_off % 8
 
     # Online softmax accumulators: [BLOCK_H]
     m_prev = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
@@ -429,68 +419,24 @@ def _tq_grouped_decode_stage1(
         )
 
         # ============================================================
-        # K DEQUANT → k_float [BLOCK_KV, BLOCK_D]
+        # K DEQUANT → k_float [BLOCK_KV, BLOCK_D] (FP8 only; MSE keys use
+        # the original scalar kernel).
         # ============================================================
-        if KEY_FP8:
-            k_addrs = slot_bases[:, None] + d_offs[None, :]
-            k_raw = tl.load(
-                KV_cache_ptr + k_addrs,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            )
-            if FP8_E4B15:
-                # SM < 8.9: SW emulation requires float32 intermediate
-                k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
-            else:
-                k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-
-            # scores = q_rot @ k_float^T : [BLOCK_H, BLOCK_KV]
-            scores = tl.dot(q_rot.to(tl.float16), tl.trans(k_float.to(tl.float16)))
-            scores = (scores * ATTN_SCALE).to(tl.float32)
-            scores = tl.where(mask_h[:, None] & kv_mask[None, :], scores, -float("inf"))
+        k_addrs = slot_bases[:, None] + d_offs[None, :]
+        k_raw = tl.load(
+            KV_cache_ptr + k_addrs,
+            mask=kv_mask[:, None] & d_mask[None, :],
+            other=0,
+        )
+        if FP8_E4B15:
+            k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
         else:
-            # MSE unpack → centroid gather → k_dequant [BLOCK_KV, BLOCK_D]
-            mse_addrs0 = slot_bases[:, None] + mse_byte_idx[None, :]
-            mse_raw0 = tl.load(
-                KV_cache_ptr + mse_addrs0,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            mse_raw1 = tl.load(
-                KV_cache_ptr + mse_addrs0 + 1,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            raw16 = mse_raw0 | (mse_raw1 << 8)
-            mse_idx = (raw16 >> mse_bit_shift[None, :]) & mse_mask
+            k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
 
-            c_vals = tl.load(
-                Centroids_ptr + mse_idx,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0.0,
-            )
-
-            if NORM_CORRECTION:
-                c_norm_sq = tl.sum(
-                    tl.where(d_mask[None, :], c_vals * c_vals, 0.0), axis=1
-                )
-                c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
-                c_vals = c_vals * c_inv_norm[:, None]
-
-            # term1 = q_rot @ c_vals^T : [BLOCK_H, BLOCK_KV]
-            term1 = tl.dot(q_rot.to(tl.float16), tl.trans(c_vals.to(tl.float16)))
-
-            norm_bases = slot_bases + MSE_BYTES
-            n_lo = tl.load(KV_cache_ptr + norm_bases, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            n_hi = tl.load(KV_cache_ptr + norm_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            vec_norms = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-
-            scores = vec_norms[None, :] * term1.to(tl.float32) * ATTN_SCALE
-            scores = tl.where(mask_h[:, None] & kv_mask[None, :], scores, -float("inf"))
+        # scores = q_rot @ k_float^T : [BLOCK_H, BLOCK_KV]
+        scores = tl.dot(q_rot.to(tl.float16), tl.trans(k_float.to(tl.float16)))
+        scores = (scores * ATTN_SCALE).to(tl.float32)
+        scores = tl.where(mask_h[:, None] & kv_mask[None, :], scores, -float("inf"))
 
         # ============================================================
         # ONLINE SOFTMAX: [BLOCK_H]
@@ -500,72 +446,36 @@ def _tq_grouped_decode_stage1(
         p = tl.exp(scores - n_e_max[:, None])
 
         # ============================================================
-        # V DEQUANT → values [BLOCK_KV, BLOCK_D]
+        # V DEQUANT → values [BLOCK_KV, BLOCK_D] (4-bit uniform; VQB==3
+        # is an MSE-only path handled by the original scalar kernel).
         # ============================================================
+        tl.static_assert(VQB == 4, "grouped kernel only supports 4-bit values")
         val_bases = slot_bases + KPS
 
-        if VQB == 3:
-            val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
-            val_raw0 = tl.load(
-                KV_cache_ptr + val_addrs0,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            val_raw1 = tl.load(
-                KV_cache_ptr + val_addrs0 + 1,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            raw16_val = val_raw0 | (val_raw1 << 8)
-            v_idx = ((raw16_val >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
+        vb_idx = d_offs // 2
+        vb_shift = (d_offs % 2) * 4
+        val_addrs = val_bases[:, None] + vb_idx[None, :]
+        val_raw = tl.load(
+            KV_cache_ptr + val_addrs,
+            mask=kv_mask[:, None] & d_mask[None, :],
+            other=0,
+        ).to(tl.int32)
+        v_idx = ((val_raw >> vb_shift[None, :]) & 0xF).to(tl.float32)
 
-            sc_bases = val_bases + VAL_DATA_BYTES
-            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_scales = (
-                (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            )
-            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            values = v_idx * v_scales[:, None] + v_zeros[:, None]
-        else:  # VQB == 4
-            vb_idx = d_offs // 2
-            vb_shift = (d_offs % 2) * 4
-            val_addrs = val_bases[:, None] + vb_idx[None, :]
-            val_raw = tl.load(
-                KV_cache_ptr + val_addrs,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            v_idx = ((val_raw >> vb_shift[None, :]) & 0xF).to(tl.float32)
-
-            sc_bases = val_bases + VAL_DATA_BYTES
-            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_scales = (
-                (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            )
-            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            values = v_idx * v_scales[:, None] + v_zeros[:, None]
+        sc_bases = val_bases + VAL_DATA_BYTES
+        sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(tl.uint16)
+        sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
+            tl.uint16
+        )
+        v_scales = (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
+            tl.uint16
+        )
+        zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
+            tl.uint16
+        )
+        v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        values = v_idx * v_scales[:, None] + v_zeros[:, None]
 
         # ============================================================
         # ACCUMULATE: acc += p @ values via tl.dot
@@ -836,8 +746,8 @@ def triton_turboquant_decode_attention(
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
     BLOCK_H = 16
     BLOCK_KV_GROUPED = 16
-    VALID_BLOCK_H = min(BLOCK_H, kv_group_size)
-    head_groups = triton.cdiv(Hq, VALID_BLOCK_H)
+    heads_per_kv_head = triton.cdiv(kv_group_size, BLOCK_H)
+    head_groups = Hk * heads_per_kv_head
 
     if kv_group_size > 1 and key_fp8:
         grid = (B, head_groups, NUM_KV_SPLITS)
@@ -846,7 +756,6 @@ def triton_turboquant_decode_attention(
             kv_cache,
             block_table,
             seq_lens,
-            centroids,
             mid_o,
             q_rot.stride(0),
             q_rot.stride(1),
@@ -857,14 +766,11 @@ def triton_turboquant_decode_attention(
             mid_o.stride(0),
             mid_o.stride(1),
             mid_o.stride(2),
-            NUM_KV_HEADS=Hk,
             HEAD_DIM=D,
             BLOCK_SIZE=block_size,
             NUM_KV_SPLITS=NUM_KV_SPLITS,
             KV_GROUP_SIZE=kv_group_size,
             Q_HEAD_NUM=Hq,
-            MSE_BITS=mse_bits,
-            MSE_BYTES=cfg["mse_bytes"],
             KPS=key_packed_size,
             VQB=value_quant_bits,
             VAL_DATA_BYTES=cfg["val_data_bytes"],
@@ -872,13 +778,12 @@ def triton_turboquant_decode_attention(
             BLOCK_D=cfg["BLOCK_D"],
             BLOCK_KV=BLOCK_KV_GROUPED,
             BLOCK_H=BLOCK_H,
-            KEY_FP8=1 if key_fp8 else 0,
-            NORM_CORRECTION=1 if norm_correction else 0,
             FP8_E4B15=fp8_e4b15,
             num_warps=4,
             num_stages=2,
         )
     else:
+        # MHA (kv_group_size==1): use original scalar kernel
         BLOCK_KV = 4
         grid = (B, Hq, NUM_KV_SPLITS)
         _tq_decode_stage1[grid](
