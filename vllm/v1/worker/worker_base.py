@@ -320,7 +320,13 @@ class WorkerWrapperBase:
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)
 
-    def _apply_mm_cache(self, scheduler_output: SchedulerOutput) -> None:
+    def _apply_mm_cache(self, scheduler_output: SchedulerOutput | list[SchedulerOutput | None]) -> None:
+        if isinstance(scheduler_output, list):
+            for so in scheduler_output:
+                if so is not None:
+                    self._apply_mm_cache(so)
+            return
+
         mm_cache = self.mm_receiver_cache
         if mm_cache is None:
             return
@@ -331,7 +337,7 @@ class WorkerWrapperBase:
             )
 
     def execute_model(
-        self, scheduler_output: SchedulerOutput
+        self, scheduler_output: SchedulerOutput | list[SchedulerOutput | None]
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self._apply_mm_cache(scheduler_output)
 
