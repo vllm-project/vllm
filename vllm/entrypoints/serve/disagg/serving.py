@@ -144,7 +144,7 @@ class ServingTokens(OpenAIServing):
                 request,
                 prompt_input=request.token_ids,
                 prompt_embeds=None,
-                skip_mm_cache=True,
+                skip_mm_cache=False,
             )
 
         # Schedule the request and get the result generator.
