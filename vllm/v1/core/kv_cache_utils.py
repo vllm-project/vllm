@@ -1290,10 +1290,18 @@ def get_kv_cache_groups(
         except ValueError:
             pass  # Could not fully unify; fall through to LCM path
         else:
-            if is_kv_cache_spec_uniform(kv_cache_spec):
-                return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
-            elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_spec):
-                return _get_kv_cache_groups_uniform_type(uniform_spec)
+            # Only take the shortcut if unification actually resolved the
+            # page-size incompatibility.  If page sizes are still
+            # non-divisible (e.g. different head_sizes), fall through to
+            # the LCM path which will raise NotImplementedError.
+            new_page_sizes = {s.page_size_bytes for s in kv_cache_spec.values()}
+            if len(new_page_sizes) <= 1 or (
+                max(new_page_sizes) % min(new_page_sizes) == 0
+            ):
+                if is_kv_cache_spec_uniform(kv_cache_spec):
+                    return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
+                elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_spec):
+                    return _get_kv_cache_groups_uniform_type(uniform_spec)
 
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function
