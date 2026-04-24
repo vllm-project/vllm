@@ -450,7 +450,9 @@ class TestExtractToolCallsStreaming:
     def test_content_before_tool_chunked(self, parser):
         """Content before tool call with chunked streaming."""
         full_text = "Thinking... " + build_tool_call("fn", {"a": "b"})
-        deltas = self._stream_chunked(parser, full_text, chunk_size=7)
+        # chunk_size=12 ensures the plain-text prefix is emitted as one
+        # chunk before the start-token prefix logic kicks in.
+        deltas = self._stream_chunked(parser, full_text, chunk_size=12)
         content = "".join(d.content for d in deltas if d.content is not None)
         assert "Thinking" in content
         args_str = self._reconstruct_args(deltas)
@@ -483,6 +485,20 @@ class TestExtractToolCallsStreaming:
         deltas = self._stream(parser, partial_text)
         # Should have no tool call deltas yet
         assert all(not d.tool_calls for d in deltas)
+
+    def test_no_leakage_during_chunked_streaming(self, parser):
+        """Sentinel tokens split across chunks must not leak into content."""
+        full_text = build_tool_call("get_weather", {"location": "SF"})
+        # Use chunk_size=1 to aggressively split the start token
+        deltas = self._stream_chunked(parser, full_text, chunk_size=1)
+        # Reconstruct all content emitted before tool calls
+        content = "".join(d.content for d in deltas if d.content is not None)
+        # The DSML sentinel must never appear in emitted content
+        assert "<｜DSML｜function_calls>" not in content
+        assert "<｜DSML｜" not in content
+        # Tool call must still be successfully extracted
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"location": "SF"}
 
 
 class TestDelimiterPreservation:

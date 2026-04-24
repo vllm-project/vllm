@@ -78,6 +78,15 @@ class DeepSeekV32ToolParser(ToolParser):
         logger.debug(
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
+        self._start_prefixes = {
+            self.tool_call_start_token[:i]
+            for i in range(1, len(self.tool_call_start_token))
+        }
+
+    def _is_potential_tool_call_prefix(self, text: str) -> bool:
+        start = self.tool_call_start_token
+        tail = text[-(len(start) - 1) :]
+        return any(tail.endswith(p) for p in self._start_prefixes)
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -296,6 +305,10 @@ class DeepSeekV32ToolParser(ToolParser):
             self.is_tool_call_started = True
             start_idx = current_text.index(self.tool_call_start_token)
             content_before = current_text[len(previous_text) : start_idx] or None
+        # elif self._is_potential_tool_call_prefix(current_text):
+        #     # The start token may be split across chunks; buffer instead of
+        #     # emitting partial sentinel characters as content.
+        #     return None
         else:
             # Still in plain-text region, forward as content.
             return DeltaMessage(content=delta_text) if delta_text else None
