@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
+    - linux-strix-halo-gpu-rocm-noneng
     - linux-strix-halo-gpu-rocm-oem

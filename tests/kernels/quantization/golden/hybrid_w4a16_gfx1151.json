@@ -1,0 +1,2521 @@
+{
+  "gpu": "gfx1151",
+  "shapes": [
+    {
+      "in_features": 2048,
+      "out_features": 2048,
+      "group_size": 128,
+      "comment": "gemma-2b o_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.4128
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.808
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7654
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.4264
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.7844
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.8477
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.6978
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.4082
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.6968
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.3975
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.6954
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.4047
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.6875
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.2419
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7243
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7317
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.4744
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.8001
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.9224
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.1375
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.0644
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.5782
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.2083
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.3604
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.9934
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.2141
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 2048,
+      "out_features": 2560,
+      "group_size": 128,
+      "comment": "gemma-2b qkv_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.2864
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7909
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.8736
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.8731
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.5097
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.3792
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.0927
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.705
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.4913
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.6033
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.6707
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.0623
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.4599
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.1639
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7231
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.8702
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.6878
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.222
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.4316
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.8495
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.4533
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.1602
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.5573
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.2919
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.668
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.3596
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 2048,
+      "out_features": 32768,
+      "group_size": 128,
+      "comment": "gemma-2b gate_up_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9247
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7686
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.4351
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.3068
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.2607
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.0032
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 9.257
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.6918
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.2849
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.5337
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.9014
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.6818
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.6505
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.8991
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.6974
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.2795
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.0476
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.9376
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.9119
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.4613
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.293
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.0634
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.3204
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6918
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.3473
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.499
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 2560,
+      "out_features": 2560,
+      "group_size": 128,
+      "comment": "Qwen3-4B o_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.0641
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.8888
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.964
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.2454
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.3269
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3406
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.9707
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.9499
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.3059
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.1459
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8095
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.7538
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.9946
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.968
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7862
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.9541
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1948
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.0128
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.5936
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3383
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.4911
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.1208
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.4179
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8093
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6467
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.7181
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 2560,
+      "out_features": 3840,
+      "group_size": 128,
+      "comment": "Qwen3-4B qkv_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9951
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.8274
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.5253
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.3449
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.5221
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.2684
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.1006
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8312
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.5846
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.577
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.3841
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.6554
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.9148
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9157
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7331
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.3217
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.235
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.2574
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.7746
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.1391
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.2947
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.3903
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.7392
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.7488
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.5053
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.716
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 2560,
+      "out_features": 19456,
+      "group_size": 128,
+      "comment": "Qwen3-4B gate_up_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.8928
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7141
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.2879
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.359
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.489
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.3508
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.7559
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.7674
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.238
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.5302
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.3167
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.2346
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.0488
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.854
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.6112
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.1849
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1882
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.2449
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.686
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3656
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8964
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6275
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.9546
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.1914
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.057
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.812
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 3584,
+      "out_features": 3584,
+      "group_size": 128,
+      "comment": "Qwen2.5-7B o_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9835
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.8347
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.5694
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1539
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.8149
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.8862
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.8782
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.0556
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.0844
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.633
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.0266
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.5028
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.4662
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9292
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7102
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.3607
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1325
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.9536
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.5861
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.4198
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.5615
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.0996
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.7903
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.6602
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.2616
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.5029
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 3584,
+      "out_features": 4608,
+      "group_size": 128,
+      "comment": "Qwen2.5-7B qkv_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9585
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7914
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.5332
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1761
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.4575
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.2209
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.5579
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.0935
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.567
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.2707
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8004
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.4321
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.7165
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9067
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.669
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.355
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.8338
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.2186
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.2532
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.164
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.2933
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.9253
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.5604
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.6155
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.303
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.6696
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 3584,
+      "out_features": 37888,
+      "group_size": 128,
+      "comment": "Qwen2.5-7B gate_up_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9485
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7864
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.4789
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.495
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.715
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.5926
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.2507
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.5897
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.9993
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 25.0296
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 25.158
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 25.1095
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.6831
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9442
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7205
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 3.4637
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.3038
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.2927
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.0686
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.764
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.2801
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.3827
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.6459
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.7479
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.7876
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.2924
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 8192,
+      "out_features": 512,
+      "group_size": 128,
+      "comment": "L2 2MiB at",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.1493
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.583
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7119
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.67
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.1469
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.4256
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.5442
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 9.6996
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.0883
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.2808
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.8062
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.5493
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.2201
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9742
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.4265
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.679
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.5253
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.8178
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.0579
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.3119
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 9.3804
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.5742
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.3559
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.6903
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.8783
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.0947
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 8320,
+      "out_features": 512,
+      "group_size": 128,
+      "comment": "L2 2MiB above",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.1777
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.6729
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.8472
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.685
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.3672
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.647
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.5277
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 10.7157
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.0478
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.5271
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.0259
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.5149
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.8677
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.0332
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.5737
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.7516
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.4951
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.9602
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.8492
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.2091
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 10.8307
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.6779
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.411
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.7803
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.3718
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.2113
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 9728,
+      "out_features": 2560,
+      "group_size": 128,
+      "comment": "Qwen3-4B down_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9361
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.8381
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.1756
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1222
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.3762
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3302
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.7077
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.8582
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.4545
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.053
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.4355
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6322
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6437
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9072
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.7243
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.1943
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.2395
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.208
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.0093
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.4266
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.9891
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.7865
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.2798
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 24.1159
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8202
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.0967
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 16384,
+      "out_features": 2048,
+      "group_size": 128,
+      "comment": "gemma-2b down_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.6628
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.2668
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.7605
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.3027
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.4611
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.7037
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.2372
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.419
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.427
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.3701
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.9742
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.4975
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.57
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.6178
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.1842
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.6867
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.1813
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.2884
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.054
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 10.3469
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.7178
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.6519
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.8697
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.7922
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.2217
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.1922
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 18944,
+      "out_features": 3584,
+      "group_size": 128,
+      "comment": "Qwen2.5-7B down_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.885
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.1035
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.1331
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.1602
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 8.2714
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.8243
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.1115
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.2223
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.7413
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.4659
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6745
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.2756
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.8942
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.8619
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.0915
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.069
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.943
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.8982
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3026
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3981
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.8937
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.6004
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.5615
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 23.6987
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.6381
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.5786
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 38912,
+      "out_features": 2048,
+      "group_size": 128,
+      "comment": "hf-kernel, K_packed % 4096 != 0",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.424
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.8228
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.5955
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.1065
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.4339
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 9.1693
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.7792
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.9705
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.3488
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.9475
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.9299
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.6152
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.0634
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.3508
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.6919
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.3579
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.568
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.5435
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.6452
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.5037
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.3892
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 22.0346
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.5223
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.4163
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.7689
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.7043
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 49152,
+      "out_features": 2048,
+      "group_size": 128,
+      "comment": "hf-kernel, K_packed % 4096 == 0",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.2254
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.4478
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.8837
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.7114
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.3617
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.0897
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.2481
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.251
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.8496
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.0149
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.0741
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.2297
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.7638
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.1845
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.3661
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.7269
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.3789
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.6411
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.6507
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.5358
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.7032
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.6265
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.7705
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.5845
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.3266
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.3552
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "in_features": 49152,
+      "out_features": 4096,
+      "group_size": 128,
+      "comment": "hf-kernel, K_packed % 4096 == 0",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.262
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.5001
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.969
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.0626
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 4.0089
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 7.4095
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 6.0759
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 9.6046
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 11.9319
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.156
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 21.0747
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.6117
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 14.811
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.1896
+            },
+            {
+              "batch_size": 2,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.372
+            },
+            {
+              "batch_size": 4,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 0.7141
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 1.4814
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.0375
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.8263
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.305
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 10.1078
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 11.497
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 15.3731
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.4851
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 13.4057
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 12.9403
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1445,6 +1445,12 @@ def pytest_addoption(parser):
         default=False,
         help="include intermittent (noisy) benchmark cases",
     )
+    parser.addoption(
+        "--write-golden",
+        action="store_true",
+        default=False,
+        help="record performance measurements instead of asserting",
+    )
 
 
 def pytest_report_header(config):

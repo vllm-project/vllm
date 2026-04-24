@@ -132,8 +132,36 @@ jobs:
           retention-days: 90
 
   test-kernels:
-    runs-on: linux-strix-halo-gpu-rocm-oem
+    name: test-kernels (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on }}
     needs: build-wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: correctness
+            runs-on: linux-strix-halo-gpu-rocm-oem
+            timeout: 300
+            pytest_args: >-
+              tests/kernels/moe/test_exllama_moe.py
+              tests/kernels/moe/test_hybrid_w4a16_moe.py
+              tests/kernels/quantization/test_awq_gemv_moe.py
+              tests/kernels/quantization/test_hip_w4a16.py
+              tests/kernels/quantization/test_hybrid_w4a16_triton.py
+              tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py
+              tests/kernels/quantization/test_rocm_skinny_gemms.py
+              tests/kernels/quantization/test_dynamic_int8_lm_head.py
+              tests/quantization/test_hip_w4a16_kernel.py
+          - name: performance
+            runs-on: linux-strix-halo-gpu-rocm-noneng
+            timeout: 300
+            # TODO: Until we understand the reason for inconsistent
+            # performance on different runners, don't let performance
+            # tests fail the whole workflow.  Runner VRAM
+            # configuration is one idea.
+            allow_failure: true
+            pytest_args: >-
+              tests/kernels/quantization/test_hybrid_w4a16_perf.py
     container:
       image: ghcr.io/rocm/vllm/gfx11-ci:latest
       credentials:
@@ -248,18 +276,27 @@ jobs:
           print(f'Platform: {type(current_platform).__name__}')
           "
 
-      - name: Run kernel tests
+      - name: Test kernel ${{ matrix.name }}
         run: |
-          python -m pytest -v --timeout=300 \
-            tests/kernels/moe/test_exllama_moe.py \
-            tests/kernels/moe/test_hybrid_w4a16_moe.py \
-            tests/kernels/quantization/test_awq_gemv_moe.py \
-            tests/kernels/quantization/test_hip_w4a16.py \
-            tests/kernels/quantization/test_hybrid_w4a16_triton.py \
-            tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py \
-            tests/kernels/quantization/test_rocm_skinny_gemms.py \
-            tests/kernels/quantization/test_dynamic_int8_lm_head.py \
-            tests/quantization/test_hip_w4a16_kernel.py
+          set +e
+          python -m pytest -v --timeout=${{ matrix.timeout }} ${{ matrix.pytest_args }}
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            if [ "${{ matrix.allow_failure }}" = "true" ]; then
+              echo "::warning::Non-blocking ${{ matrix.name }} tests failed with exit code $status"
+              {
+                echo "## Non-blocking test failure"
+                echo ""
+                echo "\`${{ matrix.name }}\` failed with exit code \`$status\`."
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+
+            exit "$status"
+          fi
 
   upload-wheel:
     runs-on: ubuntu-latest
