@@ -180,8 +180,7 @@ def determine_expert_placement_strategy(
             return "linear"
         if (
             moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.use_deepep_ll_kernels
-            and not moe_parallel_config.use_nixl_ep_kernels
+            and not moe_parallel_config.needs_round_robin_routing_tables
         ):
             logger.warning(
                 "Round-robin expert placement currently only supports "
@@ -687,8 +686,7 @@ class FusedMoE(PluggableLayer):
         # Currently routing_tables only needed for round-robin expert placement
         # with DeepEP-ll or NIXL EP all2all backends.
         if self.expert_placement_strategy != "round_robin" or (
-            not self.moe_parallel_config.use_deepep_ll_kernels
-            and not self.moe_parallel_config.use_nixl_ep_kernels
+            not self.moe_parallel_config.needs_round_robin_routing_tables
         ):
             return None
 
@@ -1099,7 +1097,11 @@ class FusedMoE(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "gpt_oss_mxfp4":
+        quant_config_name = self.quant_config and self.quant_config.get_name()
+        if quant_config_name == "humming":
+            assert hasattr(self.quant_method, "weight_schema")
+            quant_config_name = self.quant_method.weight_schema.quant_method
+        if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]

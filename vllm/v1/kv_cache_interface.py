@@ -356,6 +356,20 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
+    head_size_v: int = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.head_size_v is None:
+            object.__setattr__(self, "head_size_v", self.head_size)
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * (self.head_size + self.head_size_v)
+            * get_dtype_size(self.dtype)
+        )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
