@@ -293,21 +293,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         device = common_attn_metadata.query_start_loc.device
-        cu_chunk_seqlen_p = torch.as_tensor(
-            cu_chunk_seqlen,
-            device=device,
-            dtype=torch.int32,
+        # Build on pinned CPU and upload non-blocking to avoid the synchronous
+        # H2D copy that `torch.as_tensor(list, device=cuda)` would force.
+        cu_chunk_seqlen_p = torch.tensor(
+            cu_chunk_seqlen, dtype=torch.int32, pin_memory=True
+        ).to(device, non_blocking=True)
+        seq_idx_p = torch.tensor(seq_idx, dtype=torch.int32, pin_memory=True).to(
+            device, non_blocking=True
         )
-        seq_idx_p = torch.as_tensor(
-            seq_idx,
-            device=device,
-            dtype=torch.int32,
-        )
-        last_chunk_indices_p = torch.as_tensor(
-            last_chunk_indices,
-            device=device,
-            dtype=torch.int32,
-        )
+        last_chunk_indices_p = torch.tensor(
+            last_chunk_indices, dtype=torch.int32, pin_memory=True
+        ).to(device, non_blocking=True)
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
 
     def _compute_prefix_caching_block_indices(
