@@ -385,7 +385,7 @@ def default_server_args():
 @pytest.fixture(scope="module")
 def server_with_store(default_server_args):
     with RemoteOpenAIServer(
-        "/mnt/data4/models/Qwen/Qwen3-8B",
+        "Qwen/Qwen3-1.7B",
         default_server_args,
         env_dict={
             "VLLM_ENABLE_RESPONSES_API_STORE": "1",
