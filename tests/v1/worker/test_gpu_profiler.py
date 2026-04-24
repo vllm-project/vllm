@@ -205,6 +205,104 @@ def test_mixed_delay_and_stop(default_profiler_config):
     assert profiler.start_call_count == 0
 
 
+def test_runtime_num_steps_override(default_profiler_config):
+    """Test that num_steps passed to start() overrides config max_iterations."""
+    # Config has max_iterations=0 (unlimited), but we override at runtime
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+    profiler.start(num_steps=2)
+
+    assert profiler._running is True
+    assert profiler._max_iters == 2
+
+    # Iteration 1
+    profiler.step()
+    assert profiler._running is True
+
+    # Iteration 2
+    profiler.step()
+    assert profiler._running is True
+
+    # Iteration 3 (exceeds num_steps=2)
+    profiler.step()
+    assert profiler._running is False
+    assert profiler.stop_call_count == 1
+
+
+def test_runtime_delay_steps_override(default_profiler_config):
+    """Test that delay_steps passed to start() overrides config delay_iterations."""
+    # Config has delay_iterations=0, but we override at runtime
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+    profiler.start(delay_steps=3)
+
+    assert profiler._active is True
+    assert profiler._running is False  # Delayed
+    assert profiler._delay_iters == 3
+
+    profiler.step()  # Step 1
+    assert profiler._running is False
+
+    profiler.step()  # Step 2
+    assert profiler._running is False
+
+    profiler.step()  # Step 3 (threshold reached)
+    assert profiler._running is True
+    assert profiler.start_call_count == 1
+
+
+def test_runtime_combined_overrides(default_profiler_config):
+    """Test num_steps and delay_steps together at runtime."""
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+    profiler.start(num_steps=2, delay_steps=2)
+
+    assert profiler._delay_iters == 2
+    assert profiler._max_iters == 2
+
+    # Step 1-2: delay period
+    profiler.step()
+    assert profiler._running is False
+    profiler.step()
+    assert profiler._running is True  # Profiling starts
+
+    # Step 3-4: profiling period
+    profiler.step()
+    assert profiler._running is True
+
+    profiler.step()  # Exceeds num_steps=2
+    assert profiler._running is False
+    assert profiler.stop_call_count == 1
+
+
+def test_runtime_override_preserves_config_defaults(default_profiler_config):
+    """Test that None overrides leave config values unchanged."""
+    default_profiler_config.delay_iterations = 5
+    default_profiler_config.max_iterations = 10
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+
+    # Pass None (default) - should keep config values
+    profiler.start(num_steps=None, delay_steps=None)
+    assert profiler._delay_iters == 5
+    assert profiler._max_iters == 10
+
+
+def test_runtime_override_on_restart(default_profiler_config):
+    """Test that runtime overrides apply on each start() call."""
+    profiler = ConcreteWorkerProfiler(default_profiler_config)
+
+    # First session: profile for 2 steps
+    profiler.start(num_steps=2)
+    assert profiler._max_iters == 2
+    profiler.step()
+    profiler.step()
+    profiler.step()  # auto-stops
+    assert profiler._running is False
+
+    profiler.stop()  # clean up
+
+    # Second session: profile for 5 steps
+    profiler.start(num_steps=5)
+    assert profiler._max_iters == 5
+
+
 class TestIsUriPath:
     """Tests for the _is_uri_path helper function."""
 
