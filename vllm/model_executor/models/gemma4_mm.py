@@ -14,10 +14,11 @@ processor inserts ``mm:ss`` timestamps between frames so the model can
 reason about temporal order.
 """
 
+import inspect
 import math
-import time
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal
+from functools import lru_cache
+from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import torch
@@ -33,6 +34,7 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
 )
+from transformers.models.gemma4.processing_gemma4 import Gemma4ProcessorKwargs
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -63,12 +65,13 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
+from vllm.transformers_utils.processor import (
+    cached_processor_from_config,
+    get_processor_kwargs_keys,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .gemma4_mm_utils import get_gemma4_pooled_token_counts
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -116,6 +119,95 @@ def _get_hf_processor_mm_kwargs(
     }
 
 
+def get_gemma4_pooled_token_counts(
+    pixel_position_ids: torch.Tensor,
+    output_length: int,
+) -> torch.Tensor:
+    """Compute the number of non-padding pooled tokens per image."""
+    if pixel_position_ids.ndim != 3 or pixel_position_ids.shape[-1] != 2:
+        raise ValueError(
+            "pixel_position_ids must have shape "
+            f"(batch, max_patches, 2), got {tuple(pixel_position_ids.shape)}"
+        )
+    if output_length <= 0:
+        raise ValueError(f"output_length must be positive, got {output_length}.")
+
+    input_seq_len = pixel_position_ids.shape[1]
+    quotient, remainder = divmod(input_seq_len, output_length)
+    if remainder:
+        raise ValueError(
+            f"Cannot map {input_seq_len=} to {output_length=}: "
+            "expected input_seq_len == output_length * k^2."
+        )
+
+    pooling_factor = math.isqrt(quotient)
+    if pooling_factor**2 != quotient:
+        raise ValueError(
+            f"Cannot map {input_seq_len=} to {output_length=}: "
+            "expected input_seq_len == output_length * k^2."
+        )
+
+    padding_positions = (pixel_position_ids == -1).all(dim=-1)
+    clamped_positions = pixel_position_ids.clamp(min=0)
+    valid_x = clamped_positions[..., 0].masked_fill(padding_positions, -1)
+    valid_y = clamped_positions[..., 1].masked_fill(padding_positions, -1)
+
+    width_patches = valid_x.amax(dim=-1) + 1
+    height_patches = valid_y.amax(dim=-1) + 1
+    if ((width_patches % pooling_factor) != 0).any() or (
+        (height_patches % pooling_factor) != 0
+    ).any():
+        raise ValueError(
+            "Gemma4 valid patch grid dimensions must be divisible by the "
+            f"pooling factor {pooling_factor}."
+        )
+
+    return (width_patches // pooling_factor) * (height_patches // pooling_factor)
+
+
+@lru_cache(maxsize=1)
+def _get_gemma4_hf_processor_signature() -> inspect.Signature:
+    base_signature = inspect.signature(Gemma4Processor.__call__)
+    extra_kwarg_names = get_processor_kwargs_keys(Gemma4ProcessorKwargs)
+    extra_kwarg_names |= {"video_vision_batch_size"}
+
+    params = [
+        param
+        for name, param in base_signature.parameters.items()
+        if name != "self" and param.kind != inspect.Parameter.VAR_KEYWORD
+    ]
+    existing_names = {param.name for param in params}
+
+    for kwarg_name in sorted(extra_kwarg_names - existing_names):
+        params.append(
+            inspect.Parameter(
+                kwarg_name,
+                kind=inspect.Parameter.KEYWORD_ONLY,
+                default=None,
+            )
+        )
+
+    return inspect.Signature(params)
+
+
+class _Gemma4HFProcessorWrapper:
+    def __init__(self, processor: Gemma4Processor) -> None:
+        self._processor = processor
+        self.__signature__ = _get_gemma4_hf_processor_signature()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._processor, name)
+
+    def __call__(
+        self,
+        *args: object,
+        video_vision_batch_size: object = None,
+        **kwargs: object,
+    ) -> BatchFeature:
+        del video_vision_batch_size
+        return self._processor(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Input schema
 # ---------------------------------------------------------------------------
@@ -146,6 +238,7 @@ class Gemma4ImagePixelInputs(TensorSchema):
         torch.Tensor,
         TensorShape("bn", "np", 2),
     ]
+    image_num_soft_tokens: list[int] | None = None
 
 
 class Gemma4AudioInputs(TensorSchema):
@@ -182,6 +275,9 @@ class Gemma4VideoInputs(TensorSchema):
         torch.Tensor,
         TensorShape("bn", "np", 2),
     ]
+    video_frame_counts: torch.Tensor | list[int]
+    video_num_soft_tokens: list[list[int]] | None = None
+    video_vision_batch_size: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -217,16 +313,20 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         if is_mistral_tokenizer(tokenizer):
             tokenizer = tokenizer.transformers_tokenizer
 
+        # Mirror InputProcessingContext.get_hf_processor(), but drop
+        # vLLM-local kwargs before processor construction so options like
+        # video_vision_batch_size stay in vLLM and never reach HF.
         merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         merged_kwargs = _get_hf_processor_mm_kwargs(merged_kwargs)
         merged_kwargs.pop("tokenizer", None)
 
-        return cached_processor_from_config(
+        processor = cached_processor_from_config(
             self.ctx.model_config,
             processor_cls=Gemma4Processor,
             tokenizer=tokenizer,
             **merged_kwargs,
         )
+        return cast(Gemma4Processor, _Gemma4HFProcessorWrapper(processor))
 
     def validate_num_items(self, modality: str, num_items: int) -> None:
         if (
@@ -517,57 +617,6 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
-    def _call_hf_processor_without_local_kwargs(
-        self,
-        processor: Gemma4Processor,
-        data: Mapping[str, object],
-        kwargs: Mapping[str, object],
-        *,
-        num_tries: int = 1,
-        max_tries: int = 5,
-    ) -> BatchFeature:
-        allowed_kwargs = get_allowed_kwarg_only_overrides(
-            processor,
-            kwargs,
-            requires_kw_only=False,
-            allow_var_kwargs=True,
-        )
-        allowed_kwargs.setdefault("return_tensors", "pt")
-
-        try:
-            output = processor(**data, **allowed_kwargs)
-        except Exception as exc:
-            # See https://github.com/huggingface/tokenizers/issues/537
-            if (
-                isinstance(exc, RuntimeError)
-                and exc
-                and exc.args[0] == "Already borrowed"
-                and num_tries < max_tries
-            ):
-                logger.warning(
-                    "Failed to acquire tokenizer in current thread. "
-                    "Retrying (%d/%d)...",
-                    num_tries,
-                    max_tries,
-                )
-                time.sleep(0.5)
-                return self._call_hf_processor_without_local_kwargs(
-                    processor,
-                    data,
-                    kwargs,
-                    num_tries=num_tries + 1,
-                    max_tries=max_tries,
-                )
-
-            msg = (
-                f"Failed to apply {type(processor).__name__} "
-                f"on data={data} with kwargs={allowed_kwargs}"
-            )
-            raise ValueError(msg) from exc
-
-        output_ = self.info.ctx._postprocess_output(output.data)
-        return BatchFeature(output_)
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -636,10 +685,11 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
 
-                frame_outputs = self._call_hf_processor_without_local_kwargs(
-                    self.info.get_hf_processor(**video_mm_kwargs),
-                    dict(text=dummy_prompt, images=frames),
-                    dict(video_mm_kwargs, **tok_kwargs),
+                frame_outputs = super()._call_hf_processor(
+                    prompt=dummy_prompt,
+                    mm_data={"images": frames},
+                    mm_kwargs=video_mm_kwargs,
+                    tok_kwargs=tok_kwargs,
                 )
 
                 # Remap HF key name
@@ -736,10 +786,11 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         patched_mm_kwargs = dict(hf_merged_mm_kwargs)
         if val is not None:
             patched_mm_kwargs["max_soft_tokens"] = val
-        processed_outputs = self._call_hf_processor_without_local_kwargs(
-            self.info.get_hf_processor(**patched_mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(patched_mm_kwargs, **tok_kwargs),
+        processed_outputs = super()._call_hf_processor(
+            prompt,
+            mm_data,
+            patched_mm_kwargs,
+            tok_kwargs,
         )
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
@@ -1100,7 +1151,7 @@ class Gemma4ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> dict[str, object] | None:
+    ) -> Gemma4ImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_position_ids = kwargs.pop("pixel_position_ids", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -1108,11 +1159,11 @@ class Gemma4ForConditionalGeneration(
         assert image_embeds is None, "Gemma4 does not support image_embeds."
         if pixel_values is None:
             return None
-        return {
-            "pixel_values": pixel_values,
-            "pixel_position_ids": pixel_position_ids,
-            "image_num_soft_tokens": image_num_soft_tokens,
-        }
+        return Gemma4ImagePixelInputs(
+            pixel_values=pixel_values,
+            pixel_position_ids=pixel_position_ids,
+            image_num_soft_tokens=image_num_soft_tokens,
+        )
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
@@ -1130,7 +1181,7 @@ class Gemma4ForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> dict[str, object] | None:
+    ) -> Gemma4VideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         pixel_position_ids_videos = kwargs.pop("pixel_position_ids_videos", None)
         video_frame_counts = kwargs.pop("video_frame_counts", None)
@@ -1138,17 +1189,19 @@ class Gemma4ForConditionalGeneration(
         video_vision_batch_size = kwargs.pop("video_vision_batch_size", None)
         if pixel_values_videos is None:
             return None
-        return {
-            "pixel_values_videos": pixel_values_videos,
-            "pixel_position_ids_videos": pixel_position_ids_videos,
-            "video_frame_counts": video_frame_counts,
-            "video_num_soft_tokens": video_num_soft_tokens,
-            "video_vision_batch_size": video_vision_batch_size,
-        }
+        return Gemma4VideoInputs(
+            pixel_values_videos=pixel_values_videos,
+            pixel_position_ids_videos=pixel_position_ids_videos,
+            video_frame_counts=video_frame_counts,
+            video_num_soft_tokens=video_num_soft_tokens,
+            video_vision_batch_size=video_vision_batch_size,
+        )
 
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
-    ) -> dict[str, dict | Gemma4AudioInputs | None]:
+    ) -> dict[
+        str, Gemma4ImagePixelInputs | Gemma4AudioInputs | Gemma4VideoInputs | None
+    ]:
         mm_input_by_modality = {}
         for input_key in list(kwargs):
             if (
@@ -1180,7 +1233,7 @@ class Gemma4ForConditionalGeneration(
 
     def _process_image_input(
         self,
-        image_input: dict[str, object],
+        image_input: Gemma4ImagePixelInputs,
     ) -> list[torch.Tensor]:
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
@@ -1262,7 +1315,7 @@ class Gemma4ForConditionalGeneration(
 
     def _process_video_input(
         self,
-        video_input: dict[str, object],
+        video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
         """Process video frames through the vision tower.
 

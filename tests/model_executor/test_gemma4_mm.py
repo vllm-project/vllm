@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
 from types import MethodType
 
 import pytest
 import torch
-from transformers import BatchFeature
 
 from vllm.model_executor.models.gemma4_mm import (
     _DEFAULT_VIDEO_VISION_BATCH_SIZE,
     Gemma4ForConditionalGeneration,
     Gemma4MultiModalProcessor,
+    _Gemma4HFProcessorWrapper,
     _get_hf_processor_mm_kwargs,
     _validate_video_vision_batch_size,
 )
 from vllm.multimodal.inputs import MultiModalSharedField
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -59,56 +59,43 @@ def test_get_mm_fields_config_keeps_video_batch_size_on_cpu() -> None:
     assert field.keep_on_cpu is True
 
 
-@dataclass
-class _FakeCtx:
-    config_mm_kwargs: dict[str, object]
-
-    def get_merged_mm_kwargs(self, kwargs: dict[str, object]):
-        return self.config_mm_kwargs | kwargs
-
-    def _postprocess_output(self, output):
-        return output
-
-
 class _FakeProcessor:
     def __init__(self) -> None:
         self.captured_kwargs: dict[str, object] | None = None
 
-    def __call__(self, text=None, images=None, **kwargs):
+    def __call__(self, *args: object, **kwargs: object):
+        del args
         self.captured_kwargs = kwargs
-        return BatchFeature({"input_ids": [[1, 2, 3]]})
+        return kwargs
 
 
-def test_call_hf_processor_drops_local_only_kwargs_after_config_merge() -> None:
-    processor = object.__new__(Gemma4MultiModalProcessor)
+def test_wrapped_hf_processor_accepts_local_only_kwargs_without_forwarding() -> None:
     fake_hf_processor = _FakeProcessor()
-    fake_ctx = _FakeCtx({
+    wrapped_processor = _Gemma4HFProcessorWrapper(fake_hf_processor)
+
+    allowed_kwargs = get_allowed_kwarg_only_overrides(
+        wrapped_processor,
+        {
+            "padding": True,
+            "max_soft_tokens": 70,
+            "video_vision_batch_size": 4,
+            "not_valid": "drop-me",
+        },
+        requires_kw_only=False,
+        allow_var_kwargs=True,
+    )
+    wrapped_processor(text="hello", **allowed_kwargs)
+
+    assert allowed_kwargs == {
+        "padding": True,
         "max_soft_tokens": 70,
         "video_vision_batch_size": 4,
-    })
-
-    class _FakeInfo:
-        ctx = fake_ctx
-
-        def get_hf_processor(self, **kwargs):
-            return fake_hf_processor
-
-    processor.info = _FakeInfo()
-
-    outputs = Gemma4MultiModalProcessor._call_hf_processor(
-        processor,
-        prompt="hello",
-        mm_data={},
-        mm_kwargs={},
-        tok_kwargs={"padding": True},
-    )
-
+    }
     assert fake_hf_processor.captured_kwargs == {
+        "text": "hello",
         "max_soft_tokens": 70,
         "padding": True,
-        "return_tensors": "pt",
     }
-    assert outputs["input_ids"] == [[1, 2, 3]]
 
 
 def test_embed_multimodal_uses_request_video_batch_size() -> None:

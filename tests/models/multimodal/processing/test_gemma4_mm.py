@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.model_executor.models.gemma4_mm_utils import (
+from vllm.model_executor.models.gemma4_mm import (
     get_gemma4_pooled_token_counts,
 )
 
