@@ -1688,64 +1688,13 @@ class EngineArgs:
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             merged = sorted(existing | set(boundary), key=lambda x: int(x))
 
-
-            # KV-shared layers reuse their target's cache tensor.  The
-            # shared layer's kv_cache_dtype MUST match the target's,
-            # otherwise the cache layouts are incompatible (TQ packs K+V
-            # into a single slot, standard splits into dim-2).
-            #
-            # In YOCO architectures (e.g. Gemma 4), the cross-decoder
-            # layers all share KV from a small number of self-decoder
-            # target layers.  Quantization error in a target's KV cache
-            # is amplified across every consumer layer, so target layers
-            # should stay in bf16.
             hf_cfg = model_config.hf_text_config
-            layer_types = getattr(hf_cfg, "layer_types", None)
-            num_kv_shared = getattr(hf_cfg, "num_kv_shared_layers", 0)
-            if num_kv_shared > 0 and layer_types is not None:
-                first_shared = num_layers - num_kv_shared
-
-                # 1) Find all unique KV-sharing target layers and skip them
-                #    to prevent error amplification through YOCO sharing.
-                skip_set = set(merged)
-                target_set = set()
-                for shared_idx in range(first_shared, num_layers):
-                    current_type = layer_types[shared_idx]
-                    for t in range(first_shared - 1, -1, -1):
-                        if layer_types[t] == current_type:
-                            target_set.add(str(t))
-                            break
-                new_targets = target_set - skip_set
-                if new_targets:
-                    skip_set |= new_targets
-                    logger.info(
-                        "TQ: skipping KV-sharing target layers %s to "
-                        "prevent error amplification in YOCO architecture",
-                        sorted(new_targets, key=lambda x: int(x)),
-                    )
-
-                # 2) Propagate skip/no-skip from target → shared layer.
-                for shared_idx in range(first_shared, num_layers):
-                    # Find the target layer (last non-shared of same type)
-                    current_type = layer_types[shared_idx]
-                    target_idx = None
-                    for t in range(first_shared - 1, -1, -1):
-                        if layer_types[t] == current_type:
-                            target_idx = t
-                            break
-                    if target_idx is None:
-                        continue
-                    target_skipped = str(target_idx) in skip_set
-                    shared_skipped = str(shared_idx) in skip_set
-                    if target_skipped and not shared_skipped:
-                        skip_set.add(str(shared_idx))
-                    elif not target_skipped and shared_skipped:
-                        skip_set.discard(str(shared_idx))
-                merged = sorted(skip_set, key=lambda x: int(x))
-                logger.info(
-                    "TQ: after KV-sharing alignment, skip list: %s",
-                    merged,
-                )
+            merged = TurboQuantConfig.apply_yoco_skip_alignment(
+                merged=merged,
+                num_layers=num_layers,
+                layer_types=getattr(hf_cfg, "layer_types", None) or [],
+                num_kv_shared=getattr(hf_cfg, "num_kv_shared_layers", 0),
+            )
 
             cache_config.kv_cache_dtype_skip_layers = merged
             logger.info(

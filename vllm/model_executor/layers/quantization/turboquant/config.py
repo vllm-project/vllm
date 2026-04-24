@@ -175,6 +175,82 @@ class TurboQuantConfig:
         return [str(i) for i in indices]
 
     @staticmethod
+    def apply_yoco_skip_alignment(
+        merged: list[str],
+        num_layers: int,
+        layer_types: list,
+        num_kv_shared: int,
+    ) -> list[str]:
+        """Align the TQ skip list for YOCO (You Only Cache Once) architectures.
+
+        KV-shared layers reuse their target's cache tensor, so the
+        kv_cache_dtype of a shared layer MUST match its target's.
+        This method:
+          1. Skips all KV-sharing target layers (to prevent quantization
+             error amplification across every consumer layer).
+          2. Propagates the skip/no-skip decision from each target to its
+             corresponding shared layers so the layouts stay compatible.
+
+        Args:
+            merged: Current sorted skip-layer list (strings of layer indices).
+            num_layers: Total number of hidden layers.
+            layer_types: Per-layer type list from hf_text_config.layer_types.
+            num_kv_shared: Number of KV-sharing layers
+                (hf_text_config.num_kv_shared_layers).
+
+        Returns:
+            Updated sorted skip-layer list as strings.
+        """
+        import logging
+
+        _logger = logging.getLogger(__name__)
+
+        if num_kv_shared <= 0 or not layer_types:
+            return merged
+
+        first_shared = num_layers - num_kv_shared
+        skip_set = set(merged)
+
+        # 1) Find all unique KV-sharing target layers and skip them
+        #    to prevent error amplification through YOCO sharing.
+        target_set: set[str] = set()
+        for shared_idx in range(first_shared, num_layers):
+            current_type = layer_types[shared_idx]
+            for t in range(first_shared - 1, -1, -1):
+                if layer_types[t] == current_type:
+                    target_set.add(str(t))
+                    break
+        new_targets = target_set - skip_set
+        if new_targets:
+            skip_set |= new_targets
+            _logger.info(
+                "TQ: skipping KV-sharing target layers %s to "
+                "prevent error amplification in YOCO architecture",
+                sorted(new_targets, key=lambda x: int(x)),
+            )
+
+        # 2) Propagate skip/no-skip from target → shared layer.
+        for shared_idx in range(first_shared, num_layers):
+            current_type = layer_types[shared_idx]
+            target_idx = None
+            for t in range(first_shared - 1, -1, -1):
+                if layer_types[t] == current_type:
+                    target_idx = t
+                    break
+            if target_idx is None:
+                continue
+            target_skipped = str(target_idx) in skip_set
+            shared_skipped = str(shared_idx) in skip_set
+            if target_skipped and not shared_skipped:
+                skip_set.add(str(shared_idx))
+            elif not target_skipped and shared_skipped:
+                skip_set.discard(str(shared_idx))
+
+        result = sorted(skip_set, key=lambda x: int(x))
+        _logger.info("TQ: after KV-sharing alignment, skip list: %s", result)
+        return result
+
+    @staticmethod
     def from_cache_dtype(cache_dtype: str, head_dim: int) -> "TurboQuantConfig":
         """Create config from a named preset.
 
