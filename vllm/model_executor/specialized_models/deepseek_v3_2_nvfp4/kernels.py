@@ -484,6 +484,7 @@ def _fused_q_kernel(
     index_q_fp8_stride0,
     index_q_fp8_stride1,
     INDEX_Q_HEAD_DIM: tl.constexpr,
+    Q_NOPE_DIM: tl.constexpr,
     # MQA query pack: quantize ql_nope and RoPE+quantize q_pe into mqa_q_fp8
     ql_nope_ptr,
     ql_nope_stride0,
@@ -586,7 +587,9 @@ def _fused_q_kernel(
                 )
         return
     elif pid == 1:
-        # Index Q RoPE
+        # Index Q RoPE + quantize.
+        # Keep the roped values in registers and write FP8 directly instead of
+        # materializing the intermediate BF16/FP16 tensor back to HBM.
         if head_idx >= NUM_INDEX_Q_HEADS:
             return
 
@@ -597,33 +600,56 @@ def _fused_q_kernel(
             pos,
             INDEX_Q_HALF_ROT_DIM,
         )
-        _rope(
-            index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1,
-            0,
-            cos,
-            sin,
-            1,
-            INDEX_Q_HALF_ROT_DIM,
-            0,
-            False,
+        index_q_base = (
+            index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
         )
+        rot_off = tl.arange(0, INDEX_Q_HALF_ROT_DIM)
+        x1_in = tl.load(index_q_base + rot_off)
+        x2_in = tl.load(index_q_base + rot_off + INDEX_Q_HALF_ROT_DIM)
+        x1 = x1_in.to(tl.float32)
+        x2 = x2_in.to(tl.float32)
+        # Match the old _rope()->reload path by downcasting through the source
+        # dtype before computing the shared FP8 scale.
+        r1 = (x1 * cos - x2 * sin).to(x1_in.dtype)
+        r2 = (x2 * cos + x1 * sin).to(x2_in.dtype)
 
-        # Index Q Quantize
-        index_q_block = tl.arange(0, INDEX_Q_HEAD_DIM)
-        index_q = tl.load(
-            index_q_ptr
-            + tok_idx * index_q_stride0
-            + head_idx * index_q_stride1
-            + index_q_block
+        q_nope_start = 2 * INDEX_Q_HALF_ROT_DIM
+        q_nope_off = tl.arange(0, Q_NOPE_DIM)
+        q_nope = tl.load(
+            index_q_base + q_nope_start + q_nope_off,
+        ).to(tl.float32)
+
+        # Quantize the full [q_pe_roped, q_nope] vector with one shared scale.
+        amax = tl.maximum(
+            tl.max(tl.abs(r1.to(tl.float32))),
+            tl.max(tl.abs(r2.to(tl.float32))),
         )
+        amax = tl.maximum(amax, tl.max(tl.abs(q_nope)))
+        index_q_scale = tl.div_rn(tl.maximum(amax, 1e-4), 448.0)
+        index_q_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(index_q_scale)))
 
-        index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q)
         tl.store(
             index_q_fp8_ptr
             + tok_idx * index_q_fp8_stride0
             + head_idx * index_q_fp8_stride1
-            + index_q_block,
-            index_q_fp8,
+            + rot_off,
+            tl.div_rn(r1.to(tl.float32), index_q_scale).to(tl.float8e4nv),
+        )
+        tl.store(
+            index_q_fp8_ptr
+            + tok_idx * index_q_fp8_stride0
+            + head_idx * index_q_fp8_stride1
+            + rot_off
+            + INDEX_Q_HALF_ROT_DIM,
+            tl.div_rn(r2.to(tl.float32), index_q_scale).to(tl.float8e4nv),
+        )
+        tl.store(
+            index_q_fp8_ptr
+            + tok_idx * index_q_fp8_stride0
+            + head_idx * index_q_fp8_stride1
+            + q_nope_start
+            + q_nope_off,
+            tl.div_rn(q_nope, index_q_scale).to(tl.float8e4nv),
         )
 
         # Index weights update
@@ -663,6 +689,8 @@ def fused_q(
     num_q_heads = q_pe.shape[1]
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
+    index_q_rope_dim = index_q_cos_sin_cache.shape[-1]
+    index_q_q_nope_dim = index_q_head_dim - index_q_rope_dim
     assert ql_nope.ndim == 3
     assert ql_nope.shape[:2] == q_pe.shape[:2]
     mqa_q_fp8 = torch.empty(
@@ -695,6 +723,7 @@ def fused_q(
         index_q_fp8.stride(0),
         index_q_fp8.stride(1),
         index_q_head_dim,
+        index_q_q_nope_dim,
         ql_nope,
         ql_nope.stride(0),
         ql_nope.stride(1),
