@@ -784,7 +784,8 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    if not current_platform.supports_fp8():
+    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
+    if not current_platform.has_device_capability(90):
         return False
 
     try:
