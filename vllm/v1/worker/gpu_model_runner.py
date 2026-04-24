@@ -2242,6 +2242,17 @@ class GPUModelRunner(
                         :num_reqs_padded
                     ],
                 )
+            elif (
+                not use_spec_decode
+                and self.speculative_config is not None
+                and isinstance(
+                    builder,
+                    (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+                )
+            ):
+                extra_attn_metadata_args = dict(
+                    num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                )
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(

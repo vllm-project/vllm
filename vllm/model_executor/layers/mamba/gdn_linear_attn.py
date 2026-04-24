@@ -837,6 +837,13 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
+        spec_decode_src_indices = attn_metadata.spec_decode_src_indices
+        if spec_decode_src_indices is not None:
+            assert non_spec_state_indices_tensor is not None
+            n_correct = spec_decode_src_indices.shape[0]
+            dst_indices = non_spec_state_indices_tensor[:n_correct]
+            ssm_state[dst_indices] = ssm_state[spec_decode_src_indices]
+
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
@@ -880,6 +887,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+            conv_num_accepted = (
+                num_accepted_tokens if spec_decode_src_indices is not None else None
+            )
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
@@ -891,10 +901,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
+                num_accepted_tokens=conv_num_accepted,
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
+            conv_num_accepted = (
+                num_accepted_tokens if spec_decode_src_indices is not None else None
+            )
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
@@ -904,6 +918,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
                     : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
+                num_accepted_tokens=conv_num_accepted,
                 validate_data=True,
             )
         else:
@@ -1065,12 +1080,23 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        spec_decode_src_indices = attn_metadata.spec_decode_src_indices
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        if spec_decode_src_indices is not None:
+            assert non_spec_state_indices_tensor is not None
+            n_correct = spec_decode_src_indices.shape[0]
+            dst_indices = non_spec_state_indices_tensor[:n_correct]
+            ssm_state[dst_indices] = ssm_state[spec_decode_src_indices]
+
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        conv_num_accepted = (
+            num_accepted_tokens if spec_decode_src_indices is not None else None
         )
         mixed_qkv_non_spec = causal_conv1d_update(
             mixed_qkv,
@@ -1079,6 +1105,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             self.conv1d.bias,
             self.activation,
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            num_accepted_tokens=conv_num_accepted,
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
