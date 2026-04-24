@@ -1606,6 +1606,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_NCCL_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))
     ),
+    # Opt in to the custom allreduce path on >2 PCIe-only GPUs.
+    # This requires a P2P-capable driver and is disabled by default because
+    # non-P2P PCIe systems cannot use the CUDA IPC path safely.
+    "VLLM_ENABLE_PCIE_ALLREDUCE": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_PCIE_ALLREDUCE", "0"))
+    ),
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # Flag to enable FBGemm kernels on model execution

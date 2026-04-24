@@ -150,8 +150,7 @@ class CustomAllreduce:
         assert current_platform.is_cuda_alike()
         fully_connected = current_platform.is_fully_connected(physical_device_ids)
         if world_size > 2 and not fully_connected:
-            import os
-            if os.environ.get("VLLM_ENABLE_PCIE_ALLREDUCE", "0") != "1":
+            if not envs.VLLM_ENABLE_PCIE_ALLREDUCE:
                 logger.warning(
                     "Custom allreduce is disabled for >2 PCIe-only GPUs. "
                     "Set VLLM_ENABLE_PCIE_ALLREDUCE=1 to enable P2P custom "
