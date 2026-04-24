@@ -31,6 +31,7 @@ from utils import (
 )
 
 from vllm import LLM, SamplingParams, TokensPrompt
+from vllm.transformers_utils.config import get_config
 
 IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
 
@@ -39,71 +40,40 @@ TEST_MODEL = os.getenv(
     "tiiuae/Falcon-H1-0.5B-Base",
 )
 
-CHUNKED_PREFILL_MAX_BATCH_SIZE = int(os.getenv("VLLM_DIVERGENCE_MAX_BATCH_SIZE", "10"))
-CHUNKED_PREFILL_EXTRA_BATCH_SIZES = os.getenv(
-    "VLLM_DIVERGENCE_EXTRA_BATCH_SIZES", "15,16,17"
-)
-CHUNKED_PREFILL_MAX_NUM_BATCHED_TOKENS = 2048
-
-PREFIX_CACHE_MAX_BATCH_SIZE = int(os.getenv("VLLM_DIVERGENCE_MAX_BATCH_SIZE", "8"))
-PREFIX_CACHE_EXTRA_BATCH_SIZES = os.getenv("VLLM_DIVERGENCE_EXTRA_BATCH_SIZES", "")
-PREFIX_CACHE_MAX_NUM_BATCHED_TOKENS = int(
-    os.getenv("VLLM_TEST_MAX_NUM_BATCHED_TOKENS", "2048")
-)
-PREFIX_CACHE_RESET_TIMEOUT_S = float(
-    os.getenv("VLLM_PREFIX_CACHE_RESET_TIMEOUT_S", "5.0")
-)
-PREFIX_CACHE_SHARED_PREFIX_TOKEN_COUNT = int(
-    os.getenv("VLLM_PREFIX_CACHE_SHARED_PREFIX_TOKENS", "4096")
-)
-PREFIX_CACHE_UNIQUE_SUFFIX_TOKEN_COUNT = int(
-    os.getenv("VLLM_PREFIX_CACHE_UNIQUE_SUFFIX_TOKENS", "128")
-)
+TEST_SEED = 12345
+TENSOR_PARALLEL_SIZE = 1
+DEFAULT_MAX_MODEL_LEN = 8192
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+DEFAULT_CHUNKED_PREFILL_PROMPT_TOKENS = 4096
+PREFIX_CACHE_RESET_TIMEOUT_S = 5.0
+CHUNKED_PREFILL_MAX_TOKENS = 128
+PREFIX_CACHE_MAX_TOKENS = 64
 
 MAMBA_CACHE_MODES = ["align", "all"]
 BACKENDS = ["TRITON_ATTN"]
+CHUNKED_PREFILL_BATCH_SIZES = list(range(1, 11)) + [15, 16, 17]
+PREFIX_CACHE_BATCH_SIZES = list(range(1, 9))
 
-UNIQUE_SUFFIX_INSTRUCTIONS = [
-    "Summarize the shared context in one concise sentence.",
-    "State the most concrete fact mentioned in the shared context.",
-    "Describe the tone of the shared context in a short phrase.",
-    "Name one topic from the shared context and explain why it matters.",
-    "Turn the shared context into a short follow-up question.",
-    "Identify one action implied by the shared context.",
-    "Rewrite the main idea of the shared context plainly.",
-    "Give a terse title for the shared context.",
-]
-
-
-def _parse_positive_int_csv(raw: str) -> list[int]:
-    values: list[int] = []
-    if not raw:
-        return values
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        value = int(part)
-        if value <= 0:
-            raise ValueError(f"Batch size must be positive, got {value}")
-        values.append(value)
-    return values
-
-
-def _build_batch_sizes(max_batch_size: int, extra_batch_sizes: str) -> list[int]:
-    batch_sizes = list(range(1, max_batch_size + 1))
-    batch_sizes.extend(_parse_positive_int_csv(extra_batch_sizes))
-    return sorted(set(batch_sizes))
-
-
-CHUNKED_PREFILL_BATCH_SIZES = _build_batch_sizes(
-    CHUNKED_PREFILL_MAX_BATCH_SIZE,
-    CHUNKED_PREFILL_EXTRA_BATCH_SIZES,
+PREFIX_CACHE_SUFFIX_INSTRUCTION = (
+    "Summarize the shared context in one concise sentence. "
+    "Answer in one sentence with at most eighteen words."
 )
-PREFIX_CACHE_BATCH_SIZES = _build_batch_sizes(
-    PREFIX_CACHE_MAX_BATCH_SIZE,
-    PREFIX_CACHE_EXTRA_BATCH_SIZES,
-)
+
+
+def _get_model_mamba_chunk_size(model: str) -> int:
+    hf_config = get_config(model, trust_remote_code=False)
+    get_text_config = getattr(hf_config, "get_text_config", None)
+    hf_text_config = get_text_config() if get_text_config is not None else hf_config
+    chunk_size = getattr(hf_text_config, "mamba_chunk_size", None)
+    if chunk_size is None:
+        chunk_size = getattr(hf_text_config, "chunk_size", None)
+    if chunk_size is None:
+        chunk_size = 2048
+    return int(chunk_size)
+
+
+def _chunk_misaligned_default(target_tokens: int, mamba_chunk_size: int) -> int:
+    return max(target_tokens, mamba_chunk_size) + max(1, mamba_chunk_size // 2)
 
 
 def _reset_prefix_cache(llm: LLM) -> None:
@@ -134,38 +104,27 @@ def _build_fixed_length_token_ids(
     return token_ids[:target_tokens]
 
 
-def _build_prefix_cache_prompt_variants(
+def _build_prefix_cache_probe_prompts(
     llm: LLM,
-    num_prompts: int,
-) -> tuple[list[TokensPrompt], int]:
+    shared_prefix_token_count: int,
+    unique_suffix_token_count: int,
+) -> tuple[list[int], list[int]]:
     tokenizer = llm.get_tokenizer()
     shared_prefix_token_ids = _build_fixed_length_token_ids(
         tokenizer,
-        PREFIX_CACHE_SHARED_PREFIX_TOKEN_COUNT,
+        shared_prefix_token_count,
         min_words=512,
         max_words=1024,
     )
 
-    prompts: list[TokensPrompt] = []
-    for idx in range(num_prompts):
-        instruction = UNIQUE_SUFFIX_INSTRUCTIONS[idx % len(UNIQUE_SUFFIX_INSTRUCTIONS)]
-        suffix_token_ids = _build_fixed_length_token_ids(
-            tokenizer,
-            PREFIX_CACHE_UNIQUE_SUFFIX_TOKEN_COUNT,
-            prefix_text=(
-                f"Prompt variant {idx + 1}: {instruction} "
-                "Answer in one sentence with at most eighteen words, and do "
-                "not mention the variant number."
-            ),
-            min_words=64,
-            max_words=128,
-        )
-        prompts.append(
-            TokensPrompt(
-                prompt_token_ids=shared_prefix_token_ids + suffix_token_ids,
-            )
-        )
-    return prompts, len(shared_prefix_token_ids)
+    suffix_token_ids = _build_fixed_length_token_ids(
+        tokenizer,
+        unique_suffix_token_count,
+        prefix_text=PREFIX_CACHE_SUFFIX_INSTRUCTION,
+        min_words=64,
+        max_words=128,
+    )
+    return shared_prefix_token_ids, shared_prefix_token_ids + suffix_token_ids
 
 
 def _extract_request_result(
@@ -248,25 +207,25 @@ def test_logprobs_chunked_prefill_batch_invariance(backend: str):
     prefill enabled and verifies that every output produces bitwise-identical
     logprobs regardless of batch size.
     """
-    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
-    random.seed(seed)
-    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+    random.seed(TEST_SEED)
 
-    from vllm import envs
-
-    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
-
-    if disable_custom_ar:
-        print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
-        print(f"{'=' * 80}\n")
+    mamba_chunk_size = _get_model_mamba_chunk_size(TEST_MODEL)
+    chunks = (DEFAULT_MAX_NUM_BATCHED_TOKENS + mamba_chunk_size - 1) // mamba_chunk_size
+    max_num_batched_tokens = max(mamba_chunk_size, chunks * mamba_chunk_size)
+    prompt_token_count = max(
+        DEFAULT_CHUNKED_PREFILL_PROMPT_TOKENS, max_num_batched_tokens
+    ) + max(1, mamba_chunk_size // 2)
+    max_model_len = max(
+        DEFAULT_MAX_MODEL_LEN,
+        prompt_token_count + CHUNKED_PREFILL_MAX_TOKENS,
+    )
 
     llm = LLM(
         model=TEST_MODEL,
-        tensor_parallel_size=tp_size,
+        tensor_parallel_size=TENSOR_PARALLEL_SIZE,
         max_num_seqs=128,
-        max_model_len=8192,
-        max_num_batched_tokens=CHUNKED_PREFILL_MAX_NUM_BATCHED_TOKENS,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
         dtype="bfloat16",
         gpu_memory_utilization=0.9,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
@@ -277,23 +236,24 @@ def test_logprobs_chunked_prefill_batch_invariance(backend: str):
     sp = SamplingParams(
         temperature=0.0,
         top_p=0.5,
-        max_tokens=128,
-        seed=1234,
+        max_tokens=CHUNKED_PREFILL_MAX_TOKENS,
+        seed=TEST_SEED,
         logprobs=5,
     )
 
-    min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "2048"))
-    max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "4096"))
-    prompt = _random_prompt(min_random_prompt, max_random_prompt)
-    prompt_token_ids = llm.get_tokenizer().encode(prompt)
+    prompt_token_ids = _build_fixed_length_token_ids(
+        llm.get_tokenizer(),
+        prompt_token_count,
+        min_words=512,
+        max_words=1024,
+    )
 
     baseline_logprobs = None
     baseline_tokens = None
 
     for batch_size in CHUNKED_PREFILL_BATCH_SIZES:
         prompts = [
-            TokensPrompt(prompt=prompt, prompt_token_ids=prompt_token_ids)
-            for _ in range(batch_size)
+            TokensPrompt(prompt_token_ids=prompt_token_ids) for _ in range(batch_size)
         ]
         outs = llm.generate(prompts, sp, use_tqdm=False)
         assert len(outs) == batch_size
@@ -323,27 +283,70 @@ def test_logprobs_prefix_caching_batch_invariance(
     backend: str,
     mamba_cache_mode: str,
 ):
-    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
-    random.seed(seed)
-    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+    random.seed(TEST_SEED)
 
-    from vllm import envs
+    mamba_chunk_size = _get_model_mamba_chunk_size(TEST_MODEL)
+    max_num_batched_tokens = _chunk_misaligned_default(
+        DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        mamba_chunk_size,
+    )
+    shared_prefix_token_count = max_num_batched_tokens
+    unique_suffix_token_count = max_num_batched_tokens + max(1, mamba_chunk_size // 2)
+    prompt_token_count = shared_prefix_token_count + unique_suffix_token_count
+    max_model_len = max(
+        DEFAULT_MAX_MODEL_LEN,
+        prompt_token_count + PREFIX_CACHE_MAX_TOKENS,
+    )
 
-    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        top_p=0.5,
+        max_tokens=PREFIX_CACHE_MAX_TOKENS,
+        seed=TEST_SEED,
+        logprobs=5,
+    )
 
-    if disable_custom_ar:
-        print(f"\n{'=' * 80}")
-        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
-        print(f"{'=' * 80}\n")
+    reference_llm = None
+    try:
+        reference_llm = LLM(
+            model=TEST_MODEL,
+            tensor_parallel_size=TENSOR_PARALLEL_SIZE,
+            max_num_seqs=1,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=prompt_token_count,
+            enable_prefix_caching=False,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.9,
+            enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+            attention_config={"backend": backend},
+            mamba_cache_dtype="float32",
+        )
+
+        shared_prefix_token_ids, prompt_token_ids = _build_prefix_cache_probe_prompts(
+            reference_llm,
+            shared_prefix_token_count,
+            unique_suffix_token_count,
+        )
+
+        baseline_output = reference_llm.generate(
+            [TokensPrompt(prompt_token_ids=prompt_token_ids)],
+            sampling_params,
+            use_tqdm=False,
+        )[0]
+        baseline_logprobs, baseline_tokens = _extract_request_result(baseline_output)
+    finally:
+        if reference_llm is not None:
+            with contextlib.suppress(Exception):
+                reference_llm.llm_engine.engine_core.shutdown()
 
     llm = None
     try:
         llm = LLM(
             model=TEST_MODEL,
-            tensor_parallel_size=tp_size,
+            tensor_parallel_size=TENSOR_PARALLEL_SIZE,
             max_num_seqs=64,
-            max_model_len=8192,
-            max_num_batched_tokens=PREFIX_CACHE_MAX_NUM_BATCHED_TOKENS,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
             enable_prefix_caching=True,
             mamba_cache_mode=mamba_cache_mode,
             dtype="bfloat16",
@@ -360,50 +363,44 @@ def test_logprobs_prefix_caching_batch_invariance(
                 f"but model resolved to {effective_mode!r}."
             )
 
-        sampling_params = SamplingParams(
+        warmup_params = SamplingParams(
             temperature=0.0,
-            top_p=0.5,
-            max_tokens=64,
-            seed=1234,
-            logprobs=5,
-        )
-
-        max_batch_size = max(PREFIX_CACHE_BATCH_SIZES)
-        tokenized_prompts, _ = _build_prefix_cache_prompt_variants(
-            llm,
-            max_batch_size,
+            max_tokens=1,
+            seed=TEST_SEED,
         )
 
         for batch_size in PREFIX_CACHE_BATCH_SIZES:
             _reset_prefix_cache(llm)
 
-            batch_prompts = tokenized_prompts[:batch_size]
-            run1_outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
-            run2_outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
+            llm.generate(
+                [TokensPrompt(prompt_token_ids=shared_prefix_token_ids)],
+                warmup_params,
+                use_tqdm=False,
+            )
 
-            assert len(run1_outputs) == batch_size
-            assert len(run2_outputs) == batch_size
-
-            run2_cached_tokens = [
-                int(output.num_cached_tokens or 0) for output in run2_outputs
+            batch_prompts = [
+                TokensPrompt(prompt_token_ids=prompt_token_ids)
+                for _ in range(batch_size)
             ]
+            outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
 
-            if not all(cached_tokens > 0 for cached_tokens in run2_cached_tokens):
+            assert len(outputs) == batch_size
+
+            cached_tokens = [int(output.num_cached_tokens or 0) for output in outputs]
+
+            if not all(num_cached_tokens > 0 for num_cached_tokens in cached_tokens):
                 pytest.fail(
-                    f"Expected cache hits on second pass for batch_size={batch_size}, "
-                    f"but got num_cached_tokens={run2_cached_tokens}."
+                    f"Expected cache hits for batch_size={batch_size}, "
+                    f"but got num_cached_tokens={cached_tokens}."
                 )
 
-            for request_idx, (run1_output, run2_output) in enumerate(
-                zip(run1_outputs, run2_outputs)
-            ):
-                run1_logprobs, run1_tokens = _extract_request_result(run1_output)
-                run2_logprobs, run2_tokens = _extract_request_result(run2_output)
+            for request_idx, output in enumerate(outputs):
+                step_logprobs, token_ids = _extract_request_result(output)
                 _assert_outputs_equal(
-                    run1_logprobs,
-                    run1_tokens,
-                    run2_logprobs,
-                    run2_tokens,
+                    baseline_logprobs,
+                    baseline_tokens,
+                    step_logprobs,
+                    token_ids,
                     run_label=(
                         f"backend={backend}, mode={effective_mode}, "
                         f"batch_size={batch_size}, request={request_idx}"
