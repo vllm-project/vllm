@@ -116,6 +116,7 @@ MoEBackend = Literal[
     "flashinfer_b12x",
     "marlin",
     "aiter",
+    "emulation",
 ]
 
 
@@ -145,7 +146,10 @@ class KernelConfig:
     - "flashinfer_b12x": Use FlashInfer B12x fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "marlin": Use Marlin kernels (weight-only quantization)
-    - "aiter": Use AMD AITer kernels (ROCm only)"""
+    - "aiter": Use AMD AITer kernels (ROCm only)
+    - "emulation": use BF16/FP16 GEMM, dequantizing weights and
+                   running QDQ on activations.
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod

@@ -938,13 +938,13 @@ def test_sample_recovered_tokens(
 ########################### Tests for Synthetic Rejection Sampling #########
 
 
-def _make_synthetic_sampler(acceptance_rate: float) -> RejectionSampler:
+def _make_synthetic_sampler(rates: list[float]) -> RejectionSampler:
     mock_sampler = Mock(spec=Sampler)
     mock_sampler.logprobs_mode = "raw_logprobs"
     spec_config = Mock()
     spec_config.rejection_sample_method = "synthetic"
-    spec_config.synthetic_acceptance_rate = acceptance_rate
-    return RejectionSampler(mock_sampler, spec_config)
+    spec_config.synthetic_acceptance_rates = rates
+    return RejectionSampler(mock_sampler, spec_config, torch.device(DEVICE_TYPE))
 
 
 def _make_sampling_metadata(all_greedy: bool) -> SamplingMetadata:
@@ -954,8 +954,8 @@ def _make_sampling_metadata(all_greedy: bool) -> SamplingMetadata:
 
 @pytest.mark.parametrize("all_greedy", [True, False])
 def test_synthetic_all_accepted(all_greedy: bool):
-    """With acceptance_rate=1.0, every draft token is accepted."""
-    sampler = _make_synthetic_sampler(1.0)
+    """With all rates=1.0, every draft token is accepted."""
+    sampler = _make_synthetic_sampler([1.0, 1.0])
     spec_tokens = [[1, 2], [3]]
     output_tokens = [[10, 20, 50], [30, 40]]
 
@@ -976,8 +976,8 @@ def test_synthetic_all_accepted(all_greedy: bool):
 
 @pytest.mark.parametrize("all_greedy", [True, False])
 def test_synthetic_all_rejected(all_greedy: bool):
-    """With acceptance_rate=0.0, the first token is always rejected."""
-    sampler = _make_synthetic_sampler(0.0)
+    """With all rates=0.0, the first token is always rejected."""
+    sampler = _make_synthetic_sampler([0.0, 0.0])
     spec_tokens = [[1, 2], [3]]
     output_tokens = [[10, 20, 50], [30, 40]]
 

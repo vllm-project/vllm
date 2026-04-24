@@ -22,7 +22,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -43,6 +46,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.flash_attn_diffkv import (
+    FlashAttentionDiffKVBackend,
+)
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -284,6 +290,15 @@ class MiMoV2Attention(nn.Module):
         )
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
+
+        # Use DiffKV backend when V has a different head dim than K
+        if self.v_head_dim != self.head_dim:
+            FlashAttentionDiffKVBackend.set_head_size_v(self.v_head_dim)
+            attn_backend = FlashAttentionDiffKVBackend
+            logger.info_once("Using FlashAttentionDiffKVBackend for attention.")
+        else:
+            attn_backend = None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -295,6 +310,8 @@ class MiMoV2Attention(nn.Module):
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
             sinks=self.attention_sink_bias,
+            attn_backend=attn_backend,
+            head_size_v=self.v_head_dim,
         )
 
     def forward(
@@ -310,15 +327,7 @@ class MiMoV2Attention(nn.Module):
         if self.v_scale is not None:
             v = v * self.v_scale
 
-        v = v.view(-1, self.num_kv_heads, self.v_head_dim)
-        v = torch.nn.functional.pad(v, [0, self.head_dim - self.v_head_dim], value=0)
-        v = v.view(-1, self.num_kv_heads * self.head_dim)
-
         attn_output = self.attn(q, k, v)
-
-        attn_output = attn_output.view(-1, self.num_heads, self.head_dim)[
-            ..., : self.v_head_dim
-        ].reshape(-1, self.num_heads * self.v_head_dim)
 
         output, _ = self.o_proj(attn_output)
         return output
@@ -511,7 +520,7 @@ class MiMoV2Model(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

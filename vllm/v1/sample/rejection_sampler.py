@@ -20,6 +20,10 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+if TYPE_CHECKING:
+    from vllm.config.speculative import SpeculativeConfig
 
 if TYPE_CHECKING:
     from vllm.config.speculative import SpeculativeConfig
@@ -60,6 +64,7 @@ class RejectionSampler(nn.Module):
         self,
         sampler: Sampler,
         spec_config: SpeculativeConfig | None = None,
+        device: torch.device | None = None,
     ):
         super().__init__()
         self.sampler = sampler
@@ -67,13 +72,20 @@ class RejectionSampler(nn.Module):
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
 
-        self.synthetic_mode = (
+        self.synthetic_conditional_rates: torch.Tensor | None = None
+        if (
             spec_config is not None
             and spec_config.rejection_sample_method == "synthetic"
-        )
-        self.synthetic_acceptance_rate = (
-            spec_config.synthetic_acceptance_rate if spec_config is not None else 0.0
-        )
+        ):
+            assert spec_config.synthetic_acceptance_rates is not None
+            self.synthetic_conditional_rates = torch.tensor(
+                unconditional_to_conditional_rates(
+                    spec_config.synthetic_acceptance_rates
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+        self.synthetic_mode = self.synthetic_conditional_rates is not None
 
     def forward(
         self,
@@ -166,7 +178,7 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             sampling_metadata,
             synthetic_mode=self.synthetic_mode,
-            synthetic_acceptance_rate=self.synthetic_acceptance_rate,
+            synthetic_conditional_rates=self.synthetic_conditional_rates,
         )
 
         logprobs_tensors = None
@@ -383,7 +395,7 @@ def rejection_sample(
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     synthetic_mode: bool = False,
-    synthetic_acceptance_rate: float = 0.0,
+    synthetic_conditional_rates: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -437,7 +449,7 @@ def rejection_sample(
             is_greedy,
             max_spec_len,
             uniform_probs,
-            synthetic_acceptance_rate,
+            synthetic_conditional_rates,
             SYNTHETIC_MODE=synthetic_mode,
         )
         if sampling_metadata.all_greedy:
@@ -474,7 +486,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
-        synthetic_acceptance_rate,
+        synthetic_conditional_rates,
         NO_DRAFT_PROBS=draft_probs is None,
         SYNTHETIC_MODE=synthetic_mode,
     )
@@ -692,7 +704,7 @@ def rejection_greedy_sample_kernel(
     is_greedy_ptr,  # [batch_size] or None
     max_spec_len,
     uniform_probs_ptr,  # [num_tokens] or None (synthetic mode only)
-    synthetic_acceptance_rate,
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
     SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -711,11 +723,12 @@ def rejection_greedy_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
+            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos).to(tl.int32)
             if SYNTHETIC_MODE:
                 uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-                accepted = uniform_prob < synthetic_acceptance_rate
-                token_id = draft_token_id if accepted else target_argmax_id.to(tl.int32)
+                rate = tl.load(synthetic_conditional_rates_ptr + pos)
+                accepted = uniform_prob < rate
+                token_id = draft_token_id if accepted else target_argmax_id
                 rejected = not accepted
             else:
                 token_id = target_argmax_id
@@ -748,7 +761,7 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
     vocab_size,
-    synthetic_acceptance_rate,
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
     NO_DRAFT_PROBS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
 ):
@@ -768,7 +781,8 @@ def rejection_random_sample_kernel(
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
             if SYNTHETIC_MODE:
-                accepted = uniform_prob < synthetic_acceptance_rate
+                rate = tl.load(synthetic_conditional_rates_ptr + pos)
+                accepted = uniform_prob < rate
             else:
                 if NO_DRAFT_PROBS:
                     draft_prob = 1
