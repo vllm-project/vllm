@@ -999,32 +999,6 @@ def sample_recovered_tokens_kernel(
     tl.store(output_token_ids_ptr + token_idx, recovered_id)
 
 
-# ---------------------------------------------------------------------------
-# Block verification (Sun et al. 2024, https://arxiv.org/abs/2403.10444).
-# ---------------------------------------------------------------------------
-#
-# The standard per-token rejection rule from Leviathan et al. 2022 accepts the
-# i-th draft token with probability min(1, target_p(i) / draft_p(i)) and stops
-# at the first rejection. Block verification derives an aggregated acceptance
-# rule: given p_prefix[k+1] = min(1, prod_{i<=k} target_p(i) / draft_p(i)),
-# each position uses a threshold combining p_prefix and the residual mass of
-# the next position's clamped target-minus-draft distribution. Block is
-# provably >= standard in expected accepted tokens and empirically +5-8% on
-# Vicuna / PALM-2 (paper Table 1-2) and +3-6% on Qwen3-1.7B with EAGLE3.
-#
-# Dispatch gates in rejection_sample() above:
-#   * Only active in the random sampling path (greedy path is algorithm-
-#     equivalent to token verification).
-#   * Requires `max_spec_len >= 3` — shorter drafts cannot distinguish the
-#     two rules.
-#   * Requires `draft_probs is not None` — ngram and suffix drafters do not
-#     supply per-token probabilities. Under the synthetic draft_prob = 1
-#     substitution the block rule strictly under-accepts compared with the
-#     standard rule (confirmed empirically: -9 to -14pp acceptance drop),
-#     so we silently fall through.
-#   * Mutually exclusive with synthetic_mode.
-
-
 def _generate_rejection_q(
     batch_size: int,
     vocab_size: int,
@@ -1045,6 +1019,7 @@ def _generate_rejection_q(
     return q
 
 
+# Block verification (Sun et al. 2024, https://arxiv.org/abs/2403.10444).
 def rejection_random_sample_block_verify_pytorch(
     output_token_ids: torch.Tensor,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
