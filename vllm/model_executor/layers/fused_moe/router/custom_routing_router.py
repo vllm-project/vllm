@@ -55,8 +55,9 @@ class CustomRoutingRouter(BaseRouter):
             renormalize=self.renormalize,
         )
 
-        target_dtype = torch.int32 if indices_type is None else indices_type
-        if topk_ids.dtype != target_dtype and topk_ids.dtype != torch.int64:
-            topk_ids = topk_ids.to(target_dtype)
+        if indices_type is not None:
+            topk_ids = topk_ids.to(indices_type)
+        elif topk_ids.dtype not in (torch.int32, torch.int64):
+            topk_ids = topk_ids.to(torch.int32)
 
         return topk_weights.to(torch.float32), topk_ids
