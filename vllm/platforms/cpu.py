@@ -443,6 +443,10 @@ class CpuPlatform(Platform):
             block_offsets.reshape(1, block_size)
             + indices.reshape(num_blocks, 1) * block_size
         ).flatten()
+        if key_cache.dtype == torch.uint8:
+            raise NotImplementedError(
+                "FP8 KV cache is not yet supported with KV transfer on CPU"
+            )
         cpu_attn_reshape_and_cache(
             key,
             value,

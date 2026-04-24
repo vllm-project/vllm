@@ -507,23 +507,14 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
       const int64_t block_size, const int64_t block_size_stride,
       const float k_inv = 0.0f, const float v_inv = 0.0f) {
     if constexpr (fp8_kv) {
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
-        reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e5m2_scalar>(
-            key, value, reinterpret_cast<uint8_t*>(key_cache),
-            reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
-            head_num, head_dim, block_size, key_token_num_stride,
-            key_head_num_stride, value_token_num_stride, value_head_num_stride,
-            num_blocks_stride, cache_head_num_stride, num_blocks_stride,
-            cache_head_num_stride, k_inv, v_inv);
-      } else {
-        reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e4m3_scalar>(
-            key, value, reinterpret_cast<uint8_t*>(key_cache),
-            reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
-            head_num, head_dim, block_size, key_token_num_stride,
-            key_head_num_stride, value_token_num_stride, value_head_num_stride,
-            num_blocks_stride, cache_head_num_stride, num_blocks_stride,
-            cache_head_num_stride, k_inv, v_inv);
-      }
+      constexpr auto qfn = select_fp8_quant_fn<kv_cache_t>();
+      reshape_and_cache_fp8_amx_impl<scalar_t, qfn>(
+          key, value, reinterpret_cast<uint8_t*>(key_cache),
+          reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
+          head_num, head_dim, block_size, key_token_num_stride,
+          key_head_num_stride, value_token_num_stride, value_head_num_stride,
+          num_blocks_stride, cache_head_num_stride, num_blocks_stride,
+          cache_head_num_stride, k_inv, v_inv);
       return;
     }
 

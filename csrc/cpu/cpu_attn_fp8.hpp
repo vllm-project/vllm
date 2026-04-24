@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
+
+#include "cpu/utils.hpp"
 
 typedef uint32_t __attribute__((__may_alias__)) u32_alias_t;
 typedef uint16_t __attribute__((__may_alias__)) u16_alias_t;
@@ -158,6 +161,17 @@ inline uint8_t float_to_fp8e5m2_scalar(float v, float inv_scale) noexcept {
   }
   const uint8_t exp5 = static_cast<uint8_t>(exp_fp32 + 15);
   return sign | (exp5 << 2) | mant2;
+}
+
+// ---------------------------------------------------------------------------
+// Select the FP8 quant function at compile time based on kv_cache_t.
+// ---------------------------------------------------------------------------
+template <typename kv_cache_t>
+constexpr auto select_fp8_quant_fn() {
+  if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>)
+    return float_to_fp8e5m2_scalar;
+  else
+    return float_to_fp8e4m3_scalar;
 }
 
 // ---------------------------------------------------------------------------

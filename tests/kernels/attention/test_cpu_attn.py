@@ -692,8 +692,9 @@ def test_fp8_backend_init():
     assert impl.is_fp8_kv_cache
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_fp8_round_trip(dtype: torch.dtype):
+def test_fp8_round_trip(dtype: torch.dtype, kv_cache_dtype: str):
     """Test A: quant→dequant round-trip relative error < 3%."""
     head_size = 128
     token_num = 64
@@ -719,7 +720,7 @@ def test_fp8_round_trip(dtype: torch.dtype):
         "vec",
         k_scale=scale,
         v_scale=scale,
-        kv_cache_dtype="fp8_e4m3",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     # Dequantize value cache (row-major layout) and check round-trip error.
@@ -727,11 +728,12 @@ def test_fp8_round_trip(dtype: torch.dtype):
     block_idx = 0
     block_offset = 0
     v_fp8 = value_cache[block_idx, :, block_offset, :]  # [num_kv_heads, head_size]
-    v_dq = v_fp8.view(torch.float8_e4m3fn).float() * scale  # dequantize
+    v_dq = _dequant_fp8_cache(v_fp8, scale, kv_cache_dtype)
     v_ref = value[0].float()
     rel_err = (v_dq - v_ref).abs() / (v_ref.abs() + 1e-6)
-    # E4M3 truncating encoder: max ~12.5% relative error, typical mean ~6%.
-    assert rel_err.mean().item() < 0.08, (
+    # E4M3: max ~12.5% relative error; E5M2: slightly more noise (2 mantissa bits).
+    threshold = 0.12 if kv_cache_dtype == "fp8_e5m2" else 0.08
+    assert rel_err.mean().item() < threshold, (
         f"Round-trip relative error too high: {rel_err.mean().item():.4f}"
     )
 
@@ -890,11 +892,16 @@ def _fp8_attn_e2e(
     dtype: torch.dtype,
     kv_cache_dtype: str,
     isa: str,
+    alibi_slopes: torch.Tensor | None = None,
+    softcap: float = 0.0,
+    sliding_window: int | None = None,
 ) -> None:
     """Run FP8 on-the-fly dequant attention and compare output to float reference.
 
     Shared body for test_fp8_end_to_end_native and test_fp8_amx_end_to_end;
     the two tests differ only in ISA selection and parametrize coverage.
+    Accepts optional alibi_slopes, softcap, and sliding_window to allow
+    testing FP8 in combination with these attention features.
     """
     set_random_seed(0)
     block_size = 32
@@ -909,6 +916,9 @@ def _fp8_attn_e2e(
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     # num_blocks must cover all block table entries (num_seqs * max_num_blocks_per_seq).
     num_blocks = max_num_blocks_per_seq * num_seqs
+
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    sliding_window_size = sliding_window if sliding_window is not None else -1
 
     query = torch.randn(token_num, num_query_heads, head_size, dtype=dtype)
 
@@ -967,7 +977,7 @@ def _fp8_attn_e2e(
         dtype=dtype,
         query_start_loc=cu_query_lens,
         causal=True,
-        sliding_window_size=-1,
+        sliding_window_size=sliding_window_size,
         isa=isa,
         enable_kv_split=True,
     )
@@ -982,10 +992,10 @@ def _fp8_attn_e2e(
         seq_lens=kv_lens_tensor,
         scale=scale,
         causal=True,
-        alibi_slopes=None,
-        sliding_window=(-1, -1),
+        alibi_slopes=alibi_slopes,
+        sliding_window=window_size,
         block_table=block_tables,
-        softcap=0.0,
+        softcap=softcap,
         scheduler_metadata=scheduler_metadata,
         s_aux=None,
         k_scale=k_scale,
@@ -1003,10 +1013,10 @@ def _fp8_attn_e2e(
         seq_lens=kv_lens_tensor,
         scale=scale,
         causal=True,
-        alibi_slopes=None,
-        sliding_window=(-1, -1),
+        alibi_slopes=alibi_slopes,
+        sliding_window=window_size,
         block_table=block_tables,
-        softcap=0.0,
+        softcap=softcap,
         scheduler_metadata=scheduler_metadata,
         s_aux=None,
     )
@@ -1022,6 +1032,7 @@ def _fp8_attn_e2e(
     "seq_lens",
     [
         [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode
+        [(256, 512), (5, 5)],  # prefill
         [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed
     ],
 )
@@ -1086,4 +1097,56 @@ def test_fp8_amx_end_to_end(
     """
     _fp8_attn_e2e(
         seq_lens, num_heads, head_size, k_scale, v_scale, dtype, kv_cache_dtype, "amx"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FP8 KV cache + attention feature interaction tests.
+# These verify that ALiBi, softcap, and sliding window work correctly when
+# combined with FP8 KV cache (all features operate on float logits after
+# on-the-fly dequant, so they should be orthogonal but need regression coverage).
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("feature", ["alibi", "softcap", "sliding_window"])
+def test_fp8_with_features(feature: str) -> None:
+    """FP8 KV cache combined with ALiBi / softcap / sliding_window.
+
+    Uses a small decode-only config to keep runtime bounded.
+    Compares FP8 attention output to the same attention over a float KV cache.
+    """
+    num_query_heads = 4
+    num_kv_heads = 4
+    head_size = 128
+    kv_cache_dtype = "fp8_e4m3"
+    dtype = torch.bfloat16
+    seq_lens = [(1, 128), (1, 64), (1, 32)]
+    isa = _get_attn_isa(dtype, block_size=32, head_size=head_size)
+    if isa == "amx":
+        isa = "vec"
+
+    alibi_slopes = None
+    softcap = 0.0
+    sliding_window = None
+
+    if feature == "alibi":
+        alibi_slopes = _get_alibi_slopes(num_query_heads)
+    elif feature == "softcap":
+        softcap = 50.0
+    elif feature == "sliding_window":
+        sliding_window = 64
+
+    _fp8_attn_e2e(
+        seq_lens=seq_lens,
+        num_heads=(num_query_heads, num_kv_heads),
+        head_size=head_size,
+        k_scale=1.0,
+        v_scale=1.0,
+        dtype=dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        isa=isa,
+        alibi_slopes=alibi_slopes,
+        softcap=softcap,
+        sliding_window=sliding_window,
     )
