@@ -48,21 +48,21 @@ def _reference_eagle_step_slot_mapping(
     return clamped_positions, slot_mapping, new_seq_lens
 
 
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_eagle_step_slot_mapping_kernel():
     """Test fused kernel matches Python reference for slot mapping and metadata."""
-    device = torch.device(DEVICE_TYPE)
     batch_size = 32
     block_size = 16
     max_model_len = 4096
     n_blocks_per_req = (max_model_len + block_size - 1) // block_size
 
     positions_1d = torch.randint(
-        0, max_model_len - 10, (batch_size,), dtype=torch.int64, device=device
+        0, max_model_len - 10, (batch_size,), dtype=torch.int64
     )
     block_table_tensor = torch.randint(
-        0, 1000, (batch_size, n_blocks_per_req), dtype=torch.int32, device=device
+        0, 1000, (batch_size, n_blocks_per_req), dtype=torch.int32
     )
-    seq_lens = torch.randint(1, 100, (batch_size,), dtype=torch.int32, device=device)
+    seq_lens = torch.randint(1, 100, (batch_size,), dtype=torch.int32)
 
     ref_clamped, ref_slot, ref_seq_lens = _reference_eagle_step_slot_mapping(
         positions_1d.clone(),
@@ -72,8 +72,8 @@ def test_eagle_step_slot_mapping_kernel():
         max_model_len,
     )
 
-    out_clamped = torch.zeros(batch_size, dtype=torch.int64, device=device)
-    out_slot = torch.zeros(batch_size, dtype=torch.int64, device=device)
+    out_clamped = torch.zeros(batch_size, dtype=torch.int64)
+    out_slot = torch.zeros(batch_size, dtype=torch.int64)
     seq_lens_copy = seq_lens.clone()
     eagle_step_update_slot_mapping_and_metadata(
         positions_1d=positions_1d,
@@ -94,22 +94,22 @@ def test_eagle_step_slot_mapping_kernel():
     )
 
 
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_eagle_step_slot_mapping_kernel_exceeds_max():
     """Test fused kernel when position exceeds max_model_len."""
-    device = torch.device(DEVICE_TYPE)
     batch_size = 4
     block_size = 16
     max_model_len = 100
     n_blocks_per_req = (max_model_len + block_size - 1) // block_size
 
-    positions_1d = torch.tensor([50, 98, 99, 100], dtype=torch.int64, device=device)
+    positions_1d = torch.tensor([50, 98, 99, 100], dtype=torch.int64)
     block_table_tensor = torch.randint(
-        0, 100, (batch_size, n_blocks_per_req), dtype=torch.int32, device=device
+        0, 100, (batch_size, n_blocks_per_req), dtype=torch.int32
     )
-    seq_lens = torch.tensor([51, 99, 100, 101], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([51, 99, 100, 101], dtype=torch.int32)
 
-    out_clamped = torch.zeros(batch_size, dtype=torch.int64, device=device)
-    out_slot = torch.zeros(batch_size, dtype=torch.int64, device=device)
+    out_clamped = torch.zeros(batch_size, dtype=torch.int64)
+    out_slot = torch.zeros(batch_size, dtype=torch.int64)
     eagle_step_update_slot_mapping_and_metadata(
         positions_1d=positions_1d,
         block_table_tensor=block_table_tensor,
@@ -130,21 +130,21 @@ def test_eagle_step_slot_mapping_kernel_exceeds_max():
     assert seq_lens[3].item() == 1
 
 
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_eagle_step_slot_mapping_kernel_cudagraph_padding():
     """Test that padding threads write PADDING_SLOT_ID when
     input_batch_size > batch_size (cudagraph padding)."""
-    device = torch.device(DEVICE_TYPE)
     batch_size = 4
     input_batch_size = 8
     block_size = 16
     max_model_len = 4096
     n_blocks_per_req = (max_model_len + block_size - 1) // block_size
 
-    positions_1d = torch.tensor([10, 20, 30, 40], dtype=torch.int64, device=device)
+    positions_1d = torch.tensor([10, 20, 30, 40], dtype=torch.int64)
     block_table_tensor = torch.randint(
-        0, 100, (batch_size, n_blocks_per_req), dtype=torch.int32, device=device
+        0, 100, (batch_size, n_blocks_per_req), dtype=torch.int32
     )
-    seq_lens = torch.tensor([11, 21, 31, 41], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([11, 21, 31, 41], dtype=torch.int32)
 
     ref_clamped, ref_slot, ref_seq_lens = _reference_eagle_step_slot_mapping(
         positions_1d.clone(),
@@ -154,8 +154,8 @@ def test_eagle_step_slot_mapping_kernel_cudagraph_padding():
         max_model_len,
     )
 
-    out_clamped = torch.zeros(batch_size, dtype=torch.int64, device=device)
-    out_slot = torch.full((input_batch_size,), -999, dtype=torch.int64, device=device)
+    out_clamped = torch.zeros(batch_size, dtype=torch.int64)
+    out_slot = torch.full((input_batch_size,), -999, dtype=torch.int64)
     seq_lens_copy = seq_lens.clone()
     eagle_step_update_slot_mapping_and_metadata(
         positions_1d=positions_1d,
