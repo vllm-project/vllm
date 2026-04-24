@@ -535,13 +535,15 @@ class CompilationConfig:
     model's budget range. User-provided positive value overrides
     auto-inference."""
 
-    encoder_cudagraph_max_frames_per_batch: int = 0
+    encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.
     Controls the cu_seqlens buffer size (one entry per attention sequence,
-    i.e. one per video frame). If 0 (default), auto-inferred per budget
-    level as token_budget (tight bound: packing guarantees
-    sum(T_i) <= token_budget). Positive value overrides auto-inference
-    and applies to all budget levels."""
+    i.e. one per video frame).
+    If None (default), auto-inferred as encoder_cudagraph_max_vision_items_per_batch
+    * max_frames_per_video (model-specific value according to processing_info).
+    Positive value overrides auto-inference and applies to all budget levels.
+    If we limit the video count per prompt to `0`, it will also be set to `0`
+    (i.e., fall back to image-only mode)."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None
@@ -993,11 +995,12 @@ class CompilationConfig:
             )
         if (
             self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_frames_per_batch is not None
             and self.encoder_cudagraph_max_frames_per_batch < 0
         ):
             raise ValueError(
                 "encoder_cudagraph_max_frames_per_batch must be "
-                "non-negative (0 = auto-infer)"
+                "non-negative (None = auto-infer)"
             )
 
         if self.backend == "":
