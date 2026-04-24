@@ -373,3 +373,63 @@ def test_reasoning_thinking_disabled(
 
     assert reasoning == expected_reasoning
     assert content == expected_content
+
+
+def test_extract_reasoning_streaming_fragmented_tool_call(qwen3_tokenizer):
+    """
+    Test streaming reasoning extraction when the <tool_call> tag is fragmented
+    across multiple deltas and delta_token_ids does not contain the special token ID.
+    """
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    # Force the parser to have a valid tool call tag
+    # (Qwen3 uses <tool_call>)
+    assert parser._tool_call_tag == "<tool_call>"
+    
+    # Delta 1: "<to"
+    previous_text = "Here is my reasoning. "
+    current_text = "Here is my reasoning. <to"
+    msg1 = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text="<to",
+        previous_token_ids=[1, 2],
+        current_token_ids=[1, 2, 3],
+        delta_token_ids=[3],
+    )
+    assert msg1 is not None
+    assert msg1.reasoning == "<to"
+    assert msg1.content is None
+
+    # Delta 2: "ol_"
+    previous_text = current_text
+    current_text = current_text + "ol_"
+    msg2 = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text="ol_",
+        previous_token_ids=[1, 2, 3],
+        current_token_ids=[1, 2, 3, 4],
+        delta_token_ids=[4],
+    )
+    assert msg2 is not None
+    assert msg2.reasoning == "ol_"
+    assert msg2.content is None
+
+    # Delta 3: "call>\n<function=bash>"
+    previous_text = current_text
+    current_text = current_text + "call>\n<function=bash>"
+    msg3 = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text="call>\n<function=bash>",
+        previous_token_ids=[1, 2, 3, 4],
+        current_token_ids=[1, 2, 3, 4, 5, 6],
+        delta_token_ids=[5, 6],
+    )
+    assert msg3 is not None
+    assert msg3.reasoning is None
+    assert msg3.content == "call>\n<function=bash>"
+

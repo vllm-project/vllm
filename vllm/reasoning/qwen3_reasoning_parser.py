@@ -201,18 +201,40 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             return None
 
         # Implicit reasoning end via <tool_call>.
-        if (
+        has_tool_call_id = (
             self._tool_call_token_id is not None
             and self._tool_call_token_id in delta_token_ids
-        ):
-            tool_index = delta_text.find(self._tool_call_tag)
-            if tool_index >= 0:
-                reasoning = delta_text[:tool_index]
-                content = delta_text[tool_index:]
+        )
+        just_completed_tool_call_tag = (
+            bool(self._tool_call_tag)
+            and self._tool_call_tag in current_text
+            and self._tool_call_tag not in previous_text
+        )
+
+        if has_tool_call_id or just_completed_tool_call_tag:
+            if self._tool_call_tag and self._tool_call_tag in current_text:
+                tag_start_idx = current_text.find(self._tool_call_tag)
+                delta_start_idx = len(previous_text)
+                if tag_start_idx >= delta_start_idx:
+                    reasoning_len = tag_start_idx - delta_start_idx
+                    reasoning = delta_text[:reasoning_len]
+                    content = delta_text[reasoning_len:]
+                else:
+                    reasoning = None
+                    content = delta_text
                 return DeltaMessage(
                     reasoning=reasoning if reasoning else None,
                     content=content if content else None,
                 )
+            elif has_tool_call_id and self._tool_call_tag:
+                tool_index = delta_text.find(self._tool_call_tag)
+                if tool_index >= 0:
+                    reasoning = delta_text[:tool_index]
+                    content = delta_text[tool_index:]
+                    return DeltaMessage(
+                        reasoning=reasoning if reasoning else None,
+                        content=content if content else None,
+                    )
 
         # No end token in this delta.
         if not delta_text:
@@ -224,6 +246,9 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         elif (
             self._tool_call_token_id is not None
             and self._tool_call_token_id in previous_token_ids
+        ) or (
+            bool(self._tool_call_tag)
+            and self._tool_call_tag in previous_text
         ):
             return DeltaMessage(content=delta_text)
         else:
