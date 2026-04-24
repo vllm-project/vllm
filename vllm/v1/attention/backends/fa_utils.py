@@ -141,6 +141,21 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        # head_size > 256 requires FA4 on SM90+; force upgrade from FA3
+        if (
+            fa_version == 3
+            and head_size is not None
+            and head_size > 256
+            and device_capability.major == 9
+            and is_fa_version_supported(4)
+        ):
+            logger.info_once(
+                "FA3 does not support head_size=%d on SM90, upgrading to FA version 4.",
+                head_size,
+                scope="local",
+            )
+            fa_version = 4
+
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
         # supported head dimensions.
         # See: https://github.com/Dao-AILab/flash-attention/issues/1959
