@@ -111,10 +111,12 @@ def _pth_attn_stage1(
             + kv_head * stride_kc_head
         )
         k_addrs = k_bases[:, None] + d_offs[None, :]
+        # `other=0.0` so fp8 caches don't fail the int32→fp8 implicit cast
+        # that `other=0` would produce.  Downstream converts to fp32.
         k_raw = tl.load(
             K_ptr + k_addrs,
             mask=kv_mask[:, None] & d_mask[None, :],
-            other=0,
+            other=0.0,
         )
         k_f = k_raw.to(tl.float32)
 
@@ -144,7 +146,7 @@ def _pth_attn_stage1(
         v_raw = tl.load(
             V_ptr + v_addrs,
             mask=kv_mask[:, None] & d_mask[None, :],
-            other=0,
+            other=0.0,
         )
         v_f = v_raw.to(tl.float32)
 
