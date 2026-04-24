@@ -29,8 +29,9 @@ KV_CACHE_IDX = {
     "fp8_e5m2": 2,
 }
 
-# C++ type for each kv_cache index (only used for FP8 cases)
+# C++ type for each kv_cache index
 KV_CACHE_CPP_TYPES = {
+    "auto": "scalar_t",
     "fp8_e4m3": "c10::Float8_e4m3fn",
     "fp8_e5m2": "c10::Float8_e5m2",
 }
@@ -60,23 +61,18 @@ def _make_case(
     """Generate a single switch case line."""
     encoded = encode_params(head_dim, isa, kv_cache)
     actual_isa = isa_override if isa_override else isa
-    if kv_cache == "auto":
-        attn_impl = (
-            f"cpu_attention::AttentionImpl<"
-            f"cpu_attention::ISA::{actual_isa}, \\\n"
-            f"                                                       "
-            f"scalar_t, head_dim>"
-        )
-        comment = f"head_dim={head_dim}, isa={isa}"
-    else:
-        cpp_type = KV_CACHE_CPP_TYPES[kv_cache]
-        attn_impl = (
-            f"cpu_attention::AttentionImpl<"
-            f"cpu_attention::ISA::{actual_isa}, \\\n"
-            f"                                                       "
-            f"scalar_t, head_dim, {cpp_type}>"
-        )
-        comment = f"head_dim={head_dim}, isa={isa}, kv_cache={kv_cache}"
+    cpp_type = KV_CACHE_CPP_TYPES[kv_cache]
+    attn_impl = (
+        f"cpu_attention::AttentionImpl<"
+        f"cpu_attention::ISA::{actual_isa}, \\\n"
+        f"                                                       "
+        f"scalar_t, head_dim, {cpp_type}>"
+    )
+    comment = (
+        f"head_dim={head_dim}, isa={isa}"
+        if kv_cache == "auto"
+        else f"head_dim={head_dim}, isa={isa}, kv_cache={kv_cache}"
+    )
     return (
         f"""      case {encoded}LL: {{ """
         f"""/* {comment} */ \\"""
@@ -160,9 +156,9 @@ def generate_header_file() -> str:
     header += """
 // Dispatch macro using encoded parameters.
 // KV_CACHE_IDX: Fp8KVCacheDataType enum value (kAuto=0, kFp8E4M3=1, kFp8E5M2=2).
-// FP8 cases (kv_cache_idx != 0) are generated on x86 for both AMX and VEC ISAs:
-// the VEC FP8 path requires only AVX2 (which cpu_types_x86.hpp already asserts),
-// so it is available on any x86 build, with or without AMX.
+// FP8 cases (kv_cache_idx != 0) are generated on x86 for VEC ISA on all x86
+// builds: BF16Vec32 FP8 constructors have both AVX-512 and AVX2 implementations
+// in cpu_types_x86.hpp, so FP8 VEC is available regardless of AVX-512 support.
 """
 
     def _macro_block(guard: str, isa_list: list[str], fp8: bool) -> str:
@@ -210,6 +206,11 @@ def generate_header_file() -> str:
         "#elif defined(__s390x__)",
         ["VXE", "VEC", "VEC16"],
         fp8=False,
+    )
+    header += _macro_block(
+        "#elif defined(__AVX512F__)",
+        ["VEC", "VEC16"],
+        fp8=True,
     )
     header += _macro_block(
         "#else",

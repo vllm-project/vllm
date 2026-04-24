@@ -104,6 +104,8 @@ void cpu_attn_reshape_and_cache(
                 "key_cache must be uint8 for FP8 path");
     TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
                 "value_cache must be uint8 for FP8 path");
+    TORCH_CHECK(k_scale > 0, "k_scale must be positive for FP8 path");
+    TORCH_CHECK(v_scale > 0, "v_scale must be positive for FP8 path");
 
     const float k_inv = 1.0f / static_cast<float>(k_scale);
     const float v_inv = 1.0f / static_cast<float>(v_scale);
@@ -238,6 +240,8 @@ void cpu_attention_with_kv_cache(
                 "key_cache must be uint8 for FP8 path");
     TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
                 "value_cache must be uint8 for FP8 path");
+    TORCH_CHECK(k_scale > 0, "k_scale must be positive for FP8 path");
+    TORCH_CHECK(v_scale > 0, "v_scale must be positive for FP8 path");
   }
 
   cpu_attention::AttentionInput input;

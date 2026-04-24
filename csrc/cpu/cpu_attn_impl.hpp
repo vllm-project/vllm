@@ -21,9 +21,15 @@ enum class Fp8KVCacheDataType {
   kFp8E5M2 = 2,
 };
 
+struct AttentionInput;
+
 template <ISA isa, typename scalar_t, int64_t head_dim,
-          typename kv_cache_t = scalar_t>
-class AttentionImpl {};
+          typename kv_cache_scalar_t = scalar_t>
+class AttentionImpl {
+ public:
+  void init_from_input(const AttentionInput*) {}
+  float get_output_v_scale() const noexcept { return 1.0f; }
+};
 
 struct AttentionWorkItemGroup {
   int32_t req_id;
@@ -672,17 +678,6 @@ class AttentionScheduler {
     cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(
         scratchpad_size);
 
-    // metadata_ptr->print();
-
-    // test out of boundary access
-    // {
-    //     float* cache_ptr =
-    //     cpu_utils::ScratchPadManager::getl_scratchpad_manager()->get_data<float>();
-    //     for (int64_t i = 0; i < scratchpad_size / sizeof(float); ++i) {
-    //         cache_ptr[i] = std::numeric_limits<float>::quiet_NaN();
-    //     }
-    // }
-
     return metadata_tensor;
   }
 
@@ -808,7 +803,7 @@ struct AttentionInput {
       const int32_t left_window_size, const int32_t right_window_size,      \
       float scale, const float softcap_scale,                               \
       const float *__restrict__ alibi_slopes, const bool is_first_iter,     \
-      const bool use_sink, const bool debug_info
+      const bool use_sink
 
 #define CPU_ATTENTION_PARAMS                                                  \
   q_heads_buffer, k_head_cache_ptr, v_head_cache_ptr, logits_buffer,          \
@@ -816,7 +811,7 @@ struct AttentionInput {
       kv_tile_start_pos, kv_tile_end_pos, kv_tile_token_num,                  \
       kv_cache_num_blocks_stride, q_head_num, q_token_num, q_tile_start_pos,  \
       q_heads_per_kv, block_size, left_window_size, right_window_size, scale, \
-      softcap_scale, alibi_slopes, is_first_iter, use_sink, debug_info
+      softcap_scale, alibi_slopes, is_first_iter, use_sink
 
 enum class AttentionGemmPhase { QK, PV };
 
@@ -841,43 +836,6 @@ struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
 };
 #endif
-
-template <typename T>
-void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
-                  int32_t stride) {
-  std::stringstream ss;
-  ss << std::fixed << std::setprecision(5) << name << ": [\n";
-  auto* curr_logits_buffer = ptr;
-  for (int32_t m = 0; m < row; ++m) {
-    for (int32_t n = 0; n < col; ++n) {
-      ss << curr_logits_buffer[n] << ", ";
-    }
-    ss << "\n";
-    curr_logits_buffer += stride;
-  }
-  ss << "]\n";
-  std::printf("%s", ss.str().c_str());
-}
-
-template <typename T>
-constexpr bool is_fp8_impl_v =
-    std::is_same_v<typename T::kv_cache_t, c10::Float8_e4m3fn> ||
-    std::is_same_v<typename T::kv_cache_t, c10::Float8_e5m2>;
-
-template <typename T>
-void call_init_from_input(T& impl, const AttentionInput* input) {
-  if constexpr (is_fp8_impl_v<T>) {
-    impl.init_from_input(input);
-  }
-}
-
-template <typename T>
-float call_get_output_v_scale(T& impl) {
-  if constexpr (is_fp8_impl_v<T>) {
-    return impl.get_output_v_scale();
-  }
-  return 1.0f;
-}
 
 template <typename attention_impl_t>
 class AttentionMainLoop {
@@ -934,7 +892,6 @@ class AttentionMainLoop {
     //  - alibi_slopes
     //  - is_first_iter
     //  - use_sink
-    //  - debug_info
     void operator()(DEFINE_CPU_ATTENTION_PARAMS) {
       // k_cache_token_group_stride: stride of K cache when move to next
       // BlockSizeAlignment tokens in a block
@@ -1019,50 +976,24 @@ class AttentionMainLoop {
 
       // process logits
       {
-        // if (debug_info){
-        //     print_logits("raw logits", logits_buffer, q_head_num,
-        //     kv_tile_token_num, kv_tile_token_num);
-        // }
-
         if (softcap_scale != 0.0f) {
           apply_softcap(logits_buffer, kv_tile_token_num, q_head_num,
                         kv_tile_token_num, softcap_scale);
-          // print_logits("softcap raw logits", logits_buffer, q_head_num,
-          // kv_tile_token_num, kv_tile_token_num);
         }
 
         if (alibi_slopes != nullptr) {
           apply_alibi_slopes(logits_buffer, alibi_slopes, kv_tile_token_num,
                              q_tile_start_pos, kv_tile_start_pos, q_token_num,
                              kv_tile_token_num, q_heads_per_kv);
-
-          // print_logits("alibi raw logits", logits_buffer, q_head_num,
-          // kv_tile_token_num, kv_tile_token_num);
         }
 
         apply_mask(logits_buffer, kv_tile_token_num, q_tile_start_pos,
                    kv_tile_start_pos, kv_tile_end_pos, q_token_num,
                    q_heads_per_kv, left_window_size, right_window_size);
 
-        // if (debug_info){
-        // print_logits("masked logits", logits_buffer, q_head_num,
-        // kv_tile_token_num, kv_tile_token_num);
-        // print_logits("old_max", max_buffer, 1, q_head_num, q_head_num);
-        // print_logits("old_sum", sum_buffer, 1, q_head_num, q_head_num);
-        // }
-
         apply_softmax(logits_buffer, partial_q_buffer, max_buffer, sum_buffer,
                       kv_tile_token_num, q_head_num, kv_tile_token_num,
                       is_first_iter, use_sink);
-
-        // if (debug_info){
-        //     print_logits("softmax logits",
-        //     reinterpret_cast<prob_buffer_t*>(logits_buffer), q_head_num,
-        //     kv_tile_token_num, kv_tile_token_num * sizeof(logits_buffer_t) /
-        //     sizeof(prob_buffer_t));
-        //     print_logits("new_max", max_buffer, 1, q_head_num, q_head_num);
-        //     print_logits("new_sum", sum_buffer, 1, q_head_num, q_head_num);
-        // }
       }
 
       // compute P@V
@@ -1116,10 +1047,6 @@ class AttentionMainLoop {
           accum_c = true;
         }
       }
-      //   if (debug_info) {
-      //     print_logits("output", partial_q_buffer, q_head_num, head_dim,
-      //     head_dim);
-      //   }
     }
 
     void apply_mask(logits_buffer_t* __restrict__ logits_buffer,
@@ -1381,8 +1308,8 @@ class AttentionMainLoop {
       }
 
       attention_impl_t attn_impl;
-      call_init_from_input(attn_impl, input);
-      const float output_v_scale = call_get_output_v_scale(attn_impl);
+      attn_impl.init_from_input(input);
+      const float output_v_scale = attn_impl.get_output_v_scale();
 
       // general information
       const int32_t q_head_num = input->num_heads;
@@ -1575,16 +1502,6 @@ class AttentionMainLoop {
                           : (kv_head_idx /
                              q_heads_per_kv);  // for GQA disabled case
 
-              // std::printf("thread_id: %d, req_id: %d, q_token_start: %d,
-              // q_token_end: %d, q_head_start: %d, q_head_end: %d, kv_head_idx:
-              // %d, kv_pos_start: %d, kv_pos_end: %d\n",
-              //                 thread_id, current_group_idx,
-              //                 q_token_start_idx, q_token_start_idx +
-              //                 actual_q_token_num, q_head_start_idx,
-              //                 q_head_start_idx + actual_q_heads_per_kv,
-              //                 curr_kv_head_idx, kv_tile_start_pos,
-              //                 kv_tile_end_pos);
-
               // move buffers
               kv_cache_t* curr_k_cache =
                   reinterpret_cast<kv_cache_t*>(input->key_cache) +
@@ -1697,18 +1614,6 @@ class AttentionMainLoop {
                       aligned_actual_kv_tile_pos_right -
                       aligned_actual_kv_tile_pos_left;
 
-                  //   std::printf("\tq_iter_idx: %d, q_token_start: %d,
-                  //   q_token_end: %d, q_token_num: %d, q_head_num: %d,
-                  //   q_pos_start: %d, q_pos_end: %d, kv_pos_start: %d,
-                  //   kv_pos_end: %d\n",
-                  //             q_iter_idx, q_token_start_idx +
-                  //             q_head_tile_token_offset,  q_token_start_idx +
-                  //             q_head_tile_token_offset + q_tile_token_num,
-                  //             q_tile_token_num, q_tile_head_num,
-                  //             q_tile_pos_left, q_tile_pos_right,
-                  //             aligned_actual_kv_tile_pos_left,
-                  //             aligned_actual_kv_tile_pos_right);
-
                   // Move buffers
                   q_buffer_t* curr_q_heads_buffer =
                       q_buffer + q_tile_head_offset * head_dim;
@@ -1716,29 +1621,6 @@ class AttentionMainLoop {
                       partial_q_buffer + q_tile_head_offset * head_dim;
                   float* curr_max_buffer = max_buffer + q_tile_head_offset;
                   float* curr_sum_buffer = sum_buffer + q_tile_head_offset;
-
-                  bool debug_info = false;
-                  //   bool debug_info = (
-                  //     q_head_start_idx == 4 &&
-                  //     (q_token_start_idx + q_head_tile_token_offset) <=
-                  //     4
-                  //     && (q_token_start_idx + q_head_tile_token_offset +
-                  //     q_tile_token_num) > 4
-                  //   );
-                  // if (debug_info) {
-                  //   std::printf("\tq_iter_idx: %d, q_token_start: %d,"
-                  //   "q_token_end: %d, q_token_num: %d, q_head_num: %d,"
-                  //   "q_pos_start: %d, q_pos_end: %d, kv_pos_start: %d,"
-                  //   "kv_pos_end: %d\n",
-                  //             q_iter_idx, q_token_start_idx +
-                  //             q_head_tile_token_offset,  q_token_start_idx
-                  //             + q_head_tile_token_offset +
-                  //             q_tile_token_num, q_tile_token_num,
-                  //             q_tile_head_num, q_tile_pos_left,
-                  //             q_tile_pos_right,
-                  //             aligned_actual_kv_tile_pos_left,
-                  //             aligned_actual_kv_tile_pos_right);
-                  // }
 
                   attn_impl.template execute_attention<Attention>(
                       curr_q_heads_buffer, curr_k_cache, curr_v_cache,
@@ -1750,7 +1632,7 @@ class AttentionMainLoop {
                       q_tile_token_num, q_tile_pos_left, actual_q_heads_per_kv,
                       block_size, sliding_window_left, sliding_window_right,
                       scale, softcap_scale, curr_alibi_slopes,
-                      first_iter_flag[q_iter_idx], use_sink, debug_info);
+                      first_iter_flag[q_iter_idx], use_sink);
                   first_iter_flag[q_iter_idx] = false;
                 }
               }
