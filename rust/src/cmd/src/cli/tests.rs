@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
@@ -37,7 +35,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     data_parallel_size_local: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
-                        engine_ready_timeout_secs: 300,
+                        engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
@@ -199,7 +197,7 @@ fn frontend_args_accept_json() {
                     engine_count: 1,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
-                        engine_ready_timeout_secs: 300,
+                        engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
@@ -238,7 +236,7 @@ fn frontend_args_json_applies_defaults() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
-    assert_eq!(args.runtime.engine_ready_timeout_secs, 300);
+    assert_eq!(args.runtime.engine_ready_timeout_secs, 600);
     assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
@@ -582,7 +580,7 @@ fn serve_args_accept_handshake_aliases() {
                     data_parallel_size_local: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
-                        engine_ready_timeout_secs: 300,
+                        engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
@@ -659,7 +657,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     assert_eq!(handshake_address, "tcp://10.99.48.128:29550");
     assert_eq!(advertised_host, "10.99.48.128");
     assert_eq!(*engine_count, 4);
-    assert_eq!(*ready_timeout, Duration::from_secs(300));
     assert!(
         local_input_address
             .as_deref()
@@ -678,7 +675,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
                 engine_count: 4,
-                ready_timeout: 300s,
+                ready_timeout: 600s,
                 local_input_address: Some(
                     "<ipc input>",
                 ),
@@ -742,7 +739,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
                 engine_count: 4,
-                ready_timeout: 300s,
+                ready_timeout: 600s,
                 local_input_address: None,
                 local_output_address: None,
             },
@@ -818,7 +815,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 input_address: "ipc:///tmp/input.sock",
                 output_address: "ipc:///tmp/output.sock",
                 engine_count: 2,
-                ready_timeout: 300s,
+                ready_timeout: 600s,
             },
             coordinator_mode: External {
                 address: "tcp://127.0.0.1:7000",

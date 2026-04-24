@@ -244,7 +244,7 @@ impl SharedRuntimeArgs {
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
-    300
+    600
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
