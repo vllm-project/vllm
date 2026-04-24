@@ -296,8 +296,8 @@ class CuMemAllocator:
                     if allocation["allocated_size"] == 0:
                         handle = self._python_free_callback(allocation["address"])
                         unmap_and_release(handle)
-                self.current_tag = old_tag
         finally:
+            self.current_tag = old_tag
             if expandable_was_enabled:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
