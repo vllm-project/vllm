@@ -64,6 +64,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .gemma4_mm_utils import get_gemma4_pooled_token_counts
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -71,7 +72,6 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .gemma4_mm_utils import get_gemma4_pooled_token_counts
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -84,8 +84,9 @@ logger = init_logger(__name__)
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
-# Keep video peak memory low during startup profiling on smaller GPUs.
-_VIDEO_VISION_BATCH_SIZE = 1
+# Default video vision batch size — keeps peak memory low during startup
+# profiling on smaller GPUs. Override via mm_processor_kwargs to increase.
+_DEFAULT_VIDEO_VISION_BATCH_SIZE = 1
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +137,6 @@ class Gemma4AudioInputs(TensorSchema):
         torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
     ]
 
-
-Gemma4ImageInputs = Gemma4ImagePixelInputs
 
 
 class Gemma4VideoInputs(TensorSchema):
@@ -658,6 +657,17 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 "image_position_ids"
             )
 
+        # Pre-compute per-image soft token counts on CPU during
+        # preprocessing so the model forward pass avoids GPU→CPU sync.
+        if "pixel_position_ids" in processed_outputs:
+            ppid = processed_outputs["pixel_position_ids"]
+            vision_cfg = self.info.get_hf_config().vision_config
+            pooling_k2 = vision_cfg.pooling_kernel_size**2
+            max_patches = ppid.shape[1]
+            output_length = max_patches // pooling_k2
+            counts_tensor = get_gemma4_pooled_token_counts(ppid, output_length)
+            processed_outputs["image_num_soft_tokens"] = counts_tensor.tolist()
+
         if "input_features" in processed_outputs:
             # Unpad per-item so each item's cache entry is
             # self-contained. The batched() field config in
@@ -689,6 +699,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         fields = dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             pixel_position_ids=MultiModalFieldConfig.batched("image"),
+            image_num_soft_tokens=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             input_features_padded=MultiModalFieldConfig.batched("audio"),
             input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
@@ -990,17 +1003,19 @@ class Gemma4ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Gemma4ImageInputs | None:
+    ) -> dict[str, object] | None:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_position_ids = kwargs.pop("pixel_position_ids", None)
         image_embeds = kwargs.pop("image_embeds", None)
+        image_num_soft_tokens = kwargs.pop("image_num_soft_tokens", None)
         assert image_embeds is None, "Gemma4 does not support image_embeds."
         if pixel_values is None:
             return None
-        return Gemma4ImagePixelInputs(
-            pixel_values=pixel_values,
-            pixel_position_ids=pixel_position_ids,
-        )
+        return {
+            "pixel_values": pixel_values,
+            "pixel_position_ids": pixel_position_ids,
+            "image_num_soft_tokens": image_num_soft_tokens,
+        }
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
@@ -1022,17 +1037,19 @@ class Gemma4ForConditionalGeneration(
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         pixel_position_ids_videos = kwargs.pop("pixel_position_ids_videos", None)
         video_frame_counts = kwargs.pop("video_frame_counts", None)
+        video_num_soft_tokens = kwargs.pop("video_num_soft_tokens", None)
         if pixel_values_videos is None:
             return None
         return {
             "pixel_values_videos": pixel_values_videos,
             "pixel_position_ids_videos": pixel_position_ids_videos,
             "video_frame_counts": video_frame_counts,
+            "video_num_soft_tokens": video_num_soft_tokens,
         }
 
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
-    ) -> dict[str, Gemma4ImageInputs | Gemma4AudioInputs | Gemma4VideoInputs | None]:
+    ) -> dict[str, dict | Gemma4AudioInputs | None]:
         mm_input_by_modality = {}
         for input_key in list(kwargs):
             if (
@@ -1064,33 +1081,33 @@ class Gemma4ForConditionalGeneration(
 
     def _process_image_input(
         self,
-        image_input: Gemma4ImageInputs,
+        image_input: dict[str, object],
     ) -> list[torch.Tensor]:
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
+        token_counts = image_input.get("image_num_soft_tokens")
 
-        return self._process_vision_batch(pixel_values, pixel_position_ids)
-
-    @staticmethod
-    def _get_pooled_token_counts(
-        pixel_position_ids: torch.Tensor,
-        output_length: int,
-    ) -> torch.Tensor:
-        return get_gemma4_pooled_token_counts(pixel_position_ids, output_length)
+        return self._process_vision_batch(
+            pixel_values, pixel_position_ids, token_counts=token_counts)
 
     def _process_vision_batch(
         self,
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
         max_items_per_batch: int | None = None,
+        token_counts: list[int] | None = None,
     ) -> list[torch.Tensor]:
         """Run the Gemma4 vision tower on a batch and split flat outputs.
 
         The HF Gemma4VisionModel already supports batched inputs and returns a
         single flat tensor with padding stripped in batch-major order. We keep
-        the dynamic per-item output contract by reconstructing each image's
-        token count from the pooled patch grid and splitting once after the
-        batch forward.
+        the dynamic per-item output contract by splitting once after the
+        batch forward using per-item token counts.
+
+        Args:
+            token_counts: Pre-computed CPU-side per-item token counts.
+                When provided, avoids GPU→CPU sync from
+                ``get_gemma4_pooled_token_counts``.
         """
         if pixel_values.shape[0] == 0:
             return []
@@ -1100,18 +1117,24 @@ class Gemma4ForConditionalGeneration(
             embeddings: list[torch.Tensor] = []
             for start in range(0, pixel_values.shape[0], max_items_per_batch):
                 end = start + max_items_per_batch
+                chunk_counts = (token_counts[start:end]
+                                if token_counts is not None else None)
                 embeddings.extend(
                     self._process_vision_batch(
                         pixel_values[start:end],
                         pixel_position_ids[start:end],
+                        token_counts=chunk_counts,
                     ))
             return embeddings
 
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
         max_patches = pixel_values.shape[1]
         output_length = max_patches // pooling_k2
-        token_counts = self._get_pooled_token_counts(pixel_position_ids,
-                                                     output_length)
+
+        if token_counts is None:
+            token_counts_tensor = get_gemma4_pooled_token_counts(
+                pixel_position_ids, output_length)
+            token_counts = token_counts_tensor.tolist()
 
         vt_output = self.vision_tower(
             pixel_values,
@@ -1119,7 +1142,7 @@ class Gemma4ForConditionalGeneration(
             output_length=output_length,
         )
         flat_features = vt_output.last_hidden_state
-        expected_tokens = int(token_counts.sum().item())
+        expected_tokens = sum(token_counts)
         if flat_features.shape[0] != expected_tokens:
             raise ValueError(
                 "Gemma4 vision tower output token count mismatch: "
@@ -1132,7 +1155,7 @@ class Gemma4ForConditionalGeneration(
         flat_embeddings = self.embed_vision(
             inputs_embeds=flat_features.unsqueeze(0).to(target_dtype)
         ).squeeze(0)
-        return list(flat_embeddings.split(token_counts.tolist(), dim=0))
+        return list(flat_embeddings.split(token_counts, dim=0))
 
     # ------------------------------------------------------------------ #
     # Video processing (frames through vision tower)
@@ -1140,7 +1163,8 @@ class Gemma4ForConditionalGeneration(
 
     def _process_video_input(
         self,
-        video_input: dict[str, torch.Tensor],
+        video_input: dict[str, object],
+        video_vision_batch_size: int = _DEFAULT_VIDEO_VISION_BATCH_SIZE,
     ) -> list[torch.Tensor]:
         """Process video frames through the vision tower.
 
@@ -1152,10 +1176,18 @@ class Gemma4ForConditionalGeneration(
         frame), because vLLM treats one video as one multimodal item.
         The flat_from_sizes field config groups all frames of a video
         together, so embed_multimodal must return one tensor per video.
+
+        Args:
+            video_vision_batch_size: Max frames per vision-tower forward
+                pass. Default 1 keeps peak memory low for startup
+                profiling on smaller GPUs. Increase via
+                ``mm_processor_kwargs`` for better throughput when GPU
+                memory allows.
         """
         pixel_values = video_input["pixel_values_videos"]
         pixel_position_ids = video_input["pixel_position_ids_videos"]
         frame_counts = video_input["video_frame_counts"]
+        video_num_soft_tokens = video_input.get("video_num_soft_tokens")
 
         # Split flat tensors into per-video chunks
         if isinstance(frame_counts, torch.Tensor):
@@ -1166,15 +1198,29 @@ class Gemma4ForConditionalGeneration(
         pv_per_video = torch.split(pixel_values, fc_list, dim=0)
         pp_per_video = torch.split(pixel_position_ids, fc_list, dim=0)
 
+        # Flatten per-video token counts into per-frame list
+        if video_num_soft_tokens is not None:
+            flat_token_counts: list[int] = []
+            for per_video in video_num_soft_tokens:
+                flat_token_counts.extend(per_video)
+        else:
+            flat_token_counts = None
+
         per_video_embeddings = []
+        frame_offset = 0
         for pv_chunk, pp_chunk in zip(pv_per_video, pp_per_video):
-            # Startup profiling runs a maximum-feature-size video item through
-            # this path. Chunk frames to avoid the batched vision tower peak
+            n_frames = pv_chunk.shape[0]
+            chunk_counts = (flat_token_counts[frame_offset:frame_offset + n_frames]
+                            if flat_token_counts is not None else None)
+            frame_offset += n_frames
+
+            # Chunk frames to avoid the batched vision tower peak
             # regressing small-GPU startup memory.
             frame_embs = self._process_vision_batch(
                 pv_chunk,
                 pp_chunk,
-                max_items_per_batch=_VIDEO_VISION_BATCH_SIZE,
+                max_items_per_batch=video_vision_batch_size,
+                token_counts=chunk_counts,
             )
             # Concatenate all frames of this video into one tensor.
             per_video_embeddings.append(torch.cat(frame_embs, dim=0))
@@ -1220,6 +1266,12 @@ class Gemma4ForConditionalGeneration(
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         multimodal_embeddings: list[torch.Tensor] = []
 
+        # Read configurable video_vision_batch_size from mm_processor_kwargs.
+        mm_kwargs = self.multimodal_config.mm_processor_kwargs or {}
+        video_vision_batch_size = mm_kwargs.get(
+            "video_vision_batch_size", _DEFAULT_VIDEO_VISION_BATCH_SIZE
+        )
+
         for modality, multimodal_input in mm_input_by_modality.items():
             if multimodal_input is None:
                 continue
@@ -1229,7 +1281,10 @@ class Gemma4ForConditionalGeneration(
                 )
             elif modality == "video":
                 multimodal_embeddings.extend(
-                    self._process_video_input(multimodal_input)
+                    self._process_video_input(
+                        multimodal_input,
+                        video_vision_batch_size=video_vision_batch_size,
+                    )
                 )
             elif modality == "audio":
                 multimodal_embeddings.extend(
