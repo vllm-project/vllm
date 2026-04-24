@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "hy_v3_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -188,12 +189,64 @@ class SpeculativeConfig:
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
 
-    synthetic_acceptance_rate: float | None = None
-    """Average acceptance rate for synthetic rejection sampling. Draft
-    tokens are accepted with a position-dependent probability that decays
-    geometrically, calibrated so that the mean rate across all speculative
-    positions equals this value. Only used when rejection_sample_method
-    is 'synthetic'. Must be in [0, 1]."""
+    synthetic_acceptance_rates: list[float] | None = None
+    """Per-position *unconditional* acceptance rates for synthetic rejection
+    sampling. Position i's entry is the marginal probability that the first
+    i+1 draft tokens are all accepted; the list must have length
+    num_speculative_tokens, each entry in [0, 1], and be monotonically
+    non-increasing. Only valid when rejection_sample_method is 'synthetic'.
+    Mutually exclusive with synthetic_acceptance_length."""
+
+    synthetic_acceptance_length: float | None = None
+    """Target mean acceptance length for synthetic rejection sampling, in
+    [1, num_speculative_tokens + 1]. Resolved internally to
+    synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
+    Mutually exclusive with synthetic_acceptance_rates."""
+
+    @staticmethod
+    def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
+        """Mean acceptance length to unconditional per-position rates, using
+        the minimum-variance schedule."""
+        num_drafts = length - 1  # expected number of accepted draft tokens
+        num_full = int(num_drafts)
+        return (
+            [1.0] * num_full + [num_drafts - num_full] + [0.0] * (n - num_full - 1)
+        )[:n]
+
+    @staticmethod
+    def _resolve_synthetic_acceptance_rates(
+        n: int,
+        rates: list[float] | None,
+        length: float | None,
+    ) -> list[float]:
+        """Return per-position unconditional acceptance rates from exactly one
+        of `rates` or `length` (validates range, length, and monotonicity)."""
+        if (rates is None) == (length is None):
+            raise ValueError(
+                "rejection_sample_method='synthetic' requires exactly one of "
+                "synthetic_acceptance_rates or synthetic_acceptance_length."
+            )
+        if rates is not None:
+            if len(rates) != n:
+                raise ValueError(
+                    f"synthetic_acceptance_rates must have length {n}, got {rates}."
+                )
+            if not all(0.0 <= r <= 1.0 for r in rates):
+                raise ValueError(
+                    f"synthetic_acceptance_rates entries must be in [0, 1], "
+                    f"got {rates}."
+                )
+            if any(rates[i] > rates[i - 1] for i in range(1, n)):
+                raise ValueError(
+                    f"synthetic_acceptance_rates must be non-increasing, got {rates}."
+                )
+            return list(rates)
+        assert length is not None
+        if not 1.0 <= length <= float(n + 1):
+            raise ValueError(
+                f"synthetic_acceptance_length must be in [1, {n + 1}], got {length}."
+            )
+        return SpeculativeConfig._acceptance_length_to_rates(length, n)
 
     def compute_hash(self) -> str:
         """
@@ -363,6 +416,13 @@ class SpeculativeConfig:
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+
+        if hf_config.model_type == "hy_v3":
+            hf_config.model_type = "hy_v3_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+            )
 
         return hf_config
 
@@ -808,6 +868,23 @@ class SpeculativeConfig:
             raise ValueError(
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
+            )
+
+        if self.rejection_sample_method == "synthetic":
+            # Consolidate to per-position rates
+            self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
+                self.num_speculative_tokens,
+                self.synthetic_acceptance_rates,
+                self.synthetic_acceptance_length,
+            )
+            self.synthetic_acceptance_length = None
+        elif (
+            self.synthetic_acceptance_rates is not None
+            or self.synthetic_acceptance_length is not None
+        ):
+            raise ValueError(
+                "synthetic_acceptance_rates / synthetic_acceptance_length "
+                "are only valid with rejection_sample_method='synthetic'."
             )
 
         if self.draft_model_config:

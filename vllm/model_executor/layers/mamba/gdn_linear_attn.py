@@ -143,15 +143,14 @@ class ChunkGatedDeltaRule(CustomOp):
             use_flashinfer = supports_flashinfer
 
         if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel", scope="local")
+            logger.info_once("Using FlashInfer GDN prefill kernel")
             logger.info_once(
                 "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
                 "take a while to compile. Set `--gdn-prefill-backend triton` to "
                 "avoid JIT compile time.",
-                scope="local",
             )
         else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel", scope="local")
+            logger.info_once("Using Triton/FLA GDN prefill kernel")
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -619,54 +618,20 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 2: Core Attention
         # ============================================================
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
         z = torch.empty_like(core_attn_out)
-        if attn_metadata_raw is not None:
-            assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
 
-            # TODO: xpu does not support this param yet
-            spec_sequence_masks = attn_metadata.spec_sequence_masks  # type: ignore[attr-defined]
-            assert spec_sequence_masks is None
-
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-            )
-
-            conv_state = self.kv_cache[0]
-            ssm_state = self.kv_cache[1]
-
-            torch.ops._xpu_C.gdn_attention(
-                core_attn_out,
-                z,
-                projected_states_qkvz,
-                projected_states_ba,
-                self.num_k_heads,
-                self.num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
-                conv_weights=conv_weights,
-                conv_bias=self.conv1d.bias,
-                activation=self.activation,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_prefills=attn_metadata.num_prefills,  # type: ignore[attr-defined]
-                num_decodes=attn_metadata.num_decodes,  # type: ignore[attr-defined]
-                has_initial_state=attn_metadata.has_initial_state,  # type: ignore[attr-defined]
-                non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,  # type: ignore[attr-defined]
-                non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,  # type: ignore[attr-defined]
-                num_actual_tokens=attn_metadata.num_actual_tokens,  # type: ignore[attr-defined]
-                tp_size=self.tp_size,
-                reorder_input=not self.gqa_interleaved_layout,
-            )
+        torch.ops.vllm.gdn_attention_core_xpu(
+            core_attn_out,
+            z,
+            projected_states_qkvz,
+            projected_states_ba,
+            self.prefix,
+        )
 
         # ============================================================
         # Part 3: Output Projection

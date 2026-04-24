@@ -101,7 +101,7 @@ NVSHMEM_URL="https://developer.download.nvidia.com/compute/nvshmem/redist/libnvs
 
 pushd "$WORKSPACE"
 echo "Downloading NVSHMEM ${NVSHMEM_VER} for ${NVSHMEM_SUBDIR} ..."
-curl -fSL "${NVSHMEM_URL}" -o "${NVSHMEM_FILE}"
+curl -fSL --retry 3 --retry-delay 2 "${NVSHMEM_URL}" -o "${NVSHMEM_FILE}"
 tar -xf "${NVSHMEM_FILE}"
 rm -rf nvshmem
 mv "${NVSHMEM_FILE%.tar.xz}" nvshmem

@@ -293,7 +293,6 @@ class EngineCore:
                 compile_time + encoder_compile_time,
                 compile_time,
                 encoder_compile_time,
-                scope="local",
             )
         elif compile_time > 0:
             logger.info_once(
@@ -301,13 +300,11 @@ class EngineCore:
                 "%.2f s (compilation: %.2f s)",
                 elapsed,
                 compile_time,
-                scope="local",
             )
         else:
             logger.info_once(
                 "init engine (profile, create kv cache, warmup model) took %.2f s",
                 elapsed,
-                scope="local",
             )
         return scheduler_kv_cache_config
 
