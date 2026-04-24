@@ -208,26 +208,35 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         # Precompute prefill/decode sub-batch max_query_len / max_seq_len on
         # CPU so the prefill_metadata / decode_metadata properties don't need
         # a GPU->CPU sync via `.max().item()` on every forward.
-        # Use `seq_lens_cpu_upper_bound` rather than the (deprecated)
+        # Prefer `seq_lens_cpu_upper_bound` over the (deprecated)
         # `seq_lens_cpu` property: the upper bound is precise for prefill
         # rows and optimistic-but-safe for decode rows (workspace sizing
         # from `max()` is fine with an over-estimate), and avoids the
         # `seq_lens.to("cpu")` sync the property would fall through to in
-        # async-spec-decode mode.
-        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        # async-spec-decode mode. The draft-attention path (eagle
+        # speculator) doesn't populate it; fall back to the batch-wide
+        # `max_seq_len` as a safe upper bound for both sub-batches.
         q_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         if num_prefills > 0:
             q_seqlens_p = torch.diff(q_start_loc_cpu[num_decodes:])
             max_query_len_prefill = int(q_seqlens_p.max())
-            max_seq_len_prefill = int(seq_lens_cpu[num_decodes:].max())
+            max_seq_len_prefill = (
+                int(seq_lens_cpu[num_decodes:].max())
+                if seq_lens_cpu is not None
+                else max_seq_len
+            )
         else:
             max_query_len_prefill = 0
             max_seq_len_prefill = 0
         if num_decodes > 0:
             q_seqlens_d = torch.diff(q_start_loc_cpu[: num_decodes + 1])
             max_query_len_decode = int(q_seqlens_d.max())
-            max_seq_len_decode = int(seq_lens_cpu[:num_decodes].max())
+            max_seq_len_decode = (
+                int(seq_lens_cpu[:num_decodes].max())
+                if seq_lens_cpu is not None
+                else max_seq_len
+            )
         else:
             max_query_len_decode = 0
             max_seq_len_decode = 0
