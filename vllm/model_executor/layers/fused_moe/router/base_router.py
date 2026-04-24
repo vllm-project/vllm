@@ -26,7 +26,7 @@ if current_platform.is_cuda_alike():
         map_slots,
         out_size,
         numel,
-        top_k,
+        num_active_experts,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -47,7 +47,7 @@ if current_platform.is_cuda_alike():
         replica_count = tl.maximum(replica_count, 1)
         # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
         KNUTH_MULTIPLIER = 2654435769
-        token_idx = (offs // top_k).to(tl.int64)
+        token_idx = (offs // num_active_experts).to(tl.int64)
         hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
         replica_idx = hashed % replica_count
 
@@ -88,7 +88,7 @@ if current_platform.is_cuda_alike():
         numel = topk_ids_in.numel()
         if numel == 0:
             return topk_ids
-        top_k = topk_ids_in.shape[-1]
+        num_active_experts = topk_ids_in.shape[-1]
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
@@ -103,7 +103,7 @@ if current_platform.is_cuda_alike():
             logical_to_physical_map.shape[1],
             expert_load_view.shape[0],
             numel,
-            top_k,
+            num_active_experts,
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
