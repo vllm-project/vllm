@@ -48,8 +48,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     ReadSpec,
     _is_attention_spec,
     _is_ssm_spec,
-    build_fa_local_descs,
-    build_mamba_local_descs,
+    build_fa_local_regions,
+    build_mamba_local_regions,
     generate_dense_plan,
     generate_mamba_plan,
 )
@@ -90,7 +90,7 @@ class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
     # ------------------------------------------------------------------
-    # Plan executors (pure functions, no self access)
+    # Plan executors (static — no self access)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -130,6 +130,13 @@ class NixlConnectorWorker:
 
         num_fa_descs = num_fa_regions * num_blocks
 
+        # NOTE (NickLucche) With HMA, every kv group has the same number
+        # of layers and layers from different groups share the same kv
+        # tensor.  Therefore we compute desc IDs per group using the
+        # right stride:
+        # FA descs have num_blocks entries per region (kernel granularity),
+        # SSM descs have logical_blocks entries per region (no kernel
+        # splitting).
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
@@ -140,6 +147,13 @@ class NixlConnectorWorker:
                     (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
             elif _is_ssm_spec(spec_type):
+                # NOTE (NickLucche) SSM and Attention block regions can
+                # be exchanged arbitrarily by manager.  Therefore, descs
+                # are laid out as:
+                #   [descs_fa (all regions) | descs_ssm (all regions)].
+                # num_fa_descs offset must be computed per-engine since
+                # P and D can have different num_blocks (and thus
+                # different FA desc counts).
                 ssm_region_ids = np.arange(num_ssm_regions)[:, None]
                 all_descs.append(
                     (
@@ -197,6 +211,7 @@ class NixlConnectorWorker:
         FA uses rank_to_attention_slot for the slot offset;
         SSM uses the rank's positional index.
         """
+        # Mamba-HMA: FA and Mamba use different split factors.
         fa_num_splits = len(plan.source_ranks_per_group[0])
 
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
@@ -226,28 +241,37 @@ class NixlConnectorWorker:
     ) -> list[tuple[int, int, int]]:
         """Build local (src) descriptor tuples for NIXL registration."""
         assert self.transfer_topo is not None
-        fa_descs = build_fa_local_descs(
-            base_addresses,
-            self.device_id,
+        fa_regions = build_fa_local_regions(
             self.num_blocks,
             block_size_ratio,
             self.block_len_per_layer,
             self.transfer_topo.is_kv_layout_blocks_first,
         )
-        if not self._has_mamba:
-            return fa_descs
-        assert self._conv_decomp is not None
-        mamba_descs = build_mamba_local_descs(
-            base_addresses,
-            self.block_len_per_layer,
-            self._logical_num_blocks,
-            block_size_ratio,
-            self.device_id,
-            self._conv_decomp,
-            self._mamba_ssm_size,
-            self._physical_blocks_per_logical_kv_block,
-        )
-        return fa_descs + mamba_descs
+        if self._has_mamba:
+            # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the
+            # 3-read split is unnecessary — a single conv desc per block
+            # suffices. Consider adding a fast path. Currently we always
+            # register 4 regions because local descs are created before
+            # knowing the remote TP.
+            assert self._conv_decomp is not None
+            mamba_regions = build_mamba_local_regions(
+                self.block_len_per_layer,
+                self._logical_num_blocks,
+                block_size_ratio,
+                self._conv_decomp,
+                self._mamba_ssm_size,
+                self._physical_blocks_per_logical_kv_block,
+            )
+        else:
+            mamba_regions = []
+
+        result: list[tuple[int, int, int]] = []
+        for region in fa_regions + mamba_regions:
+            base = base_addresses[region.layer_idx]
+            for blk in range(region.num_blocks):
+                addr = base + blk * region.page_stride + region.offset_in_page
+                result.append((addr, region.descriptor_bytes, self.device_id))
+        return result
 
     def __init__(
         self,
@@ -290,6 +314,9 @@ class NixlConnectorWorker:
 
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
+        # Conv state sub-projection decomposition (None when no Mamba).
+        # The 3-read transfer requires DS (dim, state_len) conv layout so
+        # that x/B/C sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
@@ -310,22 +337,11 @@ class NixlConnectorWorker:
                 for spec in self._layer_specs.values()
                 if isinstance(spec, MambaSpec)
             )
-            conv_nbytes, ssm_nbytes = (
-                torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),  # type: ignore[misc]
-                torch.tensor([], dtype=mamba_spec.dtypes[1]).element_size(),  # type: ignore[misc]
-            )
-            conv_shape, ssm_shape = (
-                torch.Size(mamba_spec.shapes[0]),
-                torch.Size(mamba_spec.shapes[1]),
-            )
-            mamba_ssm_size = (
-                conv_shape.numel() * conv_nbytes,
-                ssm_shape.numel() * ssm_nbytes,
-            )
             self._conv_decomp = derive_mamba_conv_split(
                 mamba_spec,
                 vllm_config.parallel_config.tensor_parallel_size,
             )
+            mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
 
         # Agent.
