@@ -20,9 +20,9 @@ namespace {
 // for vec_op::BF16Vec* / vec_op::BF16Vec* on Arm HW that
 // doesn't support BF16.
 // We don't use vec_op::FP32Vec* or vec_op::FP16Vec* for consistency.
-template <typename kv_cache_scalar_t>
-FORCE_INLINE void load_row8_B_as_f32(const kv_cache_scalar_t* p,
-                                     float32x4_t& b0, float32x4_t& b1);
+template <typename kv_cache_t>
+FORCE_INLINE void load_row8_B_as_f32(const kv_cache_t* p, float32x4_t& b0,
+                                     float32x4_t& b1);
 
 template <>
 FORCE_INLINE void load_row8_B_as_f32<float>(const float* p, float32x4_t& b0,
@@ -64,11 +64,11 @@ FORCE_INLINE void load_row8_B_as_f32<c10::BFloat16>(const c10::BFloat16* p,
 // #Loads = (K // 4) * (M + 4 * sizeof(kv_cache_t) / 2)
 // #FMLAs = (K // 4) * (4 * 2 * M)
 // We have (4 * 2 * M) FMLAs for (M + 4 * sizeof(kv_cache_t) / 2) loads
-template <int32_t M, typename kv_cache_scalar_t>
+template <int32_t M, typename kv_cache_t>
 FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
-    const float* __restrict A,              // [M x K],
-    const kv_cache_scalar_t* __restrict B,  // [K x 8],
-    float* __restrict C,                    // [M x 8],
+    const float* __restrict A,       // [M x K],
+    const kv_cache_t* __restrict B,  // [K x 8],
+    float* __restrict C,             // [M x 8],
     int64_t lda, int64_t ldb, int64_t ldc, int32_t K, bool accumulate) {
   // kernel supports max M of 8, as it'd spill for larger M
   static_assert(1 <= M && M <= 8, "M must be in [1,8]");
@@ -122,7 +122,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 0
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_scalar_t>(B + (int64_t)(k + 0) * ldb, b0, b1);
+      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 0) * ldb, b0, b1);
 #define STEP_K0(i) FMAS_LANE(i, a##i##v, 0)
       ROWS_APPLY(STEP_K0)
 #undef STEP_K0
@@ -130,7 +130,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 1
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_scalar_t>(B + (int64_t)(k + 1) * ldb, b0, b1);
+      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 1) * ldb, b0, b1);
 #define STEP_K1(i) FMAS_LANE(i, a##i##v, 1)
       ROWS_APPLY(STEP_K1)
 #undef STEP_K1
@@ -138,7 +138,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 2
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_scalar_t>(B + (int64_t)(k + 2) * ldb, b0, b1);
+      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 2) * ldb, b0, b1);
 #define STEP_K2(i) FMAS_LANE(i, a##i##v, 2)
       ROWS_APPLY(STEP_K2)
 #undef STEP_K2
@@ -146,7 +146,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
     // k + 3
     {
       float32x4_t b0, b1;
-      load_row8_B_as_f32<kv_cache_scalar_t>(B + (int64_t)(k + 3) * ldb, b0, b1);
+      load_row8_B_as_f32<kv_cache_t>(B + (int64_t)(k + 3) * ldb, b0, b1);
 #define STEP_K3(i) FMAS_LANE(i, a##i##v, 3)
       ROWS_APPLY(STEP_K3)
 #undef STEP_K3
@@ -157,7 +157,7 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
   // K tail
   for (; k < K; ++k) {
     float32x4_t b0, b1;
-    load_row8_B_as_f32<kv_cache_scalar_t>(B + (int64_t)k * ldb, b0, b1);
+    load_row8_B_as_f32<kv_cache_t>(B + (int64_t)k * ldb, b0, b1);
 #define TAIL_ROW(i)                             \
   IF_M(i) {                                     \
     float32x4_t ai = vdupq_n_f32(*(a##i + k));  \
@@ -181,11 +181,13 @@ FORCE_INLINE void gemm_micro_neon_fmla_Mx8_Ku4(
 #undef IF_M
 }
 
-template <int32_t N, typename kv_cache_scalar_t>
-FORCE_INLINE void gemm_macro_neon_fmla_Mx8_Ku4(
-    const float* __restrict A, const kv_cache_scalar_t* __restrict B,
-    float* __restrict C, int32_t M, int32_t K, int64_t lda, int64_t ldb,
-    int64_t ldc, bool accumulate) {
+template <int32_t N, typename kv_cache_t>
+FORCE_INLINE void gemm_macro_neon_fmla_Mx8_Ku4(const float* __restrict A,
+                                               const kv_cache_t* __restrict B,
+                                               float* __restrict C, int32_t M,
+                                               int32_t K, int64_t lda,
+                                               int64_t ldb, int64_t ldc,
+                                               bool accumulate) {
   // micro kernel is Mx8
   static_assert(N % 8 == 0, "N must be a multiple of 8");
   for (int32_t m = 0; m < M;) {
@@ -194,24 +196,24 @@ FORCE_INLINE void gemm_macro_neon_fmla_Mx8_Ku4(
     float* Cb = C + m * ldc;
 
     for (int32_t n = 0; n < N; n += 8) {
-      const kv_cache_scalar_t* Bn = B + n;
+      const kv_cache_t* Bn = B + n;
       float* Cn = Cb + n;
       switch (mb) {
         case 8:
-          gemm_micro_neon_fmla_Mx8_Ku4<8, kv_cache_scalar_t>(
-              Ab, Bn, Cn, lda, ldb, ldc, K, accumulate);
+          gemm_micro_neon_fmla_Mx8_Ku4<8, kv_cache_t>(Ab, Bn, Cn, lda, ldb, ldc,
+                                                      K, accumulate);
           break;
         case 4:
-          gemm_micro_neon_fmla_Mx8_Ku4<4, kv_cache_scalar_t>(
-              Ab, Bn, Cn, lda, ldb, ldc, K, accumulate);
+          gemm_micro_neon_fmla_Mx8_Ku4<4, kv_cache_t>(Ab, Bn, Cn, lda, ldb, ldc,
+                                                      K, accumulate);
           break;
         case 2:
-          gemm_micro_neon_fmla_Mx8_Ku4<2, kv_cache_scalar_t>(
-              Ab, Bn, Cn, lda, ldb, ldc, K, accumulate);
+          gemm_micro_neon_fmla_Mx8_Ku4<2, kv_cache_t>(Ab, Bn, Cn, lda, ldb, ldc,
+                                                      K, accumulate);
           break;
         default:
-          gemm_micro_neon_fmla_Mx8_Ku4<1, kv_cache_scalar_t>(
-              Ab, Bn, Cn, lda, ldb, ldc, K, accumulate);
+          gemm_micro_neon_fmla_Mx8_Ku4<1, kv_cache_t>(Ab, Bn, Cn, lda, ldb, ldc,
+                                                      K, accumulate);
           break;
       }
     }
@@ -220,23 +222,23 @@ FORCE_INLINE void gemm_macro_neon_fmla_Mx8_Ku4(
   }
 }
 
-template <typename kv_cache_scalar_t>
+template <typename kv_cache_t>
 class TileGemmNeonFMLA {
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 float* __restrict__ a_tile,
-                                kv_cache_scalar_t* __restrict__ b_tile,
+                                kv_cache_t* __restrict__ b_tile,
                                 float* __restrict__ c_tile, const int64_t lda,
                                 const int64_t ldb, const int64_t ldc,
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
     if constexpr (phase == AttentionGemmPhase::QK) {
-      gemm_macro_neon_fmla_Mx8_Ku4<BLOCK_SIZE_ALIGNMENT, kv_cache_scalar_t>(
+      gemm_macro_neon_fmla_Mx8_Ku4<BLOCK_SIZE_ALIGNMENT, kv_cache_t>(
           a_tile, b_tile, c_tile, m_size, k_size, lda, ldb, ldc, accum_c);
     } else {
-      gemm_macro_neon_fmla_Mx8_Ku4<HEAD_SIZE_ALIGNMENT, kv_cache_scalar_t>(
+      gemm_macro_neon_fmla_Mx8_Ku4<HEAD_SIZE_ALIGNMENT, kv_cache_t>(
           a_tile, b_tile, c_tile, m_size, dynamic_k_size, lda, ldb, ldc,
           accum_c);
     }

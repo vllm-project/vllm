@@ -499,12 +499,16 @@ def _get_attn_isa(
     head_size: int | None = None,
     kv_cache_dtype: str | None = None,
 ) -> str:
+    fp8_kv = is_quantized_kv_cache(kv_cache_dtype) if kv_cache_dtype else False
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
+        if fp8_kv:
+            raise NotImplementedError(
+                "FP8 KV cache requires head_size divisible by 32 on CPU."
+            )
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
-    fp8_kv = is_quantized_kv_cache(kv_cache_dtype) if kv_cache_dtype else False
     if fp8_kv and (supports_arm or supports_vxe):
         raise NotImplementedError(
             "FP8 KV cache is only supported on x86 (requires AVX2 or AVX-512)."
