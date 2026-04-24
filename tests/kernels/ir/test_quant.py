@@ -5,6 +5,7 @@ import torch
 
 # This registers op implementations
 import vllm.kernels  # noqa: F401
+from tests.ir.ir_test_utils import supported_providers
 from vllm import ir
 from vllm.ir.ops.quant import get_tma_aligned_size
 from vllm.platforms import current_platform
@@ -125,11 +126,9 @@ class TestStaticQuantFP8:
         assert out3.dtype == FP8_DTYPE
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter"])
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.static_quant_fp8))
     def test_impls(self, dtype, n_tokens, hidden_size, num_token_padding, provider):
         impl = ir.ops.static_quant_fp8.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
 
         x, scale, _ = ir.ops.static_quant_fp8.generate_inputs(
             num_tokens=n_tokens,
@@ -177,10 +176,10 @@ class TestStaticQuantFP8:
             out_impl.to(torch.float32) == out_impl_diff.to(torch.float32)
         )
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
+    @pytest.mark.parametrize(
+        "provider", supported_providers(ir.ops.static_quant_fp8) + ["native"]
+    )
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, provider):
-        if not ir.ops.static_quant_fp8.impls[provider].supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
         if provider == "aiter" and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(f"aiter does not support dtype={dtype}")
 
@@ -239,13 +238,13 @@ class TestStaticGroupQuantFP8:
         )
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
-    @pytest.mark.parametrize("provider", ["vllm_c"])
+    @pytest.mark.parametrize(
+        "provider", supported_providers(ir.ops.static_group_quant_fp8)
+    )
     def test_impls(
         self, dtype, n_tokens, hidden_size, group_size, num_token_padding, provider
     ):
         impl = ir.ops.static_group_quant_fp8.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
 
         x, scale, _ = ir.ops.static_group_quant_fp8.generate_inputs(
             num_tokens=n_tokens,
@@ -287,11 +286,10 @@ class TestStaticGroupQuantFP8:
             out_impl.to(torch.float32) == out_impl_diff.to(torch.float32)
         )
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "native"])
+    @pytest.mark.parametrize(
+        "provider", supported_providers(ir.ops.static_group_quant_fp8) + ["native"]
+    )
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, group_size, provider):
-        if not ir.ops.static_group_quant_fp8.impls[provider].supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
-
         args = ir.ops.static_group_quant_fp8.generate_inputs(
             num_tokens=n_tokens,
             hidden_size=hidden_size,
@@ -351,13 +349,11 @@ class TestDynamicQuantFP8:
         torch.testing.assert_close(x_deq, x.to(torch.float32), rtol=0.15, atol=0.01)
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter"])
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.dynamic_quant_fp8))
     def test_impls(
         self, dtype, n_tokens, hidden_size, per_token, num_token_padding, provider
     ):
         impl = ir.ops.dynamic_quant_fp8.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
 
         x, _, _ = ir.ops.dynamic_quant_fp8.generate_inputs(
             num_tokens=n_tokens,
@@ -414,10 +410,10 @@ class TestDynamicQuantFP8:
             out_impl.to(torch.float32)[:n] == out_impl_diff.to(torch.float32)[:n]
         )
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
+    @pytest.mark.parametrize(
+        "provider", supported_providers(ir.ops.dynamic_quant_fp8) + ["native"]
+    )
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, per_token, provider):
-        if not ir.ops.dynamic_quant_fp8.impls[provider].supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
         if provider == "aiter" and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(f"aiter does not support dtype={dtype}")
 
@@ -493,7 +489,9 @@ class TestDynamicGroupQuantFP8:
         )
         torch.testing.assert_close(x_deq, x.to(torch.float32), rtol=0.15, atol=0.01)
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "triton", "xpu_kernels"])
+    @pytest.mark.parametrize(
+        "provider", supported_providers(ir.ops.dynamic_group_quant_fp8)
+    )
     def test_impls(
         self,
         dtype,
@@ -506,8 +504,6 @@ class TestDynamicGroupQuantFP8:
         provider,
     ):
         impl = ir.ops.dynamic_group_quant_fp8.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
 
         args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
             num_tokens=n_tokens,
@@ -605,7 +601,7 @@ class TestDynamicGroupQuantFP8:
             )
 
     @pytest.mark.parametrize(
-        "provider", ["vllm_c", "aiter", "triton", "xpu_kernels", "native"]
+        "provider", supported_providers(ir.ops.dynamic_group_quant_fp8) + ["native"]
     )
     def test_torch_opcheck(
         self,
@@ -618,9 +614,6 @@ class TestDynamicGroupQuantFP8:
         use_ue8m0,
         provider,
     ):
-        if not ir.ops.dynamic_group_quant_fp8.impls[provider].supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
-
         args = ir.ops.dynamic_group_quant_fp8.generate_inputs(
             num_tokens=n_tokens,
             hidden_size=hidden_size,
