@@ -186,7 +186,36 @@ def _create_nvfp4_hnd_kv_cache(
     reshape_and_cache_flash, using the same block-table layout as
     _create_hnd_kv_cache.
 
-    Returns the nvfp4 kv_cache tensor (uint8, HND-strided).
+    The returned tensor is dtype ``uint8`` with shape
+    ``(num_blocks, 2, block_size, num_kv_heads, full_dim)`` in logical
+    (NHD) order, but physically permuted to HND layout via stride order
+    ``(0, 1, 3, 2, 4)`` (i.e. ``num_kv_heads`` before ``block_size``).
+
+    The last dimension ``full_dim = head_size // 2 + head_size // 16``
+    packs two regions contiguously:
+      - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
+        two per byte.
+      - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
+        scale per 16-element block.
+
+    Dimension 1 indexes K (``[:, 0]``) and V (``[:, 1]``).
+
+    Args:
+        k_contexts: List of key context tensors, one per sequence.
+        v_contexts: List of value context tensors, one per sequence.
+        block_size: Number of tokens per cache block.
+        num_kv_heads: Number of key/value heads.
+        head_size: Head dimension (must be divisible by 16).
+        dtype: Source data type for the bf16 intermediate cache.
+        device: Target device.
+        num_blocks: Total number of blocks to allocate.
+        common_attn_metadata: Metadata containing block tables and
+            sequence lengths.
+        kv_scale_val: Scalar float used as both k_scale and v_scale
+            during quantization.
+
+    Returns:
+        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HND-strided).
     """
     # First create a bf16 HND cache so block tables are populated.
     bf16_cache = _create_hnd_kv_cache(
