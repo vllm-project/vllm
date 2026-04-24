@@ -27,6 +27,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_PLATFORM_EXTRA_ATTR = "_platform_extra"
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 else:
@@ -44,7 +46,9 @@ def config(cls: type[ConfigT]) -> type[ConfigT]: ...
 @overload
 @dataclass_transform(field_specifiers=(PydanticField,))
 def config(
-    *, config: ConfigDict | None = None, **kwargs: Any
+    *,
+    config: ConfigDict | None = None,
+    **kwargs: Any,
 ) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
 
@@ -70,7 +74,28 @@ def config(
     if config is not None:
         merged_config.update(config)
 
+    def get_platform_extra(self: Any) -> dict[str, Any]:
+        platform_extra = self.__dict__.get(_PLATFORM_EXTRA_ATTR)
+        if platform_extra is None:
+            platform_extra = {}
+            self.__dict__[_PLATFORM_EXTRA_ATTR] = platform_extra
+        return cast(dict[str, Any], platform_extra)
+
+    def set_platform_extra(self: Any, value: Mapping[str, Any]) -> None:
+        if not isinstance(value, Mapping):
+            raise TypeError("platform_extra must be a mapping (e.g., dict).")
+        self.__dict__[_PLATFORM_EXTRA_ATTR] = dict(value)
+
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
+        has_platform_extra = False
+        for base in getattr(cls, "__mro__", []):
+            if hasattr(base, "platform_extra"):
+                has_platform_extra = True
+                break
+
+        if not has_platform_extra:
+            cls.platform_extra = property(get_platform_extra, set_platform_extra)
+
         return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
@@ -122,9 +147,33 @@ def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     of `dataclasses.field`"""
     cls = type(dataclass_instance)
     dataclass_dict = dataclass_instance.__dict__
-    dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
+    dataclass_field_names = getattr(cls, "__dataclass_fields__", {})
+    has_dynamic_platform_extra = (
+        hasattr(cls, "platform_extra")
+        and "platform_extra" not in dataclass_field_names
+    )
+    platform_extra = MISSING
+    if has_dynamic_platform_extra and "platform_extra" in kwargs:
+        platform_extra = kwargs.pop("platform_extra")
+    dataclass_dict = {
+        k: v
+        for k, v in dataclass_dict.items()
+        if k in dataclass_field_names and is_init_field(cls, k)
+    }
     dataclass_dict.update(kwargs)
-    return cls(**dataclass_dict)
+    new_instance = cls(**dataclass_dict)
+
+    # Copy fields that are not in the __init__ method from the original
+    # instance, matching the behavior of dataclasses.replace.
+    for f in dataclass_field_names.values():
+        if not f.init:
+            setattr(new_instance, f.name, getattr(dataclass_instance, f.name))
+
+    if has_dynamic_platform_extra:
+        if platform_extra is MISSING:
+            platform_extra = dataclass_instance.__dict__.get(_PLATFORM_EXTRA_ATTR, {})
+        new_instance.platform_extra = dict(platform_extra)
+    return new_instance
 
 
 def getattr_iter(
@@ -282,11 +331,14 @@ def normalize_value(x):
     # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
     if is_dataclass(x):
         type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
-        items = tuple(
-            (f.name, normalize_value(getattr(x, f.name)))
-            for f in sorted(fields(x), key=lambda f: f.name)
-        )
-        return (type_fqn, items)
+        dc_fields = tuple(sorted(fields(x), key=lambda f: f.name))
+        items = [(f.name, normalize_value(getattr(x, f.name))) for f in dc_fields]
+        if not any(f.name == "platform_extra" for f in dc_fields):
+            platform_extra = getattr(x, "__dict__", {}).get(_PLATFORM_EXTRA_ATTR)
+            if platform_extra:
+                items.append(("platform_extra", normalize_value(platform_extra)))
+                items.sort(key=lambda x: x[0])
+        return (type_fqn, tuple(items))
 
     # Containers (generic)
     if isinstance(x, Mapping):
@@ -339,6 +391,16 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
                 f"get_hash_factors: unsupported type for key '{factor}' "
                 f"({type(value).__name__})"
             ) from e
+    if "platform_extra" not in ignored_factors and "platform_extra" not in factors:
+        platform_extra = getattr(config, "__dict__", {}).get(_PLATFORM_EXTRA_ATTR)
+        if platform_extra:
+            try:
+                factors["platform_extra"] = normalize_value(platform_extra)
+            except TypeError as e:
+                raise TypeError(
+                    "get_hash_factors: unsupported type for key 'platform_extra' "
+                    f"({type(platform_extra).__name__})"
+                ) from e
     return factors
 
 
