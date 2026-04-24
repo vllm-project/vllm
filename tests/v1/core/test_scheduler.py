@@ -2835,6 +2835,10 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
     # Scheduled encoder input should be empty; no mm to compute
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
 
+    stats = scheduler.encoder_cache_manager.get_and_update_stats()
+    assert stats.queries == 0
+    assert stats.hits == 0
+
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
@@ -2888,6 +2892,10 @@ def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
         expected_encoder_inputs=[[0]],  # index 0 of the mm item
         expected_total_reqs=1,
     )
+
+    stats = scheduler.encoder_cache_manager.get_and_update_stats()
+    assert stats.queries == 1
+    assert stats.hits == 0
 
     # Then MODEL_RUNNER will execute the encoder and cache the result
 
@@ -2959,6 +2967,10 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
         expected_encoder_inputs=[[0]],  # index 0 of the mm item ONLY
         expected_total_reqs=1,
     )
+
+    stats = scheduler.encoder_cache_manager.get_and_update_stats()
+    assert stats.queries == 1
+    assert stats.hits == 0
 
     # Simulate model execution 1 step
     model_output = ModelRunnerOutput(
@@ -3043,6 +3055,10 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
         expected_encoder_inputs=[[1, 2]],
         expected_total_reqs=1,
     )
+
+    stats = scheduler.encoder_cache_manager.get_and_update_stats()
+    assert stats.queries == 3
+    assert stats.hits == 1
 
 
 @pytest.mark.parametrize("cache_exist", ["local", "connector_only", "no_where"])
