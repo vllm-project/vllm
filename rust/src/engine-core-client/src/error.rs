@@ -20,9 +20,9 @@ pub enum Error {
     },
     #[error("messagepack value decode failed")]
     ValueDecode(#[from] rmpv::decode::Error),
-    #[error("messagepack ext value encode failed")]
+    #[error("messagepack ext value encode failed: {message}")]
     ValueEncodeExt { message: String },
-    #[error("messagepack ext value decode failed")]
+    #[error("messagepack ext value decode failed: {message}")]
     ValueDecodeExt { message: String },
     #[error("io error")]
     Io(#[from] std::io::Error),

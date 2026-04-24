@@ -1,6 +1,9 @@
-use vllm_metrics::{EngineLabels, EnginePositionLabels, SchedulerMetrics};
+use vllm_metrics::{EngineLabels, EnginePositionLabels, SchedulerMetrics, WaitingReasonLabels};
 
 use crate::protocol::stats::SchedulerStats;
+
+const WAITING_REASON_CAPACITY: &str = "capacity";
+const WAITING_REASON_DEFERRED: &str = "deferred";
 
 /// Record the scheduler-stats-backed metrics for one engine at one point in time.
 pub(crate) fn record_scheduler_stats(
@@ -23,7 +26,23 @@ pub(crate) fn record_scheduler_stats(
     metrics
         .scheduler_waiting
         .get_or_create(&labels)
+        .set(stats.num_waiting_reqs + stats.num_skipped_waiting_reqs);
+    metrics
+        .scheduler_waiting_by_reason
+        .get_or_create(&WaitingReasonLabels {
+            model_name: model_name.clone(),
+            engine,
+            reason: WAITING_REASON_CAPACITY,
+        })
         .set(stats.num_waiting_reqs);
+    metrics
+        .scheduler_waiting_by_reason
+        .get_or_create(&WaitingReasonLabels {
+            model_name: model_name.clone(),
+            engine,
+            reason: WAITING_REASON_DEFERRED,
+        })
+        .set(stats.num_skipped_waiting_reqs);
     metrics
         .kv_cache_usage
         .get_or_create(&labels)

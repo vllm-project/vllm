@@ -35,11 +35,19 @@ pub struct EnginePositionLabels {
     pub position: u32,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct WaitingReasonLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub reason: &'static str,
+}
+
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
 pub struct SchedulerMetrics {
     // Scheduler state gauges.
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
+    pub scheduler_waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
 
     // Prefix-cache counters, including the connector-backed external cache path.
@@ -81,6 +89,16 @@ impl SchedulerMetrics {
             "vllm:num_requests_waiting",
             "Number of requests waiting to be processed",
             scheduler_waiting.clone(),
+        );
+
+        let scheduler_waiting_by_reason = Family::default();
+        registry.register(
+            "vllm:num_requests_waiting_by_reason",
+            "Number of waiting requests by reason. \
+             Reason labels: 'capacity' = waiting for scheduling capacity; \
+             'deferred' = deferred by transient constraints (LoRA budget, KV transfer, \
+             blocked status). Sum of all reasons equals vllm:num_requests_waiting.",
+            scheduler_waiting_by_reason.clone(),
         );
 
         let kv_cache_usage = Family::default();
@@ -198,6 +216,7 @@ impl SchedulerMetrics {
         Self {
             scheduler_running,
             scheduler_waiting,
+            scheduler_waiting_by_reason,
             kv_cache_usage,
             prefix_cache_queries,
             prefix_cache_hits,

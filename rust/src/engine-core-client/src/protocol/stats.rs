@@ -155,21 +155,22 @@ pub struct CudagraphStat {
 /// Stats associated with the scheduler.
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L170-L197>
+/// <https://github.com/vllm-project/vllm/blob/906a8c15d0beded2cca8b357877266c631340f74/vllm/v1/metrics/stats.py#L170-L196>
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerStats {
     /// Number of requests in model execution batches.
     pub num_running_reqs: u64,
-    /// Number of requests waiting to be processed.
+    /// Length of the "waiting" request queue.
     pub num_waiting_reqs: u64,
+    /// Length of the "skipped waiting" queue.
+    #[serde(default)]
+    pub num_skipped_waiting_reqs: u64,
     /// Internal DP load-balancing step counter.
     pub step_counter: u64,
     /// Internal DP load-balancing wave number.
     pub current_wave: u64,
     /// KV-cache usage. `1.0` means 100% usage.
     pub kv_cache_usage: f64,
-    /// Encoder cache usage fraction.
-    pub encoder_cache_usage: f64,
     /// Local prefix cache statistics.
     pub prefix_cache_stats: PrefixCacheStats,
     /// External connector prefix cache statistics, when configured.
