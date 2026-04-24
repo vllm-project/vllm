@@ -38,6 +38,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import get_max_num_blocks
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -573,6 +574,22 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if self.scheduler_config.min_free_block_ratio > 0:
+                    num_blocks_new_req = get_max_num_blocks(
+                        self.vllm_config, self.kv_cache_config, request.num_tokens
+                    )
+                    if (
+                        (
+                            self.kv_cache_manager.block_pool.get_num_free_blocks()
+                            - num_blocks_new_req
+                        )
+                        / self.kv_cache_manager.block_pool.num_gpu_blocks
+                        < self.scheduler_config.min_free_block_ratio
+                    ):
+                        # avoid scheduling new requests when kv cache usage is high.
+                        # This is to avoid preemption
+                        break
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(

@@ -38,7 +38,7 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
 
     monkeypatch.setattr(
         "vllm.v1.core.kv_cache_utils.max_memory_usage_bytes",
-        lambda c, s: 100 * 1024**3,  # 100 GiB
+        lambda c, s, m: 100 * 1024**3,  # 100 GiB
     )
 
     spec = {
