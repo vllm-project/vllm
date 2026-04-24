@@ -244,7 +244,7 @@ lazy-loader==0.5
     #   scikit-image
 librosa==0.10.2.post1
     # via -r requirements/test/xpu.in
-llvmlite==0.44.0
+llvmlite==0.47.0
     # via numba
 lm-eval==0.4.11
     # via -r requirements/test/xpu.in
@@ -304,7 +304,7 @@ nltk==3.9.4
     # via rouge-score
 num2words==0.5.14
     # via -r requirements/test/xpu.in
-numba==0.61.2
+numba==0.65.0
     # via
     #   -c requirements/xpu.txt
     #   librosa
