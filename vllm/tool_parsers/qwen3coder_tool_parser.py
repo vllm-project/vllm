@@ -110,6 +110,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
         self._sent_content_idx = 0
+        self.current_tool_index = 0
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
