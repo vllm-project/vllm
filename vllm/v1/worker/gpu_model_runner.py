@@ -577,7 +577,9 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler, self.speculative_config, self.device
+            )
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
@@ -2155,6 +2157,7 @@ class GPUModelRunner(
             :num_reqs_padded
         ]
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
+        seq_lens_cpu_upper_bound = seq_lens_cpu
 
         # is_prefilling: True if request is still in prefill phase.
         # Used by mamba backends to distinguish actual decodes from
@@ -2172,6 +2175,7 @@ class GPUModelRunner(
             seq_lens=self.seq_lens[:num_reqs_padded],
             _seq_lens_cpu=seq_lens_cpu,
             _num_computed_tokens_cpu=num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -4855,7 +4859,6 @@ class GPUModelRunner(
             "Model loading took %s GiB memory and %.6f seconds",
             format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
-            scope="local",
         )
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
@@ -4989,7 +4992,7 @@ class GPUModelRunner(
             )
 
         # begin loading weights
-        logger.info_once("Reloading weights inplace...", scope="local")
+        logger.info_once("Reloading weights inplace...")
         if is_checkpoint_format:
             # load weights from checkpoint/ original model format
             initialize_layerwise_reload(model)
@@ -5001,7 +5004,6 @@ class GPUModelRunner(
             logger.warning_once(
                 "Reloading with `is_checkpoint_format=True` requires that "
                 "weights be in kernel format and already sharded",
-                scope="local",
             )
             loaded_weights = set()
             for name, loaded_weight in weights_iterator:
@@ -5015,7 +5017,6 @@ class GPUModelRunner(
         logger.info_once(
             "Reloading and processing weights took %.2f seconds",
             diff_seconds,
-            scope="local",
         )
         if self.model_config.quantization is None and loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
@@ -5802,7 +5803,6 @@ class GPUModelRunner(
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
-                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
@@ -6099,7 +6099,6 @@ class GPUModelRunner(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
             elapsed_time,
             cuda_graph_size / (1 << 30),
-            scope="local",
         )
         return cuda_graph_size
 

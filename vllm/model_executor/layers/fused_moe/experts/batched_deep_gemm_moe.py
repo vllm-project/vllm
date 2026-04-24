@@ -369,7 +369,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             logger.warning_once(
                 "DPMetadata unavailable. Defaulting expected_m to "
                 f"{max_tokens_per_expert}.",
-                scope="local",
             )
             return max_tokens_per_expert
 

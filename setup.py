@@ -927,7 +927,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
+        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+        if VLLM_TARGET_DEVICE == "cpu":
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
@@ -1107,7 +1109,7 @@ setup(
         #   - .buildkite/test-amd.yaml
         "helion": ["helion==1.0.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",
