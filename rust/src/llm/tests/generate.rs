@@ -6,6 +6,7 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, Logprobs, MaybeWireLogprobs,
@@ -47,8 +48,7 @@ fn request_output_with_events(
         events,
         kv_transfer_params: None,
         trace_headers: None,
-        num_cached_tokens: 0,
-        num_external_computed_tokens: 0,
+        prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
     }
@@ -72,8 +72,7 @@ fn request_output_with_logprobs(
         events: None,
         kv_transfer_params: None,
         trace_headers: None,
-        num_cached_tokens: 0,
-        num_external_computed_tokens: 0,
+        prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
     }
@@ -98,8 +97,7 @@ fn request_output_with_logprobs_and_kv(
         events: None,
         kv_transfer_params,
         trace_headers: None,
-        num_cached_tokens: 0,
-        num_external_computed_tokens: 0,
+        prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
     }
@@ -585,21 +583,28 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                     EngineCoreOutputs {
                         engine_index: 4,
                         timestamp: 10.0,
-                        outputs: vec![request_output_with_events(
-                            &request.request_id,
-                            vec![1],
-                            None,
-                            Some(vec![
-                                EngineCoreEvent {
-                                    r#type: EngineCoreEventType::Queued,
-                                    timestamp: 8.0,
-                                },
-                                EngineCoreEvent {
-                                    r#type: EngineCoreEventType::Scheduled,
-                                    timestamp: 9.0,
-                                },
-                            ]),
-                        )],
+                        outputs: vec![EngineCoreOutput {
+                            prefill_stats: Some(PrefillStats {
+                                num_prompt_tokens: 2,
+                                num_computed_tokens: 2,
+                                ..Default::default()
+                            }),
+                            ..request_output_with_events(
+                                &request.request_id,
+                                vec![1],
+                                None,
+                                Some(vec![
+                                    EngineCoreEvent {
+                                        r#type: EngineCoreEventType::Queued,
+                                        timestamp: 8.0,
+                                    },
+                                    EngineCoreEvent {
+                                        r#type: EngineCoreEventType::Scheduled,
+                                        timestamp: 9.0,
+                                    },
+                                ]),
+                            )
+                        }],
                         ..Default::default()
                     },
                 )
@@ -657,9 +662,6 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_recomputed_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
     )));
     assert!(rendered.contains(&format!(
         "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"

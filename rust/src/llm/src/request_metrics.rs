@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType, EngineCoreOutput};
 use vllm_metrics::{
     EngineLabels, FinishedReasonLabels, METRICS, PromptTokenSourceLabels, RequestMetrics,
@@ -82,7 +83,9 @@ impl RequestMetricsTracker {
         output: &EngineCoreOutput,
     ) {
         self.last_seen_engine_index = engine_index;
-        self.latest_num_cached_tokens = output.num_cached_tokens;
+        if let Some(prefill_stats) = &output.prefill_stats {
+            self.latest_num_cached_tokens = prefill_stats.num_cached_tokens;
+        }
         self.num_generation_tokens += output.new_token_ids.len() as u32;
         metrics()
             .generation_tokens
@@ -94,13 +97,9 @@ impl RequestMetricsTracker {
         }
 
         if self.is_prefilling {
-            record_prompt_tokens(
-                &self.model_name,
-                engine_index,
-                self.prompt_len,
-                output.num_cached_tokens,
-                output.num_external_computed_tokens,
-            );
+            if let Some(prefill_stats) = &output.prefill_stats {
+                record_prompt_tokens(&self.model_name, engine_index, prefill_stats);
+            }
             self.first_token_latency = received_at - self.arrival_time;
             observe_time_to_first_token_seconds(
                 &self.model_name,
@@ -260,24 +259,15 @@ fn prompt_token_source_labels(
     }
 }
 
-fn record_prompt_tokens(
-    model_name: &str,
-    engine: u32,
-    prompt_len: u32,
-    num_cached_tokens: u32,
-    num_external_computed_tokens: u32,
-) {
-    let recomputed = u64::from(num_cached_tokens + 1 == prompt_len);
-    let computed = prompt_len.saturating_sub(num_cached_tokens) as u64;
-    let external_kv_transfer = num_external_computed_tokens as u64;
-    let local_cache_hit = (num_cached_tokens as u64)
-        .saturating_add(recomputed)
-        .saturating_sub(external_kv_transfer);
+fn record_prompt_tokens(model_name: &str, engine: u32, prefill_stats: &PrefillStats) {
+    let computed = prefill_stats.num_computed_tokens as u64;
+    let local_cache_hit = prefill_stats.num_local_cached_tokens as u64;
+    let external_kv_transfer = prefill_stats.num_external_cached_tokens as u64;
 
     metrics()
         .prompt_tokens
         .get_or_create(&engine_labels(model_name, engine))
-        .inc_by(prompt_len as u64);
+        .inc_by(prefill_stats.num_prompt_tokens as u64);
     metrics()
         .prompt_tokens_by_source
         .get_or_create(&prompt_token_source_labels(
@@ -305,11 +295,7 @@ fn record_prompt_tokens(
     metrics()
         .prompt_tokens_cached
         .get_or_create(&engine_labels(model_name, engine))
-        .inc_by(num_cached_tokens as u64);
-    metrics()
-        .prompt_tokens_recomputed
-        .get_or_create(&engine_labels(model_name, engine))
-        .inc_by(recomputed);
+        .inc_by(prefill_stats.num_cached_tokens as u64);
 }
 
 fn diff_or_zero(end: f64, start: f64) -> f64 {
@@ -337,6 +323,7 @@ pub(crate) fn current_unix_timestamp_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use vllm_engine_core_client::protocol::stats::PrefillStats;
     use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType};
 
     use super::{RequestMetricsTracker, diff_or_zero};
@@ -363,7 +350,13 @@ mod tests {
                         timestamp: 9.0,
                     },
                 ]),
-                num_cached_tokens: 4,
+                prefill_stats: Some(PrefillStats {
+                    num_prompt_tokens: 64,
+                    num_computed_tokens: 60,
+                    num_cached_tokens: 4,
+                    num_local_cached_tokens: 4,
+                    num_external_cached_tokens: 0,
+                }),
                 ..Default::default()
             },
         );
@@ -379,7 +372,6 @@ mod tests {
                     r#type: EngineCoreEventType::Preempted,
                     timestamp: 10.5,
                 }]),
-                num_cached_tokens: 4,
                 ..Default::default()
             },
         );

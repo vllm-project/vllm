@@ -75,6 +75,33 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens_per_pos: Vec<u64>,
 }
 
+/// Breakdown of a scheduled prefill computation.
+///
+/// Python models this as a plain `@dataclass`, so it is serialized by msgspec
+/// as a map (named fields) rather than in the array-like form used by
+/// `EngineCoreOutput` itself.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/metrics/stats.py#L242-L273>
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefillStats {
+    /// Total number of tokens to be prefilled.
+    #[serde(default)]
+    pub num_prompt_tokens: u32,
+    /// Tokens to be prefilled locally (actual compute work).
+    #[serde(default)]
+    pub num_computed_tokens: u32,
+    /// Tokens to be prefilled without actual compute work.
+    #[serde(default)]
+    pub num_cached_tokens: u32,
+    /// Tokens to be prefilled from local prefix cache.
+    #[serde(default)]
+    pub num_local_cached_tokens: u32,
+    /// Tokens to be prefilled from external KV transfer.
+    #[serde(default)]
+    pub num_external_cached_tokens: u32,
+}
+
 /// Stats for debugging the metrics calculation.
 ///
 /// Original Python definition:

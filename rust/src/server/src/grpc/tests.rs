@@ -92,8 +92,7 @@ fn request_output(
         events: None,
         kv_transfer_params: None,
         trace_headers: None,
-        num_cached_tokens: 0,
-        num_external_computed_tokens: 0,
+        prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
     }

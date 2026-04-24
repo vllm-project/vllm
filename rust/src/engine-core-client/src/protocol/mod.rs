@@ -11,7 +11,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use thiserror_ext::AsReport;
 
 use crate::error::{Error, Result, value_encode_ext};
-use crate::protocol::stats::SchedulerStats;
+use crate::protocol::stats::{PrefillStats, SchedulerStats};
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
 // (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and future
@@ -401,7 +401,7 @@ impl EngineCoreUtilityRequest {
 /// Engine-core output for a single request.
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L140-L171>
+/// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/engine/__init__.py#L154-L184>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
@@ -424,12 +424,10 @@ pub struct EngineCoreOutput {
     pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
-    /// Number of tokens with prefix-cache hits, local plus external.
+    /// Breakdown of the scheduled prefill computation, set on the first output
+    /// of a newly scheduled prefill and elided for subsequent decode outputs.
     #[serde(default)]
-    pub num_cached_tokens: u32,
-    /// Number of tokens computed remotely, preserving the original connector count.
-    #[serde(default)]
-    pub num_external_computed_tokens: u32,
+    pub prefill_stats: Option<PrefillStats>,
     #[serde(default)]
     pub routed_experts: Option<OpaqueValue>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
@@ -631,8 +629,7 @@ mod tests {
                 events: None,
                 kv_transfer_params: None,
                 trace_headers: None,
-                num_cached_tokens: 0,
-                num_external_computed_tokens: 0,
+                prefill_stats: None,
                 routed_experts: None,
                 num_nans_in_logits: 0,
             }],

@@ -87,7 +87,6 @@ pub struct RequestMetrics {
     pub prompt_tokens: Family<EngineLabels, U64Counter>,
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
-    pub prompt_tokens_recomputed: Family<EngineLabels, U64Counter>,
     pub generation_tokens: Family<EngineLabels, U64Counter>,
 
     // We intentionally don't support iteration-level histograms for now, since it seems to make
@@ -143,13 +142,6 @@ impl RequestMetrics {
             "vllm:prompt_tokens_cached",
             "Number of prompt tokens with prefix cache hits.",
             prompt_tokens_cached.clone(),
-        );
-
-        let prompt_tokens_recomputed = Family::default();
-        registry.register(
-            "vllm:prompt_tokens_recomputed",
-            "Number of cached prompt tokens recomputed during prefill.",
-            prompt_tokens_recomputed.clone(),
         );
 
         let generation_tokens = Family::default();
@@ -285,7 +277,6 @@ impl RequestMetrics {
             prompt_tokens,
             prompt_tokens_by_source,
             prompt_tokens_cached,
-            prompt_tokens_recomputed,
             generation_tokens,
             request_success,
             request_prompt_tokens,

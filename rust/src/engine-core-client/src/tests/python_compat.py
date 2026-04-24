@@ -84,8 +84,7 @@ class EngineCoreOutput(
     events: object | None = None
     kv_transfer_params: object | None = None
     trace_headers: object | None = None
-    num_cached_tokens: int = 0
-    num_external_computed_tokens: int = 0
+    prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
 
