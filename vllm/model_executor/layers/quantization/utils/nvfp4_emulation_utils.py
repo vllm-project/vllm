@@ -37,13 +37,13 @@ def _e2m1_inline(magnitude):
     b0 = magnitude & 1  # LSB
 
     # For mag 0-3: [0.0, 0.5, 1.0, 1.5]
-    low_group = tl.where(b1 == 1,
-                         tl.where(b0 == 1, 1.5, 1.0),
-                         tl.where(b0 == 1, 0.5, 0.0))
+    low_group = tl.where(
+        b1 == 1, tl.where(b0 == 1, 1.5, 1.0), tl.where(b0 == 1, 0.5, 0.0)
+    )
     # For mag 4-7: [2.0, 3.0, 4.0, 6.0]
-    high_group = tl.where(b1 == 1,
-                          tl.where(b0 == 1, 6.0, 4.0),
-                          tl.where(b0 == 1, 3.0, 2.0))
+    high_group = tl.where(
+        b1 == 1, tl.where(b0 == 1, 6.0, 4.0), tl.where(b0 == 1, 3.0, 2.0)
+    )
     return tl.where(b2 == 1, high_group, low_group)
 
 
