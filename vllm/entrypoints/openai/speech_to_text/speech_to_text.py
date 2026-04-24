@@ -5,7 +5,7 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Set
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -67,6 +67,17 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+
+def asr_inter_chunk_separator(
+    language: str | None, no_space_languages: Set[str]
+) -> str:
+    """Space to insert between ASR text chunks for streaming and non-streaming join.
+
+    Languages in ``no_space_languages`` (e.g. Chinese, Japanese) use an empty
+    separator; others use a single ASCII space.
+    """
+    return "" if language and language.lower() in no_space_languages else " "
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -173,9 +184,8 @@ class OpenAISpeechToText(OpenAIServing):
         request_id: str,
     ) -> tuple[list[EngineInput], float]:
         # Validate request
-        language = self.model_cls.validate_language(request.language)
-        # Skip to_language validation to avoid extra logging for Whisper.
-        to_language = (
+        request.language = self.model_cls.validate_language(request.language)
+        request.to_language = (
             self.model_cls.validate_language(request.to_language)
             if request.to_language
             else None
@@ -218,28 +228,23 @@ class OpenAISpeechToText(OpenAIServing):
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
 
-        if language is None and getattr(
+        if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
             # Auto-detect language from the first chunk.
-            language = await self._detect_language(
+            request.language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
             )
-            request.language = language
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
-            # The model has control over the construction, as long as it
-            # returns a valid PromptType.
-            prompt = self.model_cls.get_generation_prompt(
+            stt_params = request.build_stt_params(
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
-                to_language=to_language,
             )
+            prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
             if request.response_format == "verbose_json":
@@ -378,6 +383,9 @@ class OpenAISpeechToText(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if not request.model:
+            request.model = self.models.model_name()
+
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
@@ -486,9 +494,18 @@ class OpenAISpeechToText(OpenAIServing):
 
             list_result_generator.append(generator)
 
+        separator = asr_inter_chunk_separator(
+            request.language, self.model_cls.no_space_languages
+        )
+
         if request.stream:
             return stream_generator_method(
-                request, list_result_generator, request_id, request_metadata, duration_s
+                request,
+                list_result_generator,
+                request_id,
+                request_metadata,
+                duration_s,
+                separator,
             )
         # Non-streaming response.
         total_segments = []
@@ -500,7 +517,6 @@ class OpenAISpeechToText(OpenAIServing):
                 "translate": TranslationSegment,
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
-            text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
             if chunk_size_in_s is None:
                 assert len(list_result_generator) == 1, (
@@ -528,7 +544,7 @@ class OpenAISpeechToText(OpenAIServing):
                     else:
                         raw_text = op.outputs[0].text
                         text_parts.append(self.model_cls.post_process_output(raw_text))
-            text = "".join(text_parts)
+            text = separator.join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
@@ -581,6 +597,7 @@ class OpenAISpeechToText(OpenAIServing):
         | type[TranslationResponseStreamChoice],
         stream_response_class: type[TranscriptionStreamResponse]
         | type[TranslationStreamResponse],
+        separator: str,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
@@ -597,6 +614,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         try:
             for result_generator in list_result_generator:
+                beginning_of_chunk = True
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -613,6 +631,14 @@ class OpenAISpeechToText(OpenAIServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
+
+                    # dont add separator to the first chunk
+                    if (
+                        result_generator is not list_result_generator[0]
+                        and beginning_of_chunk
+                    ):
+                        output.text = separator + output.text
+                        beginning_of_chunk = False
 
                     # TODO: For models that output structured formats (e.g.,
                     # Qwen3-ASR with "language X<asr_text>" prefix), streaming

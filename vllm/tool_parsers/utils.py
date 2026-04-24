@@ -31,6 +31,19 @@ Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 logger = init_logger(__name__)
 
 
+def partial_tag_overlap(text: str, tag: str) -> int:
+    """Length of the longest prefix of *tag* that matches a suffix of *text*.
+
+    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
+    Returns 0 when there is no overlap.
+    """
+    max_check = min(len(tag) - 1, len(text))
+    for k in range(max_check, 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
+
+
 def find_common_prefix(s1: str, s2: str) -> str:
     """
     Finds a common prefix that is shared between two strings, if there is one.

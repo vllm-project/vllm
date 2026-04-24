@@ -301,7 +301,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
 
         # Check if thinking is enabled
-        self.is_enabled = reasoning_config is not None
+        self.is_enabled = reasoning_config is not None and reasoning_config.enabled
 
         self.reasoning_start_token_ids = getattr(
             reasoning_config, "reasoning_start_token_ids", []

@@ -80,6 +80,21 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
+def _make_control_bundle(node_ip: str) -> dict[str, float]:
+    # The engine actor is scheduled on the final CPU-only bundle. Keep that
+    # bundle colocated with the group's first GPU bundle so the actor does not
+    # float to an unrelated node and reorder worker ranks away from the
+    # advertised DP bootstrap host.
+    return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+
+def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
+    for key in bundle:
+        if key.startswith("node:"):
+            return key.split(":", 1)[1]
+    raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -597,10 +612,20 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    control_node_ip = _get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        _make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
-                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+                    # STRICT_PACK already keeps every bundle in the placement
+                    # group on one node, so the explicit node affinity on the
+                    # control bundle is redundant for correctness here. Keep it
+                    # anyway for consistency with the span path and to preserve
+                    # intent if this scheduling strategy changes later.
+                    bundles = device_bundle * world_size + [
+                        _make_control_bundle(node_ip)
+                    ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
@@ -1212,19 +1237,6 @@ def wait_for_engine_startup(
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
-            # Setup KV cache config with initialization state from
-            # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg["num_gpu_blocks"]
-            cache_config.num_gpu_blocks = num_gpu_blocks
-
-            # In external DP LB mode, the coordinator address that the
-            # front-end procs connect to is obtained from rank 0 via
-            # one of the engine handshakes, and passed to the local
-            # front-end process in the response from the other.
-            if addresses.frontend_stats_publish_address is None:
-                addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
-
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")

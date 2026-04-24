@@ -46,7 +46,7 @@ mock_if_no_torch(
 
 
 # Mock any version checks by reading from compiled CI requirements
-with open(ROOT_DIR / "requirements/test.txt") as f:
+with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
     VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 

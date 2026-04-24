@@ -4,11 +4,11 @@
 from collections.abc import Sequence
 from typing import Any
 
-import librosa
 import pytest
 from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.assets.audio import AudioAsset
+from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
@@ -93,13 +93,12 @@ def run_test(
 def resampled_assets() -> list[tuple[Any, int]]:
     audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
     sampled_assets = []
+    resampler = AudioResampler(target_sr=WHISPER_SAMPLE_RATE)
     for asset in audio_assets:
         audio, orig_sr = asset.audio_and_sample_rate
         # Resample to Whisper's expected sample rate (16kHz)
         if orig_sr != WHISPER_SAMPLE_RATE:
-            audio = librosa.resample(
-                audio, orig_sr=orig_sr, target_sr=WHISPER_SAMPLE_RATE
-            )
+            audio = resampler.resample(audio, orig_sr=orig_sr)
         sampled_assets.append(
             (audio, WHISPER_SAMPLE_RATE),
         )

@@ -548,7 +548,13 @@ class MultiConnector(KVConnectorBase_V1):
             if stats_by_connector is None:
                 # Lazy init to allow optional return value.
                 stats_by_connector = MultiKVConnectorStats()
-            stats_by_connector[c.__class__.__name__] = stats
+            connector_id = c.__class__.__name__
+            if connector_id in stats_by_connector.data:
+                stats_by_connector[connector_id] = stats_by_connector[
+                    connector_id
+                ].aggregate(stats)
+            else:
+                stats_by_connector[connector_id] = stats
         return stats_by_connector
 
     @classmethod
@@ -560,9 +566,13 @@ class MultiConnector(KVConnectorBase_V1):
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
+        seen_classes: set[type] = set()
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
             vllm_config
         ):
+            if connector_cls in seen_classes:
+                continue
+            seen_classes.add(connector_cls)
             connector_prom = connector_cls.build_prom_metrics(
                 temp_config, metric_types, labelnames, per_engine_labelvalues
             )

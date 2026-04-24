@@ -916,9 +916,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                             loaded_weight=loaded_weight, shard_id=idx
                         )
                 else:
-                    param.load_merged_column_weight(
-                        loaded_weight=loaded_weight, shard_id=0
-                    )
+                    # When weights are already fused on disk (e.g. Phi-3's
+                    # gate_up_proj), there is only a single scale for the
+                    # entire fused matrix. Fill all slots with this scale
+                    # to ensure that any subsequent reduction (like .max())
+                    # works correctly while preserving the parameter shape.
+                    for idx in range(param.data.shape[0]):
+                        param.load_merged_column_weight(
+                            loaded_weight=loaded_weight, shard_id=idx
+                        )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
@@ -1130,9 +1136,15 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.validate_shard_id(loaded_shard_id)
         if loaded_shard_id is None:  # special case for certain models
             if isinstance(param, PerTensorScaleParameter):
-                param.load_qkv_weight(
-                    loaded_weight=loaded_weight, shard_id=0, tp_rank=self.tp_rank
-                )
+                # When weights are already fused on disk (e.g. Phi-3's
+                # qkv_proj), there is only a single scale for the entire
+                # fused matrix. Fill all slots (q, k, v) with this scale
+                # to ensure that any subsequent reduction (like .max())
+                # works correctly while preserving the parameter shape.
+                for idx in range(param.data.shape[0]):
+                    param.load_qkv_weight(
+                        loaded_weight=loaded_weight, shard_id=idx, tp_rank=self.tp_rank
+                    )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_qkv_weight(loaded_weight=loaded_weight, tp_rank=self.tp_rank)

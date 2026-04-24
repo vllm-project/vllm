@@ -122,8 +122,6 @@ def test_linear_decode_forward_triton(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
     set_random_seed(42)
     base = 0.01
     q = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
@@ -165,8 +163,6 @@ def test_linear_decode_forward_triton_with_padding(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
     set_random_seed(42)
 
     batch_size = 4
@@ -229,8 +225,6 @@ def test_lightning_attention_reference(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
     set_random_seed(42)
 
     base = 0.01

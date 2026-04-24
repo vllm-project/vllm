@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <torch/library.h>
 #include <tuple>
 
@@ -96,7 +97,8 @@ void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,
                         int64_t head_dim, double eps, torch::Tensor& q_weight,
                         torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
-                        bool is_neox, torch::Tensor& position_ids);
+                        bool is_neox, torch::Tensor& position_ids,
+                        int64_t forced_token_heads_per_warp);
 
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
@@ -308,4 +310,16 @@ int64_t qr_max_size();
 #ifndef USE_ROCM
 void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
                        torch::Tensor const& mat_b);
+#endif
+
+#ifndef USE_ROCM
+torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
+                                    torch::Tensor const& norm_weight,
+                                    torch::Tensor workspace, int64_t const rank,
+                                    int64_t const nranks, double const eps);
+std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
+    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
+    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
+    int64_t const q_size, int64_t const kv_size, int64_t const rank,
+    int64_t const nranks, double const eps);
 #endif

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -8,7 +9,11 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -16,6 +21,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+
+
+@dataclass(frozen=True)
+class AttentionCGSupportInfo:
+    min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend: str | None = None
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -34,10 +45,17 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
-):
+) -> tuple[
+    dict[str, type[AttentionBackend]],
+    list[list[AttentionGroup]],
+    AttentionCGSupportInfo,
+]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
     attn_backend_workspace: torch.Tensor | None = None
+    # Find minimum cudagraph support across all attention backends
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
         kv_cache_config.kv_cache_groups
     ):
@@ -86,8 +104,24 @@ def init_attn_backend(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
+            # Check cudagraph support for the attention backend
+            cg_support = builder.get_cudagraph_support(
+                vllm_config,
+                cast(AttentionSpec, kv_cache_group_spec.kv_cache_spec),
+            )
+            if cg_support.value < min_cg_support.value:
+                min_cg_support = cg_support
+                min_cg_attn_backend = attn_backend.__name__
         attn_groups.append(groups)
-    return attn_backends, attn_groups
+
+    return (
+        attn_backends,
+        attn_groups,
+        AttentionCGSupportInfo(
+            min_cg_support=min_cg_support,
+            min_cg_attn_backend=min_cg_attn_backend,
+        ),
+    )
 
 
 def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
@@ -110,7 +144,7 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
@@ -158,7 +192,7 @@ def init_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
@@ -193,12 +227,15 @@ def build_attn_metadata(
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
+    if seq_lens_cpu_upper_bound is not None:
+        seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
@@ -210,6 +247,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             max_seq_len=max_seq_len,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
