@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.flash_sampler_utils import flash_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
     DecodeEagleCudaGraphManager,
@@ -68,6 +69,9 @@ class EagleSpeculator:
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        
+        # TP configuration
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -164,6 +168,9 @@ class EagleSpeculator:
         self.draft_attn_layer_names = set(all_attn_layers) - set(
             target_attn_layer_names
         )
+        self.flash_sampling_config = getattr(
+            self.model, "get_flash_sampling_config", lambda: None
+        )()
 
     def set_attn(
         self,
@@ -230,28 +237,52 @@ class EagleSpeculator:
 
     def _sample_draft(
         self,
-        logits: torch.Tensor,
+        hidden_states: torch.Tensor,
         idx_mapping: torch.Tensor,
-        pos: torch.Tensor,
+        positions: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
     ) -> torch.Tensor:
-        if draft_logits is not None:
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
-            return gumbel_sample(
-                logits,
+        num_tokens = hidden_states.shape[0]
+        use_flash_sampling = (
+            self.flash_sampling_config is not None
+            and num_tokens <= self.flash_sampling_config.max_num_flash_tokens
+            and not (self.tp_size > 1 and draft_logits is not None)
+            and False
+        )
+        if use_flash_sampling:
+            # Flash sample. The full logits tensor is never materialized.
+            sampled, _ = flash_sample(
+                hidden_states,
+                positions + 1,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
-                pos + 1,
-                apply_temperature=True,
+                self.flash_sampling_config.lm_head_weight,
+                self.flash_sampling_config.shard_indices,
+                use_greedy=draft_logits is None,
                 output_processed_logits=draft_logits,
                 output_processed_logits_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
+            return sampled.view(-1)
         else:
-            return logits.argmax(dim=-1)
+            logits = self.model.compute_logits(hidden_states)
+            if draft_logits is not None:
+                # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+                # used for draft and target sampling.
+                return gumbel_sample(
+                    logits,
+                    idx_mapping,
+                    self.temperature,
+                    self.seeds,
+                    positions + 1,
+                    apply_temperature=True,
+                    output_processed_logits=draft_logits,
+                    output_processed_logits_col=draft_step,
+                )
+            else:
+                return logits.argmax(dim=-1)
 
     def prefill(
         self,
@@ -276,10 +307,9 @@ class EagleSpeculator:
             mm_inputs=mm_inputs,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
-
+        
         self.draft_tokens[:num_reqs, 0] = self._sample_draft(
-            logits,
+            sample_hidden_states,
             idx_mapping,
             pos,
             self.current_draft_step,
@@ -361,9 +391,8 @@ class EagleSpeculator:
         last_hidden_states = last_hidden_states[:num_reqs]
 
         # Sample the draft tokens.
-        logits = self.model.compute_logits(last_hidden_states)
         draft_tokens = self._sample_draft(
-            logits,
+            last_hidden_states,
             idx_mapping,
             positions,
             self.current_draft_step,

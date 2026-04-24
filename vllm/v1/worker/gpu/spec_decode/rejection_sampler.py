@@ -3,6 +3,7 @@
 import torch
 
 from vllm.config import SpeculativeConfig
+from vllm.v1.worker.gpu.sample.flash_sampler_utils import FlashSamplingConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
@@ -12,6 +13,9 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+# from vllm.v1.worker.gpu.spec_decode.flash_rejection_sampler_utils import (
+#     flash_rejection_sample,
+# )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -43,6 +47,7 @@ class RejectionSampler:
         sampler: Sampler,
         spec_config: SpeculativeConfig,
         device: torch.device,
+        use_fp64_gumbel: bool = False,
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
@@ -57,6 +62,8 @@ class RejectionSampler:
                 dtype=torch.float32,
                 device=device,
             )
+        self.flash_target_logits_cache: torch.Tensor | None = None
+        self.use_fp64_gumbel = use_fp64_gumbel
 
     def _get_logprobs_tensors(
         self,
@@ -96,7 +103,7 @@ class RejectionSampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
-        draft_logits: torch.Tensor | None = None,
+        draft_logits: torch.Tensor | None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -140,5 +147,68 @@ class RejectionSampler:
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
+            num_sampled=num_sampled,
+        )
+
+
+    def _init_flash_target_logits_cache(
+        self,
+        config: FlashSamplingConfig,
+        device: torch.device,
+    ) -> None:
+        shard_vocab_size = config.shard_indices.num_org_elements
+        self.flash_target_logits_cache = torch.empty(
+            config.max_num_flash_tokens,
+            shard_vocab_size,
+            dtype=config.lm_head_weight.dtype,
+            device=device,
+        )
+
+    def flash_sample(
+        self,
+        hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        draft_logits: torch.Tensor | None,
+        config: FlashSamplingConfig,
+    ) -> SamplerOutput:
+        if False:
+            from vllm.v1.worker.gpu.spec_decode.flash_rejection_sampler_utils import (
+                flash_rejection_sample,
+            )
+
+            num_tokens = hidden_states.shape[0]
+            assert num_tokens <= config.max_num_flash_tokens
+            if self.flash_target_logits_cache is None:
+                self._init_flash_target_logits_cache(
+                    config, hidden_states.device,
+                )
+        else:
+            from vllm.v1.worker.gpu.spec_decode.flash_rejection_sampler_utils_v2 import (
+                flash_rejection_sample,
+            )
+
+        
+        sampled, num_sampled = flash_rejection_sample(
+            hidden_states,
+            draft_logits,
+            input_batch.input_ids[input_batch.logits_indices],
+            input_batch.cu_num_logits,
+            input_batch.positions[input_batch.logits_indices],
+            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            config.lm_head_weight,
+            config.shard_indices,
+            self.flash_target_logits_cache,
+            self.num_speculative_steps,
+            target_logits_scale=config.logits_scale,
+            use_fp64=self.use_fp64_gumbel,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
             num_sampled=num_sampled,
         )

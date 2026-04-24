@@ -225,6 +225,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler,
                     self.speculative_config,
                     self.device,
+                    use_fp64_gumbel=self.model_config.use_fp64_gumbel,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
             self.structured_outputs_worker = StructuredOutputsWorker(
@@ -301,6 +302,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prepare_communication_buffer_for_model(self.model)
             if self.speculator is not None:
                 prepare_communication_buffer_for_model(self.speculator.model)
+
+        self.flash_sampling_config = getattr(
+            self.model, "get_flash_sampling_config", lambda: None
+        )()
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
@@ -927,31 +932,57 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
-        if grammar_output is not None:
-            # Apply grammar bitmask to the logits in-place.
-            assert self.structured_outputs_worker is not None
-            self.structured_outputs_worker.apply_grammar_bitmask(
-                logits,
-                input_batch,
-                grammar_output.structured_output_request_ids,
-                grammar_output.grammar_bitmask,
-            )
-
-        if input_batch.num_draft_tokens == 0:
-            # No draft tokens (common case).
-            assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+        use_flash_sampling = (
+            self.flash_sampling_config is not None
+            and input_batch.num_draft_tokens <= self.flash_sampling_config.max_num_flash_tokens
+            and grammar_output is None
+            and self.sampler is not None
+            and self.sampler.can_flash_sample(input_batch.idx_mapping_np)
+        )
+        if use_flash_sampling:
+            if input_batch.num_draft_tokens == 0:
+                # No draft tokens (common case).
+                sampler_output = self.sampler.flash_sample(
+                    sample_hidden_states,
+                    input_batch,
+                    self.flash_sampling_config,
+                )
+            else:
+                # Rejection sampling for spec decoding.
+                assert self.rejection_sampler is not None
+                assert self.speculator is not None
+                sampler_output = self.rejection_sampler.flash_sample(
+                    sample_hidden_states,
+                    input_batch,
+                    self.speculator.draft_logits,
+                    self.flash_sampling_config,
+                )
         else:
-            # Rejection sampling for spec decoding.
-            assert self.rejection_sampler is not None
-            assert self.speculator is not None
-            sampler_output = self.rejection_sampler(
-                logits,
-                input_batch,
-                # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
-            )
+            logits = self.model.compute_logits(sample_hidden_states)
+            if grammar_output is not None:
+                # Apply grammar bitmask to the logits in-place.
+                assert self.structured_outputs_worker is not None
+                self.structured_outputs_worker.apply_grammar_bitmask(
+                    logits,
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.grammar_bitmask,
+                )
+
+            if input_batch.num_draft_tokens == 0:
+                # No draft tokens (common case).
+                assert self.sampler is not None
+                sampler_output = self.sampler(logits, input_batch)
+            else:
+                # Rejection sampling for spec decoding.
+                assert self.rejection_sampler is not None
+                assert self.speculator is not None
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    # Draft logits are needed for probabilistic rejection sampling.
+                    self.speculator.draft_logits,
+                )
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.

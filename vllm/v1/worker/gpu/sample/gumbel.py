@@ -86,9 +86,9 @@ def gumbel_block_argmax(
     seeds_ptr,
     pos_ptr,
     processed_logits_ptr,
-    processed_logits_stride,
+    processed_logits_stride_0,
+    processed_logits_stride_1,
     processed_logits_col_ptr,
-    vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
 ):
@@ -108,8 +108,8 @@ def gumbel_block_argmax(
             col = 0
         tl.store(
             processed_logits_ptr
-            + req_state_idx * processed_logits_stride
-            + col * vocab_size
+            + req_state_idx * processed_logits_stride_0
+            + col * processed_logits_stride_1
             + block,
             logits,
             mask=mask,
@@ -140,13 +140,91 @@ def gumbel_block_argmax(
 
 
 @triton.jit
+def gumbel_block_argmax_2d(
+    logits,
+    token_idxs,
+    token_mask,
+    vocab_block,
+    vocab_mask,
+    expanded_idx_mapping_ptr,
+    temp_ptr,
+    seeds_ptr,
+    pos_ptr,
+    processed_logits_ptr,
+    processed_logits_stride_0,
+    processed_logits_stride_1,
+    processed_logits_col_ptr,
+    APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+):
+    req_state_idxs = tl.load(
+        expanded_idx_mapping_ptr + token_idxs,
+        mask=token_mask,
+        other=0,
+    )
+    temps = tl.load(temp_ptr + req_state_idxs, mask=token_mask, other=1.0).to(
+        tl.float32
+    )
+    if APPLY_TEMPERATURE:
+        # Apply temperature.
+        # NOTE(woosuk): Match the behavior of _temperature_kernel.
+        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
+        safe_temps = tl.where(temps == 0.0, 1.0, temps)
+        logits = logits / safe_temps[:, None]
+
+    if processed_logits_ptr is not None:
+        # Store the temperature-applied logits.
+        if processed_logits_col_ptr is not None:
+            col = tl.load(processed_logits_col_ptr)
+        else:
+            col = 0
+        tl.store(
+            processed_logits_ptr
+            + req_state_idxs * processed_logits_stride_0
+            + col * processed_logits_stride_1
+            + vocab_block,
+            logits,
+            mask=vocab_mask,
+        )
+
+    # Calculate the seed for gumbel noise.
+    seeds = tl.load(seeds_ptr + req_state_idxs, mask=token_mask, other=0)
+    positions = tl.load(pos_ptr + token_idxs, mask=token_mask, other=0)
+    gumbel_seeds = tl.randint(seeds, positions)
+
+    # fp32 is the default reduction dtype; fp64 is ~1/32–1/64x the throughput
+    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
+    if USE_FP64:
+        logits = logits.to(tl.float64)
+        u = tl_rand64(gumbel_seeds, vocab_block, includes_zero=False)
+    else:
+        u = tl.rand(gumbel_seeds[:, None], vocab_block[None, :])
+        u = tl.maximum(u, _FP32_TINY)
+    
+    gumbel_noise = -tl.log(-tl.log(u))
+    is_greedy = temps == 0.0
+    gumbel_noise = tl.where(is_greedy[:, None], 0.0, gumbel_noise)
+
+    # Apply gumbel noise.
+    logits = tl.where(
+        token_mask[:, None] & vocab_mask[None, :],
+        logits + gumbel_noise,
+        float("-inf"),
+    )
+
+    values, idxs = tl.max(logits, axis=1, return_indices=True)
+    return values, idxs
+
+
+@triton.jit
 def _gumbel_sample_kernel(
     local_argmax_ptr,
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
     processed_logits_ptr,
-    processed_logits_stride,
+    processed_logits_stride_0,
+    processed_logits_stride_1,
     processed_logits_col_ptr,
     logits_ptr,
     logits_stride,
@@ -180,9 +258,9 @@ def _gumbel_sample_kernel(
         seeds_ptr,
         pos_ptr,
         processed_logits_ptr,
-        processed_logits_stride,
+        processed_logits_stride_0,
+        processed_logits_stride_1,
         processed_logits_col_ptr,
-        vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
     )
@@ -215,6 +293,7 @@ def gumbel_sample(
         local_max.stride(0),
         output_processed_logits,
         output_processed_logits.stride(0) if output_processed_logits is not None else 0,
+        output_processed_logits.stride(1) if output_processed_logits is not None else 0,
         output_processed_logits_col,
         logits,
         logits.stride(0),

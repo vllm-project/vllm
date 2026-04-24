@@ -337,6 +337,7 @@ def _resample_kernel(
     # [num_logits]
     pos_ptr,
     vocab_size,
+    vocab_start,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -418,7 +419,7 @@ def _resample_kernel(
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    token_id = vocab_start + block_idx * BLOCK_SIZE + idx
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
@@ -647,6 +648,7 @@ def rejection_sample(
         seed,
         pos,
         vocab_size,
+        0,  # vocab_start (logits are already all-gathered)
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,

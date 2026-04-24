@@ -47,6 +47,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.v1.worker.gpu.sample.flash_sampler_utils import FlashSamplingConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -580,6 +581,24 @@ class LlamaForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_flash_sampling_config(self) -> FlashSamplingConfig | None:
+        if not hasattr(self, "lm_head") or not hasattr(self, "logits_processor"):
+            return None
+        lp = self.logits_processor
+        if lp.soft_cap is not None or lp.logits_as_input:
+            return None
+        logits_scale = None
+        if lp.scale != 1.0:
+            logits_scale = torch.tensor(
+                [lp.scale], dtype=torch.float32,
+                device=self.lm_head.weight.device,
+            )
+        return FlashSamplingConfig(
+            lm_head_weight=self.lm_head.weight,
+            shard_indices=self.lm_head.shard_indices,
+            logits_scale=logits_scale,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(

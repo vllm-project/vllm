@@ -91,6 +91,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.sample.flash_sampler_utils import FlashSamplingConfig
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
@@ -1700,6 +1701,24 @@ class DeepseekV2ForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_flash_sampling_config(self) -> FlashSamplingConfig | None:
+        if not hasattr(self, "lm_head") or not hasattr(self, "logits_processor"):
+            return None
+        lp = self.logits_processor
+        if lp.soft_cap is not None or lp.logits_as_input:
+            return None
+        logits_scale = None
+        if lp.scale != 1.0:
+            logits_scale = torch.tensor(
+                [lp.scale], dtype=torch.float32,
+                device=self.lm_head.weight.device,
+            )
+        return FlashSamplingConfig(
+            lm_head_weight=self.lm_head.weight,
+            shard_indices=self.lm_head.shard_indices,
+            logits_scale=logits_scale,
+        )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales

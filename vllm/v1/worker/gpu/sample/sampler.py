@@ -6,6 +6,10 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.model import LogprobsMode
+from vllm.v1.worker.gpu.sample.flash_sampler_utils import (
+    FlashSamplingConfig,
+    flash_sample,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
@@ -197,3 +201,40 @@ class Sampler:
             use_fp64=self.use_fp64_gumbel,
         )
         return sampled, processed_logits
+
+    def can_flash_sample(self, idx_mapping_np: np.ndarray) -> bool:
+        ss = self.sampling_states
+        return (
+            not np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np])
+            and not np.any(self.penalties_state.use_penalty[idx_mapping_np])
+            and np.all(self.bad_words_state.num_bad_words.np[idx_mapping_np] == 0)
+            and np.all(ss.min_p.np[idx_mapping_np] == 0.0)
+            and np.all(ss.top_k.np[idx_mapping_np] == ss.vocab_size)
+            and np.all(ss.top_p.np[idx_mapping_np] == 1.0)
+            and ss.max_num_logprobs(idx_mapping_np) == NO_LOGPROBS
+            and self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) == 0
+        )
+
+    def flash_sample(
+        self,
+        hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        config: FlashSamplingConfig,
+    ) -> SamplerOutput:
+        sampled, num_sampled = flash_sample(
+            hidden_states,
+            input_batch.positions[input_batch.logits_indices],
+            input_batch.expanded_idx_mapping,
+            self.sampling_states.temperature.gpu,
+            self.sampling_states.seeds.gpu,
+            config.lm_head_weight,
+            config.shard_indices,
+            target_logits_scale=config.logits_scale,
+            use_fp64=self.use_fp64_gumbel,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+        )
