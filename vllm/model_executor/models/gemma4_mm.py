@@ -62,6 +62,8 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .gemma4_mm_utils import get_gemma4_pooled_token_counts
@@ -87,6 +89,29 @@ _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
 # Default video vision batch size — keeps peak memory low during startup
 # profiling on smaller GPUs. Override via mm_processor_kwargs to increase.
 _DEFAULT_VIDEO_VISION_BATCH_SIZE = 1
+
+
+def _validate_video_vision_batch_size(value: object) -> int:
+    if value is None:
+        return _DEFAULT_VIDEO_VISION_BATCH_SIZE
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            "video_vision_batch_size must be a positive integer, "
+            f"got {value!r}."
+        )
+
+    return value
+
+
+def _get_hf_processor_mm_kwargs(
+    mm_kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in mm_kwargs.items()
+        if key != "video_vision_batch_size"
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +211,19 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return params
 
     def get_hf_processor(self, **kwargs: object) -> Gemma4Processor:
-        return self.ctx.get_hf_processor(
-            Gemma4Processor,
-            **kwargs,
+        tokenizer = self.ctx.get_tokenizer()
+        if is_mistral_tokenizer(tokenizer):
+            tokenizer = tokenizer.transformers_tokenizer
+
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        merged_kwargs = _get_hf_processor_mm_kwargs(merged_kwargs)
+        merged_kwargs.pop("tokenizer", None)
+
+        return cached_processor_from_config(
+            self.ctx.model_config,
+            processor_cls=Gemma4Processor,
+            tokenizer=tokenizer,
+            **merged_kwargs,
         )
 
     def validate_num_items(self, modality: str, num_items: int) -> None:
@@ -502,6 +537,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             )
 
         mm_data = dict(mm_data)
+        hf_mm_kwargs = _get_hf_processor_mm_kwargs(mm_kwargs)
 
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
@@ -509,6 +545,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # same vision tower, matching transformers processing_gemma4.py.
         video_outputs: dict[str, Any] = {}
         if videos := mm_data.pop("videos", []):
+            video_vision_batch_size = _validate_video_vision_batch_size(
+                merged_kwargs.get("video_vision_batch_size")
+            )
             processor = self.info.get_hf_processor()
 
             all_video_pixel_values: list[torch.Tensor] = []
@@ -537,7 +576,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 timestamps = [idx / fps for idx in frame_indices]
 
                 # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(mm_kwargs)
+                video_mm_kwargs = dict(hf_mm_kwargs)
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
@@ -602,6 +641,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 "pixel_position_ids_videos": torch.cat(all_video_position_ids, dim=0),
                 "video_frame_counts": torch.tensor(video_frame_counts),
                 "video_num_soft_tokens": video_num_soft_tokens_per_video,
+                "video_vision_batch_size": video_vision_batch_size,
                 "video_timestamps": video_timestamps_per_video,
             }
 
@@ -642,6 +682,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         patched_mm_kwargs = dict(mm_kwargs)
         if val is not None:
             patched_mm_kwargs["max_soft_tokens"] = val
+        patched_mm_kwargs = _get_hf_processor_mm_kwargs(patched_mm_kwargs)
 
         processed_outputs = super()._call_hf_processor(
             prompt,
@@ -726,6 +767,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 video_num_soft_tokens=MultiModalFieldConfig.batched(
                     "video", keep_on_cpu=True
                 ),
+                video_vision_batch_size=MultiModalFieldConfig.shared(
+                    "video", batch_size=len(vfc), keep_on_cpu=True
+                ),
                 video_timestamps=MultiModalFieldConfig.batched(
                     "video", keep_on_cpu=True
                 ),
@@ -739,7 +783,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(
+            **_get_hf_processor_mm_kwargs(hf_processor_mm_kwargs)
+        )
 
         prompt_updates = []
 
@@ -1033,11 +1079,12 @@ class Gemma4ForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> dict[str, torch.Tensor] | None:
+    ) -> dict[str, object] | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         pixel_position_ids_videos = kwargs.pop("pixel_position_ids_videos", None)
         video_frame_counts = kwargs.pop("video_frame_counts", None)
         video_num_soft_tokens = kwargs.pop("video_num_soft_tokens", None)
+        video_vision_batch_size = kwargs.pop("video_vision_batch_size", None)
         if pixel_values_videos is None:
             return None
         return {
@@ -1045,6 +1092,7 @@ class Gemma4ForConditionalGeneration(
             "pixel_position_ids_videos": pixel_position_ids_videos,
             "video_frame_counts": video_frame_counts,
             "video_num_soft_tokens": video_num_soft_tokens,
+            "video_vision_batch_size": video_vision_batch_size,
         }
 
     def _parse_and_validate_multimodal_inputs(
@@ -1164,7 +1212,6 @@ class Gemma4ForConditionalGeneration(
     def _process_video_input(
         self,
         video_input: dict[str, object],
-        video_vision_batch_size: int = _DEFAULT_VIDEO_VISION_BATCH_SIZE,
     ) -> list[torch.Tensor]:
         """Process video frames through the vision tower.
 
@@ -1176,18 +1223,15 @@ class Gemma4ForConditionalGeneration(
         frame), because vLLM treats one video as one multimodal item.
         The flat_from_sizes field config groups all frames of a video
         together, so embed_multimodal must return one tensor per video.
-
-        Args:
-            video_vision_batch_size: Max frames per vision-tower forward
-                pass. Default 1 keeps peak memory low for startup
-                profiling on smaller GPUs. Increase via
-                ``mm_processor_kwargs`` for better throughput when GPU
-                memory allows.
         """
+
         pixel_values = video_input["pixel_values_videos"]
         pixel_position_ids = video_input["pixel_position_ids_videos"]
         frame_counts = video_input["video_frame_counts"]
         video_num_soft_tokens = video_input.get("video_num_soft_tokens")
+        video_vision_batch_size = _validate_video_vision_batch_size(
+            video_input.get("video_vision_batch_size")
+        )
 
         # Split flat tensors into per-video chunks
         if isinstance(frame_counts, torch.Tensor):
@@ -1266,12 +1310,6 @@ class Gemma4ForConditionalGeneration(
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         multimodal_embeddings: list[torch.Tensor] = []
 
-        # Read configurable video_vision_batch_size from mm_processor_kwargs.
-        mm_kwargs = self.multimodal_config.mm_processor_kwargs or {}
-        video_vision_batch_size = mm_kwargs.get(
-            "video_vision_batch_size", _DEFAULT_VIDEO_VISION_BATCH_SIZE
-        )
-
         for modality, multimodal_input in mm_input_by_modality.items():
             if multimodal_input is None:
                 continue
@@ -1281,10 +1319,7 @@ class Gemma4ForConditionalGeneration(
                 )
             elif modality == "video":
                 multimodal_embeddings.extend(
-                    self._process_video_input(
-                        multimodal_input,
-                        video_vision_batch_size=video_vision_batch_size,
-                    )
+                    self._process_video_input(multimodal_input)
                 )
             elif modality == "audio":
                 multimodal_embeddings.extend(
