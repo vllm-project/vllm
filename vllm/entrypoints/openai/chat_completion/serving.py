@@ -272,8 +272,10 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        stream_prompt_token_ids: list[int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
+            stream_prompt_token_ids = prompt_token_ids
 
             # If we are creating sub requests for multiple prompts, ensure that they
             # have unique request ids.
@@ -369,6 +371,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 reasoning_parser,
+                prompt_token_ids=stream_prompt_token_ids,
                 chat_template_kwargs=chat_template_kwargs,
             )
 
@@ -415,6 +418,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
+        prompt_token_ids: list[int] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
@@ -482,7 +486,14 @@ class OpenAIServingChat(OpenAIServing):
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[] for _ in range(num_choices)]
             reasoning_end_arr = [False] * num_choices
-            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
+            prompt_is_reasoning_end = (
+                reasoning_parser.is_reasoning_end(prompt_token_ids)
+                if reasoning_parser is not None and prompt_token_ids is not None
+                else None
+            )
+            prompt_is_reasoning_end_arr: list[bool | None] = [
+                prompt_is_reasoning_end
+            ] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -612,11 +623,14 @@ class OpenAIServingChat(OpenAIServing):
 
                     if (
                         reasoning_parser
-                        and res.prompt_token_ids
+                        and res.prompt_token_ids is not None
                         and prompt_is_reasoning_end_arr[i] is None
                     ):
-                        # only check once per choice, because prompt_token_ids
-                        # are the same for all deltas in that choice
+                        # Fall back to RequestOutput prompt tokens only when
+                        # the rendered request did not expose them up front.
+                        # This keeps streaming on the content path for
+                        # enable_thinking=False even if intermediate outputs
+                        # omit prompt_token_ids.
                         prompt_is_reasoning_end_arr[i] = (
                             reasoning_parser.is_reasoning_end(res.prompt_token_ids)
                         )
