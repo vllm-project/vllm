@@ -195,17 +195,12 @@ def test_rocm_vec_mat_mul_kernel(n, k, m, dtype, rows_per_block, seed):
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
 def test_rocm_vec_mat_mul_rdna4_row_write_regression(rows_per_block, dtype):
-    # Regression for RDNA4 (WARP_SIZE=32): output rows 2+ were silently skipped.
-    # The pre-fix kernel used `lane % 32 == 0` to select the group leader thread
-    # for each packed half2 write. THREADS_PER_ROW_GROUP is WARP_SIZE/ROWS_PER_BLOCK,
-    # so on WARP_SIZE=32 with rows_per_block=4 it is 8, and the second pair's leader
-    # sits at lane 16, which fails `lane % 32 == 0` and never writes.
-    # Fix: `lane % (2 * THREADS_PER_ROW_GROUP)`.
-    # Requires rows_per_block >= 4 to have a second pair; rows_per_block=2 is
-    # unaffected. On CDNA (WARP_SIZE=64), lane % 32 == 0 is correct either way.
+    # All output rows are correctly written when M spans multiple half2-packed
+    # groups (rows_per_block >= 4, m = rows_per_block * 4). k is small to keep
+    # num_warps within THREADS_PER_ROW_GROUP.
     torch.manual_seed(0)
-    m = rows_per_block * 4  # multiple blocks, all row slots exercised
-    k = 128  # small K to isolate from the cross-warp reduction bug
+    m = rows_per_block * 4
+    k = 128
     A = torch.randn(1, k, dtype=dtype, device="cuda")
     B = torch.randn(m, k, dtype=dtype, device="cuda")
 
@@ -221,18 +216,11 @@ def test_rocm_vec_mat_mul_rdna4_row_write_regression(rows_per_block, dtype):
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
 def test_rocm_vec_mat_mul_rdna4_reduction_regression(k, dtype):
-    # Regression for RDNA4 (WARP_SIZE=32): cross-warp reduction silently dropped
-    # partial sums when num_warps > THREADS_PER_ROW_GROUP. On WARP_SIZE=32 with
-    # rows_per_block=2, THREADS_PER_ROW_GROUP=16, and num_warps exceeds 16 when
-    # K > 4096. The pre-fix loop only accumulated warps 0..THREADS_PER_ROW_GROUP-1,
-    # losing contributions from warps 16+ and producing results that are too small.
-    # Fix: stride the loop by THREADS_PER_ROW_GROUP across all num_warps. On CDNA
-    # (WARP_SIZE=64), THREADS_PER_ROW_GROUP=32 and the test K values don't exceed
-    # the threshold.
+    # Cross-warp reduction accumulates all partial sums when num_warps exceeds
+    # THREADS_PER_ROW_GROUP. rows_per_block=2 keeps THREADS_PER_ROW_GROUP small
+    # so the threshold is reached at the tested K values.
     torch.manual_seed(0)
-    rows_per_block = (
-        2  # isolate from the row-write bug (which needs rows_per_block >= 4)
-    )
+    rows_per_block = 2
     m = rows_per_block * 4
     A = torch.randn(1, k, dtype=dtype, device="cuda")
     B = torch.randn(m, k, dtype=dtype, device="cuda")
