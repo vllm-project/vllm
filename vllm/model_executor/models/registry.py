@@ -1309,6 +1309,15 @@ ModelRegistry = _ModelRegistry(
     }
 )
 
+if envs.VLLM_USE_SPECIALIZED_MODELS:
+    from vllm.model_executor.specialized_models import get_specialized_models
+
+    for _arch, (_mod, _cls) in get_specialized_models().items():
+        ModelRegistry.models[_arch] = _LazyRegisteredModel(
+            module_name=_mod,
+            class_name=_cls,
+        )
+
 _T = TypeVar("_T")
 
 

@@ -43,6 +43,13 @@ class DummyModelLoader(BaseModelLoader):
                 # random values to the weights.
                 initialize_dummy_weights(layer, model_config)
 
+                # Some models build derived weights from loaded parameters instead of
+                # storing them in checkpoints. Rebuild those tensors for dummy load.
+                for layer in model.modules():
+                    fuse_indexer_weights = getattr(layer, "fuse_indexer_weights", None)
+                    if callable(fuse_indexer_weights):
+                        fuse_indexer_weights()
+
     def _process_online_quant_layer(
         self,
         layer: nn.Module,
