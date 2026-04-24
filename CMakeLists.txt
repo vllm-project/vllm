@@ -106,6 +106,24 @@ else()
 endif()
 
 #
+# spinloop extension (pure CXX; must stay above the non-CUDA device branch so
+# CPU builds define the target before the early return)
+#
+set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
+set(SPINLOOP_COMPILE_FLAGS "")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
+endif()
+define_extension_target(
+  spinloop
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
+  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
+  USE_SABI 3.11
+  WITH_SOABI)
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
@@ -277,24 +295,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3.8
     WITH_SOABI)
 endif()
-
-#
-# spinloop extension
-#
-
-set(VLLM_SPINLOOP_EXT_SRC
-  "csrc/spinloop.cpp")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
-endif()
-define_extension_target(
-  spinloop
-  DESTINATION vllm
-  LANGUAGE CXX
-  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
-  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
-  USE_SABI 3.11
-  WITH_SOABI)
 
 #
 # _C extension
