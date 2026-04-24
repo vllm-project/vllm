@@ -162,15 +162,6 @@ def helion_matmul_w_progress_fp8(
 
     return out
 
-
-def copy_engine_all_gather_w_progress(
-    output: torch.Tensor,
-    inp: torch.Tensor,  # Must be symmetric tensor
-    progress: torch.Tensor,
-    group_name: ProcessGroup,  
-    splits_per_rank: int,
-    backend_stream: torch.cuda.Stream | None = None,
-) -> torch.cuda.Stream:
     """
     Performs an all-gather operation with progress tracking using symmetric memory.
 
@@ -204,6 +195,15 @@ def copy_engine_all_gather_w_progress(
         copies, reduce kernel launch overhead, and maximize overlap of communication
         and computation.
     """
+def copy_engine_all_gather_w_progress(
+    output: torch.Tensor,
+    inp: torch.Tensor,  # Must be symmetric tensor
+    progress: torch.Tensor,
+    group_name: ProcessGroup,  
+    splits_per_rank: int,
+    backend_stream: torch.cuda.Stream | None = None,
+) -> torch.cuda.Stream:
+
     backend_stream = dist._symmetric_memory._get_backend_stream(priority=-1)
     assert inp.is_contiguous(), "Input tensor 'inp' must be contiguous"
     symm_mem_group = group_name
@@ -224,7 +224,7 @@ def copy_engine_all_gather_w_progress(
     assert list(output.shape) == output_shape, "Mismatch in output shape"
     chunks = output.chunk(world_size * splits_per_rank)
 
-    #symm_mem_hdl.barrier()
+    symm_mem_hdl.barrier()
     backend_stream.wait_stream(torch.cuda.current_stream())
 
     with torch.cuda.stream(backend_stream):
@@ -245,6 +245,8 @@ def copy_engine_all_gather_w_progress(
 
     return backend_stream
 
+from torch.distributed._symmetric_memory import enable_symm_mem_for_group, get_symm_mem_workspace
+
 def _helion_all_gather_fp8_gemm_runtime(
     a_shared: torch.Tensor,
     b: torch.Tensor,
@@ -255,36 +257,22 @@ def _helion_all_gather_fp8_gemm_runtime(
     a_out: torch.Tensor | None = None,
     SPLITS_PER_RANK: int = 1, 
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Performs an all-gather on a_shared and matrix multiplication using the Helion library.
-    """
-
-    symm_mem_group = group_name
-    symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared, group=group_name)
-
-    if symm_mem_hdl is None:
-        a_shared_symm = dist._symmetric_memory.empty(
-            a_shared.shape,
-            dtype=a_shared.dtype,
-            device=a_shared.device
-        )
-        a_shared_symm.copy_(a_shared)
-        a_shared_symm._is_symmetric_memory = True
-
-        # Try rendezvous again with the symmetric copy
-        symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared_symm, group=group_name)
-        if symm_mem_hdl is None:
-            raise RuntimeError("Failed to get symmetric memory handle after copy")
-    else:
-        a_shared_symm = a_shared  # already usable
-
-    a_shape = list(a_shared_symm.shape)
-    a_shape[0] *= symm_mem_hdl.world_size
+    
+    # Use get_symm_mem_workspace to reuse persistent P2P buffers, allowing torch.compile 
+    # to capture the graph without re-allocation (see: https://github.com/pytorch/pytorch/issues/162859)
+    symm_mem = get_symm_mem_workspace(group_name.group_name, a_shared.nbytes)
+    a_shared_symm = symm_mem.get_buffer(
+        symm_mem.rank, 
+        a_shared.shape, 
+        a_shared.dtype
+    )
+    a_shared_symm.copy_(a_shared)
     if a_out is None:
-        a_out = torch.empty(a_shape, dtype=a_shared.dtype, device=a_shared.device)
+        a_out = torch.empty((a_shared.shape[0] * world_size, a_shared.shape[1]), 
+                            dtype=a_shared.dtype, device=a_shared.device)
     
     progress = torch.zeros(
-        symm_mem_hdl.world_size * SPLITS_PER_RANK,
+        world_size * SPLITS_PER_RANK,
         dtype=torch.uint32,
         device=a_shared_symm.device,
     )
@@ -301,11 +289,10 @@ def _helion_all_gather_fp8_gemm_runtime(
         scale_b,
         progress,
         SPLITS_PER_RANK=SPLITS_PER_RANK,
-        RANK=symm_mem_hdl.rank,
+        RANK=symm_mem.rank,
     )
     assert type(c) is torch.Tensor
     torch.cuda.current_stream().wait_stream(backend_stream)
-
     return a_out, c
 
 def helion_all_gather_fp8_gemm_fake(
