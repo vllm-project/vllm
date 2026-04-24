@@ -8,7 +8,9 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-
+from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from transformers import AutoTokenizer
 
 class TestQwen3xmlToolParser(ToolParserTests):
     @pytest.fixture
@@ -70,3 +72,63 @@ class TestQwen3xmlToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+    @pytest.mark.asyncio
+    async def test_qwen3xml_async_streaming_free_text(self):
+        
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+        parser = Qwen3XMLToolParser(tokenizer)
+        
+        # 1. First tool call
+        # 2. Free text
+        # 3. Second tool call
+        
+        text_to_stream = (
+            "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
+            "\nNext, I will check the weather for London:\n"
+            "<tool_call>\n<function=get_weather>\n<parameter=city>London</parameter>\n</function>\n</tool_call>"
+        )
+        
+        request = ChatCompletionRequest(messages=[], model="test")
+        
+        emitted_messages = []
+        previous_text = ""
+        previous_tokens = []
+        token_ids = tokenizer.encode(text_to_stream, add_special_tokens=False)
+        
+        for i in range(1, len(token_ids) + 1):
+            current_token_ids = token_ids[:i]
+            current_text = tokenizer.decode(current_token_ids)
+            delta_text = current_text[len(previous_text):]
+            token_delta = current_token_ids[len(previous_tokens):]
+            
+            delta = parser.extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_tokens,
+                current_token_ids,
+                token_delta,
+                request
+            )
+            if delta is not None:
+                emitted_messages.append(delta)
+                
+            previous_text = current_text
+            previous_tokens = current_token_ids
+
+        # Check that the free text is emitted BEFORE London's arguments are emitted.
+        found_early = False
+        for i, msg in enumerate(emitted_messages):
+            if msg.content and "Next, I will check the weather for London" in msg.content:
+                # Check if we already saw "London" in any previous or current tool call arguments
+                is_london_emitted = any(
+                    tc.function.arguments and "London" in tc.function.arguments 
+                    for m in emitted_messages[:i+1] if m.tool_calls 
+                    for tc in m.tool_calls
+                )
+                if not is_london_emitted:
+                    found_early = True
+                break
+        
+        assert found_early, "Free text between tool calls should be emitted as soon as the second tool call starts, not delayed."

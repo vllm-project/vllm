@@ -251,16 +251,15 @@ class StreamingXMLToolCallParser:
             # Found complete XML element, process it
             try:
                 preprocessed_element = self._preprocess_xml_chunk(element)
-                # Check if this is the first tool_call start
+                # Check if a new tool_call starts and we have buffered text content
                 if (
                     (
                         preprocessed_element.strip().startswith("<tool_call>")
                         or preprocessed_element.strip().startswith("<function name=")
                     )
-                    and self.tool_call_index == 0
-                ) and self.text_content_buffer:
-                    # First tool_call starts,
-                    # output previously collected text content first
+                    and self.text_content_buffer
+                ):
+                    # Output previously collected text content first
                     text_delta = DeltaMessage(content=self.text_content_buffer)
                     self._emit_delta(text_delta)
                     # Clear buffer for potential subsequent text content
