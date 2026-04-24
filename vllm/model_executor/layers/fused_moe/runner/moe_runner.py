@@ -550,10 +550,14 @@ class MoERunner(MoERunnerInterface):
             hidden_states
         )
 
+        # Record before `_maybe_pad_hidden_states` pads activations to match
+        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        routed_hidden_dim = hidden_states.shape[-1]
         hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
             shared_experts_input,
             hidden_states,
         )
+        hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
 
         result = self._forward_entry(
             hidden_states,
@@ -573,6 +577,8 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
+        if hidden_dim_was_padded:
+            fused_output = fused_output[..., :routed_hidden_dim]
 
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.
