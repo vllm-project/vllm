@@ -62,20 +62,6 @@ class TestQwen3xmlToolParser(ToolParserTests):
             single_tool_call_expected_args={"city": "Tokyo"},
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
-            # xfail markers - Qwen3XML has systematic streaming issues
-            xfail_streaming={
-                "test_single_tool_call_simple_args": (
-                    "Qwen3XML streaming has systematic issues"
-                ),
-                "test_parallel_tool_calls": "Qwen3XML streaming has systematic issues",
-                "test_various_data_types": "Qwen3XML streaming has systematic issues",
-                "test_empty_arguments": "Qwen3XML streaming has systematic issues",
-                "test_surrounding_text": "Qwen3XML streaming has systematic issues",
-                "test_escaped_strings": "Qwen3XML streaming has systematic issues",
-                "test_streaming_reconstruction": (
-                    "Qwen3XML streaming reconstruction has known issues"
-                ),
-            },
             supports_typed_arguments=False,
         )
 

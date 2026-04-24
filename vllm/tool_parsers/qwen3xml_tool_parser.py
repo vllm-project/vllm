@@ -56,6 +56,7 @@ class StreamingXMLToolCallParser:
         # state for streaming
         self.tool_call_index = 0
         self.current_call_id = None
+        self.id_emitted = False
         self.last_completed_call_id = None
         self.current_function_name = None
         self.current_function_open = False
@@ -285,7 +286,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(name=None, arguments=""),
                             )
@@ -440,10 +441,10 @@ class StreamingXMLToolCallParser:
             if delta.tool_calls:
                 # For tool_calls, we need to intelligently merge arguments
                 for tool_call in delta.tool_calls:
-                    # Find if there's already a tool_call with the same call_id
+                    # Find if there's already a tool_call with the same index
                     existing_call = None
                     for existing in merged_tool_calls:
-                        if existing.id == tool_call.id:
+                        if existing.index == tool_call.index:
                             existing_call = existing
                             break
 
@@ -592,6 +593,12 @@ class StreamingXMLToolCallParser:
         """Emit Delta response (streaming output)"""
         self.deltas.append(delta)
 
+    def _get_call_id_for_delta(self) -> str | None:
+        if not self.id_emitted:
+            self.id_emitted = True
+            return self.current_call_id
+        return None
+
     def _auto_close_open_parameter_if_needed(self, incoming_tag: str | None = None):
         """Before starting to process new elements,
         if there are unclosed tags from before,
@@ -647,7 +654,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(
                                 name=function_name, arguments=""
@@ -678,7 +685,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(
                                     name=None, arguments=json_start
@@ -696,7 +703,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(
                                     name=None, arguments=json_continue
@@ -739,7 +746,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(name=None, arguments='"'),
                         )
@@ -774,7 +781,7 @@ class StreamingXMLToolCallParser:
                 tool_calls=[
                     DeltaToolCall(
                         index=self.tool_call_index - 1,
-                        id=self.current_call_id,
+                        id=self._get_call_id_for_delta(),
                         type="function",
                         function=DeltaFunctionCall(name=None, arguments=delta_data),
                     )
@@ -831,7 +838,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(
                                 name=None, arguments=output_arguments
@@ -867,7 +874,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(name=None, arguments='""'),
                             )
@@ -880,7 +887,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(name=None, arguments='"'),
                             )
@@ -903,7 +910,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(name=None, arguments="}"),
                         )
@@ -916,7 +923,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(name=None, arguments="{}"),
                         )
@@ -939,7 +946,7 @@ class StreamingXMLToolCallParser:
                 tool_calls=[
                     DeltaToolCall(
                         index=self.tool_call_index - 1,
-                        id=self.current_call_id,
+                        id=self._get_call_id_for_delta(),
                         type="function",
                         function=DeltaFunctionCall(name=None, arguments=""),
                     )
@@ -1125,6 +1132,7 @@ class StreamingXMLToolCallParser:
         if self.current_call_id:
             self.last_completed_call_id = self.current_call_id
         self.current_call_id = None
+        self.id_emitted = False
         self.current_function_name = None
         self.current_function_open = False
         self.parameters = {}
