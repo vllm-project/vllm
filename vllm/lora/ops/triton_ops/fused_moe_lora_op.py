@@ -452,6 +452,7 @@ def _fused_moe_lora_shrink(
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
+    fully_sharded: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
@@ -527,7 +528,7 @@ def _fused_moe_lora_shrink(
         MUL_ROUTED_WEIGHT=False,
         ADD_INPUTS=False,
         USE_B_L2_CACHE=True,
-        sort_c=use_tma and sorted_token_ids is not None,
+        sort_c=use_tma and sorted_token_ids is not None and not fully_sharded,
         IS_PRIMARY=True,
         **shrink_config,
     )
@@ -571,6 +572,7 @@ def _fused_moe_lora_expand(
     offset: int = 0,
     use_gdc: bool = False,
     use_tma: bool = False,
+    fully_sharded: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -611,7 +613,7 @@ def _fused_moe_lora_expand(
     a_desc = None
     b_desc = None
     if use_tma:
-        if sorted_token_ids is not None:
+        if sorted_token_ids is not None and not fully_sharded:
             a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
                 a_intermediate_cache1,
                 [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
@@ -696,6 +698,7 @@ def _fused_moe_lora(
     shrink_num_warps: int,
     shrink_num_stages: int,
     shrink_split_k: int,
+    shrink_use_tma: bool,
     expand_block_size_m: int,
     expand_block_size_n: int,
     expand_block_size_k: int,
@@ -703,6 +706,7 @@ def _fused_moe_lora(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
+    expand_use_tma: bool,
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
@@ -744,10 +748,10 @@ def _fused_moe_lora(
         else num_tokens * shrink_block_size_m
     )
 
-    # TMA is not currently compatiple with fully_sharded due to the non-determinism
-    # of token id sorting across ranks.
-    use_tma = supports_tma(device) and not fully_sharded
-
+    # When fully_sharded, TMA is still used but sort_c is forced to False to avoid
+    # non-determinism from token id sorting differing across ranks.
+    support_tma = supports_tma(device)
+    use_tma = support_tma and shrink_use_tma
     intermediate_cache_shape = (
         num_slices,
         M,
@@ -762,7 +766,7 @@ def _fused_moe_lora(
 
         # When storing intermediate data in sorted order for TMA, we
         # need an extra 'num_active_loras' dim in the cache to avoid conflicts
-        if sorted_token_ids is not None:
+        if sorted_token_ids is not None and not fully_sharded:
             intermediate_cache_shape = (
                 num_slices,
                 sorted_token_ids.shape[0],
@@ -809,6 +813,7 @@ def _fused_moe_lora(
         mul_routed_weight,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        fully_sharded=fully_sharded,
     )
 
     if fully_sharded:
@@ -824,6 +829,7 @@ def _fused_moe_lora(
             # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
+    use_tma = support_tma and expand_use_tma
     _fused_moe_lora_expand(
         output,
         a_intermediate_cache1,
@@ -859,6 +865,7 @@ def _fused_moe_lora(
         offset,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        fully_sharded=fully_sharded,
     )
 
 
@@ -884,6 +891,7 @@ def _fused_moe_lora_fake(
     shrink_num_warps: int,
     shrink_num_stages: int,
     shrink_split_k: int,
+    shrink_use_tma: bool,
     expand_block_size_m: int,
     expand_block_size_n: int,
     expand_block_size_k: int,
@@ -891,6 +899,7 @@ def _fused_moe_lora_fake(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
+    expand_use_tma: bool,
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
@@ -929,6 +938,7 @@ def _fused_moe_lora_shrink_fake(
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
+    fully_sharded: bool = False,
 ) -> None:
     return
 
@@ -967,6 +977,7 @@ def _fused_moe_lora_expand_fake(
     offset: int = 0,
     use_gdc: bool = False,
     use_tma: bool = False,
+    fully_sharded: bool = False,
 ) -> None:
     return
 

@@ -109,4 +109,5 @@ def try_get_optimal_moe_lora_config(
         config["BLOCK_SIZE_K"] = max(
             16, min(config.get("BLOCK_SIZE_K", 32), next_power_of_2(rank))
         )
+    config["USE_TMA"] = True
     return config

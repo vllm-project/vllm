@@ -179,6 +179,7 @@ def use_fused_moe_lora_kernel(
         "NUM_WARPS": 4,
         "NUM_STAGES": 3,
         "SPLIT_K": 1,
+        "USE_TMA": True,
     }
 
     mul_routed_weight = False
@@ -212,6 +213,7 @@ def use_fused_moe_lora_kernel(
         config["NUM_WARPS"],
         config["NUM_STAGES"],
         config["SPLIT_K"],
+        config["USE_TMA"],
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
         config["BLOCK_SIZE_K"],
@@ -219,6 +221,7 @@ def use_fused_moe_lora_kernel(
         config["NUM_WARPS"],
         config["NUM_STAGES"],
         config["SPLIT_K"],
+        config["USE_TMA"],
         mul_routed_weight,
         fully_sharded=fully_sharded,
         offset=offset,
@@ -384,6 +387,7 @@ def use_fused_moe_lora_kernel_naive(
         "NUM_WARPS": 4,
         "NUM_STAGES": 3,
         "SPLIT_K": 1,
+        "USE_TMA": True,
     }
 
     mul_routed_weight = False
@@ -425,6 +429,7 @@ def use_fused_moe_lora_kernel_naive(
         config["NUM_WARPS"],
         config["NUM_STAGES"],
         config["SPLIT_K"],
+        config["USE_TMA"],
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
         config["BLOCK_SIZE_K"],
@@ -432,6 +437,7 @@ def use_fused_moe_lora_kernel_naive(
         config["NUM_WARPS"],
         config["NUM_STAGES"],
         config["SPLIT_K"],
+        config["USE_TMA"],
         mul_routed_weight=mul_routed_weight,
         fully_sharded=fully_sharded,
         offset=offset,
