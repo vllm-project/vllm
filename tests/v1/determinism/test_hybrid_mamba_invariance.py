@@ -16,7 +16,6 @@ Mamba chunk boundary. In "all" mode, a cache hit must reproduce exactly the
 same serialized Mamba state that was materialized during the cache-filling run.
 """
 
-import contextlib
 import os
 import random
 import time
@@ -42,6 +41,7 @@ TEST_MODEL = os.getenv(
 
 TEST_SEED = 12345
 TENSOR_PARALLEL_SIZE = 1
+GPU_MEMORY_UTILIZATION = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.4"))
 DEFAULT_MAX_MODEL_LEN = 8192
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 DEFAULT_CHUNKED_PREFILL_PROMPT_TOKENS = 4096
@@ -227,7 +227,7 @@ def test_logprobs_chunked_prefill_batch_invariance(backend: str):
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens,
         dtype="bfloat16",
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
         mamba_cache_dtype="float32",
@@ -306,107 +306,86 @@ def test_logprobs_prefix_caching_batch_invariance(
         logprobs=5,
     )
 
-    reference_llm = None
-    try:
-        reference_llm = LLM(
-            model=TEST_MODEL,
-            tensor_parallel_size=TENSOR_PARALLEL_SIZE,
-            max_num_seqs=1,
-            max_model_len=max_model_len,
-            max_num_batched_tokens=prompt_token_count,
-            enable_prefix_caching=False,
-            dtype="bfloat16",
-            gpu_memory_utilization=0.9,
-            enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
-            attention_config={"backend": backend},
-            mamba_cache_dtype="float32",
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=TENSOR_PARALLEL_SIZE,
+        max_num_seqs=64,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_prefix_caching=True,
+        mamba_cache_mode=mamba_cache_mode,
+        dtype="bfloat16",
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        attention_config={"backend": backend},
+        mamba_cache_dtype="float32",
+    )
+
+    effective_mode = llm.llm_engine.vllm_config.cache_config.mamba_cache_mode
+    if effective_mode != mamba_cache_mode:
+        pytest.skip(
+            f"Requested mamba_cache_mode={mamba_cache_mode!r}, "
+            f"but model resolved to {effective_mode!r}."
         )
 
-        shared_prefix_token_ids, prompt_token_ids = _build_prefix_cache_probe_prompts(
-            reference_llm,
-            shared_prefix_token_count,
-            unique_suffix_token_count,
-        )
+    shared_prefix_token_ids, prompt_token_ids = _build_prefix_cache_probe_prompts(
+        llm,
+        shared_prefix_token_count,
+        unique_suffix_token_count,
+    )
 
-        baseline_output = reference_llm.generate(
-            [TokensPrompt(prompt_token_ids=prompt_token_ids)],
-            sampling_params,
+    baseline_output = llm.generate(
+        [TokensPrompt(prompt_token_ids=prompt_token_ids)],
+        sampling_params,
+        use_tqdm=False,
+    )[0]
+    baseline_cached_tokens = int(baseline_output.num_cached_tokens or 0)
+    if baseline_cached_tokens != 0:
+        pytest.fail(
+            "Expected uncached baseline run, but got "
+            f"num_cached_tokens={baseline_cached_tokens}."
+        )
+    baseline_logprobs, baseline_tokens = _extract_request_result(baseline_output)
+
+    warmup_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        seed=TEST_SEED,
+    )
+
+    for batch_size in PREFIX_CACHE_BATCH_SIZES:
+        _reset_prefix_cache(llm)
+
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=shared_prefix_token_ids)],
+            warmup_params,
             use_tqdm=False,
-        )[0]
-        baseline_logprobs, baseline_tokens = _extract_request_result(baseline_output)
-    finally:
-        if reference_llm is not None:
-            with contextlib.suppress(Exception):
-                reference_llm.llm_engine.engine_core.shutdown()
-
-    llm = None
-    try:
-        llm = LLM(
-            model=TEST_MODEL,
-            tensor_parallel_size=TENSOR_PARALLEL_SIZE,
-            max_num_seqs=64,
-            max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_prefix_caching=True,
-            mamba_cache_mode=mamba_cache_mode,
-            dtype="bfloat16",
-            gpu_memory_utilization=0.9,
-            enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
-            attention_config={"backend": backend},
-            mamba_cache_dtype="float32",
         )
 
-        effective_mode = llm.llm_engine.vllm_config.cache_config.mamba_cache_mode
-        if effective_mode != mamba_cache_mode:
-            pytest.skip(
-                f"Requested mamba_cache_mode={mamba_cache_mode!r}, "
-                f"but model resolved to {effective_mode!r}."
+        batch_prompts = [
+            TokensPrompt(prompt_token_ids=prompt_token_ids) for _ in range(batch_size)
+        ]
+        outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
+
+        assert len(outputs) == batch_size
+
+        cached_tokens = [int(output.num_cached_tokens or 0) for output in outputs]
+
+        if not all(num_cached_tokens > 0 for num_cached_tokens in cached_tokens):
+            pytest.fail(
+                f"Expected cache hits for batch_size={batch_size}, "
+                f"but got num_cached_tokens={cached_tokens}."
             )
 
-        warmup_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=1,
-            seed=TEST_SEED,
-        )
-
-        for batch_size in PREFIX_CACHE_BATCH_SIZES:
-            _reset_prefix_cache(llm)
-
-            llm.generate(
-                [TokensPrompt(prompt_token_ids=shared_prefix_token_ids)],
-                warmup_params,
-                use_tqdm=False,
+        for request_idx, output in enumerate(outputs):
+            step_logprobs, token_ids = _extract_request_result(output)
+            _assert_outputs_equal(
+                baseline_logprobs,
+                baseline_tokens,
+                step_logprobs,
+                token_ids,
+                run_label=(
+                    f"backend={backend}, mode={effective_mode}, "
+                    f"batch_size={batch_size}, request={request_idx}"
+                ),
             )
-
-            batch_prompts = [
-                TokensPrompt(prompt_token_ids=prompt_token_ids)
-                for _ in range(batch_size)
-            ]
-            outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
-
-            assert len(outputs) == batch_size
-
-            cached_tokens = [int(output.num_cached_tokens or 0) for output in outputs]
-
-            if not all(num_cached_tokens > 0 for num_cached_tokens in cached_tokens):
-                pytest.fail(
-                    f"Expected cache hits for batch_size={batch_size}, "
-                    f"but got num_cached_tokens={cached_tokens}."
-                )
-
-            for request_idx, output in enumerate(outputs):
-                step_logprobs, token_ids = _extract_request_result(output)
-                _assert_outputs_equal(
-                    baseline_logprobs,
-                    baseline_tokens,
-                    step_logprobs,
-                    token_ids,
-                    run_label=(
-                        f"backend={backend}, mode={effective_mode}, "
-                        f"batch_size={batch_size}, request={request_idx}"
-                    ),
-                )
-    finally:
-        if llm is not None:
-            with contextlib.suppress(Exception):
-                llm.llm_engine.engine_core.shutdown()
