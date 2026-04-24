@@ -455,9 +455,9 @@ def add_kv_sharing_layers_to_kv_cache_groups(
         # get_attn_backends_for_group) can find it.
         group_spec = tgt_kv_cache_group.kv_cache_spec
         if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            group_spec.kv_cache_specs[layer_name] = (
-                group_spec.kv_cache_specs[target_layer_name]
-            )
+            group_spec.kv_cache_specs[layer_name] = group_spec.kv_cache_specs[
+                target_layer_name
+            ]
 
         if runner_only_attn_layers is not None:
             runner_only_attn_layers.add(layer_name)

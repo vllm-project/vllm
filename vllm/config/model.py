@@ -678,7 +678,7 @@ class ModelConfig:
             # can be correctly capped to sliding window size.
             # Use object.__setattr__ to bypass huggingface_hub strict
             # dataclass validation which rejects None for int-typed fields.
-            object.__setattr__(self.hf_text_config, 'sliding_window', None)
+            object.__setattr__(self.hf_text_config, "sliding_window", None)
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False

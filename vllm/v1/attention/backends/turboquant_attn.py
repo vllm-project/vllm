@@ -256,11 +256,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = sliding_window
-        # window_size tuple for flash_attn: (left, right)
+        # window_size for flash_attn: [left, right]
         if sliding_window is None:
-            self._fa_window_size = (-1, -1)
+            self._fa_window_size: list[int] = [-1, -1]
         else:
-            self._fa_window_size = (sliding_window - 1, 0)
+            self._fa_window_size = [sliding_window - 1, 0]
 
         from vllm.model_executor.layers.quantization.turboquant.config import (
             TurboQuantConfig,
@@ -617,17 +617,22 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     if sw is not None:
                         q_pos = torch.arange(q_len, device=query.device)
                         k_pos = torch.arange(q_len, device=query.device)
-                        mask = (k_pos.unsqueeze(0) <= q_pos.unsqueeze(1)) & \
-                               (q_pos.unsqueeze(1) - k_pos.unsqueeze(0) < sw)
+                        mask = (k_pos.unsqueeze(0) <= q_pos.unsqueeze(1)) & (
+                            q_pos.unsqueeze(1) - k_pos.unsqueeze(0) < sw
+                        )
                         out = F.scaled_dot_product_attention(
-                            q_t, k_t, v_t,
+                            q_t,
+                            k_t,
+                            v_t,
                             attn_mask=mask,
                             scale=self.scale,
                             enable_gqa=use_gqa,
                         ).transpose(0, 1)
                     else:
                         out = F.scaled_dot_product_attention(
-                            q_t, k_t, v_t,
+                            q_t,
+                            k_t,
+                            v_t,
                             is_causal=True,
                             scale=self.scale,
                             enable_gqa=use_gqa,

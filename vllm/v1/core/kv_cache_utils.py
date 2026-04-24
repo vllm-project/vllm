@@ -1292,9 +1292,7 @@ def get_kv_cache_groups(
         else:
             if is_kv_cache_spec_uniform(kv_cache_spec):
                 return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
-            elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(
-                kv_cache_spec
-            ):
+            elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_spec):
                 return _get_kv_cache_groups_uniform_type(uniform_spec)
 
     # As KVCacheManager can only allocate memory of one size, we need to unify
