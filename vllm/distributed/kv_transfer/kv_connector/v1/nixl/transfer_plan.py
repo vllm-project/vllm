@@ -272,7 +272,7 @@ def generate_dense_plan(
     """Generate transfer plan for dense (attention-only) models."""
     block_size_ratio = transfer_topo.block_size // remote_info.remote_block_size
 
-    m = _compute_tp_mapping(
+    tp_mapping = _compute_tp_mapping(
         transfer_topo.tp_rank,
         transfer_topo.tp_size,
         remote_info.remote_tp_size,
@@ -286,8 +286,8 @@ def generate_dense_plan(
         remote_block_lens=remote_meta.block_lens,
         is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         block_size_ratio=block_size_ratio,
-        num_attn_reads=len(m.source_ranks_per_group[0]),
-        rank_offset_factor=m.rank_offset_factor,
+        num_attn_reads=len(tp_mapping.source_ranks_per_group[0]),
+        rank_offset_factor=tp_mapping.rank_offset_factor,
         remote_num_blocks=remote_meta.num_blocks,
     )
 
@@ -295,9 +295,9 @@ def generate_dense_plan(
         fa_regions=tuple(fa_regions),
         ssm_regions=(),
         group_spec_types=group_spec_types,
-        source_ranks_per_group=m.source_ranks_per_group,
-        all_source_ranks=m.all_source_ranks,
-        rank_to_attention_slot=m.rank_to_attention_slot,
+        source_ranks_per_group=tp_mapping.source_ranks_per_group,
+        all_source_ranks=tp_mapping.all_source_ranks,
+        rank_to_attention_slot=tp_mapping.rank_to_attention_slot,
         remote_expansion_stride=local_physical_blocks_per_logical,
     )
 
@@ -329,7 +329,7 @@ def generate_mamba_plan(
         f"is not tested. Got {block_size_ratio=}."
     )
 
-    m = _compute_tp_mapping(
+    tp_mapping = _compute_tp_mapping(
         tp_rank,
         tp_size,
         remote_tp_size,
@@ -344,8 +344,8 @@ def generate_mamba_plan(
         remote_block_lens=remote_block_lens,
         is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         block_size_ratio=block_size_ratio,
-        num_attn_reads=len(m.source_ranks_per_group[0]),
-        rank_offset_factor=m.rank_offset_factor,
+        num_attn_reads=len(tp_mapping.source_ranks_per_group[0]),
+        rank_offset_factor=tp_mapping.rank_offset_factor,
         remote_num_blocks=remote_meta.num_blocks,
     )
 
@@ -409,9 +409,9 @@ def generate_mamba_plan(
         fa_regions=tuple(fa_regions),
         ssm_regions=tuple(ssm_regions),
         group_spec_types=group_spec_types,
-        source_ranks_per_group=m.source_ranks_per_group,
-        all_source_ranks=m.all_source_ranks,
-        rank_to_attention_slot=m.rank_to_attention_slot,
+        source_ranks_per_group=tp_mapping.source_ranks_per_group,
+        all_source_ranks=tp_mapping.all_source_ranks,
+        rank_to_attention_slot=tp_mapping.rank_to_attention_slot,
         remote_expansion_stride=remote_phys_ratio,
     )
 
