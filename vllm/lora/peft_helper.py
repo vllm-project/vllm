@@ -37,7 +37,7 @@ class PEFTHelper:
     use_dora: bool = field(default=False)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
-    vllm_max_position_embeddings: int | None = field(default=False)
+    vllm_max_position_embeddings: int | None = field(default=None)
 
     def _validate_features(self) -> list[str]:
         """
