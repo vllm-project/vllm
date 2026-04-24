@@ -782,10 +782,11 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> FlexAttentionMetadata:
-        # Use actual max_seq_len instead of max_model_len to avoid
-        # torch.compile recompilation during CUDA graph capture.
-        common_attn_metadata.max_seq_len = (
-            common_attn_metadata.seq_lens_cpu.max().item()
+        # Use actual max_seq_len (not max_model_len) to avoid torch.compile
+        # recompilation during CUDA graph capture.
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        common_attn_metadata.max_seq_len = int(
+            common_attn_metadata.seq_lens_cpu_upper_bound.max().item()
         )
         return self.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
