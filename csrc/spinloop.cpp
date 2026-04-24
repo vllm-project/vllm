@@ -66,7 +66,7 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
   }
 
   static const char* keywords[] = {"buffer", "callback", "timeout", NULL};
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*O|d", (char **)keywords,
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*O|d", (char**)keywords,
                                    &buffer, &callback, &timeout)) {
     return NULL;
   }
@@ -159,7 +159,7 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
 #if defined(__i386__) || defined(__x86_64__)
       __builtin_ia32_pause();
 #elif defined(__aarch64__)
-        __asm__ volatile("yield" ::: "memory");
+        __asm__ volatile("yield" :: : "memory");
 #endif
       Py_END_ALLOW_THREADS
 #if defined(__i386__) || defined(__x86_64__)
