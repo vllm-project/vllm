@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 
 import pytest
 
@@ -8,9 +9,14 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.tokenizers import get_tokenizer
+from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
+from tests.tool_parsers.utils import run_tool_extraction_streaming
+
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
 
@@ -164,3 +170,190 @@ class TestQwen3xmlToolParser(ToolParserTests):
         all_content = "".join([m.content for m in emitted_messages if m.content])
         
         assert "I hope this helps!" in all_content, "Free text after the last tool call should be emitted."
+
+
+def test_qwen36_anyof_parameter_xml_not_double_encoded(qwen3_tokenizer):
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "update_record",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        # anyOf schema — no top-level "type" key
+                        "data": {
+                            "anyOf": [{"type": "object"}, {"type": "null"}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    model_output = (
+        "<tool_call>\n"
+        "<function=update_record>\n"
+        '<parameter=data>{"key": "value", "count": 42}</parameter>\n'
+        "</function>\n"
+        "</tool_call>"
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+
+    assert isinstance(args["data"], dict), (
+        f"anyOf parameter was double-encoded: data={args['data']!r}. "
+        "StreamingXMLToolCallParser._get_param_type ignores anyOf schemas."
+    )
+    assert args["data"] == {"key": "value", "count": 42}
+
+
+def test_qwen36_anyof_parameter_xml_streaming_not_double_encoded(qwen3_tokenizer):
+  
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "update_record",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "data": {
+                            "anyOf": [{"type": "object"}, {"type": "null"}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    # Deltas are pre-formed XML element chunks (one element per delta),
+    # which is the same pattern used by speculative decoding.
+    deltas = [
+        "<tool_call>",
+        "\n<function=update_record>",
+        '\n<parameter=data>{"key": "value", "count": 42}</parameter>',
+        "\n</function>",
+        "\n</tool_call>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert isinstance(args["data"], dict), (
+        f"anyOf parameter was double-encoded in streaming: data={args['data']!r}"
+    )
+
+
+def test_qwen36_xml_streaming_double_close_brace(qwen3_tokenizer):
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        )
+    ]
+
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_weather>",
+        "\n<parameter=city>\nDallas\n</parameter>",
+        "\n</function>",
+        "\n</tool_call>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    full_args = reconstructor.tool_calls[0].function.arguments
+
+    assert not full_args.endswith("}}"), (
+        f"XML streaming parser emitted double closing brace: {full_args!r}. "
+        "parse_single_streaming_chunks fallback called _end_element('function') twice."
+    )
+    args = json.loads(full_args)
+    assert args == {"city": "Dallas"}
+
+
+def test_xml_streaming_parallel_tool_calls_preformed_chunks(qwen3_tokenizer):
+    """
+    Note: in normal token-by-token streaming this rarely triggers because
+    the tokenizer splits XML tags across multiple tokens.  It CAN trigger with
+    speculative decoding multi-token flushes.
+    """
+    
+
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        )
+    ]
+
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_weather>",
+        "\n<parameter=city>Paris</parameter>",
+        "\n</function>",
+        "\n</tool_call>",
+        "<tool_call>",
+        "\n<function=get_weather>",
+        "\n<parameter=city>London</parameter>",
+        "\n</function>",
+        "\n</tool_call>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2, (
+        f"Expected 2 tool calls, got {len(reconstructor.tool_calls)}"
+    )
+
+    args0 = json.loads(reconstructor.tool_calls[0].function.arguments)
+    args1 = json.loads(reconstructor.tool_calls[1].function.arguments)
+
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert reconstructor.tool_calls[1].function.name == "get_weather"
+    assert args0 == {"city": "Paris"}, f"First call args wrong: {args0!r}"
+    assert args1 == {"city": "London"}, f"Second call args wrong: {args1!r}"

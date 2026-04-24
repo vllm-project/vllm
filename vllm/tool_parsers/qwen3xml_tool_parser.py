@@ -113,58 +113,25 @@ class StreamingXMLToolCallParser:
                 if (
                     self.current_call_id is not None
                     and self.function_end_token in xml_chunk
+                    and self.current_function_open
                 ):
-                    # - Added '}' (non-empty parameter ending)
-                    # - Added '{}' (empty parameter function)
-                    has_function_close = any(
-                        (
-                            td.tool_calls
-                            and any(
-                                (
-                                    tc.function
-                                    and tc.id == self.current_call_id
-                                    and isinstance(tc.function.arguments, str)
-                                    and (tc.function.arguments in ("}", "{}"))
-                                )
-                                for tc in td.tool_calls
-                            )
-                        )
-                        for td in new_deltas
-                    )
-                    if not has_function_close:
-                        # Close potentially unclosed element
-                        if self.current_param_name:
-                            self._end_element("parameter")
-                        if self.current_function_name:
-                            self._end_element("function")
+                    # Close potentially unclosed element
+                    if self.current_param_name:
+                        self._end_element("parameter")
+                    if self.current_function_name:
+                        self._end_element("function")
                 # If this chunk contains </tool_call>
                 # but didn't generate final empty delta, then complete it
                 if (
                     self.current_call_id is not None
                     and self.tool_call_end_token in xml_chunk
                 ):
-                    has_toolcall_close = any(
-                        (
-                            td.tool_calls
-                            and any(
-                                (
-                                    tc.type == "function"
-                                    and tc.function
-                                    and tc.function.arguments == ""
-                                    and tc.id == self.current_call_id
-                                )
-                                for tc in td.tool_calls
-                            )
-                        )
-                        for td in new_deltas
-                    )
-                    if not has_toolcall_close:
-                        # Close potentially unclosed element
-                        if self.current_param_name:
-                            self._end_element("parameter")
-                        if self.current_function_name:
-                            self._end_element("function")
-                        self._end_element("tool_call")
+                    # Close potentially unclosed elements
+                    if self.current_param_name:
+                        self._end_element("parameter")
+                    if self.current_function_open:
+                        self._end_element("function")
+                    self._end_element("tool_call")
             except Exception as e:
                 logger.warning("Error with fallback parsing: %s", e)
             # Merge newly generated deltas into single response
@@ -1009,9 +976,18 @@ class StreamingXMLToolCallParser:
 
         properties = find_tool_properties(self.tools, self.current_function_name)
         if param_name in properties and isinstance(properties[param_name], dict):
-            return self.repair_param_type(
-                str(properties[param_name].get("type", "string"))
-            )
+            prop = properties[param_name]
+            param_type = prop.get("type")
+            if param_type is None and "anyOf" in prop:
+                # Handle anyOf schemas (common in Qwen 3.6)
+                for option in prop["anyOf"]:
+                    if isinstance(option, dict) and "type" in option:
+                        opt_type = str(option["type"])
+                        if opt_type in ["object", "array", "arr", "sequence"]:
+                            return opt_type
+                return "string"
+
+            return self.repair_param_type(str(param_type or "string"))
         return "string"
 
     def repair_param_type(self, param_type: str) -> str:
