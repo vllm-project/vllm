@@ -113,14 +113,14 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
     def get_inputs(self) -> list[torch.Tensor]:
         T = 5
         L = 4096
-        q = self.empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
+        q_pe = self.empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
         k_pe = self.empty_bf16(T, self.qk_rope_head_dim)
         kv_c_normed = self.empty_bf16(T, self.kv_lora_rank)
         cos_sin_cache = self.empty_bf16(L, self.qk_rope_head_dim)
         positions = self.empty(T, dtype=torch.int64)
         k_scale = self.empty(0, dtype=torch.float32)
         inputs = [
-            q,
+            q_pe,
             k_pe,
             kv_c_normed,
             positions,
@@ -138,7 +138,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
         if _USE_LAYERNAME:
 
             def _pattern_with_ln(
-                q: torch.Tensor,
+                q_pe: torch.Tensor,
                 k_pe: torch.Tensor,
                 kv_c_normed: torch.Tensor,
                 positions: torch.Tensor,
@@ -148,7 +148,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 k_pe_unsqueezed = k_pe.unsqueeze(1)
                 q_pe, k_pe = self.rope_matcher(
-                    positions, q, k_pe_unsqueezed, cos_sin_cache
+                    positions, q_pe, k_pe_unsqueezed, cos_sin_cache
                 )
                 dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                     kv_c_normed, k_pe, layer_name, self.kv_cache_dtype, k_scale
@@ -158,7 +158,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             return _pattern_with_ln
 
         def _pattern(
-            q: torch.Tensor,
+            q_pe: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
             positions: torch.Tensor,
@@ -166,7 +166,9 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            q_pe, k_pe = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+            q_pe, k_pe = self.rope_matcher(
+                positions, q_pe, k_pe_unsqueezed, cos_sin_cache
+            )
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed, k_pe, _ln, self.kv_cache_dtype, k_scale
             )
@@ -181,7 +183,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
         if _USE_LAYERNAME:
 
             def _replacement_with_ln(
-                q: torch.Tensor,
+                q_pe: torch.Tensor,
                 k_pe: torch.Tensor,
                 kv_c_normed: torch.Tensor,
                 positions: torch.Tensor,
@@ -192,7 +194,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 at = auto_functionalized(
                     self.FUSED_OP,
                     positions=positions,
-                    q_pe=q,
+                    q_pe=q_pe,
                     k_pe=k_pe,
                     kv_c=kv_c_normed,
                     cos_sin_cache=cos_sin_cache,
@@ -208,7 +210,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             return _replacement_with_ln
 
         def _replacement(
-            q: torch.Tensor,
+            q_pe: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
             positions: torch.Tensor,
@@ -218,7 +220,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             at = auto_functionalized(
                 self.FUSED_OP,
                 positions=positions,
-                q_pe=q,
+                q_pe=q_pe,
                 k_pe=k_pe,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache,
