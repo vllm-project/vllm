@@ -499,7 +499,7 @@ def test_extract_reasoning_streaming_fragmented_tool_call(qwen3_tokenizer):
     )
     assert msg3 is not None
     assert msg3.reasoning is None
-    assert msg3.content == "call>\n<function=bash>"
+    assert msg3.content == "<tool_call>\n<function=bash>"
 
 
 class _StubToolParser(ToolParser):
