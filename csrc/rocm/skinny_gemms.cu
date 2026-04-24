@@ -330,11 +330,17 @@ torch::Tensor vecMatMul(at::Tensor& mat, at::Tensor& vec,
   TORCH_CHECK(mat.dtype() == vec.dtype());
   TORCH_CHECK(vec.dtype() == torch::kFloat16 ||
               vec.dtype() == torch::kBFloat16);
-  TORCH_CHECK(rows_per_block <= WARP_SIZE,
-              "rows_per_block must not exceed WARP_SIZE (", WARP_SIZE, ").");
+  TORCH_CHECK(rows_per_block == 2 || rows_per_block == 4 ||
+                  rows_per_block == 8 || rows_per_block == 16,
+              "rows_per_block must be 2, 4, 8, or 16.");
 
   auto M = mat.size(0);
   auto K = mat.size(1);
+
+  TORCH_CHECK(M % rows_per_block == 0, "M (", M,
+              ") must be a multiple of rows_per_block (", rows_per_block, ").");
+  TORCH_CHECK(K % 8 == 0, "K (", K, ") must be a multiple of 8.");
+  TORCH_CHECK(K <= 8192, "K (", K, ") must not exceed 8192.");
 
   auto out = torch::empty(
       {1, M}, torch::TensorOptions().dtype(vec.dtype()).device(vec.device()));
@@ -376,9 +382,7 @@ torch::Tensor vecMatMul(at::Tensor& mat, at::Tensor& vec,
             mat_ptr, vec_ptr, out_ptr, K);
         break;
       default:
-        NUM_BLOCKS = M / 4;
-        vecMatMul_kernel<scalar_t, 4><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(
-            mat_ptr, vec_ptr, out_ptr, K);
+        TORCH_CHECK(false, "Unsupported rows_per_block: ", rows_per_block);
         break;
     }
   });
