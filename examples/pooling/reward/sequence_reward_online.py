@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Example online usage of Pooling API.
+Example online usage of sequence reward models.
 
 Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM. e.g.
 
-vllm serve internlm/internlm2-1_8b-reward --trust-remote-code
+vllm serve Skywork/Skywork-Reward-V2-Qwen3-0.6B
+
+The key distinction between sequence classification and token classification
+lies in their output granularity: sequence classification produces a single
+result for an entire input sequence, whereas token classification yields a
+result for each individual token within the sequence.
 """
 
 import argparse

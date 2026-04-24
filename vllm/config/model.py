@@ -953,8 +953,12 @@ class ModelConfig:
                 "mxfp4",
                 "gpt_oss_mxfp4",
                 "cpu_awq",
+                "humming",
                 "gguf",
             ]
+            # if the user specifies humming, we should always use humming
+            if self.quantization == "humming":
+                overrides = ["humming"] + overrides
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]
