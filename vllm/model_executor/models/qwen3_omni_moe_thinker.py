@@ -457,8 +457,11 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Compute feature lengths after CNN
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
-        # Vectorized mask creation: avoid creating many small tensors
-        max_len_after_cnn = feature_lens_after_cnn.max().item()
+        # Vectorized mask creation: avoid creating many small tensors. The
+        # `.item()` below is unavoidable — `torch.arange` needs a Python int
+        # for the output size. Runs once per audio forward.
+        with gpu_sync_allowed():
+            max_len_after_cnn = feature_lens_after_cnn.max().item()
         indices = torch.arange(max_len_after_cnn, device=padded_feature.device)
         padded_mask_after_cnn = indices.unsqueeze(0) < feature_lens_after_cnn.unsqueeze(
             1

@@ -1445,9 +1445,13 @@ class GPUModelRunner(
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         if self.cache_config.mamba_cache_mode == "align":
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
+            # Align mode needs the Python values immediately to call
+            # `postprocess_mamba` below; unavoidable D2H. Opt-in cache mode.
+            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+            with gpu_sync_allowed():
+                accepted_np = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            for i, num_tokens in enumerate(accepted_np):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
             mamba_utils.postprocess_mamba(
                 scheduler_output,

@@ -210,9 +210,13 @@ class WorkerLoRAManager:
     def add_adapter(self, adapter_request: Any) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
             return False
-        loaded_adapter = self._load_adapter(adapter_request)
-        loaded = self._adapter_manager.add_adapter(loaded_adapter)
-        self._adapter_manager.activate_adapter(loaded_adapter.id)
+        # One-time per adapter: load may sync (tensorizer) and
+        # `activate_adapter` eventually calls `set_lora` / `reset_lora`
+        # which write per-adapter scalars to GPU buffers.
+        with gpu_sync_allowed():
+            loaded_adapter = self._load_adapter(adapter_request)
+            loaded = self._adapter_manager.add_adapter(loaded_adapter)
+            self._adapter_manager.activate_adapter(loaded_adapter.id)
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
@@ -309,5 +313,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             loaded = (
                 self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
             )
-        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        # `activate_adapter` eventually calls `set_lora` / `reset_lora` which
+        # write per-adapter scalars to GPU buffers; allow the one-time sync.
+        with gpu_sync_allowed():
+            self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded

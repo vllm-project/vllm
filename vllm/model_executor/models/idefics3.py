@@ -356,7 +356,9 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 "image", num_patches
             ),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            # Only consumed as Python split sizes in `_process_image_input`;
+            # keep CPU-resident to avoid the `.tolist()` D2H sync.
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

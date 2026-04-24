@@ -393,7 +393,16 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     # Figure out how many tokens are in each request
     # num_decode_tokens: [1, 2, 1]
-    num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
+    # Avoid `torch.bincount` here — on CUDA it forces a sync to determine
+    # the output size (even with `minlength`, the kernel must confirm no
+    # value exceeds the bound). `scatter_add_` into a preallocated buffer
+    # is equivalent and stays async.
+    num_decode_tokens = torch.zeros(
+        num_reqs, dtype=request_ids.dtype, device=request_ids.device
+    )
+    num_decode_tokens.scatter_add_(
+        0, request_ids.to(num_decode_tokens.dtype), torch.ones_like(request_ids)
+    )
 
     # Calculate new query_start_loc with tokens in generation_indices
     # decode_query_start_loc: [0, 1, 3, 4]
@@ -403,8 +412,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[0] = 0
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+    # `.item()` reductions here are unavoidable — the CommonAttentionMetadata
+    # fields below need Python ints. Feature is opt-in (kv_sharing_fast_prefill).
+    from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+    with gpu_sync_allowed():
+        decode_max_query_len = int(num_decode_tokens.max().item())
+        total_num_decode_tokens = int(num_decode_tokens.sum().item())
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,

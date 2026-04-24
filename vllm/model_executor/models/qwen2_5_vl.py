@@ -1258,7 +1258,11 @@ class Qwen2_5_VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         image_embeds_out = []
         for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+            # `compute_mrope_for_media` returns a CPU tensor; pin +
+            # non-blocking upload to avoid synchronous H2D.
+            positions = compute_mrope_for_media(size, merge_size).to(
+                emb.device, non_blocking=True
+            )
             emb = torch.cat([emb, positions], dim=1)
             image_embeds_out.append(emb)
         image_embeds_split = image_embeds_out
@@ -1340,7 +1344,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 merge_size,
                 tokens_per_second=tokens_per_second,
                 video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device)
+            ).to(emb.device, non_blocking=True)
 
             emb = emb[retention_mask]
             positions = positions[retention_mask]
