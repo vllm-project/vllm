@@ -29,60 +29,55 @@ _SKIP_UNSUPPORTED = pytest.mark.skipif(
 
 
 @_SKIP_UNSUPPORTED
-def test_static_quant_fp8_registration():
-    expected = {
-        "native": True,
-        "vllm_c": IS_CUDA_ALIKE or IS_XPU,
-        "aiter": IS_ROCM,
-    }
-    actual = {
-        provider: impl.supported
-        for provider, impl in ir.ops.static_quant_fp8.impls.items()
-    }
-    assert actual == expected
+class TestRegistration:
+    def test_static_quant_fp8(self):
+        expected = {
+            "native": True,
+            "vllm_c": IS_CUDA_ALIKE or IS_XPU,
+            "aiter": IS_ROCM,
+        }
+        actual = {
+            provider: impl.supported
+            for provider, impl in ir.ops.static_quant_fp8.impls.items()
+        }
+        assert actual == expected
 
+    def test_static_group_quant_fp8(self):
+        expected = {
+            "native": True,
+            "vllm_c": IS_CUDA_ALIKE or IS_XPU,
+        }
+        actual = {
+            provider: impl.supported
+            for provider, impl in ir.ops.static_group_quant_fp8.impls.items()
+        }
+        assert actual == expected
 
-@_SKIP_UNSUPPORTED
-def test_static_group_quant_fp8_registration():
-    expected = {
-        "native": True,
-        "vllm_c": IS_CUDA_ALIKE or IS_XPU,
-    }
-    actual = {
-        provider: impl.supported
-        for provider, impl in ir.ops.static_group_quant_fp8.impls.items()
-    }
-    assert actual == expected
+    def test_dynamic_quant_fp8(self):
+        expected = {
+            "native": True,
+            "vllm_c": IS_CUDA_ALIKE or IS_XPU,
+            "aiter": IS_ROCM,
+        }
+        actual = {
+            provider: impl.supported
+            for provider, impl in ir.ops.dynamic_quant_fp8.impls.items()
+        }
+        assert actual == expected
 
-
-@_SKIP_UNSUPPORTED
-def test_dynamic_quant_fp8_registration():
-    expected = {
-        "native": True,
-        "vllm_c": IS_CUDA_ALIKE or IS_XPU,
-        "aiter": IS_ROCM,
-    }
-    actual = {
-        provider: impl.supported
-        for provider, impl in ir.ops.dynamic_quant_fp8.impls.items()
-    }
-    assert actual == expected
-
-
-@_SKIP_UNSUPPORTED
-def test_dynamic_group_quant_fp8_registration():
-    expected = {
-        "native": True,
-        "vllm_c": IS_CUDA,
-        "aiter": IS_ROCM,
-        "triton": IS_CUDA_ALIKE,
-        "xpu_kernels": IS_XPU,
-    }
-    actual = {
-        provider: impl.supported
-        for provider, impl in ir.ops.dynamic_group_quant_fp8.impls.items()
-    }
-    assert actual == expected
+    def test_dynamic_group_quant_fp8(self):
+        expected = {
+            "native": True,
+            "vllm_c": IS_CUDA,
+            "aiter": IS_ROCM,
+            "triton": IS_CUDA_ALIKE,
+            "xpu_kernels": IS_XPU,
+        }
+        actual = {
+            provider: impl.supported
+            for provider, impl in ir.ops.dynamic_group_quant_fp8.impls.items()
+        }
+        assert actual == expected
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
