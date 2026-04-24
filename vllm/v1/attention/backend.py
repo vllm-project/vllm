@@ -237,6 +237,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -278,6 +282,7 @@ class AttentionBackend(ABC):
         device_capability: "DeviceCapability",
         attn_type: str,
         use_non_causal: bool = False,
+        use_batch_invariant: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -312,6 +317,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append(f"attention type {attn_type} not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
+        if use_batch_invariant and not cls.supports_batch_invariance():
+            invalid_reasons.append("batch invariance not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -389,6 +396,12 @@ class CommonAttentionMetadata:
     """(batch_size,) bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
+
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows
+    and for all rows outside async spec decode; optimistic for async-spec
+    decode rows (assumes every draft was accepted). Not safe for kernels
+    that need exact per-row context lengths on decode rows."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None

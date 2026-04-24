@@ -14,7 +14,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -991,40 +990,7 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
-def override_envs_for_invariance(
-    attention_backend: AttentionBackendEnum | None,
-):
-    decode_invariant_backends = [
-        AttentionBackendEnum.FLASH_ATTN,  # best supported backend
-        AttentionBackendEnum.TRITON_ATTN,
-    ]
-    supported_backends = decode_invariant_backends + [
-        # FlashInfer temporarily disabled due to invariant CTA sizes.
-        # See FlashInfer issue #2424
-        # AttentionBackendEnum.FLASHINFER,
-        AttentionBackendEnum.FLASH_ATTN_MLA,
-        AttentionBackendEnum.TRITON_MLA,
-        # Not yet supported MLA backends
-        # AttentionBackendEnum.FLASHMLA,
-        # AttentionBackendEnum.FLEX_ATTENTION,  # IMA issue
-        # AttentionBackendEnum.FLASHINFER_MLA,  # PR #28967
-    ]
-    if attention_backend not in supported_backends:
-        supported_names = [b.name for b in supported_backends]
-        backend_name = attention_backend.name if attention_backend else None
-        error = (
-            "VLLM batch_invariant mode requires an attention backend in "
-            f"{supported_names}, but got '{backend_name}'. "
-            "Please use --attention-backend or attention_config to set "
-            "one of the supported backends before enabling batch_invariant."
-        )
-        raise RuntimeError(error)
-    if attention_backend not in decode_invariant_backends:
-        warning = (
-            "You are using a non-decode-invariant form of batch invariance. "
-            "This will not be invariant between prefill and decode."
-        )
-        logger.warning_once(warning)
+def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -1045,12 +1011,10 @@ def override_envs_for_invariance(
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
 
-def init_batch_invariance(
-    attention_backend: AttentionBackendEnum | None,
-):
+def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
-        override_envs_for_invariance(attention_backend)
+        override_envs_for_invariance()
         enable_batch_invariant_mode()
 
         # Disable TF32 for batch invariance - it causes non-deterministic rounding
