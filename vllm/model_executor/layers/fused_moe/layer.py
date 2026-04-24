@@ -1618,6 +1618,25 @@ class FusedMoE(PluggableLayer):
         return s
 
 
+# This is a temporary forwarding method which will be removed/modified layer.
+def fused_moe_make_expert_params_mapping(
+    model: torch.nn.Module,
+    ckpt_gate_proj_name: str,
+    ckpt_down_proj_name: str,
+    ckpt_up_proj_name: str,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    return FusedMoE.make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name,
+        ckpt_down_proj_name,
+        ckpt_up_proj_name,
+        num_experts,
+        num_redundant_experts,
+    )
+
+
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters
 # to avoid expensive runtime reflection in model loading code
 FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
