@@ -154,8 +154,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
+            # Deep-copy the tokenizer so the AsyncMicrobatchTokenizer,
+            # which runs in an executor thread, gets its own Rust backend
+            tok = copy.deepcopy(self.get_tokenizer())
             self._async_tokenizer = AsyncMicrobatchTokenizer(
-                self.get_tokenizer(), executor=self._executor
+                tok, executor=self._executor
             )
 
         return self._async_tokenizer
