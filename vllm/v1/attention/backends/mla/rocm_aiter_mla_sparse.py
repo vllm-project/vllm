@@ -86,11 +86,15 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "fp8_e4m3fnuz",
+        "fp8_e5m2fnuz",
     ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1]
+        return [64]
 
     @staticmethod
     def get_name() -> str:
@@ -146,7 +150,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     paged_kv_indptr: torch.Tensor
     paged_kv_indptr_rest: torch.Tensor
 
-    block_size: int = 1
+    block_size: int = 64
     topk_tokens: int = 2048
 
 
@@ -197,8 +201,6 @@ class ROCMAiterMLASparseMetadataBuilder(
             max_num_batched_tokens, dtype=torch.int32, device=device
         )
 
-        # These two needs to be calculated in runtime,
-        # but we still needs to prepare the buffer
         self.paged_kv_indices = torch.zeros(
             [max_num_batched_tokens * self.topk_tokens],
             dtype=torch.int32,
@@ -313,27 +315,61 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        self._sparse_decode_out: torch.Tensor | None = None
 
-    def _forward_bf16_kv(
+    def _forward_sparse_mla(
         self,
-        q: torch.Tensor,  # [sq, heads, d_qk]
-        kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
-        topk_indices: torch.Tensor,  # [sq, topk]
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
         attn_metadata: ROCMAiterMLASparseMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
+        from vllm.platforms import current_platform
         num_tokens = q.shape[0]
+        attn_out_dtype = q.dtype
+
+        fp8_dtype = current_platform.fp8_dtype()
+        mla_kwargs: dict = {}
+
+        if self.kv_cache_dtype in ("fp8_e4m3", "fp8_e5m2",
+                                   "fp8_e4m3fnuz", "fp8_e5m2fnuz"):
+            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(fp8_dtype)
+            mla_kwargs["k_scale"] = layer._k_scale
+            mla_kwargs["v_scale"] = layer._v_scale
+
+        # mla_decode_fwd uses page_size=1 internally. When block_size > 1,
+        # flatten [num_pages, block_size, head_size] ->
+        # [num_pages * block_size, 1, head_size] so flat token indices work.
+        if kv_c_and_k_pe_cache.dim() >= 2 and kv_c_and_k_pe_cache.shape[1] != 1:
+            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.reshape(
+                -1, 1, kv_c_and_k_pe_cache.shape[-1]
+            )
+
         mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
-        output = torch.empty(
-            [num_tokens, mla_num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device,
-        )
+        qo_indptr = attn_metadata.qo_indptr[:num_tokens + 1]
+        kv_last_page_len = attn_metadata.paged_kv_last_page_len[:num_tokens]
+
         seq_len = (topk_indices != -1).sum(dim=-1)
         torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
         attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
+        kv_indptr = attn_metadata.paged_kv_indptr[:num_tokens + 1]
+
+        if (
+            self._sparse_decode_out is None
+            or self._sparse_decode_out.shape[0] < num_tokens
+            or self._sparse_decode_out.dtype != attn_out_dtype
+        ):
+            self._sparse_decode_out = torch.zeros(
+                [num_tokens, mla_num_heads, self.kv_lora_rank],
+                dtype=attn_out_dtype,
+                device=q.device,
+            )
+        output = self._sparse_decode_out[:num_tokens]
+
         fetch_id_to_ragged_triton(
             topk_indices,
-            attn_metadata.paged_kv_indptr,
+            kv_indptr,
             attn_metadata.paged_kv_indices,
             attn_metadata.topk_tokens,
         )
@@ -343,11 +379,12 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             kv_c_and_k_pe_cache,
             output,
             self.scale,
-            attn_metadata.qo_indptr,
+            qo_indptr,
             1,
-            attn_metadata.paged_kv_indptr,
+            kv_indptr,
             attn_metadata.paged_kv_indices,
-            attn_metadata.paged_kv_last_page_len,
+            kv_last_page_len,
+            **mla_kwargs,
         )
 
         return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
@@ -381,8 +418,9 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         )
 
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        attn_out = self._forward_bf16_kv(
-            mla_padded_q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
+        attn_out = self._forward_sparse_mla(
+            mla_padded_q, kv_c_and_k_pe_cache, topk_indices_global,
+            attn_metadata, layer
         )
 
         return attn_out, None

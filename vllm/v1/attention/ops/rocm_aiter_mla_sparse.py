@@ -7,11 +7,42 @@ from importlib.util import find_spec
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+
+logger = init_logger(__name__)
+
+_AITER_MQA_SMALL_HEADS_WARNED = False
+
+_cached_paged_logits: torch.Tensor | None = None
+
+
+def _get_paged_logits_buffer(
+    rows: int, cols: int, device: torch.device
+) -> torch.Tensor:
+    """Return a (rows, cols) float32 buffer pre-filled with -inf.
+
+    Within a decode step every layer sees the same (batch*next_n,
+    actual_max_seq_len) shape, so the expensive torch.full call only
+    happens once per step (or when the shape changes).
+    """
+    global _cached_paged_logits
+    if (
+        _cached_paged_logits is not None
+        and _cached_paged_logits.shape[0] == rows
+        and _cached_paged_logits.shape[1] == cols
+        and _cached_paged_logits.device == device
+    ):
+        return _cached_paged_logits
+    _cached_paged_logits = torch.full(
+        (rows, cols), float("-inf"), device=device, dtype=torch.float32
+    )
+    return _cached_paged_logits
+
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
@@ -111,7 +142,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
-        "NHD",
+        "SHUFFLE",
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -212,7 +243,7 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
-        "NHD",
+        "SHUFFLE",
         head_dim,
         block_tile_size,
         head_tile_size,
@@ -300,6 +331,7 @@ def rocm_fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
+    block_size: int = 1,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -317,41 +349,80 @@ def rocm_fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
+        block_size: KV cache block size (default 1).
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+    global _AITER_MQA_SMALL_HEADS_WARNED
     from vllm._aiter_ops import rocm_aiter_ops
 
+    batch_size, next_n, heads, _ = q_fp8.shape
+
     aiter_paged_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled():
+    if rocm_aiter_ops.is_enabled() and heads >= 16:
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
+    elif rocm_aiter_ops.is_enabled() and not _AITER_MQA_SMALL_HEADS_WARNED:
+        logger.warning(
+            "AITER paged MQA logits kernel does not support %d heads "
+            "(requires >= 16). Falling back to PyTorch reference.",
+            heads,
+        )
+        _AITER_MQA_SMALL_HEADS_WARNED = True
 
     if aiter_paged_mqa_logits_module is not None:
-        deepgemm_fp8_paged_mqa_logits_stage1 = (
-            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
+        _deepgemm_fp8_paged_mqa_logits = getattr(
+            aiter_paged_mqa_logits_module,
+            "deepgemm_fp8_paged_mqa_logits",
+            None,
         )
-        batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
-            float("-inf"),
-            device="cuda",
-            dtype=torch.float32,
+        use_new_api = (
+            _deepgemm_fp8_paged_mqa_logits is not None and block_size > 1
         )
-        # TODO: 1. Replace _stage1 and out_qk.sum with another fused variant;
-        #       2. Remove ChunkQ when AITER PR #2891 merged
-        deepgemm_fp8_paged_mqa_logits_stage1(
-            q_fp8,
-            kv_cache_fp8,
-            weights,
-            out_qk,
-            context_lens,
-            block_tables,
-            max_model_len,
-            ChunkQ=heads,
-        )
-        return out_qk.sum(dim=0)
+        if use_new_api:
+            out_logits = _get_paged_logits_buffer(
+                batch_size * next_n, max_model_len, q_fp8.device
+            )
+            _deepgemm_fp8_paged_mqa_logits(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                out_logits,
+                context_lens,
+                block_tables,
+                max_model_len,
+                ChunkK=256,
+                Preshuffle=block_size == 64,
+                KVBlockSize=block_size,
+                WavePerEU=2,
+            )
+            return out_logits
+        else:
+            _stage1 = (
+                aiter_paged_mqa_logits_module
+                .deepgemm_fp8_paged_mqa_logits_stage1
+            )
+            out_qk = torch.full(
+                (heads, batch_size * next_n, max_model_len),
+                float("-inf"),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            # TODO: 1. Replace _stage1 and out_qk.sum with another fused
+            #          variant;
+            #       2. Remove ChunkQ when AITER PR #2891 merged
+            _stage1(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                out_qk,
+                context_lens,
+                block_tables,
+                max_model_len,
+                ChunkQ=heads,
+            )
+            return out_qk.sum(dim=0)
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -540,7 +611,7 @@ def rocm_aiter_sparse_attn_indexer(
     num_tokens = slot_mapping.shape[0]
     k = k[:num_tokens]
 
-    ops.indexer_k_quant_and_cache(
+    indexer_k_quant_and_cache_triton(
         k,
         kv_cache,
         slot_mapping,
@@ -598,6 +669,7 @@ def rocm_aiter_sparse_attn_indexer(
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
         assert decode_metadata is not None
+        kv_block_size = kv_cache.shape[1]
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
         # we only have [num_block, block_size, head_dim],
         kv_cache = kv_cache.unsqueeze(-2)
@@ -620,6 +692,8 @@ def rocm_aiter_sparse_attn_indexer(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
 
+        actual_max_seq_len = layer_attn_metadata.max_seq_len
+
         logits = rocm_fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
@@ -627,7 +701,8 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
+            max_model_len=actual_max_seq_len,
+            block_size=kv_block_size,
         )
 
         num_rows = logits.shape[0]
