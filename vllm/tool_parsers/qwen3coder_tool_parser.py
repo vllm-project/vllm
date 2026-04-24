@@ -374,6 +374,22 @@ class Qwen3CoderToolParser(ToolParser):
             # Check if this tool call has ended
             tool_ends = current_text.count(self.tool_call_end_token)
             if tool_ends > self.current_tool_index:
+                # Find the end of the tool call that just finished and update
+                # _sent_content_idx to prevent it from leaking into content.
+                search_idx = 0
+                for _ in range(self.current_tool_index + 1):
+                    search_idx = current_text.find(self.tool_call_start_token,
+                                                  search_idx)
+                    if search_idx == -1:
+                        break
+                    end_idx = current_text.find(self.tool_call_end_token,
+                                               search_idx)
+                    if end_idx != -1:
+                        self._sent_content_idx = max(
+                            self._sent_content_idx,
+                            end_idx + len(self.tool_call_end_token))
+                    search_idx += len(self.tool_call_start_token)
+
                 # This tool has ended, advance to next
                 self.current_tool_index += 1
                 self.header_sent = False
@@ -382,11 +398,10 @@ class Qwen3CoderToolParser(ToolParser):
                 self.json_closed = False
                 self.accumulated_params = {}
 
-                # Check if there are more tool calls
-                tool_starts = current_text.count(self.tool_call_start_token)
-                if self.current_tool_index >= tool_starts:
-                    # No more tool calls
-                    self.is_tool_call_started = False
+                # Always reset is_tool_call_started when a tool call ends.
+                # This allows correctly sending any content between or after
+                # tool calls.
+                self.is_tool_call_started = False
                 # Continue processing next tool
                 return None
 
