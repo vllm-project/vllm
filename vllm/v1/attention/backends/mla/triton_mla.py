@@ -90,11 +90,15 @@ def _get_shared_cg_buffer(
     shape: tuple[int, ...],
     dtype: torch.dtype,
     device: torch.device,
+    init_zeros: bool = False,
 ) -> torch.Tensor:
     key = (key_prefix, device, shape, dtype)
     buf = _SHARED_CG_BUFFERS.get(key)
     if buf is None:
-        buf = torch.empty(shape, dtype=dtype, device=device)
+        if init_zeros:
+            buf = torch.zeros(shape, dtype=dtype, device=device)
+        else:
+            buf = torch.empty(shape, dtype=dtype, device=device)
         _SHARED_CG_BUFFERS[key] = buf
     return buf
 

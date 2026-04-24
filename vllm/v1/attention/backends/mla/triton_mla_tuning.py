@@ -14,6 +14,8 @@ Keys are (q_num_heads, max_model_len, B); values are dicts of kernel knobs.
 Lookup falls back to the analytical heuristic if a key is not present.
 """
 
+from bisect import bisect_right
+
 
 TUNED_KV_CONFIGS: dict[tuple[int, int, int], dict] = {
 
@@ -128,6 +130,32 @@ TUNED_KV_CONFIGS: dict[tuple[int, int, int], dict] = {
 }
 
 
+def _build_tuning_indexes() -> tuple[
+    dict[int, tuple[int, ...]], dict[tuple[int, int], tuple[int, ...]]
+]:
+    mml_bucket_sets: dict[int, set[int]] = {}
+    batch_bucket_sets: dict[tuple[int, int], set[int]] = {}
+    for heads, mml, batch in TUNED_KV_CONFIGS:
+        mml_bucket_sets.setdefault(heads, set()).add(mml)
+        batch_bucket_sets.setdefault((heads, mml), set()).add(batch)
+
+    return (
+        {heads: tuple(sorted(mmls)) for heads, mmls in mml_bucket_sets.items()},
+        {key: tuple(sorted(batches)) for key, batches in batch_bucket_sets.items()},
+    )
+
+
+_TUNED_MML_BUCKETS, _TUNED_BATCH_BUCKETS = _build_tuning_indexes()
+del _build_tuning_indexes
+
+
+def _floor_bucket(buckets: tuple[int, ...], value: int) -> int:
+    idx = bisect_right(buckets, value) - 1
+    if idx < 0:
+        idx = 0
+    return buckets[idx]
+
+
 def lookup_config(q_num_heads: int, max_model_len: int, B: int) -> dict | None:
     """Return the tuned config dict for (heads, mml, B), else None.
 
@@ -140,15 +168,14 @@ def lookup_config(q_num_heads: int, max_model_len: int, B: int) -> dict | None:
         return TUNED_KV_CONFIGS[(q_num_heads, max_model_len, B)]
 
     # heads must match exactly
-    mmls = sorted({k[1] for k in TUNED_KV_CONFIGS if k[0] == q_num_heads})
-    if not mmls:
+    mmls = _TUNED_MML_BUCKETS.get(q_num_heads)
+    if mmls is None:
         return None
-    mml = max((m for m in mmls if m <= max_model_len), default=mmls[0])
+    mml = _floor_bucket(mmls, max_model_len)
 
-    bs = sorted({k[2] for k in TUNED_KV_CONFIGS
-                 if k[0] == q_num_heads and k[1] == mml})
-    if not bs:
+    bs = _TUNED_BATCH_BUCKETS.get((q_num_heads, mml))
+    if bs is None:
         return None
-    b = max((x for x in bs if x <= B), default=bs[0])
+    b = _floor_bucket(bs, B)
 
     return TUNED_KV_CONFIGS.get((q_num_heads, mml, b))
