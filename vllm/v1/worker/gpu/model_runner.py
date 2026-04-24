@@ -177,6 +177,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.use_pp:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
 
+        self.is_disaggregated = (
+            self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_transfer_instance
+        )
+
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
         self.uniform_decode_query_len = 1 + self.num_speculative_steps
@@ -1222,6 +1227,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 computed_prefill_lens + 1,  # +1 to consider the skew in eagle
             )
 
+        is_prefill_instance = self.is_disaggregated and self.req_states.all_prefills(
+            input_batch.idx_mapping_np,
+            # +1 to account for EAGLE processing one position ahead.
+            shift_computed_tokens=1,
+        )
+
         # Postprocess results and update request states.
         # NOTE: This is intentionally done after creating the AsyncOutput,
         # ensuring that `copy_event` is recorded before calling postprocess.
@@ -1233,6 +1244,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            # Skip drafting tokens for the prefill instance during P/D disaggregation,
+            # or when all requests in the batch are still mid-prefill.
+            # NOTE: Draft prefill must still run to populate the draft KV cache.
+            skip_drafting = is_prefill_instance or self.req_states.all_prefills(
+                input_batch.idx_mapping_np
+            )
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
@@ -1246,6 +1263,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
                 mm_inputs=mm_inputs,
+                skip_drafting=skip_drafting,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)

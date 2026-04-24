@@ -414,6 +414,7 @@ class EagleSpeculator:
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        skip_drafting: bool = False,
     ) -> torch.Tensor:
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
@@ -496,7 +497,7 @@ class EagleSpeculator:
                 mm_inputs=mm_inputs,
             )
 
-        if self.num_speculative_steps == 1:
+        if skip_drafting or self.num_speculative_steps == 1:
             # Early exit.
             return self.draft_tokens[:num_reqs, :1]
 

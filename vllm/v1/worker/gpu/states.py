@@ -138,3 +138,11 @@ class RequestState:
             self.num_computed_prefill_tokens[idx_mapping_np]
             < self.prefill_len.np[idx_mapping_np]
         )
+
+    def all_prefills(
+        self, idx_mapping_np: np.ndarray, shift_computed_tokens: int = 0
+    ) -> bool:
+        return np.all(
+            self.num_computed_prefill_tokens[idx_mapping_np] + shift_computed_tokens
+            < self.prefill_len.np[idx_mapping_np]
+        )
