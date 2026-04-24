@@ -641,6 +641,297 @@ def _pth_attn_stage1_gqa_wmma(
 
 
 # ------------------------------------------------------------------ #
+#  Stage 1 — GQA grouped Q-heads, sub-byte packed (INT4 / INT2)        #
+# ------------------------------------------------------------------ #
+
+
+@triton.jit
+def _pth_attn_stage1_packed_gqa(
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    K_scale_ptr,
+    V_scale_ptr,
+    Block_table_ptr,
+    Q_to_req_ptr,
+    Q_to_klen_ptr,
+    Mid_o_ptr,
+    stride_q_tok,
+    stride_q_h,
+    stride_kc_blk,
+    stride_kc_slot,
+    stride_kc_head,
+    stride_vc_blk,
+    stride_vc_slot,
+    stride_vc_head,
+    stride_ks_blk,
+    stride_ks_slot,
+    stride_ks_head,
+    stride_vs_blk,
+    stride_vs_slot,
+    stride_vs_head,
+    stride_bt_r,
+    stride_mid_q,
+    stride_mid_h,
+    stride_mid_s,
+    HQ: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,
+    KV_GROUP_SIZE: tl.constexpr,
+    ATTN_SCALE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    PACKED_HEAD_PADDED: tl.constexpr,
+    PACKING_FACTOR: tl.constexpr,
+):
+    """Split-KV stage1 for INT4 / INT2 packed cache, with GQA grouping.
+
+    Mirrors :func:`_pth_attn_stage1_gqa_wmma` (groups ``KV_GROUP_SIZE``
+    Q-heads into one ``BLOCK_M × HEAD_DIM`` tile, lets QK / PV land as
+    real ``tl.dot`` calls onto WMMA / MFMA / Tensor Cores) but reads the
+    cache as packed bytes and runs the dot split across ``PACKING_FACTOR``
+    interleaved streams, like :func:`_attn_packed` and
+    :func:`_pth_attn_stage1_packed`.
+
+    Q is expected pre-rotated (RHT for INT4, full Hadamard for INT2);
+    the output is in the rotated space and the launcher un-rotates it
+    after stage 2.
+    """
+    q_id = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    sid = tl.program_id(2)
+
+    k_len = tl.load(Q_to_klen_ptr + q_id)
+    if k_len <= 0:
+        return
+
+    split_len = tl.cdiv(k_len, NUM_KV_SPLITS)
+    split_start = split_len * sid
+    split_end = tl.minimum(split_start + split_len, k_len)
+    if split_start >= split_end:
+        return
+
+    req_id = tl.load(Q_to_req_ptr + q_id)
+
+    m_offs = tl.arange(0, BLOCK_M)
+    h_offs = kv_head * KV_GROUP_SIZE + m_offs
+    h_mask = (m_offs < KV_GROUP_SIZE) & (h_offs < HQ)
+
+    packed_offs = tl.arange(0, PACKED_HEAD_PADDED)
+    packed_dim_mask = packed_offs < (HEAD_DIM // PACKING_FACTOR)
+
+    # PACKING_FACTOR Q streams over the head_dim (positions s, s+PF, ...).
+    offs_s0 = packed_offs * PACKING_FACTOR
+    offs_s1 = packed_offs * PACKING_FACTOR + 1
+    mask_s0 = offs_s0 < HEAD_DIM
+    mask_s1 = offs_s1 < HEAD_DIM
+
+    q_base = q_id * stride_q_tok + h_offs[:, None] * stride_q_h
+    q_mask = h_mask[:, None]
+    Q_s0 = tl.load(
+        Q_ptr + q_base + offs_s0[None, :],
+        mask=q_mask & mask_s0[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    Q_s1 = tl.load(
+        Q_ptr + q_base + offs_s1[None, :],
+        mask=q_mask & mask_s1[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    if PACKING_FACTOR == 4:
+        offs_s2 = packed_offs * 4 + 2
+        offs_s3 = packed_offs * 4 + 3
+        mask_s2 = offs_s2 < HEAD_DIM
+        mask_s3 = offs_s3 < HEAD_DIM
+        Q_s2 = tl.load(
+            Q_ptr + q_base + offs_s2[None, :],
+            mask=q_mask & mask_s2[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        Q_s3 = tl.load(
+            Q_ptr + q_base + offs_s3[None, :],
+            mask=q_mask & mask_s3[None, :],
+            other=0.0,
+        ).to(tl.float32)
+
+    # Σ Q per row (BLOCK_M,) for the INT4 zero-point correction.
+    if PACKING_FACTOR == 2:
+        Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
+
+    m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc_s0 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
+    acc_s1 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
+    if PACKING_FACTOR == 4:
+        acc_s2 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
+        acc_s3 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
+
+    bt_base = req_id * stride_bt_r
+    kv_range = tl.arange(0, BLOCK_KV)
+
+    for start_n in range(split_start, split_end, BLOCK_KV):
+        kv_offs = start_n + kv_range
+        kv_mask = kv_offs < split_end
+
+        page_idx = kv_offs // BLOCK_SIZE
+        page_off = kv_offs % BLOCK_SIZE
+        block_nums = tl.load(
+            Block_table_ptr + bt_base + page_idx, mask=kv_mask, other=0
+        )
+
+        # K : (packed_dim, BLOCK_KV) bytes — transposed so tl.dot(Q_s, K_s)
+        # lands as (BLOCK_M, BLOCK_KV).
+        k_addrs = (
+            block_nums[None, :] * stride_kc_blk
+            + page_off[None, :] * stride_kc_slot
+            + kv_head * stride_kc_head
+            + packed_offs[:, None]
+        )
+        K_packed = tl.load(
+            K_ptr + k_addrs,
+            mask=kv_mask[None, :] & packed_dim_mask[:, None],
+            other=0,
+        )
+        if PACKING_FACTOR == 2:
+            K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
+            K_s0 = K_s0_u.to(tl.float32)
+            K_s1 = K_s1_u.to(tl.float32)
+        else:
+            kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_packed)
+            K_s0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
+            K_s1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
+            K_s2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
+            K_s3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
+
+        k_sc_addrs = (
+            block_nums * stride_ks_blk
+            + page_off * stride_ks_slot
+            + kv_head * stride_ks_head
+        )
+        ks_raw = tl.load(K_scale_ptr + k_sc_addrs, mask=kv_mask, other=0.0)
+        if PACKING_FACTOR == 2:
+            ks_bits = ks_raw.to(tl.int32, bitcast=True)
+            k_zp = (ks_bits & 0xF).to(tl.float32)
+            k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
+        else:
+            k_scales = ks_raw
+
+        if PACKING_FACTOR == 2:
+            qk = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
+            qk = (qk - Q_sum[:, None] * k_zp[None, :]) * (
+                ATTN_SCALE * k_scales[None, :]
+            )
+        else:
+            qk = (
+                tl.dot(Q_s0, K_s0)
+                + tl.dot(Q_s1, K_s1)
+                + tl.dot(Q_s2, K_s2)
+                + tl.dot(Q_s3, K_s3)
+            )
+            qk = qk * (ATTN_SCALE * k_scales[None, :])
+
+        # Mask padded K columns and padded Q-head rows to -inf.
+        qk = tl.where(kv_mask[None, :] & h_mask[:, None], qk, -float("inf"))
+
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+        qk = qk - m_ij[:, None]
+        p = tl.exp(qk)
+        l_ij = tl.sum(p, axis=1)
+
+        alpha = tl.exp(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        acc_s0 = acc_s0 * alpha[:, None]
+        acc_s1 = acc_s1 * alpha[:, None]
+        if PACKING_FACTOR == 4:
+            acc_s2 = acc_s2 * alpha[:, None]
+            acc_s3 = acc_s3 * alpha[:, None]
+
+        # V : (BLOCK_KV, packed_dim) bytes.
+        v_addrs = (
+            block_nums[:, None] * stride_vc_blk
+            + page_off[:, None] * stride_vc_slot
+            + kv_head * stride_vc_head
+            + packed_offs[None, :]
+        )
+        V_packed = tl.load(
+            V_ptr + v_addrs,
+            mask=kv_mask[:, None] & packed_dim_mask[None, :],
+            other=0,
+        )
+        if PACKING_FACTOR == 2:
+            V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
+            V_s0 = V_s0_u.to(tl.float32)
+            V_s1 = V_s1_u.to(tl.float32)
+        else:
+            vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_packed)
+            V_s0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
+            V_s1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
+            V_s2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
+            V_s3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
+
+        v_sc_addrs = (
+            block_nums * stride_vs_blk
+            + page_off * stride_vs_slot
+            + kv_head * stride_vs_head
+        )
+        vs_raw = tl.load(V_scale_ptr + v_sc_addrs, mask=kv_mask, other=0.0)
+        if PACKING_FACTOR == 2:
+            vs_bits = vs_raw.to(tl.int32, bitcast=True)
+            v_zp = (vs_bits & 0xF).to(tl.float32)
+            v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
+        else:
+            v_scales = vs_raw
+
+        # PV split-dot.  P (BLOCK_M, BLOCK_KV) → P_v (BLOCK_M, BLOCK_KV)
+        # → tl.dot(P_v, V_si) (BLOCK_M, packed_dim).
+        P_v = p * v_scales[None, :]
+        if PACKING_FACTOR == 2:
+            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+            acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
+            acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
+        else:
+            acc_s0 += tl.dot(P_v, V_s0)
+            acc_s1 += tl.dot(P_v, V_s1)
+            acc_s2 += tl.dot(P_v, V_s2)
+            acc_s3 += tl.dot(P_v, V_s3)
+
+        m_i = m_ij
+
+    # Per-row output + LSE for the BLOCK_M Q-heads sharing this KV head.
+    safe_l = tl.where(l_i > 0.0, l_i, 1.0)
+    out_base = q_id * stride_mid_q + h_offs[:, None] * stride_mid_h + sid * stride_mid_s
+    out_mask = h_mask[:, None]
+    tl.store(
+        Mid_o_ptr + out_base + offs_s0[None, :],
+        acc_s0 / safe_l[:, None],
+        mask=out_mask & mask_s0[None, :],
+    )
+    tl.store(
+        Mid_o_ptr + out_base + offs_s1[None, :],
+        acc_s1 / safe_l[:, None],
+        mask=out_mask & mask_s1[None, :],
+    )
+    if PACKING_FACTOR == 4:
+        tl.store(
+            Mid_o_ptr + out_base + offs_s2[None, :],
+            acc_s2 / safe_l[:, None],
+            mask=out_mask & mask_s2[None, :],
+        )
+        tl.store(
+            Mid_o_ptr + out_base + offs_s3[None, :],
+            acc_s3 / safe_l[:, None],
+            mask=out_mask & mask_s3[None, :],
+        )
+
+    lse_addrs = (
+        q_id * stride_mid_q + h_offs * stride_mid_h + sid * stride_mid_s + HEAD_DIM
+    )
+    lse = m_i + tl.log(safe_l)
+    tl.store(Mid_o_ptr + lse_addrs, lse, mask=h_mask)
+
+
+# ------------------------------------------------------------------ #
 #  CPU-side query maps (vectorized, no per-request Python loop)       #
 # ------------------------------------------------------------------ #
 
@@ -740,6 +1031,10 @@ def triton_per_token_head_attention(
     # inner loop over groups).  Disabled outright for packed modes — the
     # int8 dot doesn't apply when K is sub-byte packed.
     use_grouped_wmma = use_qk_int8_wmma and 2 <= kv_group <= 32 and packing_factor == 1
+    # Packed modes: same grouping trick to land tl.dot onto WMMA / MFMA /
+    # Tensor Cores after the unpack.  Per-query packed kernel is the
+    # vector mul-reduce fallback for MHA models (kv_group < 2).
+    use_packed_gqa = packing_factor > 1 and 2 <= kv_group <= 32
 
     # Pre-allocated buffer reuse (TQ pattern: allocate once, slice by batch)
     if mid_o_buf is not None and mid_o_buf.shape[0] >= total_q:
@@ -769,10 +1064,11 @@ def triton_per_token_head_attention(
         if buf_holder is not None:
             buf_holder._pth_lse_buf = lse
 
-    # Stage 1 — three dispatches, all write the same mid_o layout consumed
+    # Stage 1 — four dispatches, all write the same mid_o layout consumed
     # by _fwd_kernel_stage2:
     #   * grouped-WMMA: int8 tensor cores (INT8 cache, kv_group >= 2)
-    #   * packed: sub-byte unpack + multi-stream dot (INT4 / INT2)
+    #   * packed-GQA: sub-byte unpack + tl.dot tile (INT4 / INT2 + GQA)
+    #   * packed (per-query): mul-reduce fallback for MHA + INT4 / INT2
     #   * elementwise: bf16/fp16/int8/fp8 flat head slot (everything else)
     if use_grouped_wmma:
         BLOCK_M = max(16, triton.next_power_of_2(kv_group))
@@ -814,6 +1110,55 @@ def triton_per_token_head_attention(
             BLOCK_M=BLOCK_M,
             BLOCK_KV=block_kv,
             QK_INT8_WMMA=True,
+            num_warps=4,
+            num_stages=2,
+        )
+    elif use_packed_gqa:
+        # GQA-grouped sub-byte packed kernel.  BLOCK_M padded to ≥16 (the
+        # tl.dot M dimension floor); rows beyond ``KV_GROUP_SIZE`` are
+        # masked to -inf and zeroed in the store.
+        BLOCK_M = max(16, triton.next_power_of_2(kv_group))
+        # Pad to >=16 so the kernel's tl.dot also compiles for the
+        # tightest head_size + packing combos (e.g. head_size=32 + INT2).
+        packed_head_padded = max(16, triton.next_power_of_2(D // packing_factor))
+        _pth_attn_stage1_packed_gqa[(total_q, Hk, NUM_KV_SPLITS)](
+            query,
+            key_cache,
+            value_cache,
+            k_scale_cache,
+            v_scale_cache,
+            block_table,
+            q_to_req,
+            q_to_klen,
+            mid_o,
+            query.stride(0),
+            query.stride(1),
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(2),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(2),
+            k_scale_cache.stride(0),
+            k_scale_cache.stride(1),
+            k_scale_cache.stride(2),
+            v_scale_cache.stride(0),
+            v_scale_cache.stride(1),
+            v_scale_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            HQ=Hq,
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group,
+            ATTN_SCALE=scale,
+            BLOCK_M=BLOCK_M,
+            BLOCK_KV=block_kv,
+            PACKED_HEAD_PADDED=packed_head_padded,
+            PACKING_FACTOR=packing_factor,
             num_warps=4,
             num_stages=2,
         )
@@ -1527,8 +1872,18 @@ def triton_per_token_head_prefill(
     kv_group = Hq // Hkv
     BLOCK_SIZE = key_cache.shape[1]
 
-    BLOCK_M = 64 if D > 128 else 128
-    BLOCK_N = 64 if D > 128 else 128
+    if packing_factor > 1:
+        # Packed prefill carries PACKING_FACTOR fp32 acc tiles (one per
+        # interleaved Q stream).  At BLOCK_M=128 the per-program register
+        # footprint is ``PACKING_FACTOR × BLOCK_M × packed_dim × 4 B``
+        # which for INT2 + D=128 hits ~65 KB and spills to scratch on
+        # RDNA3.  Shrink BLOCK_M proportionally to the packing factor so
+        # the acc tiles stay roughly the same size as in the flat case.
+        BLOCK_M = max(16, (64 if D > 128 else 128) // packing_factor)
+        BLOCK_N = max(16, (64 if D > 128 else 128) // packing_factor)
+    else:
+        BLOCK_M = 64 if D > 128 else 128
+        BLOCK_N = 64 if D > 128 else 128
     BLOCK_D = triton.next_power_of_2(D)
 
     grid = (num_reqs, Hq, triton.cdiv(max_query_len, BLOCK_M))

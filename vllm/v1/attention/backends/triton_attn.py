@@ -684,11 +684,12 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Dedicated decode/prefill kernels for all per-token-head modes.
-        # The launchers dispatch internally on ``kv_quant_mode``: INT8 / FP8
-        # use the flat-head-slot kernels (with optional int8 WMMA on int8
-        # caches), INT4 / INT2 use the sub-byte packed variants with Q
-        # rotation done Python-side.
+        # Dedicated prefill kernel (with packed variant for INT4 / INT2).
+        # Decode is gated separately below: only INT8 / FP8 use the
+        # dedicated split-KV decode kernel — INT4 / INT2 fall through to
+        # ``unified_attention`` / ``_attn_packed``, which gets tensor cores
+        # via ``tl.dot`` whereas the split-KV decode kernel uses vector
+        # mul-reduce.
         if (
             self._is_per_token_head_quant
             and self.alibi_slopes is None
