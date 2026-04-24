@@ -4,7 +4,7 @@
 import importlib
 import sys
 import types
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pytest
 import torch
@@ -90,7 +90,7 @@ class FakeTritonMLABackend(_FakeMLABackend):
 
 
 def _install_fake_amdsmi(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_amdsmi = types.ModuleType("amdsmi")
+    fake_amdsmi: Any = types.ModuleType("amdsmi")
 
     class AmdSmiException(Exception):
         pass
@@ -108,7 +108,7 @@ def _install_fake_amdsmi(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _install_fake_aiter_ops(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_aiter_ops = types.ModuleType("vllm._aiter_ops")
+    fake_aiter_ops: Any = types.ModuleType("vllm._aiter_ops")
 
     class FakeRocmAiterOps:
         @staticmethod
