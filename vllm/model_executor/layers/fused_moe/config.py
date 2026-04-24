@@ -113,12 +113,14 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
+    # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K weights)
+    SigmoidRenorm = (6,)
     # Custom
-    Custom = (6,)
+    Custom = (7,)
     # Simulated
-    Simulated = (7,)
+    Simulated = (8,)
     # Unspecified
-    Unspecified = 8.0
+    Unspecified = 9.0
 
 
 def get_routing_method_type(
