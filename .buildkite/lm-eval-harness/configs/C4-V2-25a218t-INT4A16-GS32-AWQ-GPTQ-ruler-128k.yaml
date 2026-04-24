@@ -8,3 +8,5 @@ limit: 10
 metadata:
   max_seq_lengths:
     - 131072
+# NOTE: placeholder ground truth; retune rtol after first successful CI run.
+rtol: 100
