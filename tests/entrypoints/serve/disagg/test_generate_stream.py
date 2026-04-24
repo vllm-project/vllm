@@ -168,7 +168,7 @@ def _parse_sse_chunks(chunks: list[str]) -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_serve_tokens_keeps_mm_cache_for_engine_execution():
+async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
@@ -193,7 +193,7 @@ async def test_serve_tokens_keeps_mm_cache_for_engine_execution():
         serving.openai_serving_render.preprocess_completion.call_args.kwargs[
             "skip_mm_cache"
         ]
-        is False
+        is True
     )
 
 
