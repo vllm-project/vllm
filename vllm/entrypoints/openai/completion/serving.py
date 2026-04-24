@@ -383,6 +383,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
+                        object="text_completion",
                         created=created_time,
                         model=model_name,
                         choices=[
