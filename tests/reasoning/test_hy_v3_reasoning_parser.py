@@ -4,6 +4,7 @@ import pytest
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.hy_v3_reasoning_parser import HYV3ReasoningParser
 from vllm.tokenizers import get_tokenizer
 
 parser_name = "hy_v3"
@@ -241,3 +242,33 @@ def test_is_reasoning_end_full_prompt(
     token_ids = hy_v3_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)
     assert check_is_reasoning_end == is_reasoning_end
+
+
+def test_constructor_does_not_mutate_shared_chat_template_kwargs(hy_v3_tokenizer):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    chat_template_kwargs = {"reasoning_effort": "low"}
+
+    first_parser: ReasoningParser = parser_cls(
+        hy_v3_tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    second_parser: ReasoningParser = parser_cls(
+        hy_v3_tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+
+    assert chat_template_kwargs == {"reasoning_effort": "low"}
+    assert isinstance(first_parser, HYV3ReasoningParser)
+    assert isinstance(second_parser, HYV3ReasoningParser)
+    assert first_parser._identity_parser is None
+    assert second_parser._identity_parser is None
+
+
+def test_constructor_falls_back_to_outer_reasoning_effort(hy_v3_tokenizer):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        hy_v3_tokenizer,
+        reasoning_effort="low",
+    )
+
+    assert isinstance(parser, HYV3ReasoningParser)
+    assert parser._identity_parser is None
