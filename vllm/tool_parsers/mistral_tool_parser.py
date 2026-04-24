@@ -118,6 +118,8 @@ class MistralToolParser(ToolParser):
     set.
     """
 
+    IS_MISTRAL_TOOL_PARSER = True  # used by vllm.utils.mistral
+
     # Used to generate correct grammar in `adjust_request`
     model_can_reason: bool = False
 
