@@ -25,7 +25,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import find_tool_properties, partial_tag_overlap
 
 logger = init_logger(__name__)
 
@@ -109,6 +109,7 @@ class Qwen3CoderToolParser(ToolParser):
         # Store accumulated parameters for type conversion
         self.accumulated_params = {}
         self.streaming_request = None
+        self._sent_content_idx = 0
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -391,29 +392,39 @@ class Qwen3CoderToolParser(ToolParser):
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
             # Check if tool call is starting
+            tool_starts_count = current_text.count(self.tool_call_start_token)
             if (
                 self.tool_call_start_token_id in delta_token_ids
-                or self.tool_call_start_token in delta_text
+                or tool_starts_count > self.current_tool_index
             ):
                 self.is_tool_call_started = True
                 # Return any content before the tool call
-                if self.tool_call_start_token in delta_text:
-                    content_before = delta_text[
-                        : delta_text.index(self.tool_call_start_token)
-                    ]
+                last_start = current_text.rfind(self.tool_call_start_token)
+                if last_start > self._sent_content_idx:
+                    content_before = current_text[self._sent_content_idx:last_start]
+                    self._sent_content_idx = last_start
                     if content_before:
                         return DeltaMessage(content=content_before)
                 return None
             else:
+                overlap = partial_tag_overlap(current_text, self.tool_call_start_token)
+                sendable_idx = len(current_text) - overlap
+                
                 # Check if we're between tool calls - skip whitespace
                 if (
                     current_text.rstrip().endswith(self.tool_call_end_token)
                     and delta_text.strip() == ""
                 ):
                     # We just ended a tool call, skip whitespace
+                    self._sent_content_idx = len(current_text)
                     return None
-                # Normal content, no tool call
-                return DeltaMessage(content=delta_text)
+                    
+                if sendable_idx > self._sent_content_idx:
+                    content = current_text[self._sent_content_idx:sendable_idx]
+                    self._sent_content_idx = sendable_idx
+                    if content:
+                        return DeltaMessage(content=content)
+                return None
 
         # Check if we're between tool calls (waiting for next one)
         # Count tool calls we've seen vs processed

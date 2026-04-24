@@ -1146,3 +1146,50 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     args = json.loads(raw_arguments)
     assert args["message"] == "hello world"
     assert '\\"hello world\\"' not in raw_arguments
+
+
+def test_extract_tool_calls_streaming_split_tag(qwen3_tool_parser):
+    """
+    This highlights the need to use current_text instead of delta_text.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    # Iteration 1: "<tool"
+    prev_text_1 = "I will use a tool."
+    delta_text_1 = "<tool"
+    curr_text_1 = prev_text_1 + delta_text_1
+
+    msg1 = qwen3_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text_1,
+        current_text=curr_text_1,
+        delta_text=delta_text_1,
+        previous_token_ids=[1, 2, 3],
+        current_token_ids=[1, 2, 3, 4],
+        delta_token_ids=[4],
+        request=request
+    )
+
+    # Iteration 2: "_call>"
+    prev_text_2 = curr_text_1
+    delta_text_2 = "_call>"
+    curr_text_2 = prev_text_2 + delta_text_2
+
+    msg2 = qwen3_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text_2,
+        current_text=curr_text_2,
+        delta_text=delta_text_2,
+        previous_token_ids=[1, 2, 3, 4],
+        current_token_ids=[1, 2, 3, 4, 5],
+        delta_token_ids=[5],
+        request=request
+    )
+
+    # The assertion must verify that the is_tool_call_started variable correctly switches to True
+    assert qwen3_tool_parser.is_tool_call_started is True, "is_tool_call_started should be True when '<tool_call>' is completed in current_text."
+
+    # and that the function does not return fragments of the tag in DeltaMessage(content=...)
+    if msg1 and msg1.content:
+        assert "<tool" not in msg1.content
+    if msg2 and msg2.content:
+        assert "_call>" not in msg2.content
+
