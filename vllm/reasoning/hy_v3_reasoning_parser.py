@@ -34,8 +34,12 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
         # at the outer level of the chat message.
         # Otherwise, If both are empty, assign "no_think".
 
-        chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
-        reasoning_effort = chat_kwargs.pop("reasoning_effort", "no_think")
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        reasoning_effort = (
+            chat_kwargs.get("reasoning_effort")
+            or kwargs.get("reasoning_effort")
+            or "no_think"
+        )
 
         logger.debug("reasoning_effort for choosing parser: %s", reasoning_effort)
 

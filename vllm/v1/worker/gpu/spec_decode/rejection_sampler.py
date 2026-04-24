@@ -5,6 +5,7 @@ import torch
 from vllm.config import SpeculativeConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
@@ -15,7 +16,6 @@ from vllm.v1.worker.gpu.spec_decode.probabilistic_rejection_sampler_utils import
     probabilistic_rejection_sample,
 )
 from vllm.v1.worker.gpu.spec_decode.synthetic_rejection_sampler_utils import (
-    compute_synthetic_rejection_sampler_params,
     synthetic_rejection_sample,
 )
 
@@ -102,24 +102,20 @@ class RejectionSampler:
         self,
         sampler: Sampler,
         spec_config: SpeculativeConfig,
+        device: torch.device,
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
         self.rejection_sample_method = spec_config.rejection_sample_method
+        self.synthetic_conditional_rates: torch.Tensor | None = None
         if self.rejection_sample_method == "synthetic":
-            synthetic_acceptance_rate = spec_config.synthetic_acceptance_rate
-            if (
-                synthetic_acceptance_rate is None
-                or not 0.0 <= synthetic_acceptance_rate <= 1.0
-            ):
-                raise ValueError(
-                    f"synthetic_acceptance_rate must be in [0, 1], "
-                    f"but got {synthetic_acceptance_rate}"
-                )
-            self.base_acceptance_rate, self.decay_factor = (
-                compute_synthetic_rejection_sampler_params(
-                    synthetic_acceptance_rate, self.num_speculative_steps
-                )
+            assert spec_config.synthetic_acceptance_rates is not None
+            self.synthetic_conditional_rates = torch.tensor(
+                unconditional_to_conditional_rates(
+                    spec_config.synthetic_acceptance_rates
+                ),
+                dtype=torch.float32,
+                device=device,
             )
 
     def _get_logprobs_tensors(
@@ -218,8 +214,7 @@ class RejectionSampler:
                 input_batch.positions[input_batch.logits_indices],
                 input_batch.idx_mapping,
                 self.sampler.sampling_states.seeds.gpu,
-                self.base_acceptance_rate,
-                self.decay_factor,
+                self.synthetic_conditional_rates,
                 self.num_speculative_steps,
             )
         else:
