@@ -288,6 +288,58 @@ To disable the Python code interpreter specifically, omit `code_interpreter` fro
 
 **Consider a custom implementation**: The GPT-OSS Python tool is a reference implementation. For production deployments, consider implementing a custom code execution sandbox with stricter isolation guarantees. See the [GPT-OSS documentation](https://github.com/openai/gpt-oss?tab=readme-ov-file#python) for guidance.
 
+## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
+
+### Background
+
+vLLM's prefix caching improves inference performance by reusing KV cache blocks across requests that share common prompt prefixes. However, in multi-tenant deployments where users share the same vLLM instance, this reuse introduces a timing side-channel risk ([CVE-2025-46570](https://github.com/vllm-project/vllm/security/advisories/GHSA-4qjh-9fv9-r85r)).
+
+An attacker sharing the same backend can measure differences in Time to First Token (TTFT) to infer whether a guessed prompt prefix matches another user's cached prompt. When a prefix is already cached, the prefill step is faster, producing a measurable timing signal. Research has shown that this signal becomes nearly perfectly distinguishable (ROC AUC of 0.99) with prefix lengths of just 8 tokens. See [Leaking Secrets from Prefix Caches](https://arxiv.org/html/2411.18191v1) for details.
+
+### Cache Salting
+
+To mitigate this, vLLM supports an optional `cache_salt` parameter on inference requests (added in v0.9.0 via [PR #17045](https://github.com/vllm-project/vllm/pull/17045)). When `cache_salt` is provided, the salt value is mixed into the hash of the first KV cache block. This ensures that only requests with the same salt can share cached prefix blocks, effectively isolating cache reuse between tenants.
+
+The `cache_salt` parameter is accepted on `/v1/chat/completions`, `/v1/completions`, and the Responses API.
+
+#### Usage with the OpenAI Python client
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={
+        "cache_salt": "per-user-or-per-tenant-secret",
+    },
+)
+```
+
+#### Usage with a raw request
+
+```json
+{
+  "model": "meta-llama/Llama-3-8b",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "cache_salt": "per-user-or-per-tenant-secret"
+}
+```
+
+### How to choose a salt value
+
+The salt can be any non-empty string. Common strategies:
+
+- **Per-user isolation**: Use a unique secret per user (e.g., a UUID). This prevents any cross-user cache inference.
+- **Per-group sharing**: Use a shared salt for a group of users who are allowed to benefit from each other's cached prefixes (e.g., users within the same organization).
+- **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Set `cache_salt` to a per-tenant secret on every request to prevent cross-tenant cache timing inference.
+- **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
+- Note that cache salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
+
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).
