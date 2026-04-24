@@ -231,7 +231,11 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
     ) -> tuple[bool, str | None]:
         if current_platform.has_device_capability(120) and has_flashinfer_b12x_gemm():
             return True, None
-        return False, "FlashInfer b12x requires SM120+ and FlashInfer with Sm120BlockScaledDenseGemmKernel"
+        return (
+            False,
+            "FlashInfer b12x requires SM120+ and FlashInfer "
+            "with Sm120BlockScaledDenseGemmKernel",
+        )
 
     @classmethod
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:

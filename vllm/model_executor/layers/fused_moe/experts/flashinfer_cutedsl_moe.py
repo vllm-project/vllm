@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -25,9 +24,8 @@ from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     flashinfer_cute_dsl_fused_moe_nvfp4,
     flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_moe_nvfp4,
     has_flashinfer_b12x_moe,
+    has_flashinfer_cutedsl_moe_nvfp4,
     scaled_fp4_grouped_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
@@ -347,7 +345,8 @@ def flashinfer_cutedsl_moe_masked(
 
 
 class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
-    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121, RTX Pro 6000 / DGX Spark).
+    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121,
+    RTX Pro 6000 / DGX Spark).
 
     Uses ``b12x_fused_moe`` from FlashInfer PR #3080 which fuses token
     dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction into a
@@ -387,14 +386,12 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         # representations.  We set scale_2 = 1.0 to signal that the bake-in is
         # already done.
         layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.float()
-            * layer.w13_weight_scale_2.view(-1, 1, 1)
+            layer.w13_weight_scale.float() * layer.w13_weight_scale_2.view(-1, 1, 1)
         ).to(layer.w13_weight_scale.dtype)
         layer.w13_weight_scale_2.data.fill_(1.0)
 
         layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.float()
-            * layer.w2_weight_scale_2.view(-1, 1, 1)
+            layer.w2_weight_scale.float() * layer.w2_weight_scale_2.view(-1, 1, 1)
         ).to(layer.w2_weight_scale.dtype)
         layer.w2_weight_scale_2.data.fill_(1.0)
 

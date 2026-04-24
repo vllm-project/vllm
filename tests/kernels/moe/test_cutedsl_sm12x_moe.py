@@ -8,7 +8,8 @@ from vllm.platforms import current_platform
 
 if not current_platform.is_device_capability_family(120):
     pytest.skip(
-        reason="FlashInfer CuteDSL SM12x MoE requires SM120 (RTX Pro 6000 / DGX Spark).",
+        reason="FlashInfer CuteDSL SM12x MoE requires SM120 "
+        "(RTX Pro 6000 / DGX Spark).",
         allow_module_level=True,
     )
 
@@ -134,7 +135,7 @@ def test_flashinfer_b12x_moe(
             sf_vec_size=sf_vec_size,
             is_sf_swizzled_layout=True,
         )
-        w1_q = w1_q_flat.view(e, 2 * n, k // 2)          # uint8, packed FP4
+        w1_q = w1_q_flat.view(e, 2 * n, k // 2)  # uint8, packed FP4
         w1_blockscale = w1_sf_flat.view(e, 2 * n, w1_sf_flat.shape[1])  # float8
 
         # W2: no row reordering needed for the down-projection.
@@ -145,8 +146,8 @@ def test_flashinfer_b12x_moe(
             sf_vec_size=sf_vec_size,
             is_sf_swizzled_layout=True,
         )
-        w2_q = w2_q_flat.view(e, k, n // 2)               # uint8, packed FP4
-        w2_blockscale = w2_sf_flat.view(e, k, w2_sf_flat.shape[1])    # float8
+        w2_q = w2_q_flat.view(e, k, n // 2)  # uint8, packed FP4
+        w2_blockscale = w2_sf_flat.view(e, k, w2_sf_flat.shape[1])  # float8
 
         # All per-expert alphas are 1.0 (global_scale = 1.0, no compensation).
         ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
