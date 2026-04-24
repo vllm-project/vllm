@@ -137,6 +137,7 @@ jobs:
         --device /dev/kfd
         --device /dev/dri
         --group-add video
+        --group-add render
         --security-opt seccomp=unconfined
     permissions:
       contents: read
@@ -154,6 +155,35 @@ jobs:
         with:
           name: vllm-rocm-wheel
           path: dist/
+
+      - name: GPU sanity check
+        run: |
+          echo "=== /dev/kfd and /dev/dri ==="
+          ls -la /dev/kfd /dev/dri || true
+          echo ""
+          echo "=== id ==="
+          id
+          echo ""
+          echo "=== rocm-smi ==="
+          if command -v rocm-smi >/dev/null 2>&1; then
+            rocm-smi --showproductname --showid
+          else
+            echo "rocm-smi not found"
+          fi
+          echo ""
+          echo "=== rocminfo (agents) ==="
+          if command -v rocminfo >/dev/null 2>&1; then
+            rocminfo | grep -E "Name:|Marketing Name:|Device Type:" | head -40
+          else
+            echo "rocminfo not found"
+          fi
+          echo ""
+          echo "=== amd-smi ==="
+          if command -v amd-smi >/dev/null 2>&1; then
+            amd-smi list || true
+          else
+            echo "amd-smi not found"
+          fi
 
       - name: Install wheel and test dependencies
         run: |
