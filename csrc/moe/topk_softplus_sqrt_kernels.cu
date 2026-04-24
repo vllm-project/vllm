@@ -60,7 +60,11 @@ __device__ __forceinline__ float toFloat(T value) {
   }
 }
 
-#define FINAL_MASK 0xffffffff
+#ifdef USE_ROCM
+  #define FINAL_MASK 0xffffffffffffffffULL
+#else
+  #define FINAL_MASK 0xffffffff
+#endif
 template <typename T>
 __inline__ __device__ T warpReduceSum(T val) {
 #pragma unroll
