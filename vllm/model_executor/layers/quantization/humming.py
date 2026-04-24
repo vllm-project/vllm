@@ -9,6 +9,7 @@ import regex as re
 import torch
 
 from vllm import envs
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -285,8 +286,6 @@ class HummingConfig(QuantizationConfig):
 
         if self.full_config:
             weight_schema = self.get_layer_weight_schema(self.full_config, prefix)
-            if weight_schema is not None and weight_schema.quant_method == "mxfp4":
-                weight_schema.quant_method = "gpt_oss_mxfp4"
 
         is_online_quant = False
         online_quant_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
@@ -335,6 +334,13 @@ class HummingConfig(QuantizationConfig):
             layer_type = "moe"
         elif isinstance(layer, LinearBase):
             layer_type = "linear"
+
+        # TODO: remove this after humming moe backend is ready
+        quant_method = self.full_config.get("quant_method", None)
+        moe_activation = getattr(layer, "activation", None)
+        if quant_method == "mxfp4" and moe_activation == MoEActivation.SWIGLUOAI:
+            self.full_config["quan_method"] = "gpt_oss_mxfp4"
+
         quant_config = self.get_quant_config_for_layer(prefix, layer_type)
         if quant_config is None:
             if isinstance(layer, FusedMoE):
