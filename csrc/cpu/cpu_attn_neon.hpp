@@ -341,7 +341,8 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim, scalar_t> {
       const int64_t head_num, const int64_t key_head_num_stride,
       const int64_t value_head_num_stride, const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
-      const int64_t block_size, const int64_t block_size_stride) {
+      const int64_t block_size, const int64_t block_size_stride,
+      const float /*k_inv*/ = 0.0f, const float /*v_inv*/ = 0.0f) {
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
       for (int64_t head_idx = 0; head_idx < head_num; ++head_idx) {

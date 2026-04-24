@@ -127,16 +127,16 @@ class TileGemm82 {
 }  // namespace
 
 // This is a general but naive implementation based on vector instructions
-template <typename scalar_t, int64_t head_dim, typename kv_cache_t_>
-class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_t_> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_scalar_t> {
   static constexpr bool fp8_kv =
-      std::is_same_v<kv_cache_t_, c10::Float8_e4m3fn> ||
-      std::is_same_v<kv_cache_t_, c10::Float8_e5m2>;
+      std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_scalar_t, c10::Float8_e5m2>;
 
  public:
   using query_t = scalar_t;
   using q_buffer_t = float;
-  using kv_cache_t = kv_cache_t_;
+  using kv_cache_t = kv_cache_scalar_t;
   using logits_buffer_t = float;
   using partial_output_buffer_t = float;
   using prob_buffer_t = float;
@@ -245,13 +245,35 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_t_> {
   // reshape K as column-major and V as row-major
   static void reshape_and_cache(
       const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
-      scalar_t* __restrict__ key_cache, scalar_t* __restrict__ value_cache,
+      kv_cache_t* __restrict__ key_cache, kv_cache_t* __restrict__ value_cache,
       const int64_t* __restrict__ slot_mapping, const int64_t token_num,
       const int64_t key_token_num_stride, const int64_t value_token_num_stride,
       const int64_t head_num, const int64_t key_head_num_stride,
       const int64_t value_head_num_stride, const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
-      const int64_t block_size, const int64_t block_size_stride) {
+      const int64_t block_size, const int64_t block_size_stride,
+      const float k_inv = 0.0f, const float v_inv = 0.0f) {
+    if constexpr (fp8_kv) {
+      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
+        reshape_and_cache_fp8_vec_impl<scalar_t, float_to_fp8e5m2_scalar>(
+            key, value, reinterpret_cast<uint8_t*>(key_cache),
+            reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
+            head_num, head_dim, block_size, key_token_num_stride,
+            key_head_num_stride, value_token_num_stride, value_head_num_stride,
+            num_blocks_stride, cache_head_num_stride, num_blocks_stride,
+            cache_head_num_stride, k_inv, v_inv);
+      } else {
+        reshape_and_cache_fp8_vec_impl<scalar_t, float_to_fp8e4m3_scalar>(
+            key, value, reinterpret_cast<uint8_t*>(key_cache),
+            reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
+            head_num, head_dim, block_size, key_token_num_stride,
+            key_head_num_stride, value_token_num_stride, value_head_num_stride,
+            num_blocks_stride, cache_head_num_stride, num_blocks_stride,
+            cache_head_num_stride, k_inv, v_inv);
+      }
+      return;
+    }
+
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
       for (int64_t head_idx = 0; head_idx < head_num; ++head_idx) {
@@ -269,8 +291,9 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_t_> {
                                           token_idx * key_token_num_stride +
                                           head_idx * key_head_num_stride;
           scalar_t* key_cache_start_ptr =
-              key_cache + block_idx * num_blocks_stride +
-              head_idx * cache_head_num_stride + block_offset;
+              reinterpret_cast<scalar_t*>(key_cache) +
+              block_idx * num_blocks_stride + head_idx * cache_head_num_stride +
+              block_offset;
 
 #pragma GCC unroll 8
           for (int64_t i = 0, j = 0; i < head_dim; ++i, j += block_size) {
@@ -283,8 +306,9 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_t_> {
                                             token_idx * value_token_num_stride +
                                             head_idx * value_head_num_stride;
           scalar_t* value_cache_start_ptr =
-              value_cache + block_idx * num_blocks_stride +
-              head_idx * cache_head_num_stride + block_offset * head_dim;
+              reinterpret_cast<scalar_t*>(value_cache) +
+              block_idx * num_blocks_stride + head_idx * cache_head_num_stride +
+              block_offset * head_dim;
           std::memcpy(value_cache_start_ptr, value_start_ptr,
                       sizeof(scalar_t) * head_dim);
         }

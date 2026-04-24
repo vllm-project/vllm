@@ -1,20 +1,14 @@
 #include "cpu_attn_dispatch_generated.h"
-#include "cpu/cpu_attn_fp8.hpp"
 
 // Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
-// Mirrors DISPATCH_BY_KV_CACHE_DTYPE in
-// csrc/quantization/w8a8/fp8/nvidia/quant_utils.cuh:
-//   "fp8" / "fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
-static inline bool is_fp8_kv_dtype(const std::string& kv_cache_dtype) {
-  return kv_cache_dtype == "fp8_e4m3" || kv_cache_dtype == "fp8_e5m2" ||
-         kv_cache_dtype == "fp8";
-}
-
-static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
+// "auto" -> kAuto(0); "fp8"/"fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
+static inline cpu_attention::Fp8KVCacheDataType parse_kv_cache_dtype(
     const std::string& kv_cache_dtype) {
   if (kv_cache_dtype == "fp8_e5m2")
     return cpu_attention::Fp8KVCacheDataType::kFp8E5M2;
-  return cpu_attention::Fp8KVCacheDataType::kFp8E4M3;
+  if (kv_cache_dtype == "fp8_e4m3" || kv_cache_dtype == "fp8")
+    return cpu_attention::Fp8KVCacheDataType::kFp8E4M3;
+  return cpu_attention::Fp8KVCacheDataType::kAuto;
 }
 
 torch::Tensor get_scheduler_metadata(
@@ -97,7 +91,9 @@ void cpu_attn_reshape_and_cache(
   TORCH_CHECK_EQ(key_cache.dim(), 4);
   TORCH_CHECK_EQ(value_cache.dim(), 4);
 
-  const bool is_fp8 = is_fp8_kv_dtype(kv_cache_dtype);
+  const int64_t kv_cache_idx =
+      static_cast<int64_t>(parse_kv_cache_dtype(kv_cache_dtype));
+  const bool is_fp8 = (kv_cache_idx != 0);
 
   if (is_fp8) {
     TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
@@ -106,81 +102,19 @@ void cpu_attn_reshape_and_cache(
                 "value_cache must be uint8 for FP8 path");
     TORCH_CHECK(k_scale > 0, "k_scale must be positive for FP8 path");
     TORCH_CHECK(v_scale > 0, "v_scale must be positive for FP8 path");
-
-    const float k_inv = 1.0f / static_cast<float>(k_scale);
-    const float v_inv = 1.0f / static_cast<float>(v_scale);
-    const auto fp8_dtype = parse_fp8_kv_dtype(kv_cache_dtype);
-    const bool use_e5m2 =
-        (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2);
-
-    const int64_t token_num = key.size(0);
-    const int64_t head_num = key.size(1);
-    const int64_t head_dim = key.size(2);
-    const int64_t block_size = key_cache.size(2);
-
-    VLLM_DISPATCH_FLOATING_TYPES(
-        key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
-#if defined(CPU_CAPABILITY_AMXBF16)
-          if (isa == "amx") {
-            if (use_e5m2)
-              reshape_and_cache_fp8_amx_e5m2_typed<scalar_t>(
-                  key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                  key_cache.data_ptr<uint8_t>(),
-                  value_cache.data_ptr<uint8_t>(),
-                  slot_mapping.data_ptr<int64_t>(), token_num, head_num,
-                  head_dim, block_size, key.stride(0), key.stride(1),
-                  value.stride(0), value.stride(1), key_cache.stride(0),
-                  key_cache.stride(1), value_cache.stride(0),
-                  value_cache.stride(1), k_inv, v_inv);
-            else
-              reshape_and_cache_fp8_amx_typed<scalar_t>(
-                  key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                  key_cache.data_ptr<uint8_t>(),
-                  value_cache.data_ptr<uint8_t>(),
-                  slot_mapping.data_ptr<int64_t>(), token_num, head_num,
-                  head_dim, block_size, key.stride(0), key.stride(1),
-                  value.stride(0), value.stride(1), key_cache.stride(0),
-                  key_cache.stride(1), value_cache.stride(0),
-                  value_cache.stride(1), k_inv, v_inv);
-            return;
-          }
-#endif
-          if (use_e5m2)
-            reshape_and_cache_fp8_e5m2_typed<scalar_t>(
-                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
-                slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
-                block_size, key.stride(0), key.stride(1), value.stride(0),
-                value.stride(1), key_cache.stride(0), key_cache.stride(1),
-                value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
-          else
-            reshape_and_cache_fp8_typed<scalar_t>(
-                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
-                slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
-                block_size, key.stride(0), key.stride(1), value.stride(0),
-                value.stride(1), key_cache.stride(0), key_cache.stride(1),
-                value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
-        });
-    return;
   }
 
-  // Non-FP8 path
-  TORCH_CHECK_EQ(key.stride(2), 1);
-  TORCH_CHECK_EQ(value.stride(2), 1);
+  const float k_inv = is_fp8 ? 1.0f / static_cast<float>(k_scale) : 0.0f;
+  const float v_inv = is_fp8 ? 1.0f / static_cast<float>(v_scale) : 0.0f;
 
   const int64_t token_num = key.size(0);
-  const int64_t key_token_num_stride = key.stride(0);
-  const int64_t value_token_num_stride = value.stride(0);
-  const int64_t head_num = value.size(1);
-  const int64_t key_head_num_stride = key.stride(1);
-  const int64_t value_head_num_stride = value.stride(1);
+  const int64_t head_num = key.size(1);
+  const int64_t head_dim = key.size(2);
   const int64_t num_blocks = key_cache.size(0);
   const int64_t num_blocks_stride = key_cache.stride(0);
   const int64_t cache_head_num_stride = key_cache.stride(1);
   const int64_t block_size = key_cache.size(2);
   const int64_t block_size_stride = key_cache.stride(2);
-  const int64_t head_dim = key.size(-1);
 
   cpu_attention::ISA isa_tag = [&]() {
     if (isa == "amx") {
@@ -200,14 +134,16 @@ void cpu_attn_reshape_and_cache(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
-        CPU_ATTN_DISPATCH(head_dim, isa_tag, 0, [&]() {
+        CPU_ATTN_DISPATCH(head_dim, isa_tag, kv_cache_idx, [&]() {
+          using kv_t = typename attn_impl::kv_cache_t;
           attn_impl::reshape_and_cache(
               key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-              key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
-              slot_mapping.data_ptr<int64_t>(), token_num, key_token_num_stride,
-              value_token_num_stride, head_num, key_head_num_stride,
-              value_head_num_stride, num_blocks, num_blocks_stride,
-              cache_head_num_stride, block_size, block_size_stride);
+              reinterpret_cast<kv_t*>(key_cache.data_ptr()),
+              reinterpret_cast<kv_t*>(value_cache.data_ptr()),
+              slot_mapping.data_ptr<int64_t>(), token_num, key.stride(0),
+              value.stride(0), head_num, key.stride(1), value.stride(1),
+              num_blocks, num_blocks_stride, cache_head_num_stride, block_size,
+              block_size_stride, k_inv, v_inv);
         });
       });
 }
@@ -234,7 +170,9 @@ void cpu_attention_with_kv_cache(
   TORCH_CHECK_EQ(key_cache.dim(), 4);
   TORCH_CHECK_EQ(value_cache.dim(), 4);
 
-  const bool is_fp8 = is_fp8_kv_dtype(kv_cache_dtype);
+  const int64_t kv_cache_idx =
+      static_cast<int64_t>(parse_kv_cache_dtype(kv_cache_dtype));
+  const bool is_fp8 = (kv_cache_idx != 0);
   if (is_fp8) {
     TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
                 "key_cache must be uint8 for FP8 path");
@@ -278,15 +216,7 @@ void cpu_attention_with_kv_cache(
   if (is_fp8) {
     input.k_scale_fp8 = static_cast<float>(k_scale);
     input.v_scale_fp8 = static_cast<float>(v_scale);
-#if !defined(__AVX2__) && !defined(__AVX512F__)
-    TORCH_CHECK(false,
-                "cpu_attention_with_kv_cache requires AVX2 or AVX-512 for "
-                "FP8 KV cache; not supported on this platform.");
-#endif
   }
-
-  const int64_t kv_cache_idx =
-      is_fp8 ? static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype)) : 0;
 
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "cpu_attention_with_kv_cache", [&]() {

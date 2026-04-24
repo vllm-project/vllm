@@ -1,6 +1,7 @@
 #ifndef CPU_ATTN_AMX_HPP
 #define CPU_ATTN_AMX_HPP
 
+#include "cpu_attn_fp8.hpp"
 #include "cpu_attn_impl.hpp"
 
 namespace cpu_attention {
@@ -145,9 +146,9 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
       _tile_zero(7);
     }
 
+    alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_3[scratch_elems];
     for (int32_t k = 0; k < k_times; ++k) {
-      alignas(64) c10::BFloat16 scratch_2[scratch_elems];
-      alignas(64) c10::BFloat16 scratch_3[scratch_elems];
       const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
       const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
 
@@ -293,11 +294,11 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
       _tile_zero(7);
     }
 
+    alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_3[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_4[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_5[scratch_elems];
     for (int32_t k = 0; k < k_group_times; ++k) {
-      alignas(64) c10::BFloat16 scratch_2[scratch_elems];
-      alignas(64) c10::BFloat16 scratch_3[scratch_elems];
-      alignas(64) c10::BFloat16 scratch_4[scratch_elems];
-      alignas(64) c10::BFloat16 scratch_5[scratch_elems];
       const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
       const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
       const c10::BFloat16* load_4 = prepare_b_tile(b_tile_4, scratch_4);
@@ -328,8 +329,6 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
     }
 
     if (has_tail) {
-      alignas(64) c10::BFloat16 scratch_2[scratch_elems];
-      alignas(64) c10::BFloat16 scratch_3[scratch_elems];
       const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
       const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
 
@@ -359,16 +358,16 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
 
 }  // namespace
 
-template <typename scalar_t, int64_t head_dim, typename kv_cache_t_>
-class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
   static constexpr bool fp8_kv =
-      std::is_same_v<kv_cache_t_, c10::Float8_e4m3fn> ||
-      std::is_same_v<kv_cache_t_, c10::Float8_e5m2>;
+      std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_scalar_t, c10::Float8_e5m2>;
 
  public:
   using query_t = scalar_t;
   using q_buffer_t = scalar_t;
-  using kv_cache_t = kv_cache_t_;
+  using kv_cache_t = kv_cache_scalar_t;
   using logits_buffer_t = float;
   using partial_output_buffer_t = float;
   using prob_buffer_t = scalar_t;
@@ -495,13 +494,35 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
   // reshape KV to AMX friendly layout
   static void reshape_and_cache(
       const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
-      scalar_t* __restrict__ key_cache, scalar_t* __restrict__ value_cache,
+      kv_cache_t* __restrict__ key_cache, kv_cache_t* __restrict__ value_cache,
       const int64_t* __restrict__ slot_mapping, const int64_t token_num,
       const int64_t key_token_num_stride, const int64_t value_token_num_stride,
       const int64_t head_num, const int64_t key_head_num_stride,
       const int64_t value_head_num_stride, const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
-      const int64_t block_size, const int64_t block_size_stride) {
+      const int64_t block_size, const int64_t block_size_stride,
+      const float k_inv = 0.0f, const float v_inv = 0.0f) {
+    if constexpr (fp8_kv) {
+      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
+        reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e5m2_scalar>(
+            key, value, reinterpret_cast<uint8_t*>(key_cache),
+            reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
+            head_num, head_dim, block_size, key_token_num_stride,
+            key_head_num_stride, value_token_num_stride, value_head_num_stride,
+            num_blocks_stride, cache_head_num_stride, num_blocks_stride,
+            cache_head_num_stride, k_inv, v_inv);
+      } else {
+        reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e4m3_scalar>(
+            key, value, reinterpret_cast<uint8_t*>(key_cache),
+            reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
+            head_num, head_dim, block_size, key_token_num_stride,
+            key_head_num_stride, value_token_num_stride, value_head_num_stride,
+            num_blocks_stride, cache_head_num_stride, num_blocks_stride,
+            cache_head_num_stride, k_inv, v_inv);
+      }
+      return;
+    }
+
     // For AMX 2D tiles, size of each line is 64 bytes
     constexpr int64_t amx_tile_row_size = AMX_TILE_ROW_BYTES;
     // For AMX B matrix, N always is 16
@@ -509,6 +530,9 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
     constexpr int64_t amx_b_tile_k_size = amx_tile_row_size / sizeof(scalar_t);
     // For now suppose block_size is divisible by amx_tile_column_num
     TORCH_CHECK_EQ(block_size % amx_b_tile_k_size, 0);
+
+    scalar_t* __restrict__ kc = reinterpret_cast<scalar_t*>(key_cache);
+    scalar_t* __restrict__ vc = reinterpret_cast<scalar_t*>(value_cache);
 
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
@@ -537,8 +561,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
           constexpr int64_t quadword_num_per_group =
               token_num_per_group * quadword_num;
           int32_t* key_cache_start_ptr =
-              reinterpret_cast<int32_t*>(key_cache +
-                                         block_idx * num_blocks_stride +
+              reinterpret_cast<int32_t*>(kc + block_idx * num_blocks_stride +
                                          head_idx * cache_head_num_stride) +
               group_idx * quadword_num_per_group + group_offset;
 
@@ -567,7 +590,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
                                             token_idx * value_token_num_stride +
                                             head_idx * value_head_num_stride;
           scalar_t* value_cache_start_ptr =
-              value_cache + block_idx * num_blocks_stride +
+              vc + block_idx * num_blocks_stride +
               head_idx * cache_head_num_stride +
               sub_group_idx * token_num_per_sub_group * amx_b_tile_n_size +
               sub_group_offset;

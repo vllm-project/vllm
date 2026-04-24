@@ -156,9 +156,9 @@ def generate_header_file() -> str:
     header += """
 // Dispatch macro using encoded parameters.
 // KV_CACHE_IDX: Fp8KVCacheDataType enum value (kAuto=0, kFp8E4M3=1, kFp8E5M2=2).
-// FP8 cases (kv_cache_idx != 0) are generated on x86 for VEC ISA on all x86
-// builds: BF16Vec32 FP8 constructors have both AVX-512 and AVX2 implementations
-// in cpu_types_x86.hpp, so FP8 VEC is available regardless of AVX-512 support.
+// FP8 cases (kv_cache_idx != 0) are generated on x86 platforms with AVX2 or
+// AVX-512: BF16Vec32 FP8 constructors have both AVX-512 and AVX2 implementations
+// in cpu_types_x86.hpp. Non-x86 platforms (#else fallback) have fp8=False.
 """
 
     def _macro_block(guard: str, isa_list: list[str], fp8: bool) -> str:
@@ -213,9 +213,14 @@ def generate_header_file() -> str:
         fp8=True,
     )
     header += _macro_block(
-        "#else",
+        "#elif defined(__AVX2__)",
         ["VEC", "VEC16"],
         fp8=True,
+    )
+    header += _macro_block(
+        "#else",
+        ["VEC", "VEC16"],
+        fp8=False,
     )
     header += (
         "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ */\n\n"
