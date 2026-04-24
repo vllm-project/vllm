@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.v1.metrics.stats import EncoderCacheStats
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
@@ -76,6 +77,13 @@ class EncoderCacheManager:
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
 
+        # Hit/miss counters since last `get_and_update_stats()` call.
+        # Hit = `check_and_update_cache` returned True (embedding already
+        # resident). Miss = scheduler decided to run the encoder
+        # (via `record_miss`). Budget-deferred items are not counted as misses.
+        self._hits = 0
+        self._misses = 0
+
     def reset(self) -> None:
         """Reset the encoder cache to its initial state.
 
@@ -87,6 +95,8 @@ class EncoderCacheManager:
         self.freed.clear()
         self.num_free_slots = self.cache_size
         self.num_freeable_slots = self.cache_size
+        self._hits = 0
+        self._misses = 0
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
@@ -114,7 +124,29 @@ class EncoderCacheManager:
             self.num_freeable_slots -= num_encoder_embeds
 
         self.cached[mm_hash].add(request.request_id)
+        self._hits += 1
         return True
+
+    def record_miss(self) -> None:
+        """Record a cache miss.
+
+        Called by the scheduler once per encoder input that is actually
+        scheduled to run the encoder in this step (i.e. post-`can_allocate`
+        and post-`allocate`). This avoids counting inputs that were deferred
+        due to compute/space budget as misses.
+        """
+        self._misses += 1
+
+    def get_and_update_stats(self) -> EncoderCacheStats:
+        """Return hit/miss counters since the last call and reset them."""
+        stats = EncoderCacheStats()
+        stats.record(
+            num_queries=self._hits + self._misses,
+            num_hits=self._hits,
+        )
+        self._hits = 0
+        self._misses = 0
+        return stats
 
     def can_allocate(
         self,

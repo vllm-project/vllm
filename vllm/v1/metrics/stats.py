@@ -159,6 +159,24 @@ class MultiModalCacheStats(BaseCacheStats):
 
 
 @dataclass
+class EncoderCacheStats(BaseCacheStats):
+    """
+    Stores encoder cache hit statistics.
+    - `queries`: Number of encoder-input lookups attempted
+      (hits + scheduler-decided misses).
+    - `hits`: Number of times the embedding was already resident on GPU.
+    """
+
+    def record(self, num_queries: int, num_hits: int) -> None:
+        """Aggregate scheduler-step information into the stats."""
+        if num_queries == 0:
+            return
+        self.requests += 1
+        self.queries += num_queries
+        self.hits += num_hits
+
+
+@dataclass
 class KVCacheEvictionEvent:
     """Single KV cache block eviction sample."""
 
@@ -183,6 +201,8 @@ class SchedulerStats:
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
+
+    encoder_cache_stats: "EncoderCacheStats | None" = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 
