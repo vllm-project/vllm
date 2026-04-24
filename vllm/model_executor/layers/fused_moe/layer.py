@@ -476,6 +476,23 @@ class FusedMoE(PluggableLayer):
                 )
             )
 
+    def eep_make_staged_quant_method(
+        self,
+        moe_config: FusedMoEConfig,
+    ) -> FusedMoEMethodBase | None:
+        if not self.quant_method.supports_internal_mk:
+            return None
+        if getattr(self.quant_method, "wraps_legacy_quant_method", False):
+            return None
+        old_batched_format = (
+            self.moe_config.moe_parallel_config.use_batched_activation_format
+        )
+        new_batched_format = (
+            moe_config.moe_parallel_config.use_batched_activation_format
+        )
+        assert old_batched_format == new_batched_format
+        return self.quant_method.eep_make_staged_quant_method(self, moe_config)
+
     @property
     def shared_experts(self) -> SharedExperts | None:
         return self.runner.shared_experts

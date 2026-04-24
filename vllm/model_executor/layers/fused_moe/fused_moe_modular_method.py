@@ -7,6 +7,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
@@ -29,9 +30,12 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     # --8<-- [end:modular_fused_moe]
 
     def __init__(
-        self, old_quant_method: FusedMoEMethodBase, moe_kernel: FusedMoEKernel
+        self,
+        old_quant_method: FusedMoEMethodBase,
+        moe_kernel: FusedMoEKernel,
+        moe_config: FusedMoEConfig | None = None,
     ):
-        super().__init__(old_quant_method.moe)
+        super().__init__(moe_config or old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
         self.moe_kernel = moe_kernel
         self.disable_expert_map = getattr(
@@ -41,6 +45,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         )
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
+
+    @property
+    def wraps_legacy_quant_method(self) -> bool:
+        return not self.old_quant_method.supports_internal_mk
 
     @staticmethod
     def make(
