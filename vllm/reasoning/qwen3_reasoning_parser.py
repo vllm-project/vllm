@@ -226,15 +226,6 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                     reasoning=reasoning if reasoning else None,
                     content=content if content else None,
                 )
-            elif has_tool_call_id and self._tool_call_tag:
-                tool_index = delta_text.find(self._tool_call_tag)
-                if tool_index >= 0:
-                    reasoning = delta_text[:tool_index]
-                    content = delta_text[tool_index:]
-                    return DeltaMessage(
-                        reasoning=reasoning if reasoning else None,
-                        content=content if content else None,
-                    )
 
         # No end token in this delta.
         if not delta_text:
