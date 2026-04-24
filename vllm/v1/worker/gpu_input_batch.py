@@ -553,6 +553,14 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+
+        # Clear PLT saved hidden states for this slot immediately.  The slot
+        # may be reused by a new request (via pop_removed() in add_request)
+        # before condense() is called, so we cannot rely on
+        # _condense_plt_saved_hidden_states to zero it out.
+        if self.plt_loop_nums > 1:
+            self.plt_saved_hidden_states[:, req_index].zero_()
+
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:

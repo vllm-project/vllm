@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -3802,6 +3802,11 @@ class GPUModelRunner(
                     # reset the index so the custom ops index all_moe_layers
                     # from the beginning again.
                     get_forward_context().moe_layer_index = 0
+                    # For FULL CG mode, update batch_descriptor so each PLT
+                    # iteration replays its own captured graph.
+                    get_forward_context().batch_descriptor = replace(
+                        batch_desc, plt_loop_num_idx=plt_loop_num_idx
+                    )
 
                     model_output = self._model_forward(
                         input_ids=input_ids,
@@ -3810,9 +3815,9 @@ class GPUModelRunner(
                         inputs_embeds=inputs_embeds,
                         **model_kwargs,
                     )
-                    torch.cuda.synchronize()
                     # for non-last loop, we save the hidden states for next loop
                     if plt_loop_num_idx < self.plt_loop_nums - 1:
+                        torch.cuda.synchronize()
                         self._update_saved_hidden_states(
                             model_output=model_output,
                             schedule_tokens_np=num_scheduled_tokens_np,
@@ -5175,6 +5180,18 @@ class GPUModelRunner(
                     for plt_loop_num_idx in range(self.plt_loop_nums):
                         model_kwargs["loop_num_idx"] = plt_loop_num_idx
                         get_forward_context().moe_layer_index = 0
+                        get_forward_context().batch_descriptor = replace(
+                            batch_desc, plt_loop_num_idx=plt_loop_num_idx
+                        )
+
+                        model_kwargs["loop_hidden_states"] = (
+                            None
+                            if plt_loop_num_idx == 0
+                            else self.plt_loop_hidden_states[plt_loop_num_idx][
+                                :num_tokens_padded
+                            ]
+                        )
+
                         outputs = self.model(
                             input_ids=input_ids,
                             positions=positions,

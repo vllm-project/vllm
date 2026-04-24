@@ -56,6 +56,15 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    plt_loop_num_idx: int = 0
+    """
+    PLT (Parallel Layer Traversal) loop iteration index.
+    Models that re-traverse the same layers multiple times (plt_loop_nums > 1)
+    produce different ops per iteration (different gate_proj, residual add,
+    norm scheduling). Each iteration must key to its own CUDAGraphWrapper
+    entry to avoid capture/replay collisions across loop iterations.
+    Default 0 is a no-op for non-PLT models.
+    """
 
 
 def _compute_sp_num_tokens(
