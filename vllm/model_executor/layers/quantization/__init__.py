@@ -22,6 +22,7 @@ QuantizationMethods = Literal[
     "gptq_marlin",
     "awq_marlin",
     "gptq",
+    "humming",
     "compressed-tensors",
     "bitsandbytes",
     "experts_int8",
@@ -31,7 +32,6 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "gpt_oss_mxfp4",
-    "mxfp8",
     "cpu_awq",
     "online",
     # Below are values of the OnlineQuantScheme enum, specified as strings to
@@ -41,6 +41,7 @@ QuantizationMethods = Literal[
     "fp8_per_tensor",
     "fp8_per_block",
     "int8_per_channel_weight_only",
+    "mxfp8",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -126,6 +127,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
+    from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
@@ -135,7 +137,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
-    from .mxfp8 import Mxfp8Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
 
@@ -162,8 +163,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
-        "mxfp8": Mxfp8Config,
         "cpu_awq": CPUAWQConfig,
+        "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
     }
 

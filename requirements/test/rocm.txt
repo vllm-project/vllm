@@ -76,9 +76,7 @@ attrs==26.1.0
 audioread==3.0.1
     # via librosa
 av==16.1.0
-    # via
-    #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
+    # via -r requirements/test/rocm.in
 azure-core==1.39.0
     # via
     #   azure-identity
@@ -278,9 +276,7 @@ fastar==0.10.0
 fastparquet==2026.3.0
     # via genai-perf
 fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@65d80088fca7a8f567fba30415fbcc80f7d2259c
-    # via
-    #   -c requirements/rocm.txt
-    #   -r requirements/test/rocm.in
+    # via -r requirements/test/rocm.in
 filelock==3.25.2
     # via
     #   -c requirements/common.txt
@@ -1333,7 +1329,6 @@ sortedcontainers==2.4.0
     # via hypothesis
 soundfile==0.13.1
     # via
-    #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   genai-perf
     #   librosa

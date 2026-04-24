@@ -124,6 +124,7 @@ def pooler_for_token_classify(
 
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
+    assert model_config.pooler_config is not None
     head = TokenClassifierPoolerHead(
         head_dtype=model_config.head_dtype,
         classifier=classifier,
