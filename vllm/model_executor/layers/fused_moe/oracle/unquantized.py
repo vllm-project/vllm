@@ -163,6 +163,11 @@ def select_unquantized_moe_backend(
     if current_platform.is_out_of_tree():
         return UnquantizedMoeBackend.OOT, None
 
+    if moe_config.is_lora_enabled:
+        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
+            UnquantizedMoeBackend.TRITON
+        )
+
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
