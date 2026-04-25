@@ -509,9 +509,10 @@ def _get_attn_isa(
     supports_amx = torch.cpu._is_amx_tile_supported()
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
-    if fp8_kv and (supports_arm or supports_vxe):
+    supports_avx512 = torch.cpu._is_avx512_supported()
+    if fp8_kv and not supports_amx and not supports_avx512:
         raise NotImplementedError(
-            "FP8 KV cache is only supported on x86 (requires AVX2 or AVX-512)."
+            "FP8 KV cache on CPU requires x86 with AVX-512 or AMX."
         )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
