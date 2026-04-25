@@ -287,6 +287,7 @@ class Gemma4Router(nn.Module):
             config.num_experts,
             bias=False,
             out_dtype=torch.float32,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
 
@@ -1450,13 +1451,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     expert_id,
                     shard_id,
                 ) in expert_params_mapping:
-                    # Match both:
-                    #  - Bare weights: "experts.0.down_proj" (from 3D explosion)
-                    #  - With suffix: "experts.0.down_proj.weight_scale" (2D quantized)
-                    # weight_name has trailing dot, so check with and without it
+                    # Match weight names in three forms:
+                    #  1. Dot suffix: "experts.0.down_proj.weight_scale"
+                    #  2. Bare weight: "experts.0.down_proj" (from 3D explosion)
+                    #  3. Underscore suffix: "experts.0.down_proj_packed"
+                    #     (from compressed-tensors / AWQ quantization)
                     weight_name_base = weight_name.rstrip(".")
                     if weight_name in name:
-                        # Has suffix (e.g., .weight_scale)
+                        # Has dot suffix (e.g., .weight_scale)
                         moe_name = name.replace(weight_name, param_name)
                     elif name.endswith(weight_name_base):
                         # Bare weight (no suffix)
@@ -1464,7 +1466,19 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                             weight_name_base, param_name.rstrip("_") + "_weight"
                         )
                     else:
-                        continue
+                        # Check for underscore suffix (e.g., _packed, _scale)
+                        m_us = re.match(
+                            re.escape(weight_name_base) + r"_(\w+)$",
+                            name[name.find("experts."):] if "experts." in name else "",
+                        )
+                        if m_us:
+                            us_suffix = "_" + m_us.group(1)
+                            moe_name = name.replace(
+                                weight_name_base + us_suffix,
+                                param_name + "weight" + us_suffix,
+                            )
+                        else:
+                            continue
                     if moe_name not in params_dict:
                         continue
                     if is_pp_missing_parameter(moe_name, self):
@@ -1674,22 +1688,35 @@ class Gemma4ForCausalLM(
                 #
                 # No transpose needed: checkpoint orientation already
                 # matches FusedMoE's expected layout.
-                if "moe.gate_up_proj" in name and weight.dim() == 3:
+                #
+                # Handle both unquantized weights (gate_up_proj,
+                # down_proj) and quantized weights with suffixes
+                # (gate_up_proj_packed, gate_up_proj_scale,
+                # down_proj_packed, down_proj_scale) from
+                # compressed-tensors / AWQ quantization.
+                m_gup = re.match(r"(.*)moe\.gate_up_proj(_.*)?$", name)
+                if m_gup and weight.dim() == 3:
+                    suffix = m_gup.group(2) or ""
                     num_experts = weight.size(0)
                     intermediate_size = weight.size(1) // 2
                     for expert_id in range(num_experts):
                         gate_weight = weight[expert_id, :intermediate_size, :]
                         up_weight = weight[expert_id, intermediate_size:, :]
-                        base = name.replace("moe.", f"moe.experts.{expert_id}.")
-                        yield base.replace("gate_up_proj", "gate_proj"), gate_weight
-                        yield base.replace("gate_up_proj", "up_proj"), up_weight
+                        prefix = name[:m_gup.end(1)]
+                        yield (f"{prefix}moe.experts.{expert_id}"
+                               f".gate_proj{suffix}"), gate_weight
+                        yield (f"{prefix}moe.experts.{expert_id}"
+                               f".up_proj{suffix}"), up_weight
                     continue
 
-                if "moe.down_proj" in name and weight.dim() == 3:
+                m_dp = re.match(r"(.*)moe\.down_proj(_.*)?$", name)
+                if m_dp and weight.dim() == 3:
+                    suffix = m_dp.group(2) or ""
                     num_experts = weight.size(0)
                     for expert_id in range(num_experts):
-                        expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")
-                        yield expert_name, weight[expert_id]
+                        prefix = name[:m_dp.end(1)]
+                        yield (f"{prefix}moe.experts.{expert_id}"
+                               f".down_proj{suffix}"), weight[expert_id]
                     continue
 
                 # k_eq_v layers: checkpoint has k_proj but no v_proj.
