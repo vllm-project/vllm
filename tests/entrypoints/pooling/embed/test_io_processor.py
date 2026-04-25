@@ -112,6 +112,94 @@ class TestApplyStPrompt:
         assert handler._apply_task_instruction(texts, "passage") is texts
 
 
+class TestMixedInputToMessages:
+    """Unit tests for EmbedIOProcessor._mixed_input_to_messages."""
+
+    def test_task_prefix_defaults_to_system_message(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(content=[CohereEmbedContent(type="text", text="hello")]),
+            task_prefix="query: ",
+        )
+
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert messages[1]["role"] == "user"
+        assert messages[1]["content"][0]["text"] == "hello"
+
+    def test_inline_task_prefix_text_input(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(content=[CohereEmbedContent(type="text", text="hello")]),
+            task_prefix="query: ",
+            inline_task_prefix=True,
+        )
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"][0]["text"] == "query: hello"
+
+    def test_inline_task_prefix_only_first_text_part(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(
+                content=[
+                    CohereEmbedContent(type="text", text="hello"),
+                    CohereEmbedContent(type="text", text="world"),
+                ]
+            ),
+            task_prefix="query: ",
+            inline_task_prefix=True,
+        )
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        content = messages[0]["content"]
+        assert content[0]["text"] == "query: hello"
+        assert content[1]["text"] == "world"
+
+    def test_inline_task_prefix_mixed_input(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(
+                content=[
+                    CohereEmbedContent(type="text", text="hello"),
+                    CohereEmbedContent(
+                        type="image_url",
+                        image_url={"url": "https://example.com/image.png"},
+                    ),
+                ]
+            ),
+            task_prefix="query: ",
+            inline_task_prefix=True,
+        )
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        content = messages[0]["content"]
+        assert content[0]["text"] == "query: hello"
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"] == "https://example.com/image.png"
+
+    def test_inline_task_prefix_image_only_input(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(
+                content=[
+                    CohereEmbedContent(
+                        type="image_url",
+                        image_url={"url": "https://example.com/image.png"},
+                    )
+                ]
+            ),
+            task_prefix="query: ",
+            inline_task_prefix=True,
+        )
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        content = messages[0]["content"]
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "query: "
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"] == "https://example.com/image.png"
+
+
 class TestLoadTaskInstructions:
     """Unit tests for EmbedIOProcessor._load_task_instructions."""
 
@@ -317,6 +405,7 @@ class TestPreProcessCohereOnline:
                                 content=[CohereEmbedContent(type="text", text="hello")]
                             ),
                             task_prefix="query: ",
+                            inline_task_prefix=True,
                         )
                     ],
                     "truncate_prompt_tokens": -1,

@@ -290,13 +290,17 @@ class EmbedIOProcessor(PoolingIOProcessor):
         inp: CohereEmbedInput,
         *,
         task_prefix: str | None = None,
+        inline_task_prefix: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """Build chat messages from a mixed text+image input.
 
-        When *task_prefix* is given, it is used as the system prompt.
+        When *task_prefix* is given, it is used as the system prompt by
+        default. If *inline_task_prefix* is set, the prefix is instead
+        prepended to the user content so single-message embedding templates
+        can render the request.
         """
         messages: list[ChatCompletionMessageParam] = []
-        if task_prefix is not None:
+        if task_prefix is not None and not inline_task_prefix:
             messages.append(
                 CustomChatCompletionMessageParam(
                     role="system",
@@ -309,11 +313,18 @@ class EmbedIOProcessor(PoolingIOProcessor):
             )
 
         parts: list[ChatCompletionContentPartParam] = []
+        task_prefix_inlined = False
         for item in inp.content:
             if item.type == "text" and item.text is not None:
-                parts.append(
-                    ChatCompletionContentPartTextParam(type="text", text=item.text)
-                )
+                text = item.text
+                if (
+                    task_prefix is not None
+                    and inline_task_prefix
+                    and not task_prefix_inlined
+                ):
+                    text = task_prefix + text
+                    task_prefix_inlined = True
+                parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
             elif item.type == "image_url" and item.image_url is not None:
                 parts.append(
                     ChatCompletionContentPartImageParam(
@@ -321,6 +332,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
                         image_url=ImageURL(url=item.image_url["url"]),
                     )
                 )
+        if task_prefix is not None and inline_task_prefix and not task_prefix_inlined:
+            parts.insert(
+                0,
+                ChatCompletionContentPartTextParam(type="text", text=task_prefix),
+            )
         messages.append(CustomChatCompletionMessageParam(role="user", content=parts))
         return messages
 
@@ -418,6 +434,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                         content=[CohereEmbedContent(type="text", text=text)]
                     ),
                     task_prefix=task_prefix,
+                    inline_task_prefix=True,
                 )
                 for text in texts
             ]
@@ -439,7 +456,12 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
         task_prefix = self._get_task_instruction_prefix(input_type)
         all_messages = [
-            self._mixed_input_to_messages(inp, task_prefix=task_prefix) for inp in input
+            self._mixed_input_to_messages(
+                inp,
+                task_prefix=task_prefix,
+                inline_task_prefix=True,
+            )
+            for inp in input
         ]
         ctx.engine_inputs = self._batch_render_chat(
             request, all_messages, truncate_prompt_tokens, truncation_side
