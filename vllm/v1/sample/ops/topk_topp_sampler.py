@@ -163,7 +163,9 @@ class TopKTopPSampler(nn.Module):
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         q = torch.empty_like(probs)
-        q.exponential_()
+        # The early-exit above guarantees `len(generators) == logits.shape[0]`,
+        # so every row is overwritten by the per-generator `exponential_` calls
+        # below. A global `q.exponential_()` would be entirely wasted CPU work.
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
 
