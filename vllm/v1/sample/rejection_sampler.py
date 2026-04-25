@@ -624,11 +624,24 @@ def generate_uniform_probs(
     # uniform_prob is sampled to be exact 0.0 as reported in
     # https://github.com/pytorch/pytorch/issues/16706. Using float64
     # mitigates the issue.
-    uniform_probs = torch.rand(
-        (num_tokens,),
-        dtype=torch.float64,
-        device=device,
+    # Skip the global `torch.rand` when every request with draft tokens has
+    # its own generator: the per-generator `uniform_` calls below will cover
+    # all read positions, so the global fill would just be overwritten.
+    needs_global_rand = any(
+        n > 0 and i not in generators for i, n in enumerate(num_draft_tokens)
     )
+    if needs_global_rand:
+        uniform_probs = torch.rand(
+            (num_tokens,),
+            dtype=torch.float64,
+            device=device,
+        )
+    else:
+        uniform_probs = torch.empty(
+            (num_tokens,),
+            dtype=torch.float64,
+            device=device,
+        )
     start_idx = 0
     for req_idx, n in enumerate(num_draft_tokens):
         # Do not generate random numbers for requests with no draft tokens.
@@ -665,8 +678,15 @@ def sample_recovered_tokens(
         dtype=torch.float32,
         device=device,
     )
-    q.exponential_()
-    for i, generator in sampling_metadata.generators.items():
+    # Skip the global `q.exponential_()` when every request with draft tokens
+    # has its own generator: rows with num_draft_tokens[i] == 0 are never read
+    # by `sample_recovered_tokens_kernel` (it early-exits on out-of-range
+    # positions), and the remaining rows are overwritten by the per-generator
+    # `q[i].exponential_` calls below.
+    generators = sampling_metadata.generators
+    if any(num_draft_tokens[i] > 0 and i not in generators for i in range(batch_size)):
+        q.exponential_()
+    for i, generator in generators.items():
         # Do not generate random numbers for requests with no draft tokens.
         # This can be important for reproducibility.
         if num_draft_tokens[i] > 0:
