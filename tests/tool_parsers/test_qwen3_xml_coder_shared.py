@@ -1956,3 +1956,61 @@ def test_jinja_template_phantom_tool_call_is_rejected_nonstreaming(
 # ``_parse_xml_function_call`` helper invoked at function-end during
 # streaming, so production users still see the filtered result for
 # completed tool calls.
+
+
+# ---------------------------------------------------------------------------
+# Inline empty ``<tool_call>...</tool_call>`` (no ``<function=>``) before a
+# real tool call: the content text BETWEEN the inline literal and the real
+# tool call must be preserved.  Previously the content was truncated at the
+# position of the FIRST ``<tool_call>`` token regardless of whether that
+# block contained a real ``<function=>``.
+# ---------------------------------------------------------------------------
+
+
+def test_inline_empty_tool_call_preserves_content_before_real_call(
+    qwen3_tokenizer, parser_cls
+):
+    """A bare ``<tool_call>example</tool_call>`` in the model's narrative
+    text (no ``<function=>`` inside) must NOT consume the surrounding
+    content; only the real ``<tool_call>`` block that contains a valid
+    function call should anchor ``content_index``.
+
+    The XML parser's SAX-based pipeline consumes the inline empty
+    block's body as XML text (so ``example`` is dropped), but the
+    surrounding narrative ("I'll show:" and "Now real:") must still be
+    preserved — both parsers are checked.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "log",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"msg": {"type": "string"}},
+                },
+            },
+        )
+    ]
+    parser = parser_cls(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    text = (
+        "I'll show: <tool_call>example</tool_call>. Now real:\n"
+        "<tool_call>\n<function=log>\n<parameter=msg>\nhi\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    result = parser.extract_tool_calls(text, request=request)
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "log"
+    # Content between the inline empty tool_call and the real one MUST be
+    # preserved — dropping it loses the model's contextual narrative.
+    assert result.content is not None
+    assert "I'll show:" in result.content, (
+        f"Pre-inline narrative lost from content: {result.content!r}"
+    )
+    assert "Now real:" in result.content, (
+        f"Content between inline literal and real tool_call lost: "
+        f"{result.content!r}"
+    )

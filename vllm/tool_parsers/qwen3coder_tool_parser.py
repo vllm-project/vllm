@@ -748,11 +748,43 @@ class Qwen3CoderToolParser(ToolParser):
                         }
                     )
 
-            # Extract content before tool calls
-            content_index = model_output.find(self.tool_call_start_token)
-            idx = model_output.find(self.tool_call_prefix)
-            content_index = content_index if content_index >= 0 else idx
-            content = model_output[:content_index]  # .rstrip()
+            # Extract content before tool calls.  Anchor at the FIRST
+            # ``<tool_call>`` that contains a real ``<function=NAME>``
+            # opener — a bare ``<tool_call>...</tool_call>`` written by
+            # the model in its narrative text (no function inside) is
+            # NOT a real tool call and the surrounding text MUST stay
+            # in ``content``.
+            content_index = -1
+            search_pos = 0
+            tc_start_token = self.tool_call_start_token
+            tc_end_token = self.tool_call_end_token
+            while True:
+                tc_pos = model_output.find(tc_start_token, search_pos)
+                if tc_pos == -1:
+                    break
+                tc_close = model_output.find(
+                    tc_end_token, tc_pos + len(tc_start_token)
+                )
+                # Look for a ``<function=`` inside this tool_call block
+                # (or up to end-of-string if the block isn't closed).
+                limit = tc_close if tc_close != -1 else len(model_output)
+                func_pos = model_output.find(
+                    self.tool_call_prefix, tc_pos + len(tc_start_token), limit
+                )
+                if func_pos != -1:
+                    content_index = tc_pos
+                    break
+                search_pos = (
+                    tc_close + len(tc_end_token) if tc_close != -1 else limit
+                )
+            if content_index == -1:
+                # No structural ``<tool_call>`` block contains a
+                # ``<function=``: fall back to the standalone
+                # ``<function=`` position (legacy behaviour).
+                content_index = model_output.find(self.tool_call_prefix)
+            content = (
+                model_output[:content_index] if content_index >= 0 else model_output
+            )
             valid_tool_calls = [tc for tc in tool_calls if tc is not None]
             return ExtractedToolCallInformation(
                 tools_called=(len(valid_tool_calls) > 0),
