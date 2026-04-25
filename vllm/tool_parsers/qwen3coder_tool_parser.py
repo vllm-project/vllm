@@ -126,11 +126,20 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
+        # ``allows_null`` is True when the schema explicitly admits a
+        # null value (either via ``"type": "null"`` or in an ``anyOf``
+        # union).  A nullable parameter must convert the literal
+        # ``"null"`` / ``"None"`` to JSON null even when the primary
+        # type is ``string`` — otherwise a Qwen3.5-trained model that
+        # emits the Python ``None`` literal leaves the client with the
+        # string ``"None"`` for a nullable optional.
+        allows_null = False
         if (
             isinstance(param_config[param_name], dict)
             and "type" in param_config[param_name]
         ):
             param_type = str(param_config[param_name]["type"]).strip().lower()
+            allows_null = param_type == "null"
         elif (
             isinstance(param_config[param_name], dict)
             and "anyOf" in param_config[param_name]
@@ -139,14 +148,21 @@ class Qwen3CoderToolParser(ToolParser):
             # nullable schemas like {"anyOf": [{"type": "string"},
             # {"type": "null"}]} behave as "string", not "object".
             param_type = "string"
+            picked = False
             for option in param_config[param_name]["anyOf"]:
                 if isinstance(option, dict) and "type" in option:
                     opt_type = str(option["type"]).strip().lower()
-                    if opt_type != "null":
+                    if opt_type == "null":
+                        allows_null = True
+                    elif not picked:
                         param_type = opt_type
-                        break
+                        picked = True
         else:
             param_type = "string"
+        # Nullable schemas: recognise "null" / "None" up front so a
+        # string-typed nullable still maps to JSON null.
+        if allows_null and param_value.lower() in ("null", "none"):
+            return None
         # String type takes precedence: preserve the raw value (including
         # the literal "null") rather than converting it to Python None.
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:

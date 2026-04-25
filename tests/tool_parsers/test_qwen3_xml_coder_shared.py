@@ -2014,3 +2014,56 @@ def test_inline_empty_tool_call_preserves_content_before_real_call(
         f"Content between inline literal and real tool_call lost: "
         f"{result.content!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# anyOf [{type: string}, {type: null}] with the literal "null" or "None"
+# value must convert to JSON null, NOT preserve as the string "null"/"None".
+# Observed against a real Qwen 3.6 server: the model emits ``None`` for a
+# nullable optional parameter and the parser kept it as the string "None",
+# breaking nullable-typed clients.
+# ---------------------------------------------------------------------------
+
+
+def test_anyof_string_null_with_null_literal_returns_none(
+    qwen3_tokenizer, parser_cls
+):
+    """anyOf [{type: string}, {type: null}] with value "null" or "None"
+    must convert to JSON null.  String-typed paths preserve the literal,
+    but a nullable schema MUST recognise the null sentinel — otherwise
+    the client receives the literal "null" / "None" string and downstream
+    type checks fail.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "set_value",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "optional": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    for literal in ("null", "None"):
+        parser = parser_cls(qwen3_tokenizer, tools=tools)
+        model_output = (
+            "<tool_call>\n"
+            "<function=set_value>\n"
+            f"<parameter=optional>{literal}</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(model_output, request=request)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["optional"] is None, (
+            f"anyOf string|null with value {literal!r} was kept as "
+            f"{type(args['optional']).__name__}: {args['optional']!r}"
+        )

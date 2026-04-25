@@ -760,11 +760,24 @@ class StreamingXMLToolCallParser:
                         or param_type.startswith("float")
                     )
 
+                    # Nullable string params (``anyOf: [string, null]``)
+                    # must defer too: the literal ``null`` / ``None`` is
+                    # only recognisable when the full value is in.
+                    # Without deferral, the streaming string path emits
+                    # ``"`` + chars + ``"`` and the literal stays
+                    # quoted.
+                    is_nullable_string = (
+                        param_type in [
+                            "string", "str", "text", "varchar", "char", "enum",
+                        ]
+                        and self._param_allows_null(self._pre_current_param_name)
+                    )
                     need_defer = (
                         is_complex_type
                         or is_object_type
                         or is_bool_type
                         or is_numeric_type
+                        or is_nullable_string
                     )
 
                     if not need_defer:
@@ -1092,6 +1105,48 @@ class StreamingXMLToolCallParser:
                     raw_for_parse = raw_text + "\n"
                 else:
                     raw_for_parse = raw_text
+                # Nullable-string short-circuit: when the schema is
+                # ``anyOf: [string, null]``, ``"null"`` and Python's
+                # ``"None"`` map to JSON null.  Any other value is
+                # kept verbatim as a string — never parsed as int,
+                # float, JSON, etc., even if it LOOKS like one.
+                _param_type_for_check = self._get_param_type(param_name)
+                if (
+                    _param_type_for_check in [
+                        "string", "str", "text", "varchar", "char", "enum",
+                    ]
+                    and self._param_allows_null(param_name)
+                ):
+                    if raw_for_parse.strip().lower() in ("null", "none"):
+                        parsed_value = None
+                        output_arguments = "null"
+                    else:
+                        parsed_value = raw_for_parse
+                        output_arguments = json.dumps(
+                            raw_for_parse, ensure_ascii=False
+                        )
+                    delta = DeltaMessage(
+                        tool_calls=[
+                            DeltaToolCall(
+                                index=self.tool_call_index - 1,
+                                id=self._get_call_id_for_delta(),
+                                type="function",
+                                function=DeltaFunctionCall(
+                                    name=None, arguments=output_arguments
+                                ),
+                            )
+                        ]
+                    )
+                    self._emit_delta(delta)
+                    self.parameters[param_name] = parsed_value
+                    self.current_param_name = None
+                    self.current_param_value = ""
+                    self.current_param_value_converted = ""
+                    self.start_quote_emitted = False
+                    self.should_emit_end_newline = False
+                    self.defer_current_parameter = False
+                    self.deferred_param_raw_value = ""
+                    return
                 raw_lower = raw_for_parse.strip().lower()
                 # Handle JSON literals that ast.literal_eval cannot parse
                 # (true/false/null are JSON, not Python).
@@ -1353,6 +1408,27 @@ class StreamingXMLToolCallParser:
             return self.repair_param_type(str(param_type or "string"))
         return "string"
 
+    def _param_allows_null(self, param_name: str | None) -> bool:
+        """Return True when the schema for ``param_name`` admits a null
+        value — either via ``"type": "null"`` or as one alternative in
+        an ``anyOf`` union.  Used to recognise the literal ``"null"`` /
+        ``"None"`` as JSON null even when the primary type is string.
+        """
+        if not self.tools or not self.current_function_name or not param_name:
+            return False
+        properties = find_tool_properties(self.tools, self.current_function_name)
+        if param_name not in properties or not isinstance(
+            properties[param_name], dict
+        ):
+            return False
+        prop = properties[param_name]
+        if str(prop.get("type", "")).lower() == "null":
+            return True
+        for option in prop.get("anyOf", []) or []:
+            if isinstance(option, dict) and str(option.get("type", "")).lower() == "null":
+                return True
+        return False
+
     def repair_param_type(self, param_type: str) -> str:
         """Repair unknown parameter types by treating them as string
         Args:
@@ -1391,6 +1467,16 @@ class StreamingXMLToolCallParser:
             Converted value
         """
         param_type = param_type.strip().lower()
+        # Nullable schemas (``anyOf: [string, null]`` or similar): the
+        # primary type may be string but the literal ``"null"`` /
+        # ``"None"`` must still convert to JSON null.  Caller passes the
+        # current parameter name via the parser state so we can query
+        # the schema.
+        if (
+            self._param_allows_null(self.current_param_name)
+            and param_value.lower() in ("null", "none")
+        ):
+            return None
         # String type takes precedence: the literal value "null" must remain
         # the string "null" instead of being converted to Python None.
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
