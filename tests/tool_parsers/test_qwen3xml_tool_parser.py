@@ -9,13 +9,16 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.test_qwen3_xml_coder_shared import (
+    stream_delta_message_generator,
+)
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
-from tests.tool_parsers.utils import run_tool_extraction_streaming
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
@@ -397,3 +400,70 @@ def test_xml_streaming_string_null_last_char_not_dropped(qwen3_tokenizer):
         f"and _convert_for_json_streaming(None, 'string') returns '', "
         f"so the final delta is empty and the 'l' is never emitted."
     )
+
+
+def test_xml_streaming_missing_opening_tool_call_tag(qwen3_tokenizer):
+    """The XML streaming parser must recover when the model emits a tool
+    call without the leading ``<tool_call>`` tag — i.e. directly with
+    ``<function=...>``.  The Coder parser does not support this in
+    streaming mode, so this regression stays XML-specific.
+    """
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=None)
+
+    model_output = """I'll check the weather for you.
+
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    other_content = ""
+    tool_states: dict = {}
+
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+                if tool_call.type:
+                    assert tool_call.type == "function"
+                    tool_states[idx]["type"] = tool_call.type
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += (
+                            tool_call.function.arguments
+                        )
+
+    assert "I'll check the weather for you." in other_content
+    assert len(tool_states) == 1
+    state = tool_states[0]
+    assert state["id"] is not None
+    assert state["type"] == "function"
+    assert state["name"] == "get_current_weather"
+    args = json.loads(state["arguments"])
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"

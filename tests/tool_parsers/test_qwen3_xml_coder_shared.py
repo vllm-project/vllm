@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Shared regression tests for the Qwen3 XML and Coder tool parsers.
+Shared tests for the Qwen3 XML and Coder tool parsers.
 
 These tests cover behaviour that BOTH parsers must implement identically.
 Each test runs twice — once against ``Qwen3XMLToolParser`` and once against
@@ -11,15 +11,23 @@ parser-specific file (``test_qwen3xml_tool_parser.py`` or
 ``test_qwen3coder_tool_parser.py``).
 """
 import json
+from collections.abc import Generator
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.tokenizers import get_tokenizer
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    ToolCall,
+)
+from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 
@@ -37,6 +45,845 @@ def qwen3_tokenizer():
 )
 def parser_cls(request):
     return request.param
+
+
+WEATHER_PARAMS = {
+    "type": "object",
+    "properties": {
+        "city": {"type": "string", "description": "The city name"},
+        "state": {"type": "string", "description": "The state code"},
+        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
+    },
+    "required": ["city", "state"],
+}
+
+AREA_PARAMS = {
+    "type": "object",
+    "properties": {
+        "shape": {"type": "string"},
+        "dimensions": {"type": "object"},
+        "precision": {"type": "integer"},
+    },
+}
+
+
+@pytest.fixture(params=["chat_completion", "responses_api"])
+def sample_tools(request):
+    if request.param == "chat_completion":
+        return [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "get_current_weather",
+                    "description": "Get the current weather",
+                    "parameters": WEATHER_PARAMS,
+                },
+            ),
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "calculate_area",
+                    "description": "Calculate area of a shape",
+                    "parameters": AREA_PARAMS,
+                },
+            ),
+        ]
+    else:
+        return [
+            FunctionTool(
+                type="function",
+                name="get_current_weather",
+                description="Get the current weather",
+                parameters=WEATHER_PARAMS,
+            ),
+            FunctionTool(
+                type="function",
+                name="calculate_area",
+                description="Calculate area of a shape",
+                parameters=AREA_PARAMS,
+            ),
+        ]
+
+
+@pytest.fixture
+def parser(parser_cls, qwen3_tokenizer, sample_tools):
+    return parser_cls(qwen3_tokenizer, tools=sample_tools)
+
+
+def assert_tool_calls(
+    actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
+):
+    assert len(actual_tool_calls) == len(expected_tool_calls)
+    for actual_tool_call, expected_tool_call in zip(
+        actual_tool_calls, expected_tool_calls
+    ):
+        assert actual_tool_call.type == "function"
+        assert actual_tool_call.function.name == expected_tool_call.function.name
+        assert json.loads(actual_tool_call.function.arguments) == json.loads(
+            expected_tool_call.function.arguments
+        )
+
+
+def stream_delta_message_generator(
+    parser,
+    tokenizer: TokenizerLike,
+    model_output: str,
+    request: ChatCompletionRequest | None = None,
+) -> Generator[DeltaMessage, None, None]:
+    all_token_ids = tokenizer.encode(model_output, add_special_tokens=False)
+
+    previous_text = ""
+    previous_tokens = None
+    prefix_offset = 0
+    read_offset = 0
+    for i, delta_token in enumerate(all_token_ids):
+        delta_token_ids = [delta_token]
+        previous_token_ids = all_token_ids[:i]
+        current_token_ids = all_token_ids[: i + 1]
+
+        (new_tokens, delta_text, new_prefix_offset, new_read_offset) = (
+            detokenize_incrementally(
+                tokenizer=tokenizer,
+                all_input_ids=current_token_ids,
+                prev_tokens=previous_tokens,
+                prefix_offset=prefix_offset,
+                read_offset=read_offset,
+                skip_special_tokens=False,
+                spaces_between_special_tokens=True,
+            )
+        )
+
+        current_text = previous_text + delta_text
+
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+            request=request,
+        )
+        if delta_message:
+            yield delta_message
+
+        previous_text = current_text
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
+        prefix_offset = new_prefix_offset
+        read_offset = new_read_offset
+
+
+# ---------------------------------------------------------------------------
+# Basic extraction
+# ---------------------------------------------------------------------------
+
+
+def test_extract_tool_calls_no_tools(parser):
+    model_output = "This is a test response without any tool calls"
+    extracted_tool_calls = parser.extract_tool_calls(
+        model_output, request=None
+    )
+    assert not extracted_tool_calls.tools_called
+    assert extracted_tool_calls.tool_calls == []
+    assert extracted_tool_calls.content == model_output
+
+
+_EXTRACT_CASES = [
+    (
+        """<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>""",
+        [
+            ToolCall(
+                function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps(
+                        {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                    ),
+                )
+            )
+        ],
+        None,
+    ),
+    (
+        """Sure! Let me check the weather for you.<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>""",
+        [
+            ToolCall(
+                function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps(
+                        {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                    ),
+                )
+            )
+        ],
+        "Sure! Let me check the weather for you.",
+    ),
+    (
+        """<tool_call>
+<function=calculate_area>
+<parameter=shape>
+rectangle
+</parameter>
+<parameter=dimensions>
+{"width": 10,
+ "height": 20}
+</parameter>
+<parameter=precision>
+2
+</parameter>
+</function>
+</tool_call>""",
+        [
+            ToolCall(
+                function=FunctionCall(
+                    name="calculate_area",
+                    arguments=json.dumps(
+                        {
+                            "shape": "rectangle",
+                            "dimensions": {"width": 10, "height": 20},
+                            "precision": 2,
+                        }
+                    ),
+                )
+            )
+        ],
+        None,
+    ),
+    (
+        """<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>
+<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Orlando
+</parameter>
+<parameter=state>
+FL
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>""",
+        [
+            ToolCall(
+                function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps(
+                        {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                    ),
+                )
+            ),
+            ToolCall(
+                function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps(
+                        {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
+                    ),
+                )
+            ),
+        ],
+        "\n",
+    ),
+    (
+        """Let me calculate that area for you.<tool_call>
+<function=calculate_area>
+<parameter=shape>
+circle
+</parameter>
+<parameter=dimensions>
+{"radius": 15.5}
+</parameter>
+<parameter=precision>
+3
+</parameter>
+</function>
+</tool_call>""",
+        [
+            ToolCall(
+                function=FunctionCall(
+                    name="calculate_area",
+                    arguments=json.dumps(
+                        {
+                            "shape": "circle",
+                            "dimensions": {"radius": 15.5},
+                            "precision": 3,
+                        }
+                    ),
+                )
+            )
+        ],
+        "Let me calculate that area for you.",
+    ),
+]
+
+_EXTRACT_IDS = [
+    "single_tool",
+    "single_tool_with_content",
+    "single_tool_multiline_param",
+    "parallel_tools",
+    "tool_with_typed_params",
+]
+
+
+@pytest.mark.parametrize(
+    ids=_EXTRACT_IDS,
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=_EXTRACT_CASES,
+)
+def test_extract_tool_calls(
+    parser, model_output, expected_tool_calls, expected_content
+):
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    extracted_tool_calls = parser.extract_tool_calls(
+        model_output, request=request
+    )
+    assert extracted_tool_calls.tools_called
+    assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
+    # Both ``None`` and ``""`` are acceptable when the expected content is
+    # only whitespace — the two parsers differ on whether they preserve the
+    # newline that separates parallel tool-call blocks.
+    actual_content = extracted_tool_calls.content
+    if expected_content and expected_content.strip():
+        assert actual_content == expected_content
+    else:
+        assert (actual_content or "").strip() == (expected_content or "").strip()
+
+
+def test_extract_tool_calls_fallback_no_tags(parser):
+    """Test fallback parsing when XML tags are missing."""
+    model_output = """<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+</function>"""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    extracted_tool_calls = parser.extract_tool_calls(
+        model_output, request=request
+    )
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+    assert (
+        extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Type conversion
+# ---------------------------------------------------------------------------
+
+
+def test_extract_tool_calls_type_conversion(qwen3_tokenizer, parser_cls):
+    """Test parameter type conversion based on tool schema."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "test_types",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "int_param": {"type": "integer"},
+                        "float_param": {"type": "float"},
+                        "bool_param": {"type": "boolean"},
+                        "str_param": {"type": "string"},
+                        "obj_param": {"type": "object"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=test_types>
+<parameter=int_param>
+42
+</parameter>
+<parameter=float_param>
+3.14
+</parameter>
+<parameter=bool_param>
+true
+</parameter>
+<parameter=str_param>
+hello world
+</parameter>
+<parameter=obj_param>
+{"key": "value"}
+</parameter>
+</function>
+</tool_call>"""
+
+    parser_inst = parser_cls(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted_tool_calls = parser_inst.extract_tool_calls(
+        model_output, request=request
+    )
+
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+    assert args["int_param"] == 42
+    assert args["float_param"] == 3.14
+    assert args["bool_param"] is True
+    assert args["str_param"] == "hello world"
+    assert args["obj_param"] == {"key": "value"}
+
+
+def test_extract_tool_calls_complex_type_with_single_quote(
+    qwen3_tokenizer, parser_cls
+):
+    """Object parameter expressed as a Python repr (single quotes)."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "test_types",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "int_param": {"type": "integer"},
+                        "float_param": {"type": "float"},
+                        "bool_param": {"type": "boolean"},
+                        "str_param": {"type": "string"},
+                        "obj_param": {"type": "object"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=test_types>
+<parameter=obj_param>
+{'key': 'value'}
+</parameter>
+</function>
+</tool_call>"""
+
+    parser_inst = parser_cls(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted_tool_calls = parser_inst.extract_tool_calls(
+        model_output, request=request
+    )
+
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+    assert args["obj_param"] == {"key": "value"}
+
+
+# ---------------------------------------------------------------------------
+# Streaming extraction
+# ---------------------------------------------------------------------------
+
+
+_STREAMING_CASES = [
+    ("This is a test without tools", [], "This is a test without tools"),
+] + _EXTRACT_CASES
+
+_STREAMING_IDS = ["no_tools"] + _EXTRACT_IDS
+
+
+@pytest.mark.parametrize(
+    ids=_STREAMING_IDS,
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=_STREAMING_CASES,
+)
+def test_extract_tool_calls_streaming(
+    parser,
+    qwen3_tokenizer,
+    model_output,
+    expected_tool_calls,
+    expected_content,
+):
+    """Test incremental streaming behavior including typed parameters."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    other_content = ""
+    tool_states = {}
+
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        assert not delta_message.role
+
+        if delta_message.content:
+            other_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    assert tool_call.type == "function"
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        assert tool_states[idx]["name"] is None
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += (
+                            tool_call.function.arguments
+                        )
+
+    # Be tolerant about whitespace-only deltas between parallel tool calls;
+    # see ``test_extract_tool_calls`` for the same reasoning.
+    if expected_content and expected_content.strip():
+        assert other_content == expected_content
+    else:
+        assert other_content.strip() == (expected_content or "").strip()
+    assert len(tool_states) == len(expected_tool_calls)
+    assert len(parser.prev_tool_call_arr) == len(expected_tool_calls)
+
+    for idx, expected_tool in enumerate(expected_tool_calls):
+        state = tool_states[idx]
+        assert state["id"] is not None
+        assert state["type"] == "function"
+        assert state["name"] == expected_tool.function.name
+
+        arguments_str = state["arguments"]
+        assert arguments_str is not None
+        actual_args = json.loads(arguments_str)
+        expected_args = json.loads(expected_tool.function.arguments)
+        assert actual_args == expected_args
+
+
+def test_extract_tool_calls_missing_closing_parameter_tag(parser):
+    """Test handling of missing closing </parameter> tag."""
+    model_output = """Let me check the weather for you:
+<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    extracted_tool_calls = parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+    assert (
+        extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
+    )
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+    assert "city" in args
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
+    assert "Let me check the weather for you:" in extracted_tool_calls.content
+
+
+def test_extract_tool_calls_streaming_missing_closing_tag(
+    parser, qwen3_tokenizer
+):
+    """Streaming with missing closing </parameter> tag."""
+    model_output = """Let me check the weather for you:
+<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    other_content = ""
+    tool_states = {}
+
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+                if tool_call.type:
+                    assert tool_call.type == "function"
+                    tool_states[idx]["type"] = tool_call.type
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += (
+                            tool_call.function.arguments
+                        )
+
+    assert "Let me check the weather for you:" in other_content
+    assert len(tool_states) == 1
+    assert len(parser.prev_tool_call_arr) == 1
+
+    state = tool_states[0]
+    assert state["id"] is not None
+    assert state["type"] == "function"
+    assert state["name"] == "get_current_weather"
+    args = json.loads(state["arguments"])
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
+
+
+def test_extract_tool_calls_streaming_incremental(parser, qwen3_tokenizer):
+    """Test that streaming is truly incremental."""
+    model_output = """I'll check the weather.<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    chunks = []
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        chunks.append(delta_message)
+
+    assert len(chunks) > 3
+    assert chunks[0].content is not None
+    assert chunks[0].tool_calls is None or chunks[0].tool_calls == []
+
+    header_found = False
+    for chunk in chunks:
+        if chunk.tool_calls and chunk.tool_calls[0].id:
+            header_found = True
+            assert chunk.tool_calls[0].function.name == "get_current_weather"
+            assert chunk.tool_calls[0].type == "function"
+            # XML emits an empty arguments string with the header; Coder
+            # emits the opening "{" with the header.  Both are valid.
+            assert chunk.tool_calls[0].function.arguments in ("", "{")
+            break
+    assert header_found
+
+    arg_chunks = []
+    for chunk in chunks:
+        if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
+            arg_chunks.append(chunk.tool_calls[0].function.arguments)
+
+    assert len(arg_chunks) > 1
+    full_args = "".join(arg_chunks)
+    parsed_args = json.loads(full_args)
+    assert parsed_args["city"] == "Dallas"
+    assert parsed_args["state"] == "TX"
+
+
+# ---------------------------------------------------------------------------
+# Robustness regressions
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_xml_no_gt_delimiter(parser):
+    """Regression: malformed XML without '>' must not crash (PR #36774)."""
+    model_output = (
+        "<tool_call>\n"
+        "<function=get_current_weather\n"
+        "<parameter=city>Dallas</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    result = parser.extract_tool_calls(model_output, request=request)
+    assert result is not None
+    assert isinstance(result.tool_calls, list)
+    assert all(tc is not None for tc in result.tool_calls)
+
+
+def test_none_tool_calls_filtered(parser):
+    """Regression: None tool calls filtered from output (PR #36774)."""
+    model_output = (
+        "<tool_call>\n"
+        "<function=bad_func_no_gt\n"
+        "</function>\n"
+        "</tool_call>\n"
+        "<tool_call>\n"
+        "<function=get_current_weather>\n"
+        "<parameter=city>Dallas</parameter>\n"
+        "<parameter=state>TX</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    result = parser.extract_tool_calls(model_output, request=request)
+    assert all(tc is not None for tc in result.tool_calls)
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_current_weather"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+
+
+def test_streaming_multi_param_single_chunk(parser):
+    """Regression: speculative decode delivering multiple params at once
+    (PR #35615)."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",
+        # This single delta delivers all three parameters at once
+        "<parameter=city>\nDallas\n</parameter>"
+        "\n<parameter=state>\nTX\n</parameter>"
+        "\n<parameter=unit>\nfahrenheit\n</parameter>",
+        "\n</function>",
+        "\n</tool_call>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
+
+
+def test_no_double_serialization_string_args(qwen3_tokenizer, parser_cls):
+    """Regression: string arguments must not be double-serialized
+    (PR #35615)."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "greet",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = (
+        "<tool_call>\n"
+        "<function=greet>\n"
+        "<parameter=message>hello world</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    parser_inst = parser_cls(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser_inst.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    raw_arguments = result.tool_calls[0].function.arguments
+    args = json.loads(raw_arguments)
+    assert args["message"] == "hello world"
+    assert '\\"hello world\\"' not in raw_arguments
+
+
+def test_extract_tool_calls_streaming_speculative_decode_loss(parser):
+    """If the parser hasn't started JSON yet and the delta contains the
+    parameters AND the end of the tool call, the parser should not just
+    return '{' and lose the parameters.
+    """
+    request = ChatCompletionRequest(model="test", messages=[])
+
+    text1 = "<tool_call>\n<function=test>\n"
+    parser.extract_tool_calls_streaming(
+        "", text1, text1, [], [1], [1], request
+    )
+
+    delta_str = (
+        "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+    )
+    text2 = text1 + delta_str
+    delta2 = parser.extract_tool_calls_streaming(
+        text1, text2, delta_str, [1], [1, 2], [2], request
+    )
+
+    assert delta2 is not None
+    assert delta2.tool_calls is not None
+    assert len(delta2.tool_calls) == 1
+    args = delta2.tool_calls[0].function.arguments
+    assert "Paris" in args, f"Arguments lost! Got: {args}"
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +1179,6 @@ _WRITE_FILE_TOOLS = [
     )
 ]
 
-# Content with all four structural tags as literal strings (a Python file
-# that documents the tool-call format).
 _XML_TAGS_IN_CONTENT = (
     'char_deltas = [\n'
     '    "<tool_call>\\n",\n'
