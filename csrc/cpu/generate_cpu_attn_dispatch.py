@@ -215,7 +215,7 @@ def generate_header_file() -> str:
     header += _macro_block(
         "#elif defined(__AVX2__)",
         ["VEC", "VEC16"],
-        fp8=True,
+        fp8=False,
     )
     header += _macro_block(
         "#else",
