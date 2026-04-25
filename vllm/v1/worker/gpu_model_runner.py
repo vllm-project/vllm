@@ -1555,6 +1555,7 @@ class GPUModelRunner(
         model_kwargs: dict,
         plt_loop_num_idx: int,
         prev_model_output: torch.Tensor,
+        num_tokens_padded: int,
     ):
         if plt_loop_num_idx == 0:
             model_kwargs["loop_hidden_states"] = None
@@ -1563,7 +1564,6 @@ class GPUModelRunner(
         # [A, B, C, D, E, F, G] [H, I, J, K]
         # [0, A, B, C, D, E, F] [G, H, I, J]
         schedule_tokens_cumsum = np.cumsum(schedule_tokens_np)
-        total_schedule_tokens = schedule_tokens_cumsum[-1]
         for req_idx, req_sched_tokens in enumerate(schedule_tokens_np):
             token_end = schedule_tokens_cumsum[req_idx]
             token_start = token_end - req_sched_tokens + 1
@@ -1573,7 +1573,7 @@ class GPUModelRunner(
                 )
         model_kwargs["loop_hidden_states"] = self.plt_loop_hidden_states[
             plt_loop_num_idx
-        ][:total_schedule_tokens]
+        ][:num_tokens_padded]
 
     def _fill_first_hidden_state_for_plt(self, schedule_tokens_np: np.ndarray):
         schedule_tokens_cumsum = np.cumsum(schedule_tokens_np)
@@ -3790,6 +3790,7 @@ class GPUModelRunner(
                 self._fill_first_hidden_state_for_plt(
                     schedule_tokens_np=num_scheduled_tokens_np
                 )
+                ctx = get_forward_context()
                 for plt_loop_num_idx in range(self.plt_loop_nums):
                     model_kwargs["loop_num_idx"] = plt_loop_num_idx
                     self._prepare_loop_hidden_states(
@@ -3797,16 +3798,18 @@ class GPUModelRunner(
                         model_kwargs=model_kwargs,
                         plt_loop_num_idx=plt_loop_num_idx,
                         prev_model_output=plt_last_model_output,
+                        num_tokens_padded=num_tokens_padded,
                     )
                     # Each PLT loop iteration re-traverses all MoE layers, so
                     # reset the index so the custom ops index all_moe_layers
                     # from the beginning again.
-                    get_forward_context().moe_layer_index = 0
+                    ctx.moe_layer_index = 0
                     # For FULL CG mode, update batch_descriptor so each PLT
                     # iteration replays its own captured graph.
-                    get_forward_context().batch_descriptor = replace(
+                    ctx.batch_descriptor = replace(
                         batch_desc, plt_loop_num_idx=plt_loop_num_idx
                     )
+                    ctx.skip_compiled = True
 
                     model_output = self._model_forward(
                         input_ids=input_ids,
@@ -5177,12 +5180,15 @@ class GPUModelRunner(
                 ),
             ):
                 if self.plt_loop_nums > 1:
+                    ctx = get_forward_context()
+
                     for plt_loop_num_idx in range(self.plt_loop_nums):
                         model_kwargs["loop_num_idx"] = plt_loop_num_idx
-                        get_forward_context().moe_layer_index = 0
-                        get_forward_context().batch_descriptor = replace(
+                        ctx.moe_layer_index = 0
+                        ctx.batch_descriptor = replace(
                             batch_desc, plt_loop_num_idx=plt_loop_num_idx
                         )
+                        ctx.skip_compiled = True
 
                         model_kwargs["loop_hidden_states"] = (
                             None
