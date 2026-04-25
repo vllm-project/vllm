@@ -65,16 +65,16 @@ class CPUModelRunner(GPUModelRunner):
 
         # Speculative decoding fallbacks
         import vllm.v1.sample.rejection_sampler
-        import vllm.v1.spec_decode.eagle
+        import vllm.v1.spec_decode.llm_base_proposer
         import vllm.v1.spec_decode.utils
 
-        vllm.v1.spec_decode.eagle.eagle_prepare_inputs_padded_kernel = (
+        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
             cpu_tl.eagle_prepare_inputs_padded_kernel
         )
-        vllm.v1.spec_decode.eagle.eagle_prepare_next_token_padded_kernel = (
+        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_next_token_padded_kernel = (
             cpu_tl.eagle_prepare_next_token_padded_kernel
         )
-        vllm.v1.spec_decode.eagle.copy_and_expand_eagle_inputs_kernel = (
+        vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
         vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel = (
