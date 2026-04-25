@@ -679,9 +679,14 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
-| `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
+| `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, `Qwen/Qwen3-Omni-30B-A3B-Thinking`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
+
+!!! note "Qwen3-Omni on the transcriptions API"
+    Multimodal Qwen3-Omni uses the same OpenAI-compatible [`/v1/audio/transcriptions`](../serving/openai_compatible_server.md#transcriptions-api) and [`/v1/audio/translations`](../serving/openai_compatible_server.md#translations-api) entrypoints as other [SupportsTranscription](../../vllm/model_executor/models/interfaces.py) models (for example Whisper).
+    Start the server with a supported checkpoint (for example `vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct`), then call those HTTP APIs or reuse [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py).
+    For offline thinker-only audio+text generation (without the HTTP server), see [examples/offline_inference/qwen3_omni/only_thinker.py](../../examples/offline_inference/qwen3_omni/only_thinker.py).
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.

@@ -4,9 +4,17 @@
 This script demonstrates how to use the vLLM API server to perform audio
 transcription with the `openai/whisper-large-v3` model.
 
-Before running this script, you must start the vLLM server with the following command:
+The same client flow applies to any model listed under **Transcription** in
+`docs/models/supported_models.md#transcription` (for example multimodal
+`Qwen/Qwen3-Omni-30B-A3B-Instruct`).
+
+Before running this script, start the vLLM server with the desired model, e.g.:
 
     vllm serve openai/whisper-large-v3
+    # or
+    vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct
+
+The script will automatically detect the served model ID.
 
 Requirements:
 - vLLM with audio support
