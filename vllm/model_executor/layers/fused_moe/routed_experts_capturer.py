@@ -326,6 +326,5 @@ class RoutedExpertsManager:
         slot_mapping = (
             block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
         ).flatten()[:num_tokens]
-        if token_start > 0:
-            slot_mapping = slot_mapping[token_start:]
+        slot_mapping = slot_mapping[token_start:]
         return self.routed_experts_by_slot[slot_mapping]
