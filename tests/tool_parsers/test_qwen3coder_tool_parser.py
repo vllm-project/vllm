@@ -22,7 +22,7 @@ from vllm.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
 )
 from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
-
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
 
@@ -1092,9 +1092,6 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
         "\n</tool_call>",
     ]
 
-    from tests.tool_parsers.utils import (
-        run_tool_extraction_streaming,
-    )
 
     reconstructor = run_tool_extraction_streaming(
         qwen3_tool_parser,
@@ -1298,3 +1295,396 @@ multiple lines
         args = json.loads(tool_states[0]["arguments"])
         assert args["example_parameter_1"] == "value_1"
         assert args["example_parameter_2"] == "This is the value for the second parameter\nthat can span\nmultiple lines"
+
+
+def test_coder_string_null_value_not_converted_to_none(qwen3_tokenizer):
+    """Regression: string param with literal value 'null' must not become JSON null.
+
+    The null-before-type-check in _convert_param_value returns Python None for
+    ANY parameter whose raw text is 'null', even when the schema says 'string'.
+    That turns {"param": "null"} into {"param": null}, which is wrong.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "set_value",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = (
+        "<tool_call>\n"
+        "<function=set_value>\n"
+        "<parameter=key>null</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    # The value is the string "null", NOT JSON null
+    assert args["key"] == "null", (
+        f"String param 'null' was converted to JSON null. Got: {args['key']!r}"
+    )
+
+
+def test_coder_anyof_string_null_numeric_value_stays_string(qwen3_tokenizer):
+    """Regression: anyOf with string+null must keep numeric-looking values as strings.
+
+    When anyOf is treated as 'object', json.loads('42') returns int 42 even
+    though the schema declares the type as 'string'. The correct behaviour is
+    to use the first non-null type from anyOf; for string, the raw text is
+    returned unchanged.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "set_code",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = (
+        "<tool_call>\n"
+        "<function=set_code>\n"
+        "<parameter=code>42</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    # "42" is a string in the schema — must NOT become integer 42
+    assert args["code"] == "42", (
+        f"anyOf string param '42' was parsed as {type(args['code']).__name__}: {args['code']!r}"
+    )
+    assert isinstance(args["code"], str)
+
+
+_WRITE_FILE_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "write_file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+    )
+]
+
+# Tool with an object-type parameter to test double-encoded values.
+_OBJECT_PARAM_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "process",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+            },
+        },
+    )
+]
+
+# Model output as produced by a template with json.dumps(str(value)) bug:
+# the dict argument is rendered as a JSON-encoded Python repr string.
+_DOUBLE_ENCODED_OBJECT_OUTPUT = (
+    "<tool_call>\n"
+    "<function=process>\n"
+    "<parameter=name>\nhello\n</parameter>\n"
+    "<parameter=data>\n\"{'key': 'value', 'n': 1}\"\n</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"
+)
+
+# File content that contains <tool_call> and <function= as literal strings
+# (e.g. a Python file that describes the Qwen tool-call format).
+_FILE_CONTENT_WITH_TOOL_CALL_TAG = (
+    'TEMPLATE = """<tool_call>\\n<function=example_function_name>\\n"""'
+)
+
+_WRITE_FILE_OUTPUT = (
+    "<tool_call>\n"
+    "<function=write_file>\n"
+    "<parameter=path>\ntest.py\n</parameter>\n"
+    f"<parameter=content>\n{_FILE_CONTENT_WITH_TOOL_CALL_TAG}\n</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"  # trailing newline ensures a delta arrives after </tool_call>
+)
+
+
+def test_nonstreaming_content_param_with_tool_call_tag(qwen3_tokenizer):
+    """Non-streaming: <tool_call> literal inside a string param must not split it.
+
+    When writing a file whose content contains '<tool_call>' as plain text,
+    extract_tool_calls must still produce exactly one tool call with the
+    correct path and full content.
+    """
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+    result = parser.extract_tool_calls(_WRITE_FILE_OUTPUT, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "write_file"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["path"] == "test.py"
+    assert args["content"] == _FILE_CONTENT_WITH_TOOL_CALL_TAG
+
+
+def test_streaming_content_param_with_tool_call_tag(qwen3_tokenizer):
+    """Streaming: <tool_call> literal inside a string param must not be mistaken
+    for a second tool call.
+
+    The streaming parser counted ALL <tool_call> occurrences in current_text,
+    including those inside parameter values. After completing the first tool
+    call it would set is_tool_call_started=True again and attempt to process
+    the embedded <tool_call> as a second invocation — producing garbage or an
+    extra spurious tool call.
+    """
+    
+
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _WRITE_FILE_OUTPUT,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1, (
+        f"Expected 1 tool call, got {len(reconstructor.tool_calls)}: "
+        f"{[tc.function.name for tc in reconstructor.tool_calls]}"
+    )
+    assert reconstructor.tool_calls[0].function.name == "write_file"
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args["path"] == "test.py", f"path wrong: {args.get('path')!r}"
+    assert args["content"] == _FILE_CONTENT_WITH_TOOL_CALL_TAG, (
+        f"content wrong: {args.get('content')!r}"
+    )
+
+
+# Python content containing ALL XML structural tags as literal strings.
+# This is the hardest case: the parameter value looks like it could end at
+# any of the embedded closing tags.
+_XML_TAGS_IN_CONTENT = (
+    'char_deltas = [\n'
+    '    "<tool_call>\\n",\n'
+    '    "<parameter=query>\\n",\n'
+    '    "\\n</parameter>\\n",\n'
+    '    "</function>\\n",\n'
+    ']\n'
+)
+
+_WRITE_FILE_XML_TAGS_OUTPUT = (
+    "<tool_call>\n"
+    "<function=write_file>\n"
+    "<parameter=file_path>\ntest.py\n</parameter>\n"
+    f"<parameter=content>\n{_XML_TAGS_IN_CONTENT}</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"
+)
+
+
+def test_nonstreaming_content_with_xml_structural_tags(qwen3_tokenizer):
+    """Non-streaming: parameter value containing </parameter>, </function>,
+    </tool_call> as literal text must be extracted intact without spurious
+    extra parameters being created.
+    """
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+    result = parser.extract_tool_calls(_WRITE_FILE_XML_TAGS_OUTPUT, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "write_file"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["file_path", "content"], (
+        f"Unexpected keys (spurious params?): {list(args.keys())}"
+    )
+    assert args["file_path"] == "test.py"
+    assert args["content"] == _XML_TAGS_IN_CONTENT.rstrip("\n"), (
+        f"content wrong: {args.get('content')!r}"
+    )
+
+
+def test_streaming_content_with_xml_structural_tags(qwen3_tokenizer):
+    """Streaming: parameter value containing </parameter>, </function>,
+    </tool_call> as literal text must not terminate the parameter early and
+    must not create spurious extra parameters.
+    """
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _WRITE_FILE_XML_TAGS_OUTPUT,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1, (
+        f"Expected 1 tool call, got {len(reconstructor.tool_calls)}: "
+        f"{[tc.function.name for tc in reconstructor.tool_calls]}"
+    )
+    assert reconstructor.tool_calls[0].function.name == "write_file"
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["file_path", "content"], (
+        f"Unexpected keys (spurious params?): {list(args.keys())}"
+    )
+    assert args["file_path"] == "test.py"
+    assert args["content"] == _XML_TAGS_IN_CONTENT.rstrip("\n"), (
+        f"content wrong: {args.get('content')!r}"
+    )
+
+
+# File content that contains </parameter> and <parameter=NAME> on their OWN
+# LINES (preceded by \n). This occurs when writing a Jinja2 template, a test
+# fixture for the parser itself, or any file that documents the tool-call
+# format. "new_string" is intentionally NOT a parameter of write_file, so the
+# schema filter must prevent it from being treated as a structural boundary.
+_CONTENT_WITH_PARAM_LIKE_LINES = (
+    'TOOL_CALL_TEMPLATE = """\n'
+    "</parameter>\n"
+    "<parameter=new_string>\n"
+    "#!/usr/bin/env python3\n"
+    "</parameter>\n"
+    '"""\n'
+)
+
+_WRITE_FILE_PARAM_LIKE_LINES_OUTPUT = (
+    "<tool_call>\n"
+    "<function=write_file>\n"
+    "<parameter=path>\ntest_template.py\n</parameter>\n"
+    f"<parameter=content>\n{_CONTENT_WITH_PARAM_LIKE_LINES}</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"
+)
+
+
+def test_nonstreaming_content_with_param_like_lines(qwen3_tokenizer):
+    """Non-streaming: file content containing </parameter> and <parameter=NAME>
+    on their own lines must not be truncated at the first </parameter> or
+    create spurious extra parameters.  Requires schema-based filtering so that
+    "new_string" (not a real parameter of write_file) is ignored.
+    """
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+    result = parser.extract_tool_calls(_WRITE_FILE_PARAM_LIKE_LINES_OUTPUT, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "write_file"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["path", "content"], (
+        f"Spurious parameters created: {list(args.keys())}"
+    )
+    assert args["path"] == "test_template.py"
+    assert args["content"] == _CONTENT_WITH_PARAM_LIKE_LINES.rstrip("\n"), (
+        f"content truncated or wrong: {args.get('content')!r}"
+    )
+
+
+def test_streaming_content_with_param_like_lines(qwen3_tokenizer):
+    """Streaming: file content containing </parameter> and <parameter=NAME> on
+    their own lines must not emit spurious extra tool calls or parameters.
+    """
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _WRITE_FILE_PARAM_LIKE_LINES_OUTPUT,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1, (
+        f"Expected 1 tool call, got {len(reconstructor.tool_calls)}: "
+        f"{[tc.function.name for tc in reconstructor.tool_calls]}"
+    )
+    assert reconstructor.tool_calls[0].function.name == "write_file"
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["path", "content"], (
+        f"Spurious parameters created: {list(args.keys())}"
+    )
+    assert args["path"] == "test_template.py"
+    assert args["content"] == _CONTENT_WITH_PARAM_LIKE_LINES.rstrip("\n"), (
+        f"content truncated or wrong: {args.get('content')!r}"
+    )
+
+
+def test_nonstreaming_double_encoded_object_param(qwen3_tokenizer):
+    """Non-streaming: a model trained with a buggy template (json.dumps(str(dict)))
+    outputs object args as a JSON-encoded Python repr string like \"{'k': 'v'}\".
+    The parser must double-decode it back to a real dict.
+    """
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_OBJECT_PARAM_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_OBJECT_PARAM_TOOLS
+    )
+    result = parser.extract_tool_calls(_DOUBLE_ENCODED_OBJECT_OUTPUT, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["name"] == "hello"
+    assert isinstance(args["data"], dict), (
+        f"Expected dict, got {type(args['data'])}: {args['data']!r}"
+    )
+    assert args["data"] == {"key": "value", "n": 1}
+
+
+def test_streaming_double_encoded_object_param(qwen3_tokenizer):
+    """Streaming: same double-encoded object parameter scenario."""
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=_OBJECT_PARAM_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_OBJECT_PARAM_TOOLS
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _DOUBLE_ENCODED_OBJECT_OUTPUT,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args["name"] == "hello"
+    assert isinstance(args["data"], dict), (
+        f"Expected dict, got {type(args['data'])}: {args['data']!r}"
+    )
+    assert args["data"] == {"key": "value", "n": 1}

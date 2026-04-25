@@ -116,10 +116,6 @@ class Qwen3CoderToolParser(ToolParser):
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        # Handle null value for any type
-        if param_value.lower() == "null":
-            return None
-
         if param_name not in param_config:
             if param_config != {}:
                 logger.debug(
@@ -140,13 +136,26 @@ class Qwen3CoderToolParser(ToolParser):
             isinstance(param_config[param_name], dict)
             and "anyOf" in param_config[param_name]
         ):
-            # anyOf has no top-level "type"; treat as object to trigger json.loads.
-            param_type = "object"
+            # Extract the first non-null type from the anyOf list so that
+            # nullable schemas like {"anyOf": [{"type": "string"},
+            # {"type": "null"}]} behave as "string", not "object".
+            param_type = "string"
+            for option in param_config[param_name]["anyOf"]:
+                if isinstance(option, dict) and "type" in option:
+                    opt_type = str(option["type"]).strip().lower()
+                    if opt_type != "null":
+                        param_type = opt_type
+                        break
         else:
             param_type = "string"
+        # String type takes precedence: preserve the raw value (including
+        # the literal "null") rather than converting it to Python None.
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
-        elif (
+        # For non-string types, "null" maps to JSON null.
+        if param_value.lower() == "null":
+            return None
+        if (
             param_type.startswith("int")
             or param_type.startswith("uint")
             or param_type.startswith("long")
@@ -194,14 +203,24 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value == "true"
         else:
-            if (
+            is_container_type = (
                 param_type in ["object", "array", "arr"]
                 or param_type.startswith("dict")
                 or param_type.startswith("list")
-            ):
+            )
+            if is_container_type:
                 try:
-                    param_value = json.loads(param_value)
-                    return param_value
+                    parsed = json.loads(param_value)
+                    # A model trained with a buggy template
+                    # (json.dumps(str(dict))) may output a JSON-encoded
+                    # Python repr like "{'k': 'v'}". json.loads returns a
+                    # string in that case — try one more parse.
+                    if isinstance(parsed, str):
+                        try:
+                            parsed = ast.literal_eval(parsed)
+                        except (ValueError, SyntaxError, TypeError):
+                            pass
+                    return parsed
                 except (json.JSONDecodeError, TypeError, ValueError):
                     logger.debug(
                         "Parsed value '%s' of parameter '%s' cannot be "
@@ -213,6 +232,14 @@ class Qwen3CoderToolParser(ToolParser):
                     )
             try:
                 param_value = ast.literal_eval(param_value)  # safer
+                # Same double-decode for container types whose raw text
+                # had no JSON outer layer (e.g. bare Python repr
+                # "{'k': 'v'}").
+                if is_container_type and isinstance(param_value, str):
+                    try:
+                        param_value = ast.literal_eval(param_value)
+                    except (ValueError, SyntaxError, TypeError):
+                        pass
             except (ValueError, SyntaxError, TypeError):
                 logger.debug(
                     "Parsed value '%s' of parameter '%s' cannot be "
@@ -224,6 +251,131 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
+    def _next_structural_param_start(
+        self,
+        text: str,
+        start_pos: int = 0,
+        valid_param_names: set[str] | None = None,
+    ) -> int:
+        """Return index of next structural ``<parameter=NAME>`` from
+        start_pos.  Structural means preceded by ``\\n`` or at position 0.
+        If valid_param_names is given, NAME must also be in that set.
+        Returns -1 if none found.
+        """
+        ni = start_pos
+        prefix_len = len(self.parameter_prefix)
+        while True:
+            ni = text.find(self.parameter_prefix, ni)
+            if ni == -1:
+                return -1
+            if ni == 0 or text[ni - 1] == "\n":
+                if valid_param_names is not None:
+                    name_end = text.find(">", ni + prefix_len)
+                    if (
+                        name_end != -1
+                        and text[ni + prefix_len : name_end] in valid_param_names
+                    ):
+                        return ni
+                    ni += 1
+                    continue
+                return ni
+            ni += 1
+
+    def _find_true_function_end(self, text: str) -> int:
+        """Return the index of the real structural ``</function>`` in text
+        (followed with optional whitespace by ``</tool_call>`` or end of
+        string), or -1 if none found.  Skips ``</function>`` that appears
+        as literal text inside a parameter value.
+        """
+        search_pos = 0
+        while True:
+            idx = text.find(self.function_end_token, search_pos)
+            if idx == -1:
+                return -1
+            after = text[idx + len(self.function_end_token):]
+            stripped = after.lstrip()
+            if stripped == "" or stripped.startswith(self.tool_call_end_token):
+                return idx
+            search_pos = idx + len(self.function_end_token)
+
+    def _find_true_tool_call_end(self, text: str) -> int:
+        """Return the index of the real structural ``</tool_call>`` in
+        text (followed with optional whitespace by another ``<tool_call>``
+        or end of string), or -1 if none found.
+        """
+        search_pos = 0
+        while True:
+            idx = text.find(self.tool_call_end_token, search_pos)
+            if idx == -1:
+                return -1
+            after = text[idx + len(self.tool_call_end_token):]
+            stripped = after.lstrip()
+            if stripped == "" or stripped.startswith(self.tool_call_start_token):
+                return idx
+            search_pos = idx + len(self.tool_call_end_token)
+
+    def _find_true_param_end(
+        self,
+        value_text: str,
+        valid_param_names: set[str] | None = None,
+        require_lookahead: bool = False,
+    ) -> int:
+        """Find the true end of a parameter value in value_text.
+
+        A ``</parameter>`` is structural only when it is followed by
+        another structural delimiter (schema-known ``<parameter=NAME>``,
+        ``</function>``, ``</tool_call>``) or — in non-streaming mode —
+        end-of-string.  Nested structural ``<parameter=NAME>`` tags
+        decrement depth like matched openings.
+
+        Returns the index of the true ``</parameter>`` in value_text, or
+        -1 if incomplete.
+        """
+        depth = 0
+        pos = 0
+        param_prefix_len = len(self.parameter_prefix)
+        param_end_len = len(self.parameter_end_token)
+
+        while pos < len(value_text):
+            next_open = self._next_structural_param_start(
+                value_text, pos, valid_param_names
+            )
+            next_close = value_text.find(self.parameter_end_token, pos)
+            if next_close == -1:
+                return -1
+
+            if next_open != -1 and next_open < next_close:
+                depth += 1
+                pos = next_open + param_prefix_len
+            elif depth == 0:
+                after = value_text[next_close + param_end_len:]
+                stripped = after.lstrip()
+                structural_next_param = False
+                if stripped.startswith(self.parameter_prefix):
+                    if valid_param_names is not None:
+                        name_start = len(self.parameter_prefix)
+                        name_end = stripped.find(">", name_start)
+                        if name_end != -1:
+                            structural_next_param = (
+                                stripped[name_start:name_end]
+                                in valid_param_names
+                            )
+                    else:
+                        structural_next_param = True
+                if (
+                    (stripped == "" and not require_lookahead)
+                    or structural_next_param
+                    or stripped.startswith(self.function_end_token)
+                    or stripped.startswith(self.tool_call_end_token)
+                ):
+                    return next_close
+                pos = next_close + param_end_len
+            else:
+                depth -= 1
+                pos = next_close + param_end_len
+
+        return -1
+
     def _parse_xml_function_call(self, function_call_str: str) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
@@ -232,12 +384,53 @@ class Qwen3CoderToolParser(ToolParser):
             return None
         function_name = function_call_str[:end_index]
         param_config = find_tool_properties(self.tools, function_name)
+        valid_param_names: set[str] | None = (
+            set(param_config.keys()) if param_config else None
+        )
         parameters = function_call_str[end_index + 1 :]
-        param_dict = {}
-        for match_text in self.tool_call_parameter_regex.findall(parameters):
-            idx = match_text.index(">")
-            param_name = match_text[:idx]
-            param_value = str(match_text[idx + 1 :])
+        param_dict: dict = {}
+        pos = 0
+        while True:
+            # Find next structural <parameter=NAME> at the top level.  We
+            # do NOT filter the outer search by schema: callers may
+            # legitimately send a parameter whose name is not declared
+            # in the schema (e.g. renamed fields).  Schema filtering is
+            # applied only when scanning INSIDE a parameter value, to
+            # disambiguate real nested delimiters from literal text.
+            param_start = self._next_structural_param_start(
+                parameters, pos, None
+            )
+            if param_start == -1:
+                break
+            name_start = param_start + len(self.parameter_prefix)
+            name_end = parameters.find(">", name_start)
+            if name_end == -1:
+                break
+            param_name = parameters[name_start:name_end]
+            value_text = parameters[name_end + 1 :]
+
+            param_end = self._find_true_param_end(value_text, valid_param_names)
+            if param_end == -1:
+                # No true </parameter> found (malformed XML or incomplete).
+                # Fallback 1: next structural <parameter= acts as implicit end.
+                next_struct_param = self._next_structural_param_start(
+                    value_text, 0, valid_param_names
+                )
+                if next_struct_param != -1:
+                    param_value = value_text[:next_struct_param]
+                    pos = (name_end + 1) + next_struct_param
+                else:
+                    # Fallback 2: use structural </function> boundary or end
+                    func_end = self._find_true_function_end(value_text)
+                    if func_end != -1:
+                        param_value = value_text[:func_end]
+                    else:
+                        param_value = value_text
+                    pos = len(parameters)
+            else:
+                param_value = value_text[:param_end]
+                pos = (name_end + 1) + param_end + len(self.parameter_end_token)
+
             # Remove prefix and trailing \n
             if param_value.startswith("\n"):
                 param_value = param_value[1:]
@@ -255,23 +448,57 @@ class Qwen3CoderToolParser(ToolParser):
         )
 
     def _get_function_calls(self, model_output: str) -> list[str]:
-        # Find all tool calls
-        matched_ranges = self.tool_call_regex.findall(model_output)
-        raw_tool_calls = [
-            match[0] if match[0] else match[1] for match in matched_ranges
-        ]
+        # Find tool_calls using a structural delimiter approach:
+        # a real </tool_call> is followed by another <tool_call> or
+        # end-of-text.  This skips </tool_call> that appears as literal
+        # text inside a parameter value.
+        raw_tool_calls: list[str] = []
+        search_pos = 0
+        while True:
+            tc_start = model_output.find(self.tool_call_start_token, search_pos)
+            if tc_start == -1:
+                break
+            after_open = model_output[tc_start + len(self.tool_call_start_token):]
+            tc_end = -1
+            inner_search = 0
+            while True:
+                idx = after_open.find(self.tool_call_end_token, inner_search)
+                if idx == -1:
+                    tc_end = -1
+                    break
+                after_close = after_open[idx + len(self.tool_call_end_token):]
+                stripped = after_close.lstrip()
+                if stripped == "" or stripped.startswith(self.tool_call_start_token):
+                    tc_end = idx
+                    break
+                inner_search = idx + len(self.tool_call_end_token)
+            if tc_end == -1:
+                raw_tool_calls.append(after_open)
+                break
+            raw_tool_calls.append(after_open[:tc_end])
+            search_pos = (
+                tc_start + len(self.tool_call_start_token)
+                + tc_end + len(self.tool_call_end_token)
+            )
 
         # Back-off strategy if no tool_call tags found
         if len(raw_tool_calls) == 0:
             raw_tool_calls = [model_output]
 
-        raw_function_calls = []
+        # Use structural </function> boundary instead of a greedy regex so
+        # that '</function>' appearing as literal text inside a parameter
+        # value does not truncate the function body.
+        function_calls: list[str] = []
         for tool_call in raw_tool_calls:
-            raw_function_calls.extend(self.tool_call_function_regex.findall(tool_call))
-
-        function_calls = [
-            match[0] if match[0] else match[1] for match in raw_function_calls
-        ]
+            func_start = tool_call.find(self.tool_call_prefix)
+            if func_start == -1:
+                continue
+            after_func_open = tool_call[func_start + len(self.tool_call_prefix):]
+            func_end = self._find_true_function_end(after_func_open)
+            if func_end == -1:
+                function_calls.append(after_func_open)
+            else:
+                function_calls.append(after_func_open[:func_end])
         return function_calls
 
     def extract_tool_calls(
@@ -442,22 +669,34 @@ class Qwen3CoderToolParser(ToolParser):
                         return DeltaMessage(content=content)
                 return None
 
-        # Check if we're between tool calls (waiting for next one)
-        # Count tool calls we've seen vs processed
-        tool_starts_count = current_text.count(self.tool_call_start_token)
-        if self.current_tool_index >= tool_starts_count:
+        # Check if we're between tool calls (waiting for next one).
+        # Only count structural <tool_call> starts (skip past each
+        # </tool_call> of completed calls) so that <tool_call> tokens
+        # embedded in a parameter value of a completed call are not
+        # counted as spurious new tool calls.
+        if self.tool_call_start_token not in current_text[self._sent_content_idx:]:
             return content_message
 
-        # We're in a tool call, find the current tool call portion
-        # Need to find the correct tool call based on current_tool_index
+        # We're in a tool call, find the current tool call portion.
+        # Build tool_start_positions by jumping OVER completed tool
+        # calls (past each </tool_call>), so that <tool_call> tokens
+        # embedded in parameter values of completed calls are never
+        # included.
         tool_start_positions: list[int] = []
-        idx = 0
-        while True:
-            idx = current_text.find(self.tool_call_start_token, idx)
+        search_pos = 0
+        for i in range(self.current_tool_index + 1):
+            idx = current_text.find(self.tool_call_start_token, search_pos)
             if idx == -1:
                 break
             tool_start_positions.append(idx)
-            idx += len(self.tool_call_start_token)
+            if i < self.current_tool_index:
+                # Completed tool call: jump past its </tool_call> so the
+                # next search starts after it, skipping any content
+                # inside (including literal <tool_call>).
+                end_idx = current_text.find(self.tool_call_end_token, idx)
+                if end_idx == -1:
+                    break
+                search_pos = end_idx + len(self.tool_call_end_token)
 
         if self.current_tool_index >= len(tool_start_positions):
             return content_message
@@ -527,14 +766,68 @@ class Qwen3CoderToolParser(ToolParser):
                 self.streamed_args_for_tool[self.current_tool_index] += "{"
                 arguments_to_emit += "{"
 
-            param_starts = []
+            # Build param_starts using structural-aware lookup. Plain
+            # tool_text.find(parameter_prefix) would return positions
+            # inside parameter VALUES (e.g. Python code that embeds the
+            # XML format), creating spurious extra params.  Use the
+            # schema to filter nested <parameter=NAME> and advance
+            # sequentially past each complete parameter's value.
+            streaming_param_config = find_tool_properties(
+                self.tools, self.current_function_name or ""
+            )
+            valid_param_names: set[str] | None = (
+                set(streaming_param_config.keys())
+                if streaming_param_config
+                else None
+            )
+            param_starts: list[int] = []
             search_idx = 0
             while True:
-                search_idx = tool_text.find(self.parameter_prefix, search_idx)
-                if search_idx == -1:
+                # Don't filter top-level <parameter=NAME> by schema:
+                # callers may send params whose names aren't declared
+                # (e.g. renamed fields).  Schema filtering is applied
+                # below when walking INSIDE a parameter value to
+                # disambiguate nested literal XML.
+                param_start_pos = self._next_structural_param_start(
+                    tool_text, search_idx, None
+                )
+                if param_start_pos == -1:
                     break
-                param_starts.append(search_idx)
-                search_idx += len(self.parameter_prefix)
+                param_starts.append(param_start_pos)
+                # Advance past this parameter's content.
+                name_end_pos = tool_text.find(
+                    ">", param_start_pos + len(self.parameter_prefix)
+                )
+                if name_end_pos == -1:
+                    break
+                after_name = tool_text[name_end_pos + 1:]
+                after_name_stripped = (
+                    after_name[1:] if after_name.startswith("\n") else after_name
+                )
+                end_in_after = self._find_true_param_end(
+                    after_name_stripped,
+                    valid_param_names,
+                    require_lookahead=True,
+                )
+                if end_in_after == -1:
+                    implicit_end = self._next_structural_param_start(
+                        after_name_stripped, 0, valid_param_names
+                    )
+                    if implicit_end != -1:
+                        search_idx = (
+                            (name_end_pos + 1)
+                            + (1 if after_name.startswith("\n") else 0)
+                            + implicit_end
+                        )
+                    else:
+                        break
+                else:
+                    search_idx = (
+                        (name_end_pos + 1)
+                        + (1 if after_name.startswith("\n") else 0)
+                        + end_in_after
+                        + len(self.parameter_end_token)
+                    )
 
             # Process ALL complete params in a loop (spec decode fix).
             # With speculative decoding a single delta can deliver
@@ -560,10 +853,21 @@ class Qwen3CoderToolParser(ToolParser):
                 if value_text.startswith("\n"):
                     value_text = value_text[1:]
 
-                param_end_idx = value_text.find(self.parameter_end_token)
+                param_end_idx = self._find_true_param_end(
+                    value_text, valid_param_names, require_lookahead=True
+                )
                 if param_end_idx == -1:
-                    next_param_idx = value_text.find(self.parameter_prefix)
-                    func_end_idx = value_text.find(self.function_end_token)
+                    # Fallback for malformed/incomplete XML: a structural
+                    # <parameter= directly after \n acts as implicit end.
+                    next_param_idx = self._next_structural_param_start(
+                        value_text, 0, valid_param_names
+                    )
+                    # Use structural-aware search for </function> and
+                    # </tool_call> to avoid cutting the parameter at XML
+                    # tags that appear as literal text inside the
+                    # parameter value.
+                    func_end_idx = self._find_true_function_end(value_text)
+                    tool_end_in_value = self._find_true_tool_call_end(value_text)
 
                     if next_param_idx != -1 and (
                         func_end_idx == -1 or next_param_idx < func_end_idx
@@ -571,19 +875,10 @@ class Qwen3CoderToolParser(ToolParser):
                         param_end_idx = next_param_idx
                     elif func_end_idx != -1:
                         param_end_idx = func_end_idx
+                    elif tool_end_in_value != -1:
+                        param_end_idx = tool_end_in_value
                     else:
-                        # Fallback for malformed XML where </function>
-                        # is missing. Use </tool_call> as a delimiter
-                        # if present in the value so we don't include
-                        # the closing tag as part of the param value.
-                        tool_end_in_value = value_text.find(self.tool_call_end_token)
-                        if tool_end_in_value != -1:
-                            param_end_idx = tool_end_in_value
-                        else:
-                            # Parameter incomplete — break so we still
-                            # emit any fragments accumulated by earlier
-                            # loop iterations.
-                            break
+                        break
 
                 if param_end_idx == -1:
                     break
@@ -635,13 +930,17 @@ class Qwen3CoderToolParser(ToolParser):
             # </function>. If the close check ran first it would emit
             # "}" and set in_function=False before the parameter loop
             # ever ran, causing the parameter to be silently dropped.
-            if not self.json_closed and self.function_end_token in tool_text:
+            # Use structural-aware search so a literal '</function>'
+            # inside a parameter value does not trigger a premature
+            # close.
+            true_func_end = self._find_true_function_end(tool_text)
+            if not self.json_closed and true_func_end != -1:
                 self.json_closed = True
 
                 func_start = tool_text.find(self.tool_call_prefix) + len(
                     self.tool_call_prefix
                 )
-                func_content_end = tool_text.find(self.function_end_token, func_start)
+                func_content_end = true_func_end
                 if func_content_end != -1:
                     func_content = tool_text[func_start:func_content_end]
                     try:
@@ -685,8 +984,67 @@ class Qwen3CoderToolParser(ToolParser):
 
             if content_message:
                 content_message.tool_calls = [tool_call_fragments]
-                return content_message
+                result = content_message
             else:
-                return DeltaMessage(tool_calls=[tool_call_fragments])
+                result = DeltaMessage(tool_calls=[tool_call_fragments])
+
+            # Speculative decoding can deliver multiple complete tool
+            # calls in a single delta.  If we just finished one and
+            # another complete <tool_call>...</tool_call> remains in
+            # current_text, advance and re-enter to emit it.  We pass a
+            # non-empty `previous_text` sentinel so reset_streaming_state
+            # is NOT triggered inside the recursion (which would clear
+            # current_tool_index back to 0 and loop forever).
+            if (
+                self.json_closed
+                and not self.in_function
+                and current_text.count(self.tool_call_end_token)
+                > self.current_tool_index + 1
+            ):
+                # Manually advance to the next tool: this mirrors the
+                # "advance to next tool" block executed at the top of
+                # this method on the next delta arrival.
+                search_idx = 0
+                for _ in range(self.current_tool_index + 1):
+                    search_idx = current_text.find(
+                        self.tool_call_start_token, search_idx
+                    )
+                    if search_idx == -1:
+                        break
+                    end_idx = current_text.find(
+                        self.tool_call_end_token, search_idx
+                    )
+                    if end_idx != -1:
+                        self._sent_content_idx = max(
+                            self._sent_content_idx,
+                            end_idx + len(self.tool_call_end_token),
+                        )
+                    search_idx += len(self.tool_call_start_token)
+                self.current_tool_index += 1
+                self.header_sent = False
+                self.param_count = 0
+                self.json_started = False
+                self.json_closed = False
+                self.accumulated_params = {}
+                self.is_tool_call_started = False
+
+                # Recurse with a sentinel previous_text so the entry
+                # check `if not previous_text` does NOT reset the state.
+                next_delta = self.extract_tool_calls_streaming(
+                    previous_text or " ",
+                    current_text,
+                    delta_text,
+                    previous_token_ids,
+                    current_token_ids,
+                    delta_token_ids,
+                    request,
+                )
+                if next_delta is not None and next_delta.tool_calls:
+                    if result.tool_calls is None:
+                        result.tool_calls = []
+                    result.tool_calls.extend(next_delta.tool_calls)
+                    if next_delta.content and not result.content:
+                        result.content = next_delta.content
+            return result
 
         return content_message
