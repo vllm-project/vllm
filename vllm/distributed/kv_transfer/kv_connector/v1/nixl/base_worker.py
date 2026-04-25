@@ -72,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
@@ -1072,7 +1073,9 @@ class NixlBaseConnectorWorker:
                 )
                 self._region_is_mla.append(is_mla_region)
 
-                if not is_mla_region:
+                if not is_mla_region and not isinstance(
+                    layer_spec, TQFullAttentionSpec
+                ):
                     if tensor_size_bytes is None:
                         tensor_size_bytes = curr_tensor_size_bytes
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
