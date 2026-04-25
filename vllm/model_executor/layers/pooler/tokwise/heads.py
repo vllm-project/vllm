@@ -88,6 +88,15 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
                 )
                 hidden_states = F.linear(hidden_states, w, b)
             else:
+                # nn.Sequential or other non-Linear projector: we can't
+                # downcast the projector weights, so cast the input up
+                # to head_dtype to match the projector's parameter
+                # dtype.  Mirrors forward_chunk's behavior.
+                if (
+                    self.head_dtype is not None
+                    and hidden_states.dtype != self.head_dtype
+                ):
+                    hidden_states = hidden_states.to(self.head_dtype)
                 hidden_states = self.projector(hidden_states)
         # Cast the small [N, embed_dim] result, not the big [N, hidden].
         if self.head_dtype is not None:
