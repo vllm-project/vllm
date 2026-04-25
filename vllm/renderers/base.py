@@ -198,6 +198,40 @@ class BaseRenderer(ABC, Generic[_T]):
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
 
+    @staticmethod
+    def _clear_processor_cache(
+        processor: "BaseMultiModalProcessor | None",
+    ) -> None:
+        if processor is None:
+            return
+
+        processor_cache = processor.cache
+        if processor_cache is not None:
+            processor_cache.clear_cache()
+
+    def _warmup_mm_processor(
+        self,
+        processor: "BaseMultiModalProcessor",
+        *,
+        log_prefix: str,
+    ) -> None:
+        from vllm.multimodal.processing import TimingContext
+
+        model_config = self.model_config
+        mm_config = model_config.get_multimodal_config()
+        mm_limits = {k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0}
+
+        start_time = time.perf_counter()
+        processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+            seq_len=model_config.max_model_len,
+            mm_counts=dict.fromkeys(mm_limits, 1),
+            mm_options=mm_config.limit_per_prompt,
+        )
+        _ = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
+
+        elapsed = time.perf_counter() - start_time
+        logger.info("%s warmup completed in %.3fs", log_prefix, elapsed)
+
     def warmup(self, chat_params: ChatParams) -> None:
         """
         Warm up this renderer to avoid first-request latency.
@@ -221,34 +255,28 @@ class BaseRenderer(ABC, Generic[_T]):
             logger.warning("Chat template warmup failed", exc_info=True)
 
         if self.mm_processor:
-            from vllm.multimodal.processing import TimingContext
-
-            model_config = self.model_config
-            mm_config = model_config.get_multimodal_config()
-            processor = self.mm_processor
-            mm_limits = {
-                k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0
-            }
-
             try:
                 logger.debug("Warming up multi-modal processing...")
-                start_time = time.perf_counter()
-
-                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-                    seq_len=model_config.max_model_len,
-                    mm_counts=dict.fromkeys(mm_limits, 1),
-                    mm_options=mm_config.limit_per_prompt,
+                self._warmup_mm_processor(
+                    self.mm_processor,
+                    log_prefix="Multi-modal",
                 )
-                _ = processor.apply(
-                    processor_inputs, timing_ctx=TimingContext(enabled=False)
-                )
-
-                elapsed = time.perf_counter() - start_time
-                logger.info("Multi-modal warmup completed in %.3fs", elapsed)
             except Exception:
                 logger.warning("Multi-modal warmup failed")
             finally:
                 self.clear_mm_cache()
+
+        if self._readonly_mm_processor is not None:
+            try:
+                logger.debug("Warming up readonly multi-modal processing...")
+                self._warmup_mm_processor(
+                    self._readonly_mm_processor,
+                    log_prefix="Readonly multi-modal",
+                )
+            except Exception:
+                logger.warning("Readonly multi-modal warmup failed")
+            finally:
+                self._clear_processor_cache(self._readonly_mm_processor)
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the shared executor to avoid
