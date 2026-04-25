@@ -891,32 +891,18 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_lens = swa_metadata.decode_swa_lens
 
         if current_platform.is_rocm():
-            from vllm.v1.attention.ops.rocm_aiter_dsv4_decode import (
-                is_aiter_dsv4_decode_enabled,
+            # On ROCm, DeepSeek sparse attention is only supported via AITER,
+            # so we always dispatch to the AITER decode path.
+            self._forward_decode_aiter(
+                q=q,
+                kv_cache=kv_cache,
+                swa_only=swa_only,
+                topk_indices=topk_indices,
+                topk_lens=topk_lens,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                output=output,
             )
-            if is_aiter_dsv4_decode_enabled():
-                self._forward_decode_aiter(
-                    q=q,
-                    kv_cache=kv_cache,
-                    swa_only=swa_only,
-                    topk_indices=topk_indices,
-                    topk_lens=topk_lens,
-                    swa_indices=swa_indices,
-                    swa_lens=swa_lens,
-                    output=output,
-                )
-            else:
-                self._forward_decode_fallback(
-                    q=q,
-                    kv_cache=kv_cache,
-                    swa_metadata=swa_metadata,
-                    swa_only=swa_only,
-                    topk_indices=topk_indices,
-                    topk_lens=topk_lens,
-                    swa_indices=swa_indices,
-                    swa_lens=swa_lens,
-                    output=output,
-                )
             return
 
         # We treat queries in the same seq as different queries
@@ -1151,7 +1137,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         Uses aiter.mla.mla_decode_fwd with FP8 persistent-mode ASM kernels
         for ~2-3x decode speedup over the torch reference at high batch sizes.
-        Gated by VLLM_ROCM_USE_AITER_MLA_DSV4_DECODE=1.
+        This is the only sparse-attention decode path on ROCm.
         """
         from vllm.v1.attention.ops.rocm_aiter_dsv4_decode import (
             AiterSparseScratch,

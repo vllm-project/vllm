@@ -18,19 +18,11 @@ Key design decisions (validated on MI355X, see benchmarks/dsv4_mi355/PLAN.md §1
 
 from __future__ import annotations
 
-import os
-
 import torch
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def is_aiter_dsv4_decode_enabled() -> bool:
-    return os.environ.get(
-        "VLLM_ROCM_USE_AITER_MLA_DSV4_DECODE", "0"
-    ).lower() in ("true", "1")
 
 
 class AiterSparseScratch:
