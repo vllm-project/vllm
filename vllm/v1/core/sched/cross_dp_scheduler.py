@@ -684,7 +684,7 @@ class CrossDPScheduler(Scheduler):
         # Per-rank token budgets: each rank can process up to
         # max_num_scheduled_tokens.  CP requests split tokens across ranks,
         # so their per-rank cost is num_tokens / cp_size.
-        rank_budgets = [self.max_num_scheduled_tokens / self.cp_world_size] * self.cp_world_size
+        rank_budgets = [self.max_num_scheduled_tokens // self.cp_world_size] * self.cp_world_size
 
         def _get_effective_budget(is_long_seq: bool, cp_ranks: list[int] | None = None) -> int:
             """Return the max tokens a request on *cp_ranks* can schedule."""

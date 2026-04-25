@@ -213,6 +213,7 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
+        aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
