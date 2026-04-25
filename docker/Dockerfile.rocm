@@ -373,10 +373,6 @@ FROM mori_base AS test
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
-# Install libnuma-dev, required to build fastsafetensors from source.
-RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
