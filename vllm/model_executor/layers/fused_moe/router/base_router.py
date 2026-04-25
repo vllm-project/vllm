@@ -26,6 +26,7 @@ if current_platform.is_cuda_alike():
         map_slots,
         out_size,
         numel,
+        num_active_experts,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -37,7 +38,6 @@ if current_platform.is_cuda_alike():
         safe_expert_id = tl.where(valid_expert, expert_id, 0)
 
         # 1. Convert the logical expert ids to physical expert ids
-        # Directly select a random replica for each logical expert
         replica_count = tl.load(
             logical_replica_count_ptr + safe_expert_id,
             mask=mask & valid_expert,
@@ -45,8 +45,11 @@ if current_platform.is_cuda_alike():
         )
         # Avoid invalid modulo/div by forcing at least 1.
         replica_count = tl.maximum(replica_count, 1)
-        # Match torch.compile path: use flattened token position.
-        replica_idx = offs % replica_count
+        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
+        KNUTH_MULTIPLIER = 2654435769
+        token_idx = (offs // num_active_experts).to(tl.int64)
+        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
+        replica_idx = hashed % replica_count
 
         # 2. Record expert load metrics.
 
@@ -85,6 +88,7 @@ if current_platform.is_cuda_alike():
         numel = topk_ids_in.numel()
         if numel == 0:
             return topk_ids
+        num_active_experts = topk_ids_in.shape[-1]
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
@@ -99,6 +103,7 @@ if current_platform.is_cuda_alike():
             logical_to_physical_map.shape[1],
             expert_load_view.shape[0],
             numel,
+            num_active_experts,
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
