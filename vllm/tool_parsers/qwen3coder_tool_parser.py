@@ -25,7 +25,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import find_tool_properties, partial_tag_overlap
 
 logger = init_logger(__name__)
 
@@ -109,6 +109,8 @@ class Qwen3CoderToolParser(ToolParser):
         # Store accumulated parameters for type conversion
         self.accumulated_params = {}
         self.streaming_request = None
+        self._sent_content_idx = 0
+        self.current_tool_index = 0
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -372,6 +374,22 @@ class Qwen3CoderToolParser(ToolParser):
             # Check if this tool call has ended
             tool_ends = current_text.count(self.tool_call_end_token)
             if tool_ends > self.current_tool_index:
+                # Find the end of the tool call that just finished and update
+                # _sent_content_idx to prevent it from leaking into content.
+                search_idx = 0
+                for _ in range(self.current_tool_index + 1):
+                    search_idx = current_text.find(self.tool_call_start_token,
+                                                  search_idx)
+                    if search_idx == -1:
+                        break
+                    end_idx = current_text.find(self.tool_call_end_token,
+                                               search_idx)
+                    if end_idx != -1:
+                        self._sent_content_idx = max(
+                            self._sent_content_idx,
+                            end_idx + len(self.tool_call_end_token))
+                    search_idx += len(self.tool_call_start_token)
+
                 # This tool has ended, advance to next
                 self.current_tool_index += 1
                 self.header_sent = False
@@ -380,47 +398,55 @@ class Qwen3CoderToolParser(ToolParser):
                 self.json_closed = False
                 self.accumulated_params = {}
 
-                # Check if there are more tool calls
-                tool_starts = current_text.count(self.tool_call_start_token)
-                if self.current_tool_index >= tool_starts:
-                    # No more tool calls
-                    self.is_tool_call_started = False
+                # Always reset is_tool_call_started when a tool call ends.
+                # This allows correctly sending any content between or after
+                # tool calls.
+                self.is_tool_call_started = False
                 # Continue processing next tool
                 return None
 
+        content_message = None
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
             # Check if tool call is starting
+            tool_starts_count = current_text.count(self.tool_call_start_token)
             if (
                 self.tool_call_start_token_id in delta_token_ids
-                or self.tool_call_start_token in delta_text
+                or tool_starts_count > self.current_tool_index
             ):
                 self.is_tool_call_started = True
                 # Return any content before the tool call
-                if self.tool_call_start_token in delta_text:
-                    content_before = delta_text[
-                        : delta_text.index(self.tool_call_start_token)
-                    ]
+                last_start = current_text.find(self.tool_call_start_token, self._sent_content_idx)
+                if last_start != -1 and last_start > self._sent_content_idx:
+                    content_before = current_text[self._sent_content_idx:last_start]
+                    self._sent_content_idx = last_start
                     if content_before:
-                        return DeltaMessage(content=content_before)
-                return None
+                        content_message = DeltaMessage(content=content_before)
             else:
+                overlap = partial_tag_overlap(current_text, self.tool_call_start_token)
+                sendable_idx = len(current_text) - overlap
+                
                 # Check if we're between tool calls - skip whitespace
                 if (
                     current_text.rstrip().endswith(self.tool_call_end_token)
                     and delta_text.strip() == ""
                 ):
                     # We just ended a tool call, skip whitespace
+                    self._sent_content_idx = len(current_text)
                     return None
-                # Normal content, no tool call
-                return DeltaMessage(content=delta_text)
+                    
+                if sendable_idx > self._sent_content_idx:
+                    content = current_text[self._sent_content_idx:sendable_idx]
+                    self._sent_content_idx = sendable_idx
+                    if content:
+                        return DeltaMessage(content=content)
+                return None
 
         # Check if we're between tool calls (waiting for next one)
         # Count tool calls we've seen vs processed
         tool_starts_count = current_text.count(self.tool_call_start_token)
         if self.current_tool_index >= tool_starts_count:
-            # We're past all tool calls, shouldn't be here
-            return None
+            return content_message
 
         # We're in a tool call, find the current tool call portion
         # Need to find the correct tool call based on current_tool_index
@@ -434,8 +460,7 @@ class Qwen3CoderToolParser(ToolParser):
             idx += len(self.tool_call_start_token)
 
         if self.current_tool_index >= len(tool_start_positions):
-            # No more tool calls to process yet
-            return None
+            return content_message
 
         tool_start_idx = tool_start_positions[self.current_tool_index]
         # Find where this tool call ends (or current position if not ended yet)
@@ -447,6 +472,7 @@ class Qwen3CoderToolParser(ToolParser):
                 tool_start_idx : tool_end_idx + len(self.tool_call_end_token)
             ]
 
+        tool_call_fragments = None
         # Looking for function header
         if not self.header_sent:
             if self.tool_call_prefix in tool_text:
@@ -479,21 +505,16 @@ class Qwen3CoderToolParser(ToolParser):
                     # accesses streamed_args_for_tool[index].
                     self.streamed_args_for_tool.append("")
 
-                    # Send header with function info
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_index,
-                                id=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    name=self.current_function_name, arguments=""
-                                ),
-                                type="function",
-                            )
-                        ]
+                    tool_call_fragments = DeltaToolCall(
+                        index=self.current_tool_index,
+                        id=self.current_tool_id,
+                        function=DeltaFunctionCall(name=self.current_function_name, arguments=""),
+                        type="function",
                     )
-            return None
+            if not self.header_sent:
+                return content_message
 
+        arguments_to_emit = ""
         # We've sent header, now handle function body
         if self.in_function:
             # Always send opening brace first, regardless of whether
@@ -504,16 +525,8 @@ class Qwen3CoderToolParser(ToolParser):
             if not self.json_started:
                 self.json_started = True
                 self.streamed_args_for_tool[self.current_tool_index] += "{"
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="{"),
-                        )
-                    ]
-                )
+                arguments_to_emit += "{"
 
-            # Find all parameter start positions in current tool_text
             param_starts = []
             search_idx = 0
             while True:
@@ -614,15 +627,7 @@ class Qwen3CoderToolParser(ToolParser):
                         self.current_tool_index,
                         len(self.streamed_args_for_tool),
                     )
-
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments=combined),
-                        )
-                    ]
-                )
+                arguments_to_emit += combined
 
             # Check for function end AFTER processing parameters.
             # This ordering is critical: with speculative decoding a
@@ -664,20 +669,24 @@ class Qwen3CoderToolParser(ToolParser):
                         self.current_tool_index,
                         len(self.streamed_args_for_tool),
                     )
-
-                result = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="}"),
-                        )
-                    ]
-                )
-
+                arguments_to_emit += "}"
                 self.in_function = False
                 self.json_closed = True
                 self.accumulated_params = {}
 
-                return result
+        if tool_call_fragments or arguments_to_emit:
+            if not tool_call_fragments:
+                tool_call_fragments = DeltaToolCall(
+                    index=self.current_tool_index,
+                    function=DeltaFunctionCall(arguments=arguments_to_emit),
+                )
+            else:
+                tool_call_fragments.function.arguments += arguments_to_emit
 
-        return None
+            if content_message:
+                content_message.tool_calls = [tool_call_fragments]
+                return content_message
+            else:
+                return DeltaMessage(tool_calls=[tool_call_fragments])
+
+        return content_message
