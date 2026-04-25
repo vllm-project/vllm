@@ -72,7 +72,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
     row_parallel_weight_loader,
 )
-from vllm.model_executor.models.deepseek_v2 import Indexer
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -375,6 +374,9 @@ class PanguIndexer(nn.Module):
             hidden_size, self.n_head, bias=False, quant_config=None, prefix=f"{prefix}.weights_proj"
         )
         self.topk_indices_buffer = topk_indices_buffer
+        self.softmax_scale = self.head_dim**-0.5
+        self.use_composite_kv_cache = True
+        self.composite_kv_cache_head_size = self.head_dim
 
         self.prefix = prefix
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
@@ -383,22 +385,6 @@ class PanguIndexer(nn.Module):
         self.sink_len = getattr(config, 'param_sink_number', 0)
         self.num_sink_blocks = self.sink_len // self.vllm_config.cache_config.block_size
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> DSAAttentionSpec:
-        from vllm.v1.kv_cache_interface import DSAAttentionSpec
-        from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
-            cache_config.cache_dtype, model_config)
-        return DSAAttentionSpec(
-            block_size=cache_config.block_size,
-            num_kv_heads=1,
-            head_size=self.head_dim,
-            dtype=kv_cache_dtype,
-            page_size_padded=cache_config.mamba_page_size_padded,
-            cache_dtype_str=cache_config.cache_dtype,
-        )
 
     def forward(
         self,
@@ -409,7 +395,6 @@ class PanguIndexer(nn.Module):
         kv_cache: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         attn_metadata: Optional[Any] = None,
     ) -> torch.Tensor:
-
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         q_pe, q_nope = torch.split(
@@ -423,27 +408,34 @@ class PanguIndexer(nn.Module):
         )
 
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        q_pe = q_pe.unsqueeze(0)
-        k_pe = k_pe.unsqueeze(0)
-        q = torch.cat([q_pe.squeeze(0), q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze((0, 2)), k_nope], dim=-1)
+
+        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
 
         weights, _ = self.weights_proj(hidden_states)
+        weights = weights * self.softmax_scale * self.n_head**-0.5
 
         if attn_metadata is None:
-            # profile run
-            _flattened_kv = torch.empty(
-                [self.max_total_seq_len, self.head_dim + 4], device=k.device, dtype=torch.bfloat16
-            )
             return self.topk_indices_buffer
         
-        assert len(kv_cache) >= 3, (f"Expected kv_cache to have at least 3 elements, but got {len(kv_cache)}")
+        assert isinstance(kv_cache, (list, tuple)), (
+            "PanguIndexer expects the DSA attention cache to be a composite "
+            f"tuple/list, but got {type(kv_cache)}"
+        )
+        assert len(kv_cache) >= 2, (
+            "PanguIndexer expects indexer K cache at kv_cache[1], "
+            f"but got {len(kv_cache)} cache tensors."
+        )
         
-        if kv_cache[2] is not None:
+        indexer_cache = kv_cache[1]
+        if indexer_cache is not None:
             # Multi-dimensional indexing is robust to padding between blocks.
             block_size = self.vllm_config.cache_config.block_size
             # Shape: [num_blocks, padded_tokens_per_block, head_dim]
-            q_cache = kv_cache[2].view(kv_cache[2].shape[0], -1, k.shape[-1])
+            q_cache = indexer_cache.view(indexer_cache.shape[0], -1, k.shape[-1])
             block_ids = attn_metadata.slot_mapping // block_size
             offsets = attn_metadata.slot_mapping % block_size
             q_cache[block_ids, offsets] = k
@@ -451,7 +443,7 @@ class PanguIndexer(nn.Module):
         bs = q.shape[0]
         self.topk_indices_buffer[:bs] = self._apply_indexer(
             query=q,
-            key=kv_cache[2],
+            key=indexer_cache,
             weights=weights,
             attn_metadata=attn_metadata,
         )
@@ -475,11 +467,36 @@ class PanguIndexer(nn.Module):
 
         block_table = block_table[:, self.num_sink_blocks:]
         bs = query.shape[0]
-        topk_indices = torch.zeros((bs, self.topk_tokens), dtype=torch.int32, device=query.device)
+        topk_indices = torch.full((bs, self.topk_tokens), -1, dtype=torch.int32, device=query.device)
+        num_sink_tokens = min(self.sink_len, self.topk_tokens)
+        if num_sink_tokens > 0:
+            sink_indices = torch.arange(
+                num_sink_tokens, dtype=torch.int32, device=query.device)
+            topk_indices[:, :num_sink_tokens] = sink_indices
         
+        # Map each query token to its request row in the block table. Sparse MLA
+        # metadata already builds this mapping; using query_start_loc directly can
+        # misinterpret a single prefill request as one request per token.
+        token_to_seq = getattr(attn_metadata, "req_id_per_token", None)
+        if token_to_seq is not None:
+            token_to_seq = token_to_seq[:bs].to(device=query.device, dtype=torch.long)
+        else:
+            q_start = getattr(attn_metadata, "query_start_loc", None)
+            num_reqs = getattr(attn_metadata, "num_reqs", block_table.shape[0])
+            if q_start is not None and num_reqs > 0:
+                token_to_seq = torch.zeros(bs, dtype=torch.long, device=query.device)
+                max_reqs = min(int(num_reqs), block_table.shape[0])
+                for s_idx in range(max_reqs):
+                    start = q_start[s_idx]
+                    end = q_start[s_idx + 1]
+                    token_to_seq[start:end] = s_idx
+            else:
+                token_to_seq = torch.arange(bs, device=query.device)
+
         # Native PyTorch fallback for small-operator DSA
         for i in range(bs):
-            blocks = block_table[i]
+            seq_idx = token_to_seq[i]
+            blocks = block_table[seq_idx]
             valid_blocks = blocks[blocks >= 0]
             if len(valid_blocks) == 0:
                 continue
@@ -497,12 +514,13 @@ class PanguIndexer(nn.Module):
             logits = logits * token_w.unsqueeze(-1)
             total_scores = logits.sum(dim=0)
             
-            k = min(self.topk_tokens, total_scores.shape[0])
+            k = min(self.topk_tokens - num_sink_tokens, total_scores.shape[0])
             if k > 0:
                 _, indices = torch.topk(total_scores, k)
                 # Offset indices by sink_len so they map to the correct location 
                 # in the padded block_table_tensor used by the sparse backend.
-                topk_indices[i, :k] = indices.to(torch.int32) + self.sink_len
+                topk_indices[i, num_sink_tokens:num_sink_tokens + k] = (
+                    indices.to(torch.int32) + self.sink_len)
                 
         return topk_indices
 

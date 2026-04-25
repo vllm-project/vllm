@@ -118,6 +118,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+    def _get_indexer_kv_cache_and_metadata(self):
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.mla_attn.layer_name]
+        kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+        return kv_cache, attn_metadata
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -291,8 +299,14 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             )
 
         if self.indexer and self.is_sparse:
+            kv_cache, attn_metadata = self._get_indexer_kv_cache_and_metadata()
             _topk_indices = self.indexer(
-                hidden_states, q_c, positions, self.indexer_rope_emb
+                hidden_states,
+                q_c,
+                positions,
+                self.indexer_rope_emb,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
             )
 
         if llama_4_scaling is not None:
