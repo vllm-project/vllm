@@ -66,6 +66,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
     ),
+    "hy_v3": (
+        "hy_v3_tool_parser",
+        "HYV3ToolParser",
+    ),
     "internlm": (
         "internlm2_tool_parser",
         "Internlm2ToolParser",
