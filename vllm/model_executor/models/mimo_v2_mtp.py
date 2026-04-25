@@ -178,7 +178,6 @@ class MiMoV2MultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
-
         self.mtp = _MiMoV2MTPLayers(
             config=config,
             num_mtp_layers=num_mtp_layers,
