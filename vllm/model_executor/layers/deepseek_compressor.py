@@ -292,6 +292,7 @@ class DeepseekCompressor(nn.Module):
         )
         self._old_kv_state: dict[str, torch.Tensor] = {}
         self._old_score_state: dict[str, torch.Tensor] = {}
+        self._old_need_hadamard = self.head_dim == 128
 
         if self.head_dim == 512:
             assert not use_fp4_cache, (
@@ -593,7 +594,7 @@ class DeepseekCompressor(nn.Module):
             kv_compressed = apply_gptj_rope_ref(
                 kv_compressed, compressed_positions, rotary_emb.cos_sin_cache, self.rope_head_dim
             ).to(torch.bfloat16)
-            if self.rotate:
+            if self._old_need_hadamard:
                 kv_compressed = hadamard_transform_ref(kv_compressed)
 
             local_output = torch.zeros(

@@ -271,7 +271,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 compress_ratio=self.compress_ratio,
                 hidden_size=self.hidden_size,
                 head_dim=self.head_dim,
-                rotate=False,
+                rotate=True,
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.mla_attn.prefix,
             )
