@@ -151,8 +151,12 @@ class Qwen3CoderToolParser(ToolParser):
         # the literal "null") rather than converting it to Python None.
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
-        # For non-string types, "null" maps to JSON null.
-        if param_value.lower() == "null":
+        # For non-string types, "null" maps to JSON null.  Also accept
+        # the Python literal "None" so that Qwen3.5-trained models — whose
+        # chat template renders null args via ``| string`` (yielding the
+        # literal "None" in the prompt) — round-trip nullable values
+        # correctly.
+        if param_value.lower() in ("null", "none"):
             return None
         if (
             param_type.startswith("int")
@@ -305,19 +309,18 @@ class Qwen3CoderToolParser(ToolParser):
         Called both on normal delta boundaries and during speculative-
         decoding recursion when multiple complete tool calls arrive in one
         delta.
+
+        Uses STRUCTURAL ``</tool_call>`` positions so a literal
+        ``</tool_call>`` embedded in a parameter value (e.g. a code
+        snippet) does not move ``_sent_content_idx`` to the wrong place.
         """
-        search_idx = 0
-        for _ in range(self.current_tool_index + 1):
-            search_idx = current_text.find(self.tool_call_start_token, search_idx)
-            if search_idx == -1:
-                break
-            end_idx = current_text.find(self.tool_call_end_token, search_idx)
-            if end_idx != -1:
-                self._sent_content_idx = max(
-                    self._sent_content_idx,
-                    end_idx + len(self.tool_call_end_token),
-                )
-            search_idx += len(self.tool_call_start_token)
+        end_positions = self._structural_tool_call_end_positions(current_text)
+        target = self.current_tool_index
+        if target < len(end_positions):
+            self._sent_content_idx = max(
+                self._sent_content_idx,
+                end_positions[target] + len(self.tool_call_end_token),
+            )
 
         self.current_tool_index += 1
         self.header_sent = False
@@ -342,6 +345,38 @@ class Qwen3CoderToolParser(ToolParser):
             if stripped == "" or stripped.startswith(self.tool_call_start_token):
                 return idx
             search_pos = idx + len(self.tool_call_end_token)
+
+    def _structural_tool_call_end_positions(self, text: str) -> list[int]:
+        """Return positions of every STRUCTURAL ``</tool_call>`` in text.
+
+        A naive ``text.count(</tool_call>)`` over-counts when a parameter
+        value embeds the literal string ``</tool_call>`` (e.g. a code-write
+        tool whose argument contains a tool-call example).  A real
+        ``</tool_call>`` matches at least one of:
+          - it is preceded (after optional whitespace) by ``</function>``,
+            i.e. it follows the standard tool-call template; or
+          - it is followed (after optional whitespace) by another
+            ``<tool_call>`` opener or end of string.
+        Either condition rules out a literal embedded in parameter content.
+        """
+        positions: list[int] = []
+        search_pos = 0
+        while True:
+            idx = text.find(self.tool_call_end_token, search_pos)
+            if idx == -1:
+                break
+            before = text[:idx].rstrip()
+            preceded_by_func = before.endswith(self.function_end_token)
+            after = text[idx + len(self.tool_call_end_token):]
+            stripped = after.lstrip()
+            followed_structurally = (
+                stripped == ""
+                or stripped.startswith(self.tool_call_start_token)
+            )
+            if preceded_by_func or followed_structurally:
+                positions.append(idx)
+            search_pos = idx + len(self.tool_call_end_token)
+        return positions
 
     def _find_true_param_end(
         self,
@@ -627,44 +662,63 @@ class Qwen3CoderToolParser(ToolParser):
 
         # Check if we need to advance to next tool
         if self.json_closed and not self.in_function:
-            # Check if this tool call has ended
-            tool_ends = current_text.count(self.tool_call_end_token)
+            # Use structural </tool_call> count: a literal </tool_call>
+            # embedded in a parameter value must not trigger spurious
+            # advance.
+            tool_ends = len(
+                self._structural_tool_call_end_positions(current_text)
+            )
             if tool_ends > self.current_tool_index:
                 # Advance to next tool; is_tool_call_started is reset so
                 # content between or after tool calls is emitted correctly.
+                # We deliberately fall through (no early ``return None``):
+                # the rest of this delta may carry trailing free text after
+                # the closed </tool_call> or even an entire next tool call
+                # (MTP / speculative decoding). The downstream code handles
+                # both — emitting trailing content via the not-started
+                # branch, or starting the next tool via tool_starts_count.
                 self._advance_to_next_tool(current_text)
-                return None
 
         content_message = None
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
-            # Check if tool call is starting
             tool_starts_count = current_text.count(self.tool_call_start_token)
-            if (
+            start_signal = (
                 self.tool_call_start_token_id in delta_token_ids
                 or tool_starts_count > self.current_tool_index
-            ):
+            )
+            # ``tool_starts_count`` is naive and over-counts when an
+            # earlier tool's parameter value contains a literal
+            # ``<tool_call>``.  Confirm a REAL next tool by locating an
+            # opener past ``_sent_content_idx`` (which sits after the last
+            # processed tool's structural ``</tool_call>``).
+            last_start = -1
+            if start_signal:
+                last_start = current_text.find(
+                    self.tool_call_start_token, self._sent_content_idx
+                )
+            if start_signal and last_start != -1:
                 self.is_tool_call_started = True
                 # Return any content before the tool call
-                last_start = current_text.find(self.tool_call_start_token, self._sent_content_idx)
-                if last_start != -1 and last_start > self._sent_content_idx:
+                if last_start > self._sent_content_idx:
                     content_before = current_text[self._sent_content_idx:last_start]
                     self._sent_content_idx = last_start
                     if content_before:
                         content_message = DeltaMessage(content=content_before)
             else:
+                # No real new tool starting in this delta — emit any
+                # trailing/inter-call content.
                 overlap = partial_tag_overlap(current_text, self.tool_call_start_token)
                 sendable_idx = len(current_text) - overlap
-                
-                # Check if we're between tool calls - skip whitespace
+
+                # Skip whitespace-only deltas right after a closed tool.
                 if (
                     current_text.rstrip().endswith(self.tool_call_end_token)
                     and delta_text.strip() == ""
                 ):
-                    # We just ended a tool call, skip whitespace
                     self._sent_content_idx = len(current_text)
                     return None
-                    
+
                 if sendable_idx > self._sent_content_idx:
                     content = current_text[self._sent_content_idx:sendable_idx]
                     self._sent_content_idx = sendable_idx
@@ -685,6 +739,11 @@ class Qwen3CoderToolParser(ToolParser):
         # calls (past each </tool_call>), so that <tool_call> tokens
         # embedded in parameter values of completed calls are never
         # included.
+        # Use STRUCTURAL </tool_call> positions when jumping past
+        # completed tool calls — naive ``current_text.find(</tool_call>)``
+        # matches a literal ``</tool_call>`` embedded in a parameter
+        # value and would land inside an earlier tool's content.
+        structural_ends = self._structural_tool_call_end_positions(current_text)
         tool_start_positions: list[int] = []
         search_pos = 0
         for i in range(self.current_tool_index + 1):
@@ -693,10 +752,12 @@ class Qwen3CoderToolParser(ToolParser):
                 break
             tool_start_positions.append(idx)
             if i < self.current_tool_index:
-                # Completed tool call: jump past its </tool_call> so the
-                # next search starts after it, skipping any content
-                # inside (including literal <tool_call>).
-                end_idx = current_text.find(self.tool_call_end_token, idx)
+                # Completed tool call: jump past its STRUCTURAL </tool_call>.
+                end_idx = -1
+                for end_pos in structural_ends:
+                    if end_pos > idx:
+                        end_idx = end_pos
+                        break
                 if end_idx == -1:
                     break
                 search_pos = end_idx + len(self.tool_call_end_token)
@@ -705,8 +766,14 @@ class Qwen3CoderToolParser(ToolParser):
             return content_message
 
         tool_start_idx = tool_start_positions[self.current_tool_index]
-        # Find where this tool call ends (or current position if not ended yet)
-        tool_end_idx = current_text.find(self.tool_call_end_token, tool_start_idx)
+        # Find this tool call's STRUCTURAL end (or use rest of text if
+        # the tool isn't closed yet).  A naive find would truncate at a
+        # literal </tool_call> inside a parameter value.
+        tool_end_idx = -1
+        for end_pos in structural_ends:
+            if end_pos > tool_start_idx:
+                tool_end_idx = end_pos
+                break
         if tool_end_idx == -1:
             tool_text = current_text[tool_start_idx:]
         else:
@@ -1001,7 +1068,7 @@ class Qwen3CoderToolParser(ToolParser):
             if (
                 self.json_closed
                 and not self.in_function
-                and current_text.count(self.tool_call_end_token)
+                and len(self._structural_tool_call_end_positions(current_text))
                 > self.current_tool_index + 1
             ):
                 # Speculative decoding delivered multiple complete tool
@@ -1023,8 +1090,41 @@ class Qwen3CoderToolParser(ToolParser):
                     if result.tool_calls is None:
                         result.tool_calls = []
                     result.tool_calls.extend(next_delta.tool_calls)
-                    if next_delta.content and not result.content:
-                        result.content = next_delta.content
+                    # Concatenate the recursion's content (e.g. text
+                    # BETWEEN tool 1 and tool 2) with the outer's content
+                    # (e.g. text BEFORE tool 1). Without this, the "between"
+                    # fragment is silently dropped whenever the outer
+                    # already produced its own content.
+                    if next_delta.content:
+                        result.content = (
+                            (result.content or "") + next_delta.content
+                        )
+
+            # Emit trailing free text that follows the LAST structural
+            # </tool_call> in this delta (MTP / spec-decoding bursts that
+            # bundle N tool calls + trailing content into one chunk).
+            # Without this the trailing text is buffered indefinitely:
+            # the per-tool processing never advances ``_sent_content_idx``
+            # past its tool's ``</tool_call>``, and an EOS-style empty
+            # delta cannot recover content that was never emitted.
+            if self.json_closed and not self.in_function:
+                end_positions = self._structural_tool_call_end_positions(
+                    current_text
+                )
+                if end_positions:
+                    last_end = (
+                        end_positions[-1] + len(self.tool_call_end_token)
+                    )
+                    if (
+                        last_end < len(current_text)
+                        and last_end > self._sent_content_idx
+                    ):
+                        trailing = current_text[last_end:]
+                        if trailing:
+                            self._sent_content_idx = len(current_text)
+                            result.content = (
+                                (result.content or "") + trailing
+                            )
             return result
 
         return content_message

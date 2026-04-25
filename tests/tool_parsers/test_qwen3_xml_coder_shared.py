@@ -1449,3 +1449,114 @@ def test_two_tool_calls_in_one_streaming_chunk(qwen3_tokenizer, parser_cls):
     args1 = json.loads(reconstructor.tool_calls[1].function.arguments)
     assert args0 == {"city": "Paris"}
     assert args1 == {"city": "London"}
+
+
+# ---------------------------------------------------------------------------
+# Trailing free text after the LAST </tool_call> in the SAME delta (MTP /
+# speculative decoding). The text must be emitted as content; dropping it
+# silently is a regression.
+# ---------------------------------------------------------------------------
+
+
+def test_python_none_value_for_nullable_int(qwen3_tokenizer, parser_cls):
+    """A Qwen3.5-trained model emits Python ``None`` (not ``null``) for a
+    nullable non-string parameter, because the Qwen3.5 chat template
+    renders ``args_value | string`` for non-container types — turning a
+    null arg from a previous tool call into the literal "None" in the
+    prompt. The model then learns to generate the same "None" verbatim.
+
+    The parser must recognise this and convert "None" to JSON null,
+    just like it already does for the literal "null" emitted by
+    Qwen3.6-trained models.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "set_count",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+    parser = parser_cls(qwen3_tokenizer, tools=tools)
+    model_output = (
+        "<tool_call>\n"
+        "<function=set_count>\n"
+        "<parameter=count>None</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["count"] is None, (
+        f"Python repr None was not converted to JSON null. "
+        f"Got: {args['count']!r}"
+    )
+
+
+def test_streaming_two_tool_calls_plus_trailing_text_one_delta(
+    qwen3_tokenizer, parser_cls
+):
+    """MTP: a single delta delivers tool 1 + tool 2 + trailing free text.
+    Both tool calls must be emitted AND the trailing text must surface as
+    content in the same delta — not be silently dropped.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WEATHER_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WEATHER_TOOLS
+    )
+    deltas = [
+        _TWO_TOOL_CALLS_IN_ONE_CHUNK + "\nAll done!",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 2, (
+        f"Expected 2 tool calls, got {len(reconstructor.tool_calls)}"
+    )
+    assert "All done!" in reconstructor.other_content, (
+        f"Trailing text after the second tool call was dropped. "
+        f"Got content: {reconstructor.other_content!r}"
+    )
+
+
+def test_streaming_trailing_text_with_final_close_in_same_delta(
+    qwen3_tokenizer, parser_cls
+):
+    """MTP / speculative decoding can deliver the closing ``</tool_call>``
+    together with trailing free text in a single delta.  The text after
+    the close must be emitted as content rather than being silently
+    consumed by the parser's "advance to next tool" logic.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WEATHER_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WEATHER_TOOLS
+    )
+    deltas = [
+        # Build up the tool call up to and including </function>.
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>Paris</parameter>\n</function>",
+        # Then deliver </tool_call> + trailing text in ONE delta.
+        "\n</tool_call>\nI hope this helps!",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert "I hope this helps!" in reconstructor.other_content, (
+        f"Trailing text after </tool_call> was dropped. "
+        f"Got content: {reconstructor.other_content!r}"
+    )

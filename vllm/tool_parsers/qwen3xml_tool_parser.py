@@ -407,6 +407,20 @@ class StreamingXMLToolCallParser:
             # Update processed position
             self.last_processed_pos = end_pos
 
+        # Flush any text accumulated AFTER the last </tool_call> processed
+        # in this batch. Without this, trailing free text that arrives in
+        # the SAME delta as the closing </tool_call> (MTP / speculative
+        # decoding) is buffered but never emitted — and is lost entirely
+        # if EOS comes before any subsequent delta.
+        if (
+            found_any
+            and self.text_content_buffer
+            and self.current_call_id is None
+        ):
+            text_delta = DeltaMessage(content=self.text_content_buffer)
+            self._emit_delta(text_delta)
+            self.text_content_buffer = ""
+
         return found_any
 
     def _should_skip_element(self, element: str) -> bool:
@@ -650,11 +664,29 @@ class StreamingXMLToolCallParser:
                     # first char would otherwise be converted to False and
                     # emit "false", shadowing the real "true" that follows.
                     is_bool_type = param_type in ["boolean", "bool", "binary"]
+                    # Numeric types need deferral too: a nullable
+                    # parameter rendered as the literal "None" (Qwen3.5
+                    # template) or "null" (Qwen3.6 template) flips from
+                    # the partial-string fallback to JSON ``null`` only
+                    # when the FULL value is in.  Without deferral the
+                    # diff-based char emission would interleave the
+                    # partial string ("Non") with the JSON literal
+                    # ("null") and produce invalid output ("Nonl").
+                    is_numeric_type = (
+                        param_type.startswith("int")
+                        or param_type.startswith("uint")
+                        or param_type.startswith("long")
+                        or param_type.startswith("short")
+                        or param_type.startswith("unsigned")
+                        or param_type.startswith("num")
+                        or param_type.startswith("float")
+                    )
 
                     need_defer = (
                         is_complex_type
                         or is_object_type
                         or is_bool_type
+                        or is_numeric_type
                     )
 
                     if not need_defer:
@@ -1257,8 +1289,12 @@ class StreamingXMLToolCallParser:
         # the string "null" instead of being converted to Python None.
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
-        # Non-string: "null" → Python None → JSON null.
-        if param_value.lower() == "null":
+        # Non-string: "null" → Python None → JSON null.  Also accept the
+        # Python literal "None" so that Qwen3.5-trained models — whose
+        # chat template renders null args via ``| string`` (yielding the
+        # literal "None" in the prompt) — round-trip nullable values
+        # correctly.
+        if param_value.lower() in ("null", "none"):
             return None
         if (
             param_type.startswith("int")

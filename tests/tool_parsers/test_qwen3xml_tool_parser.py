@@ -175,6 +175,102 @@ class TestQwen3xmlToolParser(ToolParserTests):
         assert "I hope this helps!" in all_content, "Free text after the last tool call should be emitted."
 
 
+def test_qwen3xml_streaming_trailing_text_after_literal_close_in_value(
+    qwen3_tokenizer,
+):
+    """XML parser: a tool_call's parameter value contains a literal
+    ``</tool_call>``.  After the real ``</tool_call>``, trailing free
+    text must still be emitted.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    deltas = [
+        # Tool 1 with literal </tool_call> embedded in 'content'.
+        "<tool_call>\n<function=write_file>\n"
+        "<parameter=path>foo.py</parameter>\n"
+        "<parameter=content>\n"
+        "doc = '<tool_call>example</tool_call>'\n"
+        "</parameter>\n</function>\n</tool_call>",
+        # Trailing text in a separate delta.
+        "\nDone, file written!",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        parser, deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1, (
+        f"Expected 1 tool call, got {len(reconstructor.tool_calls)}"
+    )
+    assert "Done, file written!" in reconstructor.other_content, (
+        f"Trailing text after a tool with literal </tool_call> in its "
+        f"value was dropped. Got content: {reconstructor.other_content!r}"
+    )
+
+
+def test_qwen3xml_streaming_python_none_int_char_by_char(qwen3_tokenizer):
+    """Streaming a nullable INTEGER param value of "None" (Qwen3.5 style)
+    char-by-char must produce VALID JSON.  The XML parser's incremental
+    char path used to emit "Non" then a "l" delta computed from the diff
+    between "Non" and "null", giving the cumulative invalid string
+    "Nonl".  The fix defers int/float conversion just like bool/object
+    so the full value is parsed at </parameter> close.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "set_count",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    # Char-by-char deltas emulate worst-case slow streaming.
+    char_deltas = [
+        "<tool_call>\n", "<function=set_count>\n", "<parameter=count>",
+        "\n", "N", "o", "n", "e", "\n", "</parameter>\n",
+        "</function>\n", "</tool_call>",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, char_deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    raw = reconstructor.tool_calls[0].function.arguments
+    args = json.loads(raw)  # must be valid JSON
+    assert args["count"] is None, (
+        f"streaming nullable int 'None' produced invalid JSON or wrong "
+        f"value. Raw: {raw!r}"
+    )
+
+
 def test_qwen36_xml_streaming_double_close_brace(qwen3_tokenizer):
     tools = [
         ChatCompletionToolsParam(

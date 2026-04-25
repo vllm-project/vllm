@@ -33,6 +33,205 @@ def qwen3_tool_parser(qwen3_tokenizer):
     return Qwen3CoderToolParser(qwen3_tokenizer, tools=None)
 
 
+def test_streaming_trailing_text_after_tool_with_literal_close_tag_in_value(
+    qwen3_tokenizer,
+):
+    """A tool call's parameter value contains a literal ``</tool_call>``
+    string.  After the real tool call closes, trailing free text must
+    still be emitted as content.
+
+    The naive ``current_text.count(</tool_call>)`` and
+    ``current_text.find(</tool_call>)`` used by the early-advance and
+    ``_advance_to_next_tool`` logic don't distinguish literal text from
+    structural delimiters.  This can cause ``_sent_content_idx`` to land
+    INSIDE the tool's parameter value, after which the trailing text
+    fails to be emitted.
+    """
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    # The parameter value contains a literal ``</tool_call>`` string.
+    # The real ``</tool_call>`` follows after ``</function>``.
+    delta_1 = (
+        "<tool_call>\n<function=write_file>\n"
+        "<parameter=path>foo.py</parameter>\n"
+        "<parameter=content>\n"
+        "doc = '<tool_call>example</tool_call>'\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=delta_1,
+        delta_text=delta_1,
+        previous_token_ids=[],
+        current_token_ids=[1],
+        delta_token_ids=[1],
+        request=request,
+    )
+
+    delta_2 = "\nDone, file written!"
+    text2 = delta_1 + delta_2
+    msg2 = parser.extract_tool_calls_streaming(
+        previous_text=delta_1,
+        current_text=text2,
+        delta_text=delta_2,
+        previous_token_ids=[1],
+        current_token_ids=[1, 2],
+        delta_token_ids=[2],
+        request=request,
+    )
+    contents = []
+    if msg2 and msg2.content:
+        contents.append(msg2.content)
+    # EOS-style empty delta to flush
+    msg3 = parser.extract_tool_calls_streaming(
+        previous_text=text2,
+        current_text=text2,
+        delta_text="",
+        previous_token_ids=[1, 2],
+        current_token_ids=[1, 2, 3],
+        delta_token_ids=[3],
+        request=request,
+    )
+    if msg3 and msg3.content:
+        contents.append(msg3.content)
+
+    full = "".join(contents)
+    assert "Done, file written!" in full, (
+        f"Trailing text after a tool call whose parameter value contains "
+        f"a literal </tool_call> was dropped. Got content: {full!r}"
+    )
+
+
+def test_streaming_second_tool_after_first_with_literal_close_tag_in_value(
+    qwen3_tokenizer,
+):
+    """A first tool call's parameter value contains a literal
+    ``</tool_call>``.  A SECOND structural tool call follows after the
+    real ``</tool_call>``.  Both tool calls and any inter-call content
+    must be emitted correctly.
+    """
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "log",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"msg": {"type": "string"}},
+                },
+            },
+        ),
+    ]
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    full = (
+        "<tool_call>\n<function=write_file>\n"
+        "<parameter=path>foo.py</parameter>\n"
+        "<parameter=content>\n"
+        "doc = '<tool_call>example</tool_call>'\n"
+        "</parameter>\n</function>\n</tool_call>"
+        "\n"
+        "<tool_call>\n<function=log>\n"
+        "<parameter=msg>done</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+
+    msg = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=full,
+        delta_text=full,
+        previous_token_ids=[],
+        current_token_ids=[1],
+        delta_token_ids=[1],
+        request=request,
+    )
+    assert msg is not None
+    assert msg.tool_calls is not None
+    assert len(msg.tool_calls) == 2, (
+        f"Expected 2 tool calls, got {len(msg.tool_calls)}: {msg.tool_calls}"
+    )
+    names = [tc.function.name for tc in msg.tool_calls]
+    assert names == ["write_file", "log"], f"Wrong tool names: {names}"
+
+
+def test_streaming_content_before_and_between_two_tool_calls_one_delta(
+    qwen3_tool_parser,
+):
+    """MTP / spec-decode: a single delta delivers free text BEFORE tool 1
+    AND free text BETWEEN tool 1 and tool 2.  Both content fragments must
+    be emitted; the recursion path used to drop the second one because of a
+    ``not result.content`` guard that discarded the recursion's content
+    when the outer call already had content of its own.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    delta = (
+        "before text "
+        "<tool_call>\n<function=foo>\n"
+        "<parameter=a>\n1\n</parameter>\n"
+        "</function>\n</tool_call>"
+        "between text "
+        "<tool_call>\n<function=bar>\n"
+        "<parameter=b>\n2\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    msg = qwen3_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=delta,
+        delta_text=delta,
+        previous_token_ids=[],
+        current_token_ids=[1],
+        delta_token_ids=[1],
+        request=request,
+    )
+    assert msg is not None
+    assert msg.content is not None, "outer content lost"
+    assert "before text " in msg.content, (
+        f"missing 'before text' content: {msg.content!r}"
+    )
+    assert "between text " in msg.content, (
+        f"recursion content 'between text' was dropped because the outer "
+        f"already had content. Got: {msg.content!r}"
+    )
+
+
 def test_extract_tool_calls_streaming_split_tag(qwen3_tool_parser):
     """``<tool_call>`` arrives split across two deltas (``<tool`` then
     ``_call>``).  ``is_tool_call_started`` must flip to ``True`` once the
