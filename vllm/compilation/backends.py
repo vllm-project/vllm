@@ -29,7 +29,7 @@ from vllm.compilation.codegen import (
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
-from vllm.config.utils import Range, hash_factors
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -37,6 +37,7 @@ from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from .caching import aot_compile_hash_factors
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -1022,11 +1023,9 @@ class VllmBackend:
         self._log_compilation_config()
 
         # Minimal hashing here with existing utilities, reused below.
-
-        env_factors = envs.compile_factors()
-        env_hash = hash_factors(env_factors)
         # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compute_hash()
+        env_hash, config_hash, *_ = aot_compile_hash_factors(vllm_config)
+        env_factors = envs.compile_factors()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
         forward_code_files = list(sorted(self.compilation_config.traced_files))
 
