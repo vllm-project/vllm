@@ -1756,7 +1756,7 @@ def test_get_kv_cache_config_one_worker():
     )[0]
     expected_specs = {
         "layer_1": new_kv_cache_spec(head_size=64),
-        "layer_2": new_kv_cache_spec(head_size=96),
+        "layer_2": new_kv_cache_spec(head_size=96, sliding_window=1),
     }
     assert kv_cache_config_hybrid == KVCacheConfig(
         num_blocks=25,
