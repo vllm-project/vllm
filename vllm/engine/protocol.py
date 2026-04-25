@@ -119,11 +119,12 @@ class EngineClient(ABC):
         ...
 
     @property
+    @abstractmethod
     def is_engine_dead(self) -> bool:
         """Return True only when the engine has encountered a fatal error.
         This is distinct from ``errored`` which also returns True during
         graceful shutdown/drain."""
-        return self.errored
+        ...
 
     @abstractmethod
     async def start_profile(self) -> None:
