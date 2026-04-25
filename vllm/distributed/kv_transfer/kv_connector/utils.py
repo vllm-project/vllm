@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec, TQFullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -615,6 +615,11 @@ class TransferTopology:
             # backends so its num_blocks first.
             # Swap [2<>num_blocks] dims for hybrid SSM layout.
             cache = cache.transpose(0, 1)
+
+        # TurboQuant packs K+V into a single combined tensor per slot,
+        # so it must not be split along dim-0 like standard FA caches.
+        if isinstance(layer_spec, TQFullAttentionSpec):
+            return [cache]
 
         # Regular case: backends like FA register K/V in separate regions
         return cache if self.split_k_and_v else [cache]
