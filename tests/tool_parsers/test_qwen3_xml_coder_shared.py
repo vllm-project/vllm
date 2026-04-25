@@ -1560,3 +1560,218 @@ def test_streaming_trailing_text_with_final_close_in_same_delta(
         f"Trailing text after </tool_call> was dropped. "
         f"Got content: {reconstructor.other_content!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Parameter value containing a literal ``<parameter=NAME>`` whose NAME IS
+# itself a real parameter of the same tool.  The schema-based filter cannot
+# rule the literal out by name, so a stronger heuristic is required (e.g.
+# the literal does not pair with a structural ``</parameter>`` followed by
+# another structural delimiter).  This is the exact pattern that breaks
+# qwen-code WriteFile when the file being written is itself a parser test
+# fixture.
+# ---------------------------------------------------------------------------
+
+_CONTENT_WITH_REAL_PARAM_NAME_LITERAL = (
+    'doc = """\n'
+    '<parameter=path>\n'
+    'literal/value\n'
+    '</parameter>\n'
+    '"""\n'
+)
+
+_REAL_PARAM_NAME_LITERAL_OUTPUT = (
+    "<tool_call>\n"
+    "<function=write_file>\n"
+    "<parameter=path>\nfixture.py\n</parameter>\n"
+    f"<parameter=content>\n{_CONTENT_WITH_REAL_PARAM_NAME_LITERAL}</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+def test_content_with_real_param_name_literal_nonstreaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Non-streaming: parameter ``content`` value embeds
+    ``<parameter=path>...</parameter>`` where ``path`` IS the other real
+    parameter of the same ``write_file`` tool.  Schema name filtering alone
+    cannot disambiguate — the parser must use a stronger rule (e.g. the
+    embedded ``</parameter>`` must be followed by a structural delimiter
+    that closes the OUTER param, not the inner literal).
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
+    )
+    result = parser.extract_tool_calls(
+        _REAL_PARAM_NAME_LITERAL_OUTPUT, request=request
+    )
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["path", "content"], (
+        f"Spurious params from embedded same-name literal: "
+        f"{list(args.keys())}"
+    )
+    assert args["path"] == "fixture.py", (
+        f"Outer ``path`` was overwritten by embedded literal: "
+        f"{args.get('path')!r}"
+    )
+    expected = _CONTENT_WITH_REAL_PARAM_NAME_LITERAL.rstrip("\n")
+    assert args["content"] == expected, (
+        f"content was truncated at the embedded <parameter=path>. "
+        f"Got: {args.get('content')!r}"
+    )
+
+
+def test_content_with_real_param_name_literal_streaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Streaming variant of the same case.  Each meaningful structural-
+    looking line arrives in its own delta — the parser cannot wait for the
+    full text to disambiguate.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
+    )
+    char_deltas = [
+        "<tool_call>\n",
+        "<function=write_file>\n",
+        "<parameter=path>\nfixture.py\n</parameter>\n",
+        '<parameter=content>\ndoc = """\n',
+        "<parameter=path>\n",
+        "literal/value\n",
+        "</parameter>\n",
+        '"""\n',
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, char_deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["path", "content"], (
+        f"Spurious params from embedded same-name literal: "
+        f"{list(args.keys())}"
+    )
+    assert args["path"] == "fixture.py"
+    expected = _CONTENT_WITH_REAL_PARAM_NAME_LITERAL.rstrip("\n")
+    assert args["content"] == expected, (
+        f"content was truncated at the embedded <parameter=path>. "
+        f"Got: {args.get('content')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parameter value containing a COMPLETE nested tool_call (all four balise
+# types: <tool_call>, <function=...>, <parameter=...>, </parameter>,
+# </function>, </tool_call>) — the qwen-code WriteFile pattern when the
+# file being written is itself a parser fixture or a chat-template
+# example. Every literal must stay inside the value; no spurious extra
+# tool calls or params should be generated.
+# ---------------------------------------------------------------------------
+
+_CONTENT_WITH_FULL_NESTED_CALL = (
+    'doc = """\n'
+    "<tool_call>\n"
+    "<function=write_file>\n"
+    "<parameter=path>\n"
+    "literal/value.txt\n"
+    "</parameter>\n"
+    "<parameter=content>\n"
+    "hello\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"
+    '"""\n'
+)
+
+_FULL_NESTED_CALL_OUTPUT = (
+    "<tool_call>\n"
+    "<function=write_file>\n"
+    "<parameter=path>\nfixture.py\n</parameter>\n"
+    f"<parameter=content>\n{_CONTENT_WITH_FULL_NESTED_CALL}</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+def test_content_with_full_nested_tool_call_nonstreaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Non-streaming: parameter ``content`` contains a complete literal
+    ``<tool_call>...</tool_call>`` whose function/parameter names match
+    the OUTER tool's schema.  Every literal must stay inside the value;
+    no extra tool call must be generated.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
+    )
+    result = parser.extract_tool_calls(_FULL_NESTED_CALL_OUTPUT, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1, (
+        f"Expected 1 tool call (the outer one), got "
+        f"{len(result.tool_calls)} — embedded literal tool_call was "
+        f"incorrectly promoted to a real call."
+    )
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["path", "content"]
+    assert args["path"] == "fixture.py"
+    expected = _CONTENT_WITH_FULL_NESTED_CALL.rstrip("\n")
+    assert args["content"] == expected, (
+        f"content truncated/corrupted: {args.get('content')!r}"
+    )
+
+
+def test_content_with_full_nested_tool_call_streaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Streaming variant: the literal nested ``<tool_call>...</tool_call>``
+    crosses many delta boundaries; the parser must not start a second
+    tool call.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
+    )
+    char_deltas = [
+        "<tool_call>\n",
+        "<function=write_file>\n",
+        "<parameter=path>\nfixture.py\n</parameter>\n",
+        '<parameter=content>\ndoc = """\n',
+        "<tool_call>\n",
+        "<function=write_file>\n",
+        "<parameter=path>\n",
+        "literal/value.txt\n",
+        "</parameter>\n",
+        "<parameter=content>\n",
+        "hello\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>\n",
+        '"""\n',
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, char_deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1, (
+        f"Expected 1 tool call, got {len(reconstructor.tool_calls)} — "
+        f"a literal nested <tool_call> was promoted to a real call."
+    )
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert list(args.keys()) == ["path", "content"]
+    assert args["path"] == "fixture.py"
+    expected = _CONTENT_WITH_FULL_NESTED_CALL.rstrip("\n")
+    assert args["content"] == expected, (
+        f"content truncated/corrupted: {args.get('content')!r}"
+    )

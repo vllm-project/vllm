@@ -86,6 +86,21 @@ class StreamingXMLToolCallParser:
         self.defer_current_parameter = False
         self.deferred_param_raw_value = ""
 
+        # Depth of LITERAL nested ``<tool_call>``/``<function=...>`` opens
+        # encountered inside the current parameter's value.  Each literal
+        # opener bumps the depth; each ``</tool_call>``/``</function>``
+        # encountered while depth > 0 is also literal (decrements the
+        # depth) and must not be treated as a structural close.  Reset
+        # to 0 when leaving a parameter.
+        self._literal_tag_depth = 0
+        # Number of literal tool_call/function open or close events seen
+        # in the current ``parse_single_streaming_chunks`` call.  Used to
+        # suppress the post-processing structural-close fallback when
+        # the chunk contained literal nested-tag events: those events
+        # are already handled (escaped) by the preprocess pass and must
+        # not trigger ``_end_element`` calls.
+        self._literal_events_this_chunk = 0
+
         # recreate parser
         self.parser = ParserCreate()
         self.setup_parser()
@@ -105,6 +120,12 @@ class StreamingXMLToolCallParser:
         # Record delta count before processing
         initial_delta_count = len(self.deltas)
 
+        # Reset literal-event counter for this chunk: it will be
+        # incremented by the preprocess pass whenever it encounters a
+        # literal nested ``<tool_call>``/``<function=...>`` open or
+        # the matching close inside a parameter value.
+        self._literal_events_this_chunk = 0
+
         self.streaming_buffer += xml_chunk
 
         found_elements = self._process_complete_xml_elements()
@@ -115,9 +136,24 @@ class StreamingXMLToolCallParser:
             # checks so that </function>/</tool_call> appearing as literal
             # text inside a parameter value (e.g. file content) does NOT
             # trigger a spurious close that emits a duplicate '}' or ''.
+            # When ``_literal_tag_depth > 0`` we are still inside a
+            # literal nested ``<tool_call>``/``<function=...>`` block in
+            # the current parameter's value — the chunk's `</function>`
+            # or `</tool_call>` matches a literal opener, not a real
+            # structural close, so skip the fallback close events.
             try:
+                # Skip the fallback close events when this chunk
+                # contained any literal nested-tag event: those
+                # ``</function>``/``</tool_call>`` strings are matched
+                # to literal openers in the param value and have
+                # already been escaped — firing ``_end_element`` here
+                # would prematurely close the OUTER parameter and
+                # truncate its value.
+                literals_in_chunk = self._literal_events_this_chunk > 0
                 if (
                     self.current_call_id is not None
+                    and not literals_in_chunk
+                    and self._literal_tag_depth == 0
                     and self._chunk_has_structural_function_end(xml_chunk)
                     and self.current_function_open
                 ):
@@ -127,6 +163,8 @@ class StreamingXMLToolCallParser:
                         self._end_element("function")
                 if (
                     self.current_call_id is not None
+                    and not literals_in_chunk
+                    and self._literal_tag_depth == 0
                     and self._chunk_has_structural_tool_call_end(xml_chunk)
                 ):
                     if self.current_param_name:
@@ -155,10 +193,16 @@ class StreamingXMLToolCallParser:
             # triggered by parser, manually complete end events. Only
             # execute when still on the same call as when entered, to
             # prevent accidentally closing new calls in multi-<tool_call>
-            # scenarios.
-            if self.current_call_id is not None and (
-                self._chunk_has_structural_function_end(xml_chunk)
-                or self._chunk_has_structural_tool_call_end(xml_chunk)
+            # scenarios.  Also skip when ``_literal_tag_depth > 0``: the
+            # chunk's `</function>`/`</tool_call>` matches a literal
+            # opener inside the current parameter's value.
+            if (
+                self.current_call_id is not None
+                and self._literal_tag_depth == 0
+                and (
+                    self._chunk_has_structural_function_end(xml_chunk)
+                    or self._chunk_has_structural_tool_call_end(xml_chunk)
+                )
             ):
                 if self.current_param_name:
                     self._end_element("parameter")
@@ -227,6 +271,20 @@ class StreamingXMLToolCallParser:
         props = find_tool_properties(self.tools, self.current_function_name)
         return set(props.keys()) if props else None
 
+    def _is_already_emitted_param(self, name: str) -> bool:
+        """Return True when ``name`` has already appeared as a parameter
+        of the current tool call (either fully closed or currently open).
+
+        A ``<parameter=NAME>`` whose NAME is already used for the same
+        tool is almost always literal text inside another parameter's
+        value (e.g. a parser fixture or a file that documents the
+        tool-call format).  Treating it as a real structural opening
+        causes silent value truncation and spurious extra params.
+        """
+        if name == self.current_param_name:
+            return True
+        return name in self.parameters
+
     def _is_structural_closing_tag(self, chunk: str) -> bool:
         """Return True when a closing tag at the current buffer position is
         a real structural delimiter rather than literal text content.
@@ -246,15 +304,22 @@ class StreamingXMLToolCallParser:
         structural_param_follows = False
         if rest.startswith(self.parameter_start_token):
             valid_names = self._get_valid_param_names()
-            if valid_names is not None:
-                name_start = len(self.parameter_start_token)
-                name_end = rest.find(">", name_start)
-                if name_end != -1:
+            name_start = len(self.parameter_start_token)
+            name_end = rest.find(">", name_start)
+            if name_end != -1:
+                candidate = rest[name_start:name_end]
+                if valid_names is not None:
                     structural_param_follows = (
-                        rest[name_start:name_end] in valid_names
+                        candidate in valid_names
+                        and not self._is_already_emitted_param(candidate)
                     )
-            else:
-                structural_param_follows = True  # fallback: trust all
+                else:
+                    # Fallback (no schema): trust the name unless it is a
+                    # repeat of the current/already-emitted param, which
+                    # is almost always a literal in a parser fixture.
+                    structural_param_follows = (
+                        not self._is_already_emitted_param(candidate)
+                    )
 
         # Return True when rest is an incomplete prefix of a structural
         # closing token (e.g. rest="</" when "</function>" hasn't fully
@@ -708,30 +773,56 @@ class StreamingXMLToolCallParser:
                 or chunk.startswith(self.function_start_token)
             ):
                 # Opening tool_call/function tags are always literal inside
-                # a parameter value.
+                # a parameter value.  Track nesting depth so that the
+                # matching ``</function>`` / ``</tool_call>`` is also
+                # treated as literal even when its lookahead would
+                # otherwise satisfy the structural heuristic.
+                self._literal_tag_depth += 1
+                self._literal_events_this_chunk += 1
                 return self._escape_xml_special_chars(chunk)
             if chunk.startswith(self.parameter_start_token):
                 # A structural <parameter=NAME> always follows a newline in
                 # the buffer.  When a schema is available, also require
                 # NAME to be a known parameter of the current function so
                 # that literal ``<parameter=new_string>`` inside file
-                # content is treated as text.
+                # content is treated as text.  A NAME already emitted
+                # for this tool (or equal to the param currently being
+                # parsed) is also literal text — a parser fixture or a
+                # file that documents the tool-call format.
                 if not self._is_structural_tag_position():
                     return self._escape_xml_special_chars(chunk)
-                valid_names = self._get_valid_param_names()
-                if valid_names is not None:
-                    name_start = len(self.parameter_start_token)
-                    name_end = chunk.find(">", name_start)
-                    if (
-                        name_end != -1
-                        and chunk[name_start:name_end] not in valid_names
-                    ):
+                name_start = len(self.parameter_start_token)
+                name_end = chunk.find(">", name_start)
+                if name_end != -1:
+                    candidate = chunk[name_start:name_end]
+                    if self._is_already_emitted_param(candidate):
+                        return self._escape_xml_special_chars(chunk)
+                    valid_names = self._get_valid_param_names()
+                    if valid_names is not None and candidate not in valid_names:
                         return self._escape_xml_special_chars(chunk)
             if (
                 chunk.startswith(self.parameter_end_token)
                 or chunk.startswith(self.function_end_token)
                 or chunk.startswith(self.tool_call_end_token)
             ):
+                # Inside a literal nested tool_call/function (depth > 0),
+                # any closing tag pairs with the literal opener and is
+                # itself literal — regardless of what the lookahead says.
+                # ``</parameter>`` does not affect depth (parameters do
+                # not nest in the Qwen format).
+                if self._literal_tag_depth > 0:
+                    if chunk.startswith(self.function_end_token) or (
+                        chunk.startswith(self.tool_call_end_token)
+                    ):
+                        self._literal_tag_depth -= 1
+                        self._literal_events_this_chunk += 1
+                    else:
+                        # Literal `</parameter>` inside a nested literal
+                        # block — count it as a literal event so the
+                        # post-processing fallback knows the chunk
+                        # contained literals and skips spurious closes.
+                        self._literal_events_this_chunk += 1
+                    return self._escape_xml_special_chars(chunk)
                 if not self._is_structural_closing_tag(chunk):
                     return self._escape_xml_special_chars(chunk)
 
@@ -967,7 +1058,9 @@ class StreamingXMLToolCallParser:
         if (
             name.startswith("parameter") or name == "parameter"
         ) and self.current_param_name:
-            # End current parameter
+            # End current parameter; reset literal-tag depth tracker
+            # since we are leaving the param's value scope.
+            self._literal_tag_depth = 0
             param_name = self.current_param_name
             param_value = self.current_param_value
 

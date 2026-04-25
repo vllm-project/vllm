@@ -301,6 +301,79 @@ class Qwen3CoderToolParser(ToolParser):
                 return idx
             search_pos = idx + len(self.function_end_token)
 
+    def _scan_to_structural_function_end(
+        self,
+        after_func_open: str,
+        valid_param_names: set[str] | None = None,
+    ) -> int:
+        """Scan a function body — text immediately following the closing
+        ``>`` of ``<function=NAME>`` — by walking through structural
+        ``<parameter=NAME>...</parameter>`` blocks and return the index of
+        the structural ``</function>`` in ``after_func_open``.
+
+        This is more robust than ``_find_true_function_end`` when the
+        parameter value embeds a complete literal ``<tool_call>...
+        </function>\\n</tool_call>`` block: that nested ``</function>``
+        is followed by ``</tool_call>`` and would pass the lookahead
+        heuristic, but it is INSIDE a parameter and must be skipped.
+
+        Handles a "missing </parameter>" malformation by treating the
+        next structural ``<parameter=NAME>`` (with NAME unseen so far)
+        as an implicit end.
+
+        Returns -1 if the body is incomplete or malformed.
+        """
+        pos = 0
+        n = len(after_func_open)
+        seen: set[str] = set()
+        while pos < n:
+            # Skip whitespace between params
+            while pos < n and after_func_open[pos] in " \t\n\r":
+                pos += 1
+            if pos >= n:
+                return -1
+            if after_func_open[pos:].startswith(self.function_end_token):
+                return pos
+            if not after_func_open[pos:].startswith(self.parameter_prefix):
+                # Unexpected token before </function>; fall back to the
+                # legacy heuristic on the rest of the text.
+                rest_offset = self._find_true_function_end(after_func_open[pos:])
+                return pos + rest_offset if rest_offset != -1 else -1
+            name_end = after_func_open.find(
+                ">", pos + len(self.parameter_prefix)
+            )
+            if name_end == -1:
+                return -1
+            param_name = after_func_open[pos + len(self.parameter_prefix):name_end]
+            value_start = name_end + 1
+            if value_start < n and after_func_open[value_start] == "\n":
+                value_start += 1
+            param_end = self._find_true_param_end(
+                after_func_open[value_start:],
+                valid_param_names,
+                require_lookahead=True,
+            )
+            if param_end == -1:
+                # Missing </parameter> malformation: try the next
+                # structural <parameter=NAME> with NAME unseen so far
+                # as the implicit end.
+                unseen: set[str] | None = (
+                    (valid_param_names - seen - {param_name})
+                    if valid_param_names is not None
+                    else None
+                )
+                implicit_end = self._next_structural_param_start(
+                    after_func_open[value_start:], 0, unseen
+                )
+                if implicit_end == -1:
+                    return -1
+                pos = value_start + implicit_end
+                seen.add(param_name)
+                continue
+            seen.add(param_name)
+            pos = value_start + param_end + len(self.parameter_end_token)
+        return -1
+
     def _advance_to_next_tool(self, current_text: str) -> None:
         """Advance streaming state to the next tool call.
 
@@ -349,33 +422,59 @@ class Qwen3CoderToolParser(ToolParser):
     def _structural_tool_call_end_positions(self, text: str) -> list[int]:
         """Return positions of every STRUCTURAL ``</tool_call>`` in text.
 
-        A naive ``text.count(</tool_call>)`` over-counts when a parameter
-        value embeds the literal string ``</tool_call>`` (e.g. a code-write
-        tool whose argument contains a tool-call example).  A real
-        ``</tool_call>`` matches at least one of:
-          - it is preceded (after optional whitespace) by ``</function>``,
-            i.e. it follows the standard tool-call template; or
-          - it is followed (after optional whitespace) by another
-            ``<tool_call>`` opener or end of string.
-        Either condition rules out a literal embedded in parameter content.
+        Walks each ``<tool_call>...</tool_call>`` top-level block by
+        following ``<function=NAME>``, scanning the body via
+        ``_scan_to_structural_function_end`` (which steps over parameter
+        values that may contain literal ``<tool_call>``, ``<function=...>``,
+        ``</function>`` or ``</tool_call>`` strings), then matching the
+        trailing ``</tool_call>``.
+
+        Falls back to a lookahead heuristic when the walker cannot
+        determine a structural close (incomplete body, malformed XML).
         """
         positions: list[int] = []
-        search_pos = 0
-        while True:
-            idx = text.find(self.tool_call_end_token, search_pos)
-            if idx == -1:
+        pos = 0
+        n = len(text)
+        while pos < n:
+            tc_start = text.find(self.tool_call_start_token, pos)
+            if tc_start == -1:
                 break
-            before = text[:idx].rstrip()
-            preceded_by_func = before.endswith(self.function_end_token)
-            after = text[idx + len(self.tool_call_end_token):]
-            stripped = after.lstrip()
-            followed_structurally = (
-                stripped == ""
-                or stripped.startswith(self.tool_call_start_token)
+            body_start = tc_start + len(self.tool_call_start_token)
+            func_open = text.find(self.tool_call_prefix, body_start)
+            if func_open == -1:
+                break
+            name_end = text.find(
+                ">", func_open + len(self.tool_call_prefix)
             )
-            if preceded_by_func or followed_structurally:
-                positions.append(idx)
-            search_pos = idx + len(self.tool_call_end_token)
+            if name_end == -1:
+                break
+            func_name = text[func_open + len(self.tool_call_prefix):name_end]
+            valid_params: set[str] | None = None
+            if self.tools:
+                cfg = find_tool_properties(self.tools, func_name)
+                if cfg:
+                    valid_params = set(cfg.keys())
+            body_after_name = text[name_end + 1:]
+            func_end_rel = self._scan_to_structural_function_end(
+                body_after_name, valid_params
+            )
+            if func_end_rel == -1:
+                # Body incomplete; the structural </tool_call> is not
+                # yet known.  Stop walking — DO NOT fall back to the
+                # legacy heuristic for the rest of the text, because a
+                # literal </tool_call> embedded in an unfinished
+                # parameter would be erroneously treated as structural.
+                break
+            func_end_abs = (name_end + 1) + func_end_rel
+            after = text[func_end_abs + len(self.function_end_token):]
+            i = 0
+            while i < len(after) and after[i] in " \t\n\r":
+                i += 1
+            if not after[i:].startswith(self.tool_call_end_token):
+                break
+            tc_end_pos = func_end_abs + len(self.function_end_token) + i
+            positions.append(tc_end_pos)
+            pos = tc_end_pos + len(self.tool_call_end_token)
         return positions
 
     def _find_true_param_end(
@@ -549,15 +648,35 @@ class Qwen3CoderToolParser(ToolParser):
         if len(raw_tool_calls) == 0:
             raw_tool_calls = [model_output]
 
-        # Use structural </function> boundary instead of a greedy regex so
-        # that '</function>' appearing as literal text inside a parameter
-        # value does not truncate the function body.
+        # Use a parameter-aware walk to find the structural </function>:
+        # when the value of a parameter embeds a complete literal
+        # ``<tool_call>...</function>\n</tool_call>`` block, the nested
+        # ``</function>`` is followed by ``</tool_call>`` and would pass
+        # the simple "followed by </tool_call>" lookahead.  Walking the
+        # body parameter-by-parameter with ``_find_true_param_end``
+        # correctly steps over the literal.
         function_calls: list[str] = []
         for tool_call in raw_tool_calls:
             func_start = tool_call.find(self.tool_call_prefix)
             if func_start == -1:
                 continue
             after_func_open = tool_call[func_start + len(self.tool_call_prefix):]
+            name_end = after_func_open.find(">")
+            valid_param_names: set[str] | None = None
+            body_start = 0
+            if name_end != -1:
+                func_name = after_func_open[:name_end]
+                cfg = find_tool_properties(self.tools, func_name)
+                if cfg:
+                    valid_param_names = set(cfg.keys())
+                body_start = name_end + 1
+            scan_end = self._scan_to_structural_function_end(
+                after_func_open[body_start:], valid_param_names
+            )
+            if scan_end != -1:
+                function_calls.append(after_func_open[:body_start + scan_end])
+                continue
+            # Fallback to legacy heuristic.
             func_end = self._find_true_function_end(after_func_open)
             if func_end == -1:
                 function_calls.append(after_func_open)
@@ -880,8 +999,34 @@ class Qwen3CoderToolParser(ToolParser):
                     require_lookahead=True,
                 )
                 if end_in_after == -1:
+                    # No structural ``</parameter>`` close yet.  A
+                    # legitimate "missing </parameter>" malformation —
+                    # the model jumps from ``<parameter=A>`` straight to
+                    # ``<parameter=B>`` — is recoverable: treat the
+                    # next structural ``<parameter=NAME>`` as implicit
+                    # end of the current param.  But only if NAME has
+                    # NOT already been parsed as a sibling param of this
+                    # tool call (and is not the param currently being
+                    # scanned).  A repeated NAME is almost always a
+                    # literal embedded in the unfinished value, not a
+                    # real next parameter.
+                    cand_name = (
+                        tool_text[
+                            param_start_pos + len(self.parameter_prefix)
+                            : name_end_pos
+                        ]
+                    )
+                    already_seen = (
+                        set(self.accumulated_params.keys())
+                        | ({cand_name} if cand_name else set())
+                    )
+                    unseen_valid: set[str] | None = (
+                        (valid_param_names - already_seen)
+                        if valid_param_names is not None
+                        else None
+                    )
                     implicit_end = self._next_structural_param_start(
-                        after_name_stripped, 0, valid_param_names
+                        after_name_stripped, 0, unseen_valid
                     )
                     if implicit_end != -1:
                         search_idx = (
@@ -890,6 +1035,7 @@ class Qwen3CoderToolParser(ToolParser):
                             + implicit_end
                         )
                     else:
+                        # Wait for more data.
                         break
                 else:
                     search_idx = (
@@ -927,27 +1073,67 @@ class Qwen3CoderToolParser(ToolParser):
                     value_text, valid_param_names, require_lookahead=True
                 )
                 if param_end_idx == -1:
-                    # Fallback for malformed/incomplete XML: a structural
-                    # <parameter= directly after \n acts as implicit end.
-                    next_param_idx = self._next_structural_param_start(
-                        value_text, 0, valid_param_names
-                    )
-                    # Use structural-aware search for </function> and
-                    # </tool_call> to avoid cutting the parameter at XML
-                    # tags that appear as literal text inside the
-                    # parameter value.
-                    func_end_idx = self._find_true_function_end(value_text)
-                    tool_end_in_value = self._find_true_tool_call_end(value_text)
+                    # Confirm via the parameter-aware walker that the
+                    # function body is truly complete.  The legacy
+                    # ``_find_true_function_end`` matches a ``</function>``
+                    # at end-of-buffer (lstripped lookahead == ""), which
+                    # is wrong in streaming when the literal close of a
+                    # nested tool_call inside a parameter value sits at
+                    # the buffer's end.  Walking the body via
+                    # ``_scan_to_structural_function_end`` correctly
+                    # steps over literal tags inside parameter values
+                    # and returns -1 if any param is still open.
+                    tc_open_in_tool = tool_text.find(self.tool_call_prefix)
+                    body_func_end_in_value = -1
+                    if tc_open_in_tool != -1:
+                        name_end_in_tool = tool_text.find(
+                            ">", tc_open_in_tool + len(self.tool_call_prefix)
+                        )
+                        if name_end_in_tool != -1:
+                            body_after_name = tool_text[name_end_in_tool + 1:]
+                            body_func_end_rel = (
+                                self._scan_to_structural_function_end(
+                                    body_after_name, valid_param_names
+                                )
+                            )
+                            if body_func_end_rel != -1:
+                                body_func_end_abs = (
+                                    name_end_in_tool + 1 + body_func_end_rel
+                                )
+                                body_func_end_in_value = (
+                                    body_func_end_abs - value_start
+                                )
 
-                    if next_param_idx != -1 and (
-                        func_end_idx == -1 or next_param_idx < func_end_idx
-                    ):
-                        param_end_idx = next_param_idx
-                    elif func_end_idx != -1:
-                        param_end_idx = func_end_idx
-                    elif tool_end_in_value != -1:
-                        param_end_idx = tool_end_in_value
+                    if body_func_end_in_value > 0:
+                        # Function body is structurally complete; the
+                        # current param has missing </parameter>.  Use
+                        # the next legitimate <parameter=NAME> (NAME
+                        # unseen) before the structural </function> as
+                        # the implicit end.
+                        already_seen = (
+                            set(self.accumulated_params.keys())
+                            | ({current_param_name} if current_param_name else set())
+                        )
+                        unseen_valid: set[str] | None = (
+                            (valid_param_names - already_seen)
+                            if valid_param_names is not None
+                            else None
+                        )
+                        next_param_idx = self._next_structural_param_start(
+                            value_text, 0, unseen_valid
+                        )
+                        if (
+                            next_param_idx != -1
+                            and next_param_idx < body_func_end_in_value
+                        ):
+                            param_end_idx = next_param_idx
+                        else:
+                            param_end_idx = body_func_end_in_value
                     else:
+                        # Body not yet complete — wait for more data.
+                        # Do NOT truncate at a literal </function> or
+                        # </tool_call> that may sit inside a still-open
+                        # parameter value.
                         break
 
                 if param_end_idx == -1:
@@ -1000,10 +1186,26 @@ class Qwen3CoderToolParser(ToolParser):
             # </function>. If the close check ran first it would emit
             # "}" and set in_function=False before the parameter loop
             # ever ran, causing the parameter to be silently dropped.
-            # Use structural-aware search so a literal '</function>'
-            # inside a parameter value does not trigger a premature
+            # Use the parameter-aware walker so a literal '</function>'
+            # inside a parameter value (e.g. a content arg embedding a
+            # complete nested tool_call) does not trigger a premature
             # close.
-            true_func_end = self._find_true_function_end(tool_text)
+            true_func_end = -1
+            tc_open_in_tool_for_close = tool_text.find(self.tool_call_prefix)
+            if tc_open_in_tool_for_close != -1:
+                name_end_in_tool = tool_text.find(
+                    ">",
+                    tc_open_in_tool_for_close + len(self.tool_call_prefix),
+                )
+                if name_end_in_tool != -1:
+                    body_after_name = tool_text[name_end_in_tool + 1:]
+                    body_func_end_rel = self._scan_to_structural_function_end(
+                        body_after_name, valid_param_names
+                    )
+                    if body_func_end_rel != -1:
+                        true_func_end = (
+                            name_end_in_tool + 1 + body_func_end_rel
+                        )
             if not self.json_closed and true_func_end != -1:
                 self.json_closed = True
 

@@ -279,6 +279,107 @@ def test_extract_tool_calls_streaming_split_tag(qwen3_tool_parser):
         assert "_call>" not in msg2.content
 
 
+def test_streaming_char_by_char_literal_balises_in_value(qwen3_tokenizer):
+    """Stress test: a WriteFile tool call whose ``content`` value embeds a
+    complete literal ``<tool_call>...</tool_call>`` block — including
+    ``<parameter=path>...</parameter>`` and ``<parameter=content>...
+    </parameter>`` with names that match the OUTER tool's schema —
+    streamed one character at a time.
+
+    Reproduces the qwen-code scenario where the model writes a parser
+    fixture file: every literal ``<tool_call>``, ``<function=...>``,
+    ``<parameter=NAME>``, ``</parameter>``, ``</function>`` and
+    ``</tool_call>`` inside the ``content`` value must stay inside the
+    value; no spurious second tool call, no value truncation.
+    """
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    nested_content = (
+        'doc = """\n'
+        "<tool_call>\n"
+        "<function=write_file>\n"
+        "<parameter=path>\nliteral/value.txt\n</parameter>\n"
+        "<parameter=content>\nhello\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>\n"
+        '"""\n'
+    )
+
+    full_output = (
+        "<tool_call>\n"
+        "<function=write_file>\n"
+        "<parameter=path>\nfixture.py\n</parameter>\n"
+        f"<parameter=content>\n{nested_content}</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    tool_states: dict[int, dict] = {}
+    current_text = ""
+    previous_text = ""
+    for ch in full_output:
+        previous_text = current_text
+        current_text += ch
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=ch,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        if delta_message and delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                state = tool_states.setdefault(
+                    idx, {"id": None, "name": None, "arguments": ""}
+                )
+                if tool_call.id:
+                    state["id"] = tool_call.id
+                if tool_call.function:
+                    if tool_call.function.name:
+                        state["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        state["arguments"] += tool_call.function.arguments
+
+    assert list(tool_states.keys()) == [0], (
+        f"Expected exactly one tool call; got indices "
+        f"{list(tool_states.keys())} — a literal nested <tool_call> "
+        f"was promoted to a real call."
+    )
+    state = tool_states[0]
+    assert state["name"] == "write_file"
+    args = json.loads(state["arguments"])
+    assert list(args.keys()) == ["path", "content"], (
+        f"Spurious params from embedded literals: {list(args.keys())}"
+    )
+    assert args["path"] == "fixture.py"
+    assert args["content"] == nested_content.rstrip("\n"), (
+        f"content was truncated/corrupted: {args.get('content')!r}"
+    )
+
+
 def test_extract_tool_calls_streaming_various_chunk_sizes(
     qwen3_tokenizer,
 ):
