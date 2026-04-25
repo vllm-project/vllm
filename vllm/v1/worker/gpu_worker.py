@@ -38,12 +38,16 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.model_executor.warmup.kernel_warmup import (
+    flashinfer_autotune,
+    kernel_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import is_quantized_kv_cache, set_random_seed
@@ -359,6 +363,7 @@ class Worker(WorkerBase):
                 "correspondingly."
             )
             logger.info(msg)
+            self._maybe_flashinfer_autotune_early()
             return kv_cache_memory_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -481,7 +486,43 @@ class Worker(WorkerBase):
                     suggested_util,
                 )
 
+        self._maybe_flashinfer_autotune_early()
         return int(self.available_kv_cache_memory_bytes)
+
+    def _maybe_flashinfer_autotune_early(self) -> None:
+        """Run FlashInfer autotuning while KV cache is not yet allocated.
+
+        The FlashInfer autotuner benchmarks many kernel tactics, each of which
+        allocates temporary workspace buffers.  When autotuning runs *after*
+        KV cache allocation (the previous behavior), these workspace buffers
+        compete with the KV cache for GPU memory and frequently OOM — causing
+        the autotuner to silently fall back to the default (untuned) tactic.
+
+        By running autotuning here — after model weights are loaded and memory
+        profiling is done, but *before* KV cache is allocated — the autotuner
+        has access to the full free GPU memory and can successfully benchmark
+        all candidate tactics.  The tuning results are cached in FlashInfer's
+        singleton AutoTuner and persist for the lifetime of the process, so
+        the later kernel_warmup() call will skip the redundant autotuning.
+        """
+        enable_flashinfer_autotune = (
+            self.vllm_config.kernel_config.enable_flashinfer_autotune
+        )
+        if enable_flashinfer_autotune is False:
+            return
+        if not (has_flashinfer() and current_platform.has_device_capability(90)):
+            return
+
+        logger.info(
+            "Running FlashInfer autotuning early (before KV cache allocation) "
+            "to avoid autotuner OOM."
+        )
+        flashinfer_autotune(self.model_runner)
+        # Free any transient memory the autotuner allocated.
+        torch.accelerator.empty_cache()
+        # Mark that early autotuning completed so kernel_warmup() skips
+        # the redundant (and potentially OOM-prone) second autotuning call.
+        self._did_flashinfer_autotune_early = True
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
