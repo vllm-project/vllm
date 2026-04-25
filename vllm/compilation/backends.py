@@ -23,6 +23,10 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
+from vllm.compilation.codegen import (
+    compile_execution_fn,
+    generate_execution_code,
+)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -265,6 +269,7 @@ class CompilerManager:
         compile_range: Range,
         graph_index: int = 0,
         num_graphs: int = 1,
+        is_encoder: bool = False,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -282,13 +287,11 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
                     str(compile_range),
                     elapsed,
-                    scope="local",
                 )
             return compiled_graph
 
@@ -373,7 +376,6 @@ class CompilerManager:
                 logger.info_once(
                     "Cache the graph of compile range %s for later use",
                     str(compile_range),
-                    scope="local",
                 )
             logger.debug_once(
                 "Store the %s-th graph for compile range%s from %s via handle %s",
@@ -381,18 +383,15 @@ class CompilerManager:
                 str(compile_range),
                 self.compiler.name,
                 handle,
-                scope="local",
             )
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
                 elapsed,
-                scope="local",
             )
 
         return compiled_graph
@@ -1065,12 +1064,11 @@ class VllmBackend:
         disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
-            logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
+            logger.info_once("vLLM's torch.compile cache is disabled.")
         else:
             logger.info_once(
                 "Using cache directory: %s for vLLM's torch.compile",
                 local_cache_dir,
-                scope="local",
             )
 
         self.compiler_manager.initialize_cache(
@@ -1128,9 +1126,9 @@ class VllmBackend:
 
         dynamo_time = time.perf_counter() - torch_compile_start_time
         logger.info_once(
-            "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
+            "Dynamo bytecode transform time: %.2f s",
+            dynamo_time,
         )
-        self.compilation_config.compilation_time += dynamo_time
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
@@ -1205,7 +1203,6 @@ class VllmBackend:
             logger.info_once(
                 "Saved compiler manager cache in %.2f seconds.",
                 elapsed,
-                scope="local",
             )
 
         from torch._guards import detect_fake_mode
@@ -1244,13 +1241,23 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug_once(
-                "Computation graph saved to %s", graph_path, scope="local"
-            )
+            logger.debug_once("Computation graph saved to %s", graph_path)
 
         self._called = True
         graph_to_serialize = (
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
+        )
+
+        execution_code, submod_names = generate_execution_code(self.split_gm)
+        # Use getattr to get correct callables: __dict__ has PiecewiseBackend
+        # instances (from PiecewiseCompileInterpreter), _modules has originals.
+        # getattr checks __dict__ first, then falls back to _modules.
+        submod_callables = {
+            name: getattr(self.split_gm, name)
+            for name, _ in self.split_gm.named_children()
+        }
+        runtime_callable = compile_execution_fn(
+            execution_code, submod_callables, submod_names
         )
 
         if (
@@ -1261,9 +1268,11 @@ class VllmBackend:
                 graph_to_serialize,
                 example_inputs,
                 self.prefix,
-                self.split_gm,
+                runtime_callable,
                 is_encoder=self.is_encoder,
                 vllm_backend=self,
+                execution_code=execution_code,
+                submod_names=submod_names,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1284,7 +1293,7 @@ class VllmBackend:
         copy_and_call = make_copy_and_call(
             sym_tensor_indices,
             [example_inputs[x].clone() for x in sym_tensor_indices],
-            self.split_gm,
+            runtime_callable,
         )
 
         return VllmSerializableFunction(
@@ -1295,4 +1304,6 @@ class VllmBackend:
             is_encoder=self.is_encoder,
             vllm_backend=self,
             sym_tensor_indices=sym_tensor_indices,
+            execution_code=execution_code,
+            submod_names=submod_names,
         )

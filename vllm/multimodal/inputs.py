@@ -145,14 +145,15 @@ class PlaceholderRange:
     """
 
     @cached_property
-    def embeds_cumsum(self) -> torch.Tensor | None:
-        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
+    def embeds_cumsum(self) -> list[int] | None:
+        # python list so python indexing avoids torch C++ overhead/conversions/deallocs
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0).tolist()
 
     def get_num_embeds(self) -> int:
         if self.embeds_cumsum is None:
             return self.length
 
-        return int(self.embeds_cumsum[-1])
+        return self.embeds_cumsum[-1] if self.embeds_cumsum else 0
 
     def get_embeds_indices_in_range(
         self, start_idx: int, end_idx: int
@@ -170,10 +171,8 @@ class PlaceholderRange:
         if self.embeds_cumsum is None:
             return start_idx, end_idx
 
-        embeds_start_idx = (
-            int(self.embeds_cumsum[start_idx - 1]) if start_idx > 0 else 0
-        )
-        embeds_end_idx = int(self.embeds_cumsum[end_idx - 1])
+        embeds_start_idx = self.embeds_cumsum[start_idx - 1] if start_idx > 0 else 0
+        embeds_end_idx = self.embeds_cumsum[end_idx - 1] if end_idx > 0 else 0
 
         return embeds_start_idx, embeds_end_idx
 

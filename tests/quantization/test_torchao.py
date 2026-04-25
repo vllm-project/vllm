@@ -8,6 +8,7 @@ import torch
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
@@ -33,7 +34,7 @@ def test_pre_quantized_model(vllm_runner):
 @pytest.mark.parametrize(
     "pt_load_map_location",
     [
-        "cuda:0",
+        f"{DEVICE_TYPE}:0",
         # {"": "cuda"},
     ],
 )
@@ -60,7 +61,7 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
         model_name=model_name,
         quantization="torchao",
         dtype="bfloat16",
-        pt_load_map_location="cuda:0",
+        pt_load_map_location=f"{DEVICE_TYPE}:0",
         enforce_eager=True,
     ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
@@ -81,7 +82,7 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
         model_name=model_name,
         quantization="torchao",
         dtype="bfloat16",
-        pt_load_map_location="cuda:0",
+        pt_load_map_location=f"{DEVICE_TYPE}:0",
     ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
@@ -112,7 +113,7 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     with vllm_runner(
         model_name=model_name,
         dtype="bfloat16",
-        pt_load_map_location="cuda:0",
+        pt_load_map_location=f"{DEVICE_TYPE}:0",
         quantization="torchao",
         hf_overrides=hf_overrides,
         enforce_eager=True,
@@ -158,7 +159,7 @@ def test_online_quant_config_file(vllm_runner):
         with vllm_runner(
             model_name=model_name,
             dtype="bfloat16",
-            pt_load_map_location="cuda:0",
+            pt_load_map_location=f"{DEVICE_TYPE}:0",
             quantization="torchao",
             hf_overrides=hf_overrides,
             enforce_eager=True,
@@ -248,7 +249,7 @@ def test_opt_125m_module_fqn_to_config_regex_model(vllm_runner):
     torch._dynamo.reset()
     model_name = "torchao-testing/opt-125m-ModuleFqnToConfig-v1-regex-0.14.0.dev"
     with vllm_runner(
-        model_name=model_name, dtype="bfloat16", pt_load_map_location="cuda:0"
+        model_name=model_name, dtype="bfloat16", pt_load_map_location=f"{DEVICE_TYPE}:0"
     ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
@@ -278,7 +279,7 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel(vllm_runner, monkeypat
         model_name=model_name,
         quantization="torchao",
         dtype="bfloat16",
-        pt_load_map_location="cuda:0",
+        pt_load_map_location=f"{DEVICE_TYPE}:0",
         enforce_eager=True,
     ) as llm:
 
@@ -357,7 +358,7 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         model_name=model_name,
         quantization="torchao",
         dtype="bfloat16",
-        pt_load_map_location="cuda:0",
+        pt_load_map_location=f"{DEVICE_TYPE}:0",
         hf_overrides=hf_overrides,
         enforce_eager=True,
     ) as llm:

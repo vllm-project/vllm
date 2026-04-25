@@ -193,6 +193,9 @@ class MultiModalRegistry:
         ctx = self._create_processing_ctx(model_config, tokenizer)
         return factories.info(ctx)
 
+    def get_processing_info(self, model_config: "ModelConfig") -> BaseProcessingInfo:
+        return self._create_processing_info(model_config, tokenizer=None)
+
     def create_processor(
         self,
         model_config: "ModelConfig",

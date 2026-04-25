@@ -397,8 +397,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert not self.act_q_static
 
-            self.fp8_linear.process_weights_after_loading(layer)
-
         # If checkpoint not serialized fp8, quantize the weights.
         else:
             # If checkpoint is fp8 per-tensor, handle that there are N scales for N
@@ -427,6 +425,8 @@ class Fp8LinearMethod(LinearMethodBase):
             replace_parameter(layer, "input_scale", input_scale)
         else:
             layer.input_scale = None
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -514,14 +514,6 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.register_parameter("weight", weight)
 
         initialize_online_processing(layer)
-
-        # TODO: remove this check once the following RFC is resolved.
-        # https://github.com/vllm-project/vllm/issues/33314
-        # Subclasses (e.g. Mxfp8OnlineLinearMethod) only need the weight
-        # registration above and manage their own kernel, so skip fp8_linear
-        # kernel creation for them.
-        if type(self) is not Fp8OnlineLinearMethod:
-            return
 
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
@@ -1026,10 +1018,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
-
-        if current_platform.is_xpu():
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(

@@ -85,6 +85,14 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_null_value(self):
+        # Bare `null` must parse as None (Python), not the string "null".
+        # Without this, tool_choice=auto would emit `{"param": "null"}`
+        # instead of `{"param": null}` for nullable tool parameters.
+        result = _parse_gemma4_args("param:null")
+        assert result == {"param": None}
+        assert json.dumps(result) == '{"param": null}'
+
     def test_mixed_types(self):
         result = _parse_gemma4_args(
             'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
