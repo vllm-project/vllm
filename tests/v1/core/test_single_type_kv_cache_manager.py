@@ -41,6 +41,76 @@ def get_chunked_local_attention_manager(
     )
 
 
+def find_sliding_window_cache_hit_reference(
+    block_hashes,
+    max_length,
+    kv_cache_group_ids,
+    block_pool,
+    kv_cache_spec,
+    use_eagle,
+    alignment_tokens,
+):
+    sliding_window_contiguous_blocks = (
+        kv_cache_spec.sliding_window - 1 + kv_cache_spec.block_size - 1
+    ) // kv_cache_spec.block_size
+    if use_eagle:
+        sliding_window_contiguous_blocks += 1
+
+    max_num_blocks = max_length // kv_cache_spec.block_size
+    computed_blocks = tuple(
+        [block_pool.null_block] * max_num_blocks
+        for _ in range(len(kv_cache_group_ids))
+    )
+    block_size = kv_cache_spec.block_size
+    num_contiguous_blocks = 0
+    match_found = False
+    for i in range(max_num_blocks - 1, -1, -1):
+        if cached_block := block_pool.get_cached_block(
+            block_hashes[i], kv_cache_group_ids
+        ):
+            if (
+                num_contiguous_blocks == 0
+                and block_size != alignment_tokens
+                and (i + 1) * block_size % alignment_tokens != 0
+            ):
+                continue
+            for computed, cached in zip(computed_blocks, cached_block):
+                computed[i] = cached
+            num_contiguous_blocks += 1
+            if num_contiguous_blocks >= sliding_window_contiguous_blocks:
+                for computed in computed_blocks:
+                    del computed[i + num_contiguous_blocks :]
+                match_found = True
+                break
+        else:
+            num_contiguous_blocks = 0
+    if not match_found:
+        for computed in computed_blocks:
+            del computed[num_contiguous_blocks:]
+        while (
+            block_size != alignment_tokens
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
+            for computed in computed_blocks:
+                computed.pop()
+    if use_eagle and computed_blocks[0]:
+        for computed in computed_blocks:
+            computed.pop()
+        while (
+            block_size != alignment_tokens
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
+            for computed in computed_blocks:
+                computed.pop()
+    return computed_blocks
+
+
+def block_ids_by_group(computed_blocks):
+    return tuple(
+        tuple(block.block_id for block in blocks) for blocks in computed_blocks
+    )
+
+
 def test_chunked_local_attention_possible_cached_prefix():
     block_size = 2
     chunked_local_attention_spec = ChunkedLocalAttentionSpec(
@@ -183,6 +253,89 @@ def test_sliding_window_possible_cached_prefix():
         [True, True, False, True, False, False, True, True, False, False, False, True],
         8,
     )
+
+
+def test_sliding_window_cache_hit_matches_reference():
+    rng = random.Random(0)
+    kv_cache_group_ids = [0, 1]
+    explicit_patterns = [
+        [],
+        [False],
+        [True],
+        [True, False],
+        [True, True],
+        [False, True],
+        [False, True, True],
+        [True, True, False, True],
+        [False, False, True, True, False, True, True, True],
+        [True, True, False, True, False, False, True, True, False, True],
+    ]
+    random_patterns = [
+        [rng.random() < hit_rate for _ in range(rng.randint(0, 48))]
+        for hit_rate in (0.0, 0.05, 0.2, 0.5, 0.9, 1.0)
+        for _ in range(20)
+    ]
+
+    for block_size, sliding_window, alignment_tokens, use_eagle in [
+        (2, 1, 2, False),
+        (2, 1, 2, True),
+        (2, 4, 2, False),
+        (2, 4, 2, True),
+        (2, 6, 4, False),
+        (2, 6, 4, True),
+        (3, 7, 6, False),
+        (3, 7, 6, True),
+    ]:
+        sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=sliding_window,
+        )
+        block_pool = BlockPool(
+            num_gpu_blocks=1000, enable_caching=True, hash_block_size=block_size
+        )
+
+        for block_is_cached in explicit_patterns + random_patterns:
+            block_hash_list = [
+                BlockHash(str(i).encode()) for i in range(len(block_is_cached))
+            ]
+            for max_num_blocks in range(len(block_is_cached) + 1):
+                block_pool.cached_block_hash_to_block._cache.clear()
+                for i, (block_hash, is_cached) in enumerate(
+                    zip(block_hash_list, block_is_cached)
+                ):
+                    if is_cached:
+                        for group_id in kv_cache_group_ids:
+                            block_pool.cached_block_hash_to_block.insert(
+                                make_block_hash_with_group_id(block_hash, group_id),
+                                block_pool.blocks[
+                                    1 + i * len(kv_cache_group_ids) + group_id
+                                ],
+                            )
+
+                max_length = max_num_blocks * block_size
+                expected = find_sliding_window_cache_hit_reference(
+                    block_hashes=block_hash_list,
+                    max_length=max_length,
+                    kv_cache_group_ids=kv_cache_group_ids,
+                    block_pool=block_pool,
+                    kv_cache_spec=sliding_window_spec,
+                    use_eagle=use_eagle,
+                    alignment_tokens=alignment_tokens,
+                )
+                actual = SlidingWindowManager.find_longest_cache_hit(
+                    block_hashes=block_hash_list,
+                    max_length=max_length,
+                    kv_cache_group_ids=kv_cache_group_ids,
+                    block_pool=block_pool,
+                    kv_cache_spec=sliding_window_spec,
+                    use_eagle=use_eagle,
+                    alignment_tokens=alignment_tokens,
+                )
+
+                assert block_ids_by_group(actual) == block_ids_by_group(expected)
 
 
 def test_chunked_local_attention_remove_skipped_blocks():

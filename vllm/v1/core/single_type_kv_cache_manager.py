@@ -514,49 +514,149 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # the last matched block.
             sliding_window_contiguous_blocks += 1
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
-        num_contiguous_blocks = 0
-        match_found = False
-        # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
-            ):
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
+
+        if sliding_window_contiguous_blocks <= 0:
+            for i in range(max_num_blocks - 1, -1, -1):
+                cached_block = block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids
+                )
+                if cached_block is None:
+                    continue
                 if (
-                    num_contiguous_blocks == 0
-                    and block_size != alignment_tokens  # Faster for common case.
+                    block_size != alignment_tokens
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
-                # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
-                num_contiguous_blocks += 1
-                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    for computed in computed_blocks:
-                        del computed[i + num_contiguous_blocks :]
-                    match_found = True
-                    break
+                for computed in computed_blocks:
+                    del computed[i + 1 :]
+                break
             else:
-                num_contiguous_blocks = 0
+                for computed in computed_blocks:
+                    del computed[:]
+
+            if use_eagle and computed_blocks[0]:
+                for computed in computed_blocks:
+                    computed.pop()
+                while (
+                    block_size != alignment_tokens
+                    and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+                ):
+                    for computed in computed_blocks:
+                        computed.pop()
+            return computed_blocks
+
+        def get_prev_aligned_index(index: int) -> int:
+            if block_size == alignment_tokens:
+                return index
+            while index >= 0 and (index + 1) * block_size % alignment_tokens != 0:
+                index -= 1
+            return index
+
+        match_found = False
+
+        cached_blocks_by_idx: dict[int, list[KVCacheBlock] | None] = {}
+        cache_miss = object()
+
+        def get_cached_blocks(index: int) -> list[KVCacheBlock] | None:
+            cached_blocks = cached_blocks_by_idx.get(index, cache_miss)
+            if cached_blocks is cache_miss:
+                cached_blocks = block_pool.get_cached_block(
+                    block_hashes[index], kv_cache_group_ids
+                )
+                cached_blocks_by_idx[index] = cached_blocks
+            return cached_blocks
+
+        # Any valid contiguous window of size W contains one of the anchors
+        # spaced W blocks apart. Search anchors from right to left; on a miss,
+        # every window containing that anchor is impossible and can be skipped.
+        end = get_prev_aligned_index(max_num_blocks - 1)
+        anchor = end
+        if end >= sliding_window_contiguous_blocks - 1:
+            start = end - sliding_window_contiguous_blocks + 1
+            cached_window: list[list[KVCacheBlock]] = []
+            miss_index = -1
+            for i in range(end, start - 1, -1):
+                cached_block = block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids
+                )
+                if cached_block is None:
+                    miss_index = i
+                    break
+                cached_window.append(cached_block)
+
+            if len(cached_window) >= sliding_window_contiguous_blocks:
+                for i, cached_block in zip(
+                    range(end, start - 1, -1), cached_window
+                ):
+                    for computed, cached in zip(computed_blocks, cached_block):
+                        computed[i] = cached
+                for computed in computed_blocks:
+                    del computed[end + 1 :]
+                match_found = True
+            else:
+                anchor = get_prev_aligned_index(miss_index - 1)
+
+        while not match_found and anchor >= 0:
+            if get_cached_blocks(anchor) is None:
+                anchor -= sliding_window_contiguous_blocks
+                continue
+
+            right = anchor
+            max_right = min(
+                max_num_blocks - 1, anchor + sliding_window_contiguous_blocks - 1
+            )
+            while right < max_right and get_cached_blocks(right + 1) is not None:
+                right += 1
+
+            end = get_prev_aligned_index(right)
+            if end < anchor:
+                anchor -= sliding_window_contiguous_blocks
+                continue
+            start = end - sliding_window_contiguous_blocks + 1
+            if start < 0:
+                anchor -= sliding_window_contiguous_blocks
+                continue
+            left = anchor
+            while left > start and get_cached_blocks(left - 1) is not None:
+                left -= 1
+
+            if left <= start:
+                for i in range(start, end + 1):
+                    cached_block = get_cached_blocks(i)
+                    assert cached_block is not None
+                    for computed, cached in zip(computed_blocks, cached_block):
+                        computed[i] = cached
+
+                # Trim the trailing blocks.
+                # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+                # when sliding_window_contiguous_blocks=2.
+                for computed in computed_blocks:
+                    del computed[end + 1 :]
+                match_found = True
+                break
+
+            anchor -= sliding_window_contiguous_blocks
+
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+            num_contiguous_blocks = 0
+            for i in range(max_num_blocks):
+                cached_block = get_cached_blocks(i)
+                if cached_block is None:
+                    break
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed[i] = cached
+                num_contiguous_blocks += 1
+
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
             while (
