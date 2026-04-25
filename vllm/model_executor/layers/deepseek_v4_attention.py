@@ -711,6 +711,10 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.aux_stream = aux_stream
         self.ln_events = [torch.cuda.Event(), torch.cuda.Event()]
 
+        # AITER MLA decode scratch buffers (lazy-init on first call)
+        self._aiter_scratch: "AiterSparseScratch | None" = None
+        self._aiter_extra_scratch: "AiterSparseScratch | None" = None
+
         # Determine padded head count for FlashMLA
         if num_heads not in self.SUPPORTED_HEAD_COUNTS:
             if num_heads < 64:
@@ -887,17 +891,32 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_lens = swa_metadata.decode_swa_lens
 
         if current_platform.is_rocm():
-            self._forward_decode_fallback(
-                q=q,
-                kv_cache=kv_cache,
-                swa_metadata=swa_metadata,
-                swa_only=swa_only,
-                topk_indices=topk_indices,
-                topk_lens=topk_lens,
-                swa_indices=swa_indices,
-                swa_lens=swa_lens,
-                output=output,
+            from vllm.v1.attention.ops.rocm_aiter_dsv4_decode import (
+                is_aiter_dsv4_decode_enabled,
             )
+            if is_aiter_dsv4_decode_enabled():
+                self._forward_decode_aiter(
+                    q=q,
+                    kv_cache=kv_cache,
+                    swa_only=swa_only,
+                    topk_indices=topk_indices,
+                    topk_lens=topk_lens,
+                    swa_indices=swa_indices,
+                    swa_lens=swa_lens,
+                    output=output,
+                )
+            else:
+                self._forward_decode_fallback(
+                    q=q,
+                    kv_cache=kv_cache,
+                    swa_metadata=swa_metadata,
+                    swa_only=swa_only,
+                    topk_indices=topk_indices,
+                    topk_lens=topk_lens,
+                    swa_indices=swa_indices,
+                    swa_lens=swa_lens,
+                    output=output,
+                )
             return
 
         # We treat queries in the same seq as different queries
@@ -1116,6 +1135,56 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         slot_ids = slot_ids.to(torch.int64)
         rows = cache[slot_ids // block_size, slot_ids % block_size]
         return self._dequantize_cache_rows(rows).reshape(-1, self.head_dim)
+
+    def _forward_decode_aiter(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor | None,
+        swa_only: bool,
+        topk_indices: torch.Tensor | None,
+        topk_lens: torch.Tensor | None,
+        swa_indices: torch.Tensor,
+        swa_lens: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """AITER-accelerated sparse MLA decode (ROCm/MI355X).
+
+        Uses aiter.mla.mla_decode_fwd with FP8 persistent-mode ASM kernels
+        for ~2-3x decode speedup over the torch reference at high batch sizes.
+        Gated by VLLM_ROCM_USE_AITER_MLA_DSV4_DECODE=1.
+        """
+        from vllm.v1.attention.ops.rocm_aiter_dsv4_decode import (
+            AiterSparseScratch,
+            aiter_sparse_attn_decode,
+        )
+
+        if self._aiter_scratch is None:
+            self._aiter_scratch = AiterSparseScratch()
+        if self._aiter_extra_scratch is None:
+            self._aiter_extra_scratch = AiterSparseScratch()
+
+        blocked_swa = self._dequantize_blocked_k_cache(
+            self.swa_cache_layer.kv_cache)
+        blocked_extra = (
+            None if swa_only
+            else self._dequantize_blocked_k_cache(kv_cache)
+        )
+
+        attn_out = aiter_sparse_attn_decode(
+            q=q.unsqueeze(1),
+            blocked_k=blocked_swa,
+            indices_in_kvcache=swa_indices.unsqueeze(1),
+            topk_length=swa_lens,
+            attn_sink=self.attn_sink[:q.shape[1]],
+            scale=self.scale,
+            head_dim=self.head_dim,
+            extra_blocked_k=blocked_extra,
+            extra_indices_in_kvcache=topk_indices,
+            extra_topk_length=topk_lens,
+            scratch=self._aiter_scratch,
+            extra_scratch=self._aiter_extra_scratch,
+        )
+        output.copy_(attn_out.to(output.dtype))
 
     def _forward_decode_fallback(
         self,
