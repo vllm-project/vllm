@@ -5,7 +5,7 @@ from argparse import ArgumentError
 
 import pytest
 
-from vllm.config import VllmConfig
+from vllm.config import MoEOffloadConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -62,6 +62,63 @@ def test_prefix_caching_xxhash_from_cli():
     args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash_cbor"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
+
+
+def test_moe_cpu_offload_flags_visible_and_defaulted():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    option_strings = {
+        option
+        for action in parser._actions
+        for option in action.option_strings
+    }
+
+    assert "--moe-cpu-offload" in option_strings
+    assert "--moe-gpu-limit" in option_strings
+    assert "--moe-active-expert-budget" in option_strings
+    assert "--moe-max-pipeline-depth" in option_strings
+
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.moe_cpu_offload is False
+    assert engine_args.moe_gpu_limit == 0.4
+    assert engine_args.moe_active_expert_budget == 2
+    assert engine_args.moe_max_pipeline_depth == 4
+
+    config = engine_args.create_engine_config()
+    assert isinstance(config.moe_offload_config, MoEOffloadConfig)
+    assert config.moe_offload_config.enabled is False
+    assert config.moe_offload_config.gpu_limit == 0.4
+    assert config.moe_offload_config.active_expert_budget == 2
+    assert config.moe_offload_config.max_pipeline_depth == 4
+
+
+def test_moe_cpu_offload_flags_parse_explicit_values():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([
+        "--moe-cpu-offload",
+        "--moe-gpu-limit", "0.35",
+        "--moe-active-expert-budget", "3",
+        "--moe-max-pipeline-depth", "8",
+    ])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    config = engine_args.create_engine_config()
+
+    assert engine_args.moe_cpu_offload is True
+    assert config.moe_offload_config.enabled is True
+    assert config.moe_offload_config.gpu_limit == 0.35
+    assert config.moe_offload_config.active_expert_budget == 3
+    assert config.moe_offload_config.max_pipeline_depth == 8
+
+
+def test_moe_offload_config_validates_ranges():
+    with pytest.raises(ValueError):
+        MoEOffloadConfig(gpu_limit=0)
+    with pytest.raises(ValueError):
+        MoEOffloadConfig(gpu_limit=1.1)
+    with pytest.raises(ValueError):
+        MoEOffloadConfig(active_expert_budget=0)
+    with pytest.raises(ValueError):
+        MoEOffloadConfig(max_pipeline_depth=0)
 
 
 def test_defaults_with_usage_context():
