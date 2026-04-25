@@ -519,6 +519,7 @@ class Worker(WorkerBase):
         )
         flashinfer_autotune(self.model_runner)
         # Free any transient memory the autotuner allocated.
+        gc.collect()
         torch.accelerator.empty_cache()
         # Mark that early autotuning completed so kernel_warmup() skips
         # the redundant (and potentially OOM-prone) second autotuning call.
