@@ -1,4 +1,4 @@
-# FEATURE: Simple MoE CPU Offload Mode for vLLM
+# FEATURE: MoE CPU Offload as Expert Paging for vLLM
 
 ## Summary
 
@@ -6,7 +6,20 @@ Add an optional MoE CPU offload mode to vLLM.
 
 This feature treats the GPU as an active-expert accelerator, not as the full model container.
 
-In normal inference, a large model often fails if the full model weights cannot fit into GPU memory. For sparse MoE models, this is wasteful because only a small subset of experts is active for a given token batch.
+The design is equivalent to virtual memory and page management for sparse MoE expert models:
+
+```text
+pinned CPU memory      = backing store / source of truth for all model weights
+GPU memory             = limited expert execution cache
+expert model           = page
+missing expert bucket  = page fault
+background pager       = page fault handler / prefetcher
+resident expert table  = page table
+cold expert eviction   = page replacement
+hot expert preload     = prefetch
+```
+
+In normal inference, a large model often fails if all model weights cannot fit into GPU memory. For sparse MoE models, this is wasteful because only a small subset of experts is active for a routed token batch.
 
 When `--moe-cpu-offload` is enabled:
 
@@ -16,7 +29,8 @@ When `--moe-cpu-offload` is enabled:
 - active expert weights are copied to GPU on demand,
 - inactive experts remain in pinned CPU memory,
 - routed tokens are bucketed by expert,
-- hot experts are preloaded progressively,
+- missing expert buckets are queued on CPU,
+- a background expert pager loads hot missing experts into GPU memory,
 - cold experts are evicted when GPU memory pressure increases,
 - active experts may also be executed stage by stage to avoid OOM.
 
@@ -112,40 +126,225 @@ Meaning: maximum number of MoE execution waves that may be planned or staged ahe
 
 This is the key latency-throughput tradeoff knob.
 
-A larger value allows the runtime to wait for more routed tokens and reuse loaded experts more efficiently.
+A larger value allows the runtime to hold more routed expert buckets in the CPU miss-bucket pipeline. This gives the expert pager a larger future-demand window and improves active expert reuse.
 
 A smaller value keeps behavior closer to normal vLLM latency-oriented execution.
 
-## Runtime Behavior
+## Virtual-Memory Analogy
 
-When `--moe-cpu-offload` is enabled, the runtime follows a router-first, bucketed-expert execution model.
+This feature treats MoE expert execution as a virtual-memory and page-management problem.
 
-Pinned CPU memory remains the source of truth for all model weights. GPU memory is used as an execution cache for the router, active experts, KV cache, activations, and temporary runtime buffers.
+Pinned CPU memory is the backing store and source of truth for all model weights.
 
-### Execution Flow
+GPU memory is a limited expert page cache.
 
-1. Batch incoming tokens using the normal vLLM batching path as much as possible.
-2. Run the router model first on GPU.
-3. Collect the routed expert id for each token.
-4. Aggregate routed tokens into expert buckets.
-5. Build an execution pipeline from these expert buckets.
-6. Bound the pipeline by `--moe-max-pipeline-depth`.
-7. Rank expert buckets by hotness.
-8. Progressively preload the hottest required expert weights from pinned CPU memory to GPU memory.
-9. Execute token buckets whose expert weights are resident on GPU.
-10. Reuse resident expert weights across as many queued bucket waves as possible.
-11. Track total GPU memory usage, including KV cache, router weights, active expert weights, activations, staging buffers, and temporary MoE workspace.
-12. When projected GPU memory usage exceeds the configured limit, retire cold experts from GPU memory.
-13. Cold expert retirement only removes the GPU cached copy. The pinned CPU source-of-truth copy remains unchanged.
-14. Continue loading hot experts, executing their buckets, and retiring cold experts until the batch or pipeline is complete.
+Each expert model is treated like a page.
 
-Initial hotness can be simple:
+When routed tokens require an expert that is not resident on GPU, the runtime records a missing expert bucket. This is equivalent to a page fault.
+
+A background expert pager reads the missing bucket queue, aggregates future demand, selects the hottest missing experts, and copies them from pinned CPU memory to GPU memory.
+
+The resident expert table acts like a page table. It records which expert pages are currently resident on GPU, which are loading, which are executing, and which can be evicted.
+
+Cold expert eviction is equivalent to page replacement. Eviction removes only the GPU cached copy; the pinned CPU source-of-truth copy remains valid.
+
+The CPU can hold a large missing bucket pipeline. This gives the pager visibility into future expert demand and enables hot-expert prefetch instead of purely reactive expert loading.
+
+The key idea is:
 
 ```text
-hotness = number of routed tokens for this expert
+The CPU miss-bucket pipeline is the future-demand window for GPU expert page management.
 ```
 
-Later, hotness can include recent reuse, queue age, and transfer cost.
+## Runtime Architecture: Router Loop + Expert Paging Loop
+
+When `--moe-cpu-offload` is enabled, the runtime uses two cooperating loops:
+
+1. a foreground routing/execution loop,
+2. a background expert paging loop.
+
+Pinned CPU memory is the source of truth for all model weights. GPU memory is the execution cache for the router, active experts, KV cache, activations, and runtime buffers.
+
+## Startup
+
+At startup:
+
+1. Load all model weights into pinned CPU memory.
+2. Copy the router model path to GPU.
+3. Preload a small number of initially hot expert models to GPU.
+4. Initialize the resident expert table.
+5. Initialize the missing bucket queue.
+6. Start the background expert paging thread.
+
+The number of preloaded experts is bounded by:
+
+```text
+--moe-active-expert-budget
+```
+
+The total GPU memory usage is bounded by:
+
+```text
+--moe-gpu-limit
+```
+
+## Foreground Loop: Router and Resident Expert Execution
+
+The foreground loop is responsible for normal inference progress.
+
+```text
+loop:
+    batch tokens
+    run router on GPU
+    build token-to-expert buckets
+    sync compact bucket metadata to CPU
+    dispatch buckets whose experts are already resident on GPU
+    enqueue missing expert buckets into the CPU miss-bucket queue
+    execute resident expert buckets on GPU
+    update expert usage stats
+```
+
+### Router Compute
+
+The router model runs on GPU.
+
+It produces compact routing metadata:
+
+```text
+token_index -> expert_id(s), routing_score(s)
+```
+
+The token hidden states stay on GPU.
+
+Only routing metadata and bucket metadata are synchronized back to CPU. The system must not move full hidden-state tensors back to CPU for scheduling.
+
+### Bucket Construction
+
+The runtime groups routed tokens by expert:
+
+```text
+expert_id -> token_indices, routing_scores
+```
+
+The CPU-side bucket is a schedule, not a tensor container.
+
+The actual token hidden states remain on GPU and are later indexed by token id when the resident expert executes.
+
+### Resident Expert Dispatch
+
+The CPU checks the resident expert table.
+
+If an expert is already resident on GPU, its bucket can be dispatched immediately:
+
+```text
+if expert_id in resident_experts:
+    dispatch bucket to GPU executor
+else:
+    enqueue bucket into missing_bucket_queue
+```
+
+### Missing Bucket Queue
+
+Buckets whose experts are not resident on GPU are placed into a CPU-side missing bucket queue.
+
+The missing bucket queue is the demand signal for the background paging loop.
+
+Each missing bucket should contain metadata such as:
+
+```python
+class MissingExpertBucket:
+    layer_id: int
+    expert_id: int
+    token_indices: list[int]
+    routing_scores: list[float]
+    token_count: int
+    enqueue_step: int
+    enqueue_time: float
+```
+
+The queue should aggregate repeated misses for the same expert when possible.
+
+## Background Loop: Expert Paging Thread
+
+A separate background thread manages CPU-to-GPU expert movement.
+
+```text
+loop:
+    inspect missing_bucket_queue
+    aggregate demand by expert
+    rank missing experts by hotness
+    choose the hottest expert to load next
+    check GPU memory pressure
+    evict cold resident experts if needed
+    copy hot expert weights from pinned CPU memory to GPU
+    update resident_expert_table
+    notify foreground loop that new buckets are executable
+```
+
+This loop is similar to page management.
+
+Pinned CPU memory is like backing storage. GPU memory is like a limited page cache. Experts are the pages.
+
+## Hot Expert Selection
+
+The paging thread chooses which missing expert to load based on queue demand.
+
+The first version can use:
+
+```text
+hotness(expert) = number of queued tokens waiting for this expert
+```
+
+A better version can use:
+
+```text
+hotness(expert) =
+    queued_token_count
+  + queue_age_bonus
+  + recent_reuse_bonus
+  - load_cost_penalty
+```
+
+Where:
+
+- `queued_token_count` means how many tokens are blocked waiting for this expert,
+- `queue_age_bonus` prevents starvation,
+- `recent_reuse_bonus` keeps recently hot experts resident longer,
+- `load_cost_penalty` discourages loading a large expert for a tiny bucket.
+
+The background pager should prioritize experts that maximize:
+
+```text
+tokens computed per expert load
+```
+
+and minimize:
+
+```text
+expert bytes moved per generated token
+```
+
+## Resident Expert Table
+
+The runtime maintains a CPU-side table describing GPU expert residency:
+
+```python
+class ResidentExpertEntry:
+    layer_id: int
+    expert_id: int
+    gpu_slot_id: int
+    weight_bytes: int
+    loaded_step: int
+    last_used_step: int
+    recent_token_count: int
+    state: Literal["loading", "resident", "executing", "evicting"]
+```
+
+The foreground loop reads this table to decide whether a bucket can run immediately.
+
+The paging loop updates this table when experts are loaded or evicted.
+
+This table must be thread-safe.
 
 ## Expert Cache Policy
 
@@ -162,20 +361,56 @@ The GPU expert cache is controlled by two limits:
 
 When a new expert must be loaded and there is not enough GPU memory, the runtime evicts cold experts.
 
-A cold expert is an expert that:
+A cold expert is one that:
 
-- is not needed by the current executing bucket,
-- has low recent token count,
-- has not been reused recently,
-- is not among the hottest experts in the current pipeline window.
+- is resident on GPU,
+- is not currently executing,
+- is not needed by a high-priority queued bucket,
+- has low recent token reuse,
+- has old `last_used_step`.
 
-The first version can use a simple LRU plus token-count policy:
+Simple first version:
 
 ```text
-eviction_score = recent_token_count, then last_used_step
+evict expert with:
+    lowest recent_token_count
+    then oldest last_used_step
 ```
 
-Evict the expert with the lowest recent token count and oldest last-used step.
+Eviction removes only the GPU cached copy. The pinned CPU source-of-truth copy remains unchanged.
+
+## Missing Bucket Pipeline
+
+The missing bucket queue is not just a waiting list. It is the demand signal used by the expert pager.
+
+The CPU may hold a large missing bucket pipeline across multiple routed token waves.
+
+The pager aggregates queued buckets by expert:
+
+```text
+expert_hotness = total queued tokens waiting for that expert
+```
+
+This lets the pager preload the hottest missing experts first.
+
+A large missing bucket pipeline allows the runtime to trade latency for better expert reuse and fewer expert loads.
+
+This changes the behavior from naive offload:
+
+```text
+token needs expert -> load expert -> compute -> unload
+```
+
+to expert paging:
+
+```text
+router generates many future expert demands
+CPU accumulates missing buckets
+CPU ranks hot missing experts
+background pager preloads experts
+GPU keeps computing resident buckets
+cold experts are retired only when needed
+```
 
 ## Staged Active Expert Execution
 
@@ -212,6 +447,36 @@ The runtime should attempt smaller stages before failing with OOM.
 
 This makes the GPU a progressive execution accelerator rather than a fixed full-model memory container.
 
+## Threading and Synchronization Rules
+
+There should be two logical threads:
+
+```text
+Thread 1: foreground inference / router / dispatch loop
+Thread 2: background expert paging / preload / eviction loop
+```
+
+They communicate through:
+
+```text
+resident_expert_table
+missing_bucket_queue
+expert_load_events
+gpu_memory_accounting
+```
+
+Important synchronization rules:
+
+1. Do not evict an expert while a GPU kernel is using it.
+2. Mark expert state as `loading` before copying CPU to GPU.
+3. Mark expert state as `resident` only after the copy completes.
+4. Mark expert state as `executing` while a dispatched bucket is using it.
+5. Mark expert state as `evicting` before releasing a GPU slot.
+6. A bucket can execute only if its expert state is `resident`.
+7. Hidden states stay on GPU; only bucket metadata is synchronized to CPU.
+8. CPU source-of-truth weights are read-only during inference.
+9. The paging thread must never modify the CPU source-of-truth weights.
+
 ## Target Behavior
 
 When `--moe-cpu-offload` is enabled:
@@ -219,18 +484,20 @@ When `--moe-cpu-offload` is enabled:
 1. Load all model weights into pinned CPU memory.
 2. Keep pinned CPU memory as the canonical source of truth for all model weights.
 3. Copy the router model path to GPU and keep it resident.
-4. Keep inactive experts in pinned CPU memory.
-5. Batch tokens and run the router first.
-6. Aggregate routed tokens into expert buckets.
-7. Rank expert buckets by hotness.
-8. Build a bounded execution pipeline using `--moe-max-pipeline-depth`.
-9. Preload hot expert weights from pinned CPU memory to GPU progressively.
-10. Execute buckets for resident active experts.
-11. Reuse active experts across the pipeline window.
-12. Keep at most `--moe-active-expert-budget` active experts resident on GPU.
-13. Respect `--moe-gpu-limit` when allocating router, KV cache, active experts, staging buffers, activations, and MoE runtime workspace.
-14. Evict cold active experts when a new expert must be loaded.
-15. If needed, execute active experts stage by stage to avoid OOM.
+4. Preload a small number of hot experts to GPU.
+5. Keep inactive experts in pinned CPU memory.
+6. Batch tokens and run the router first.
+7. Aggregate routed tokens into expert buckets.
+8. Sync compact bucket metadata to CPU.
+9. Dispatch buckets whose experts are already resident on GPU.
+10. Put missing buckets into the CPU miss-bucket pipeline.
+11. Let the background pager rank missing experts by hotness.
+12. Progressively preload hot missing expert weights from pinned CPU memory to GPU.
+13. Reuse active experts across the pipeline window.
+14. Keep at most `--moe-active-expert-budget` active experts resident on GPU.
+15. Respect `--moe-gpu-limit` when allocating router, KV cache, active experts, staging buffers, activations, and MoE runtime workspace.
+16. Evict cold active experts when a new expert must be loaded.
+17. If needed, execute active experts stage by stage to avoid OOM.
 
 ## Initial Implementation Scope
 
@@ -292,30 +559,57 @@ Responsible for:
 Responsible for:
 
 - grouping routed tokens by expert,
-- deciding which experts should be active next,
-- ranking experts by bucket hotness,
+- maintaining the missing bucket pipeline,
+- deciding which resident buckets should execute immediately,
+- ranking missing experts by bucket hotness,
 - respecting `moe_active_expert_budget`,
 - respecting `moe_max_pipeline_depth`,
 - improving reuse of already-loaded experts.
 
+### Background Expert Pager
+
+Responsible for:
+
+- reading the missing bucket queue,
+- aggregating missing demand by expert,
+- selecting hot experts to preload,
+- evicting cold experts under memory pressure,
+- copying expert weights from pinned CPU memory to GPU,
+- updating the resident expert table.
+
 ## Basic Runtime Flow
 
 ```text
-if not moe_cpu_offload:
-    run normal vLLM path
-else:
-    keep all model weights in pinned CPU memory
-    keep router on GPU
+startup:
+    load all weights into pinned CPU memory
+    copy router to GPU
+    preload initial hot experts to GPU
+    initialize resident_expert_table
+    initialize missing_bucket_queue
+    start background expert pager
+
+foreground loop:
     batch tokens
-    run router first
-    collect routed expert ids
-    bucket tokens by expert
-    rank buckets by hotness
-    choose active experts within budget
-    progressively load hot active experts from CPU to GPU
-    execute resident expert buckets
-    evict cold experts when GPU memory pressure appears
-    use staged expert execution if needed to avoid OOM
+    run router on GPU
+    build expert buckets
+    sync compact bucket metadata to CPU
+    for each bucket:
+        if expert is resident on GPU:
+            dispatch bucket to GPU
+        else:
+            enqueue bucket into missing_bucket_queue
+    execute resident buckets
+    update expert usage stats
+
+background paging loop:
+    read missing_bucket_queue
+    aggregate queued demand by expert
+    select hottest missing expert
+    if GPU memory is full:
+        evict cold resident expert
+    copy selected expert from pinned CPU memory to GPU
+    update resident_expert_table
+    wake foreground loop if needed
 ```
 
 ## Correctness Requirements
@@ -332,6 +626,10 @@ Add simple metrics or logs first:
 
 - whether MoE CPU offload is enabled,
 - number of experts currently resident on GPU,
+- number of queued missing buckets,
+- number of tokens waiting in missing buckets,
+- expert cache hit ratio,
+- expert page fault count,
 - number of expert loads from CPU to GPU,
 - number of expert evictions,
 - number of staged expert executions,
@@ -351,6 +649,8 @@ Test:
 - default `moe_active_expert_budget == 2`,
 - default `moe_max_pipeline_depth == 4`,
 - expert residency cap behavior,
+- missing bucket queue aggregation,
+- hot expert selection from missing buckets,
 - cold expert eviction behavior,
 - CPU source-of-truth state remains valid after GPU eviction.
 
@@ -368,6 +668,8 @@ For one supported MoE model:
 Measure:
 
 - GPU memory usage,
+- expert cache hit ratio,
+- expert page fault count,
 - expert load count,
 - expert eviction count,
 - tokens per second,
@@ -387,24 +689,30 @@ The first version is successful when:
 5. GPU memory is used as an execution cache for router, active experts, KV cache, activations, and runtime buffers.
 6. The active expert GPU budget is enforced.
 7. Experts can be loaded from pinned CPU memory to GPU on demand.
-8. Cold experts can be evicted from GPU while remaining valid in CPU memory.
-9. Exact routed expert semantics are preserved.
-10. The runtime can reduce execution granularity when needed to avoid OOM.
-11. A basic MoE model can run with this mode on one GPU.
+8. Missing buckets are queued on CPU and aggregated by expert demand.
+9. A background expert pager can preload hot missing experts.
+10. Cold experts can be evicted from GPU while remaining valid in CPU memory.
+11. Exact routed expert semantics are preserved.
+12. The runtime can reduce execution granularity when needed to avoid OOM.
+13. A basic MoE model can run with this mode on one GPU.
 
 ## Recommended Development Order
 
 1. Add config and CLI flags.
 2. Add tests for config defaults and parsing.
 3. Add expert residency state object.
-4. Add unit tests for resident expert budget and eviction.
-5. Add pinned CPU source-of-truth weight handling.
-6. Identify expert weights for one model family.
-7. Keep expert weights in pinned CPU memory.
-8. Load active experts to GPU on demand.
-9. Add hotness-based expert bucket planning.
-10. Add cold expert eviction under GPU memory pressure.
-11. Add staged active expert execution if needed.
-12. Connect to the actual MoE execution path.
-13. Add correctness comparison against normal vLLM.
-14. Add simple metrics.
+4. Add missing bucket queue data structures.
+5. Add unit tests for resident expert budget and eviction.
+6. Add unit tests for missing bucket aggregation and hot expert selection.
+7. Add pinned CPU source-of-truth weight handling.
+8. Identify expert weights for one model family.
+9. Keep expert weights in pinned CPU memory.
+10. Load active experts to GPU on demand.
+11. Add foreground router/bucket/dispatch loop hooks.
+12. Add background expert pager loop.
+13. Add hotness-based expert bucket planning.
+14. Add cold expert eviction under GPU memory pressure.
+15. Add staged active expert execution if needed.
+16. Connect to the actual MoE execution path.
+17. Add correctness comparison against normal vLLM.
+18. Add simple metrics.
