@@ -244,8 +244,8 @@ class TileGemmS390X {
 
 }  // namespace
 
-template <typename scalar_t, int64_t head_dim>
-class AttentionImpl<ISA::VXE, scalar_t, head_dim, scalar_t> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::VXE, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
   using query_t = scalar_t;
   using q_buffer_t = float;
