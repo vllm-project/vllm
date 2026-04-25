@@ -25,7 +25,8 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl \
-    libnuma-dev
+    libnuma-dev \
+    protobuf-compiler libprotobuf-dev
 RUN python3 -m pip install --upgrade pip
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
@@ -47,6 +48,11 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+
+# Install Rust toolchain for building Rust extensions.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
@@ -106,6 +112,20 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`. The rust frontend source is brought in via the fetch_vllm
+# stage, so an uninitialized submodule would otherwise produce a confusing
+# cargo failure.
+RUN if [ ! -f vllm/rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
+
+# Require the Rust frontend to be successfully built into the final wheel.
+ENV VLLM_REQUIRE_RUST_FRONTEND=1
+
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
@@ -268,6 +288,19 @@ RUN /bin/bash -lc 'set -euo pipefail; \
 FROM fetch_vllm AS build_vllm_wheel_release
 
 ARG COMMON_WORKDIR
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`. The rust frontend source is brought in via the fetch_vllm
+# stage, so an uninitialized submodule would otherwise produce a confusing
+# cargo failure.
+RUN if [ ! -f vllm/rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
+
+# Require the Rust frontend to be successfully built into the final wheel.
+ENV VLLM_REQUIRE_RUST_FRONTEND=1
 
 # Create /install directory for custom wheels
 RUN mkdir -p /install
