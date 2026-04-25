@@ -124,10 +124,10 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # RIXL/UCX build stages
 FROM base AS build_rixl
-ARG RIXL_BRANCH="f33a5599"
+ARG RIXL_BRANCH="bf4a7214"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG UCX_BRANCH="da3fac2a"
-ARG UCX_REPO="https://github.com/ROCm/ucx.git"
+ARG UCX_BRANCH="7009d7a1"
+ARG UCX_REPO="https://github.com/openucx/ucx.git"
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV RIXL_HOME=/usr/local/rixl
@@ -165,7 +165,7 @@ RUN cd /usr/local/src && \
         --disable-doxygen-doc \
         --enable-optimizations \
         --enable-devel-headers \
-        --with-rocm=/opt/rocm \
+        --with-rocm=${ROCM_PATH} \
         --with-verbs \
         --with-dm \
         --enable-mt && \
@@ -186,7 +186,12 @@ RUN git clone ${RIXL_REPO} /opt/rixl && \
     ninja install
 
 # Generate RIXL wheel
-RUN cd /opt/rixl && mkdir -p /app/install && \
+# Exclude libcore and libpull from auditwheel: transitive dependencies
+# that are not shipped in the wheel and vary across base images.
+RUN cd /opt/rixl && \
+    sed -i "s/--exclude 'libamdhip64\*'/--exclude 'libamdhip64*' --exclude 'libcore*' --exclude 'libpull*'/" \
+        contrib/build-wheel.sh && \
+    mkdir -p /app/install && \
     ./contrib/build-wheel.sh \
         --output-dir /app/install \
         --rocm-dir ${ROCM_PATH} \
@@ -430,6 +435,10 @@ COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-pac
 # See: https://github.com/pytorch/pytorch/issues/169857
 ENV MIOPEN_DEBUG_CONV_DIRECT=0
 ENV MIOPEN_DEBUG_CONV_GEMM=0
+
+# Use legacy IPC mode for HSA to avoid GPU memory pinning issues with UCX rocm_ipc
+# See: https://github.com/ROCm/rocm-libraries/issues/6266
+ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
