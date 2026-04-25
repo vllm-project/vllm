@@ -1773,9 +1773,7 @@ def test_get_kv_cache_config_one_worker():
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer_1", "layer_2"],
-                UniformTypeKVCacheSpecs(
-                    block_size=16, kv_cache_specs=expected_specs
-                ),
+                UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=expected_specs),
             ),
         ],
     )
