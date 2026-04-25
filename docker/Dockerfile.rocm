@@ -385,11 +385,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/test/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl \
-    # Rebuild fastsafetensors from source so its C++ extension is compiled
-    # with USE_ROCM and can detect libamdhip64.so at runtime.
-    && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors fastsafetensors
+    && uv pip install --system *.whl
 
 # Persist the built wheel in the image so python_only_compile_rocm.sh can
 # reinstall it after removing compilers. The bind-mounted /install contents
