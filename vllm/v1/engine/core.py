@@ -1585,31 +1585,12 @@ class EngineCoreProc(EngineCore):
         req_ids: list[str],
         client_index: int,
         finish_reason: FinishReason,
-        routed_experts_by_req: dict[str, Any] | None = None,
     ) -> None:
-        """Enqueue terminal ``EngineCoreOutput``s for a batch of req_ids.
-
-        Single code path used by both normal termination (ERROR /
-        STOP post-generation) and abort paths, so new side effects
-        (metrics / traces / finished_req_ids bookkeeping) can be
-        added here once and both paths pick them up.
-
-        ``routed_experts_by_req`` is only populated when the caller
-        wants per-request routing attached to the terminal output
-        (abort path with ``enable_return_routed_experts=True``).
-        Missing entries or a ``None`` dict yield ``routed_experts=None``
-        on the output.
-        """
         outputs = [
             EngineCoreOutput(
                 req_id,
                 [],
                 finish_reason=finish_reason,
-                routed_experts=(
-                    routed_experts_by_req.get(req_id)
-                    if routed_experts_by_req is not None
-                    else None
-                ),
             )
             for req_id in req_ids
         ]
@@ -1619,22 +1600,10 @@ class EngineCoreProc(EngineCore):
     def _send_abort_outputs_to_client(
         self, req_ids: list[str], client_index: int
     ) -> None:
-        # When routed experts capture is enabled we surface the last-known
-        # routing for each aborted request so clients can still collect
-        # training signal. ``pop_aborted_routed_experts`` returns None
-        # for requests that were aborted before any forward pass (e.g.
-        # WAITING queue aborts, shutdown rejections).
-        routed_experts_by_req: dict[str, Any] | None = None
-        if self.vllm_config.model_config.enable_return_routed_experts:
-            routed_experts_by_req = {
-                req_id: self.scheduler.pop_aborted_routed_experts(req_id)
-                for req_id in req_ids
-            }
         self._send_finish_outputs_to_client(
             req_ids,
             client_index,
             FinishReason.ABORT,
-            routed_experts_by_req=routed_experts_by_req,
         )
 
     def _send_error_outputs_to_client(

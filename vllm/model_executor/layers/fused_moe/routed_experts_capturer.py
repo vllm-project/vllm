@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -286,7 +285,12 @@ class RoutedExpertsManager:
         """
         self.routed_experts_by_slot[slot_mapping] = data
 
-    def get(self, block_ids: list[int], num_tokens: int) -> np.ndarray:
+    def get(
+        self,
+        block_ids: list[int],
+        num_tokens: int,
+        token_start: int = 0,
+    ) -> np.ndarray:
         """Read routed experts data for a completed / preempted request.
 
         Reconstructs a per-token slot_mapping from the request's block
@@ -302,96 +306,26 @@ class RoutedExpertsManager:
                 slots (typically ``request.num_tokens - 1``; the last
                 sampled token has not been forwarded yet). Slots beyond
                 ``request.num_computed_tokens`` are zero-initialized.
+            token_start: Skip the first ``token_start`` tokens from the
+                result. The slot_mapping is sliced before the fancy-index
+                read, so only the requested slots are fetched — no large
+                intermediate array is allocated. Clamped to
+                ``[0, num_tokens]`` automatically.
 
         Returns:
-            Array of shape (num_tokens, num_layers, num_experts_per_tok).
+            Array of shape (num_tokens - token_start, num_layers,
+            num_experts_per_tok).
         """
         bs = self.block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
         block_offsets = np.arange(bs)
         # slot = block_id * block_size + offset_in_block; flatten the
-        # (num_blocks, block_size) grid and trim to num_tokens.
+        # (num_blocks, block_size) grid and trim to num_tokens, then
+        # skip the first token_start entries so only the requested
+        # range is fetched in a single fancy-index read.
         slot_mapping = (
             block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
         ).flatten()[:num_tokens]
+        if token_start > 0:
+            slot_mapping = slot_mapping[token_start:]
         return self.routed_experts_by_slot[slot_mapping]
-
-
-@dataclass
-class RoutedExpertsEntry:
-    """Cached routed experts for a single preempted / aborted request.
-
-    ``data``: routing snapshot taken before blocks were freed.
-    ``pending_block_ids``: when not None, the slot buffer was incomplete
-        at capture time (store_batch for the in-flight step hadn't run
-        yet). :meth:`RoutedExpertsCache.refresh_pending` re-reads using
-        these block_ids after store_batch to get the complete snapshot.
-    """
-
-    data: np.ndarray
-    pending_block_ids: list[int] | None = None
-    pending_num_tokens: int = 0
-
-    @property
-    def length(self) -> int:
-        return self.data.shape[0]
-
-
-@dataclass
-class RoutedExpertsCache:
-    """Per-request cache of routed experts, used by the scheduler.
-
-    Wraps ``aborted_routed_experts`` and ``_preempted_re_pending`` into
-    a single structure with clear semantics.
-    """
-
-    mgr: RoutedExpertsManager
-    _entries: dict[str, RoutedExpertsEntry] = field(default_factory=dict)
-
-    def capture(
-        self,
-        req_id: str,
-        data: np.ndarray,
-        block_ids: list[int],
-        num_tokens: int,
-    ) -> None:
-        """Cache routing at preemption time, with deferred re-read info."""
-        existing = self._entries.get(req_id)
-        if existing is None or data.shape[0] > existing.length:
-            self._entries[req_id] = RoutedExpertsEntry(
-                data=data,
-                pending_block_ids=block_ids,
-                pending_num_tokens=num_tokens,
-            )
-        else:
-            existing.pending_block_ids = block_ids
-            existing.pending_num_tokens = num_tokens
-
-    def refresh_pending(self) -> None:
-        """Re-read routing from slot buffer for entries that had
-        incomplete data at capture time. Call after store_batch."""
-        for entry in self._entries.values():
-            if entry.pending_block_ids is not None:
-                refreshed = self.mgr.get(
-                    entry.pending_block_ids, entry.pending_num_tokens
-                )
-                if refreshed.shape[0] > entry.length:
-                    entry.data = refreshed
-                entry.pending_block_ids = None
-                entry.pending_num_tokens = 0
-
-    def pop(self, req_id: str) -> np.ndarray | None:
-        """Pop and return the cached routing data, or None."""
-        entry = self._entries.pop(req_id, None)
-        return entry.data if entry is not None else None
-
-    def remove(self, req_id: str) -> None:
-        """Remove entry without returning data."""
-        self._entries.pop(req_id, None)
-
-    def get_best(self, req_id: str, current: np.ndarray) -> np.ndarray:
-        """Pop cached entry and return whichever is more complete."""
-        cached = self.pop(req_id)
-        if cached is not None and cached.shape[0] > current.shape[0]:
-            return cached
-        return current

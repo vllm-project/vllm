@@ -290,6 +290,11 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
+    routed_experts_prompt_start: int = 0
+    """When ``enable_return_routed_experts`` is active, skip the first
+    ``routed_experts_prompt_start`` prompt tokens from the returned routing
+    data. Useful for excluding system-prompt tokens so only user-turn
+    routing is returned. Default 0 returns routing for all prompt tokens."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
