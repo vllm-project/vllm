@@ -1459,8 +1459,17 @@ class Scheduler(SchedulerInterface):
                     # Prefill completed: read full prompt routing from
                     # slot buffer using the block-ID snapshot taken at
                     # schedule time (immune to async preemption).
-                    prompt_start = request.sampling_params.routed_experts_prompt_start
-                    assert prompt_start < request.num_prompt_tokens
+                    if (
+                        request.sampling_params is not None
+                        and request.sampling_params.routed_experts_prompt_start
+                        is not None
+                    ):
+                        prompt_start = (
+                            request.sampling_params.routed_experts_prompt_start
+                        )
+                        assert prompt_start < request.num_prompt_tokens
+                    else:
+                        prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
                         block_ids,
                         request.num_prompt_tokens,
