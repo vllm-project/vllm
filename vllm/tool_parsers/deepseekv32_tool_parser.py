@@ -45,21 +45,27 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
+    tool_call_start_token: str = "<｜DSML｜function_calls>"
+    tool_call_end_token: str = "</｜DSML｜function_calls>"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
-        # Sentinel token
-        self.tool_call_start_token: str = "<｜DSML｜function_calls>"
-
         # Streaming state
         self.is_tool_call_started: bool = False
         self.current_tool_index: int = 0
+        # Hold potential split prefix of tool_call_start_token to avoid
+        # leaking DSML marker fragments as plain content in streaming mode.
+        self.plain_text_buffer: str = ""
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
-            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>", re.DOTALL
+            re.escape(self.tool_call_start_token)
+            + r"(.*?)"
+            + re.escape(self.tool_call_end_token),
+            re.DOTALL,
         )
         self.invoke_complete_regex = re.compile(
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>', re.DOTALL
@@ -85,7 +91,7 @@ class DeepSeekV32ToolParser(ToolParser):
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
-            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # (e.g. <｜DSML｜function_calls>, </｜DSML｜function_calls>)
             # are not skippedduring decoding.
             # Even though they are not marked as special tokens,
             # setting skip_special_tokens=False ensures proper handling in
@@ -220,8 +226,17 @@ class DeepSeekV32ToolParser(ToolParser):
         """Reset all streaming state."""
         self.current_tool_index = 0
         self.is_tool_call_started = False
+        self.plain_text_buffer = ""
         self.prev_tool_call_arr.clear()
         self.streamed_args_for_tool.clear()
+
+    def _longest_start_token_prefix_suffix_len(self, text: str) -> int:
+        """Return the longest suffix of text that is a prefix of start token."""
+        max_check = min(len(text), len(self.tool_call_start_token) - 1)
+        for i in range(max_check, 0, -1):
+            if self.tool_call_start_token.startswith(text[-i:]):
+                return i
+        return 0
 
     def _extract_delta_tool_calls(
         self,
@@ -286,19 +301,22 @@ class DeepSeekV32ToolParser(ToolParser):
             self._reset_streaming_state()
 
         # Detect whether we've entered the tool-call region.
-        # Use current_text (not delta_text) since the start token may
-        # be split across chunks.
+        # To handle split start-token chunks, we keep a small plain-text
+        # buffer and only emit content that cannot be part of the marker.
         content_before = None
-        if self.is_tool_call_started:
-            pass
-        elif self.tool_call_start_token in current_text:
-            # Tool-call region found, capture any plain text before it.
-            self.is_tool_call_started = True
-            start_idx = current_text.index(self.tool_call_start_token)
-            content_before = current_text[len(previous_text) : start_idx] or None
-        else:
-            # Still in plain-text region, forward as content.
-            return DeltaMessage(content=delta_text) if delta_text else None
+        if not self.is_tool_call_started:
+            combined_plain = self.plain_text_buffer + delta_text
+            start_idx = combined_plain.find(self.tool_call_start_token)
+
+            if start_idx >= 0:
+                self.is_tool_call_started = True
+                self.plain_text_buffer = ""
+                content_before = combined_plain[:start_idx] or None
+            else:
+                keep_len = self._longest_start_token_prefix_suffix_len(combined_plain)
+                safe_emit = combined_plain[:-keep_len] if keep_len else combined_plain
+                self.plain_text_buffer = combined_plain[-keep_len:] if keep_len else ""
+                return DeltaMessage(content=safe_emit) if safe_emit else None
 
         # Inside tool-call region: emit any newly completed invokes.
         delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
