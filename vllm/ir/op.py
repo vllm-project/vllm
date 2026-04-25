@@ -333,7 +333,8 @@ class IrOp:
         Context manager to set the dispatch priority for implementations for this op.
         """
         assert all(p in self.impls for p in priority), (
-            "All providers in priority must be registered implementations."
+            f"All providers in priority must be registered implementations, missing "
+            f"{','.join(p for p in priority if p not in self.impls)}"
         )
 
         def filter_priority_impls(p_list: list[str]) -> list[IrOpImpl]:
