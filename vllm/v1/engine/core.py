@@ -1581,17 +1581,10 @@ class EngineCoreProc(EngineCore):
         return future
 
     def _send_finish_outputs_to_client(
-        self,
-        req_ids: list[str],
-        client_index: int,
-        finish_reason: FinishReason,
+        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
     ) -> None:
         outputs = [
-            EngineCoreOutput(
-                req_id,
-                [],
-                finish_reason=finish_reason,
-            )
+            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
@@ -1600,11 +1593,7 @@ class EngineCoreProc(EngineCore):
     def _send_abort_outputs_to_client(
         self, req_ids: list[str], client_index: int
     ) -> None:
-        self._send_finish_outputs_to_client(
-            req_ids,
-            client_index,
-            FinishReason.ABORT,
-        )
+        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ABORT)
 
     def _send_error_outputs_to_client(
         self, req_ids: list[str], client_index: int
