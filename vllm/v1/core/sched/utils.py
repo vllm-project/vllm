@@ -17,11 +17,13 @@ def _has_repeating_pattern(
     Compares the last pattern_len tokens against the preceding
     (repetition_min_count - 1) repetitions of the same length.
     """
-    for n in range(1, pattern_len + 1):
-        target_token = token_ids[-n]
-        for m in range(1, repetition_min_count):
-            if token_ids[-(pattern_len * m + n)] != target_token:
-                return False
+    last = token_ids[-pattern_len:]
+    for m in range(1, repetition_min_count):
+        # Equivalent to comparing each (n, m) pair in the prior nested loop,
+        # but delegates the element-wise compare to CPython's C-level
+        # `list.__eq__` (with short-circuit on first mismatch).
+        if token_ids[-(m + 1) * pattern_len : -m * pattern_len] != last:
+            return False
     return True
 
 
