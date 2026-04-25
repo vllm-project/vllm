@@ -255,8 +255,9 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             sendable_reasoning_len = len(delta_text) - overlap
             if sendable_reasoning_len > 0:
                 return DeltaMessage(reasoning=delta_text[:sendable_reasoning_len])
-            # Return an empty message instead of None to satisfy tests
-            # and indicate that processing is ongoing but no new content is ready.
+            # Return an empty (not None) message: None would signal
+            # "stop processing", whereas DeltaMessage() means
+            # "processing ongoing, nothing to emit yet".
             return DeltaMessage()
 
         # No end token yet: still in reasoning phase.
