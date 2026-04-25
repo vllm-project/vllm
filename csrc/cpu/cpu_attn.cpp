@@ -2,7 +2,7 @@
 
 // Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
 // "auto" -> kAuto(0); "fp8"/"fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
-static inline cpu_attention::Fp8KVCacheDataType parse_kv_cache_dtype(
+static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
     const std::string& kv_cache_dtype) {
   if (kv_cache_dtype == "fp8_e5m2")
     return cpu_attention::Fp8KVCacheDataType::kFp8E5M2;
@@ -92,7 +92,7 @@ void cpu_attn_reshape_and_cache(
   TORCH_CHECK_EQ(value_cache.dim(), 4);
 
   const int64_t kv_cache_idx =
-      static_cast<int64_t>(parse_kv_cache_dtype(kv_cache_dtype));
+      static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
   const bool is_fp8 = (kv_cache_idx != 0);
 
   if (is_fp8) {
@@ -171,7 +171,7 @@ void cpu_attention_with_kv_cache(
   TORCH_CHECK_EQ(value_cache.dim(), 4);
 
   const int64_t kv_cache_idx =
-      static_cast<int64_t>(parse_kv_cache_dtype(kv_cache_dtype));
+      static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
   const bool is_fp8 = (kv_cache_idx != 0);
   if (is_fp8) {
     TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
