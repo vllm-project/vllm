@@ -1024,8 +1024,9 @@ class VllmBackend:
 
         # Minimal hashing here with existing utilities, reused below.
         # Compute config/compiler/code hashes once and reuse
-        env_hash, config_hash, *_ = aot_compile_hash_factors(vllm_config)
-        env_factors = envs.compile_factors()
+        result = aot_compile_hash_factors(vllm_config)
+        env_hash, config_hash, *_ = result.hashes
+        env_factors = result.env_factors
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
         forward_code_files = list(sorted(self.compilation_config.traced_files))
 
