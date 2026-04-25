@@ -1775,3 +1775,184 @@ def test_content_with_full_nested_tool_call_streaming(
     assert args["content"] == expected, (
         f"content truncated/corrupted: {args.get('content')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Two consecutive tool calls, where the SECOND embeds a literal nested
+# tool_call whose ``<parameter=NAME>`` uses a NAME that is NOT in the
+# OUTER tool's schema (e.g. a description of a different tool's format).
+# Reproduces the qwen-code Qwen 3.6 freeze scenario: the depth tracker
+# in ``_find_true_param_end`` filters opens by schema, so the literal
+# ``</parameter>`` that closes the unknown-NAME literal open appears
+# unmatched and matches the structural lookahead of the trailing
+# ``</function>``, truncating the OUTER content value.
+# ---------------------------------------------------------------------------
+
+_OUT_OF_SCHEMA_NESTED_CONTENT = (
+    'template = """\n'
+    "<tool_call>\n<function=foo>\n"
+    "<parameter=bar>baz</parameter>\n"
+    "</function>\n</tool_call>\n"
+    '"""\n'
+)
+
+_TWO_TOOLS_OUT_OF_SCHEMA_NESTED_OUTPUT = (
+    "<tool_call>\n<function=foo>\n"
+    "<parameter=bar>baz</parameter>\n"
+    "</function>\n</tool_call>"
+    "\n\n"
+    "<tool_call>\n<function=write_file>\n"
+    "<parameter=path>\nfixture.py\n</parameter>\n"
+    f"<parameter=content>\n{_OUT_OF_SCHEMA_NESTED_CONTENT}</parameter>\n"
+    "</function>\n</tool_call>"
+)
+
+
+def test_two_tools_second_with_out_of_schema_nested_literal_nonstreaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Two structural tool calls; the second's ``content`` value embeds a
+    literal nested ``<tool_call>`` block whose inner ``<parameter=bar>``
+    uses a NAME not in the outer tool's schema (``write_file`` only knows
+    ``path`` and ``content``).
+
+    The walker must still match the outer ``</parameter>`` of ``content``,
+    not the literal ``</parameter>`` of the unknown-NAME nested open.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
+    )
+    result = parser.extract_tool_calls(
+        _TWO_TOOLS_OUT_OF_SCHEMA_NESTED_OUTPUT, request=request
+    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 2, (
+        f"Expected 2 tool calls, got {len(result.tool_calls)}: "
+        f"{[tc.function.name for tc in result.tool_calls]}"
+    )
+    args0 = json.loads(result.tool_calls[0].function.arguments)
+    args1 = json.loads(result.tool_calls[1].function.arguments)
+    assert args0 == {"bar": "baz"}, f"first tool args wrong: {args0!r}"
+    assert result.tool_calls[1].function.name == "write_file"
+    assert list(args1.keys()) == ["path", "content"], (
+        f"Spurious params on outer tool: {list(args1.keys())}"
+    )
+    assert args1["path"] == "fixture.py"
+    expected = _OUT_OF_SCHEMA_NESTED_CONTENT.rstrip("\n")
+    assert args1["content"] == expected, (
+        f"outer content truncated at literal </parameter>: "
+        f"{args1.get('content')!r}"
+    )
+
+
+def test_two_tools_second_with_out_of_schema_nested_literal_streaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Streaming variant of the same scenario."""
+    parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
+    )
+    char_deltas = [
+        "<tool_call>\n<function=foo>\n",
+        "<parameter=bar>baz</parameter>\n",
+        "</function>\n</tool_call>",
+        "\n\n",
+        "<tool_call>\n<function=write_file>\n",
+        "<parameter=path>\nfixture.py\n</parameter>\n",
+        '<parameter=content>\ntemplate = """\n',
+        "<tool_call>\n<function=foo>\n",
+        "<parameter=bar>baz</parameter>\n",
+        "</function>\n</tool_call>\n",
+        '"""\n',
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, char_deltas, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 2, (
+        f"Expected 2 tool calls, got {len(reconstructor.tool_calls)}"
+    )
+    args0 = json.loads(reconstructor.tool_calls[0].function.arguments)
+    args1 = json.loads(reconstructor.tool_calls[1].function.arguments)
+    assert args0 == {"bar": "baz"}
+    assert reconstructor.tool_calls[1].function.name == "write_file"
+    assert list(args1.keys()) == ["path", "content"]
+    assert args1["path"] == "fixture.py"
+    expected = _OUT_OF_SCHEMA_NESTED_CONTENT.rstrip("\n")
+    assert args1["content"] == expected, (
+        f"outer content truncated/corrupted: {args1.get('content')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phantom tool calls produced when the model writes an UNRENDERED Jinja
+# template literally in its response: ``<tool_call>\n<function={{ x }}>\n
+# <parameter={{ k }}>...``.  The function name ``{{ x }}`` contains
+# template-syntax characters and CANNOT be a real function — the parser
+# must reject these tool calls (or render them as content) rather than
+# emit them as real ones, since the client will then raise "tool not
+# found" errors and cause the agent to loop.
+# ---------------------------------------------------------------------------
+
+_JINJA_PHANTOM_OUTPUT = (
+    "<tool_call>\n<function={{ tc.name }}>\n"
+    "<parameter={{ k }}>\n{{ v }}\n</parameter>\n"
+    "</function>\n</tool_call>"
+    "\n\n"
+    "<tool_call>\n<function=write_file>\n"
+    "<parameter=path>\nout.txt\n</parameter>\n"
+    "<parameter=content>\nhello\n</parameter>\n"
+    "</function>\n</tool_call>"
+)
+
+
+def test_jinja_template_phantom_tool_call_is_rejected_nonstreaming(
+    qwen3_tokenizer, parser_cls
+):
+    """A ``<function={{ tc.name }}>`` block (unrendered Jinja) emits a
+    function name that is not a valid identifier.  It must NOT be
+    surfaced as a real tool call — the client would fail with "tool not
+    found" and the agent would loop.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+    parser = parser_cls(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(_JINJA_PHANTOM_OUTPUT, request=request)
+    assert result.tools_called
+    names = [tc.function.name for tc in result.tool_calls]
+    assert "{{ tc.name }}" not in names, (
+        f"Phantom Jinja-template tool call surfaced as real: {names}"
+    )
+    assert names == ["write_file"], (
+        f"Expected only the real ``write_file`` tool call, got: {names}"
+    )
+
+
+# NOTE: a streaming counterpart of the above test is intentionally not
+# added.  Filtering phantoms in streaming requires a separate
+# "client-visible index" counter (the existing ``current_tool_index`` is
+# also used for internal position bookkeeping).  Until that refactor
+# lands, the streaming path may still surface phantoms and the client
+# is expected to drop unknown function names.  The non-streaming path
+# is the one consumed by the offline tools-extraction code and by the
+# ``_parse_xml_function_call`` helper invoked at function-end during
+# streaming, so production users still see the filtered result for
+# completed tool calls.

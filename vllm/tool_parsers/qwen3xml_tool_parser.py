@@ -31,6 +31,19 @@ from vllm.tool_parsers.utils import find_tool_properties
 logger = init_logger(__name__)
 
 
+def _is_valid_function_name(name: str) -> bool:
+    """Return True when ``name`` looks like a real function identifier and
+    not a stray template token, malformed tag, or freeform text.
+
+    Rejects names that contain template-syntax characters (``{``, ``}``,
+    ``<``, ``>``), whitespace, quotes, or are empty.
+    """
+    if not name:
+        return False
+    forbidden = set("{}<>\"' \t\n\r")
+    return not any(c in forbidden for c in name)
+
+
 class StreamingXMLToolCallParser:
     """
     Simplified streaming XML tool call parser
@@ -1520,6 +1533,13 @@ class Qwen3XMLToolParser(ToolParser):
             tool_calls = []
             for tool_call in result.tool_calls:
                 if tool_call.function and tool_call.function.name:
+                    # Reject phantom tool calls produced when the model
+                    # writes an unrendered Jinja template or pseudo-XML
+                    # in its response (e.g. ``<function={{ tc.name }}>``).
+                    # Surfacing such names as real tool calls causes
+                    # "tool not found" errors at the client.
+                    if not _is_valid_function_name(tool_call.function.name):
+                        continue
                     tool_calls.append(
                         ToolCall(
                             id=tool_call.id,

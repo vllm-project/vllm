@@ -488,8 +488,12 @@ class Qwen3CoderToolParser(ToolParser):
         A ``</parameter>`` is structural only when it is followed by
         another structural delimiter (schema-known ``<parameter=NAME>``,
         ``</function>``, ``</tool_call>``) or — in non-streaming mode —
-        end-of-string.  Nested structural ``<parameter=NAME>`` tags
-        decrement depth like matched openings.
+        end-of-string.  Nested ``<parameter=NAME>`` opens are tracked
+        for depth REGARDLESS of whether NAME is in the schema: a
+        literal nested tool_call may use NAMEs that are not in the
+        outer tool's schema, but its literal ``</parameter>`` still
+        pairs with the literal open and must not be mistaken for a
+        structural close.
 
         Returns the index of the true ``</parameter>`` in value_text, or
         -1 if incomplete.
@@ -500,8 +504,13 @@ class Qwen3CoderToolParser(ToolParser):
         param_end_len = len(self.parameter_end_token)
 
         while pos < len(value_text):
+            # Use UNFILTERED structural opens for depth tracking so that
+            # a literal ``<parameter=UNKNOWN>`` (NAME not in the outer
+            # schema) still increments depth and its matching literal
+            # ``</parameter>`` is balanced — otherwise that close would
+            # appear unmatched and pass the structural lookahead.
             next_open = self._next_structural_param_start(
-                value_text, pos, valid_param_names
+                value_text, pos, None
             )
             next_close = value_text.find(self.parameter_end_token, pos)
             if next_close == -1:
@@ -539,6 +548,21 @@ class Qwen3CoderToolParser(ToolParser):
 
         return -1
 
+    @staticmethod
+    def _is_valid_function_name(name: str) -> bool:
+        """Return True when ``name`` looks like a real function identifier
+        and not a stray template token, malformed tag, or freeform text.
+
+        Rejects names that contain template-syntax characters (``{``,
+        ``}``, ``<``, ``>``), whitespace, quotes, or are empty.  Permits
+        identifiers, dashes (``max-retries``), dots (``user.name``),
+        slashes (``namespace/tool``), and Unicode letters.
+        """
+        if not name:
+            return False
+        forbidden = set("{}<>\"' \t\n\r")
+        return not any(c in forbidden for c in name)
+
     def _parse_xml_function_call(self, function_call_str: str) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
@@ -546,6 +570,13 @@ class Qwen3CoderToolParser(ToolParser):
         if end_index == -1:
             return None
         function_name = function_call_str[:end_index]
+        # Reject phantom tool calls produced when the model writes an
+        # unrendered Jinja template or pseudo-XML in its response (e.g.
+        # ``<function={{ tc.name }}>``).  Surfacing such names as real
+        # tool calls causes "tool not found" errors at the client and
+        # makes agents loop.
+        if not self._is_valid_function_name(function_name):
+            return None
         param_config = find_tool_properties(self.tools, function_name)
         valid_param_names: set[str] | None = (
             set(param_config.keys()) if param_config else None
