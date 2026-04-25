@@ -61,6 +61,43 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning tokens in the model OUTPUT.
+
+        The Qwen3.5+ chat template places ``<think>`` in the prompt, so the
+        output begins with reasoning tokens followed by ``</think>``.  The
+        inherited depth-counter assumes ``<think>`` lives in the output and
+        therefore returns 0 reasoning tokens for Qwen3.5 outputs.
+
+        This override:
+        - Treats the start of the output as the reasoning region by
+          default (no leading ``<think>`` required).
+        - If ``<think>`` IS present in the output (older 2507-era
+          template), reasoning begins right after it.
+        - Stops counting at the FIRST ``</think>`` or — for the Qwen3.5
+          implicit-end case — the FIRST ``<tool_call>``.
+        """
+        end_token_id = self.end_token_id
+        start_token_id = self.start_token_id
+        tool_call_token_id = self._tool_call_token_id
+
+        start_idx = 0
+        if start_token_id in token_ids:
+            for i, tid in enumerate(token_ids):
+                if tid == start_token_id:
+                    start_idx = i + 1
+                    break
+
+        count = 0
+        for i in range(start_idx, len(token_ids)):
+            tid = token_ids[i]
+            if tid == end_token_id:
+                return count
+            if tool_call_token_id is not None and tid == tool_call_token_id:
+                return count
+            count += 1
+        return count
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
@@ -174,10 +211,20 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         are content.
 
         NOTE: When thinking is disabled, no think tokens appear in the
-        generated output. The serving layer detects this via
+        generated output. The serving layer normally detects this via
         prompt_is_reasoning_end and routes deltas as content without
-        calling this method.
+        calling this method, but we ALSO honour ``self.thinking_enabled``
+        here so the parser is self-consistent with ``extract_reasoning``
+        — direct callers (and any future regression of the bypass) get
+        content rather than mis-categorised reasoning.
         """
+        # Thinking explicitly disabled — every delta is content.  We still
+        # split at </think> if (rarely) the model emits it in the output.
+        if not self.thinking_enabled and self.end_token_id not in delta_token_ids:
+            if not delta_text:
+                return None
+            return DeltaMessage(content=delta_text)
+
         # Strip <think> from delta if present (old template / edge case
         # where the model generates <think> itself).
         if self.start_token_id in delta_token_ids:
@@ -245,20 +292,28 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                     content=content if content else None,
                 )
 
-        # To avoid leaking fragments of <tool_call> into reasoning, 
-        # check for partial overlap.
-        # Before this fix we had the partial tool call tag being (partially)
-        # duplicated in reasoning and in content.
-        
-        overlap = partial_tag_overlap(current_text, self._tool_call_tag)
-        if overlap > 0:
-            sendable_reasoning_len = len(delta_text) - overlap
-            if sendable_reasoning_len > 0:
-                return DeltaMessage(reasoning=delta_text[:sendable_reasoning_len])
-            # Return an empty (not None) message: None would signal
-            # "stop processing", whereas DeltaMessage() means
-            # "processing ongoing, nothing to emit yet".
+        # To avoid leaking fragments of <tool_call> into reasoning,
+        # withhold any suffix of current_text that could grow into the
+        # tool_call tag.  Combine the bytes withheld by the previous
+        # delta with this delta's (already-stripped) text and recompute
+        # the overlap on the cumulative text.  When the continuation
+        # reveals the withheld characters were NOT in fact part of
+        # <tool_call> (e.g. the model emits "<tool_use>" instead), the
+        # previously withheld bytes are now released and emitted as
+        # reasoning.  The naive ``delta_text[:len(delta_text) - overlap]``
+        # would silently drop them.
+        prev_overlap = partial_tag_overlap(previous_text, self._tool_call_tag)
+        withheld_from_prev = (
+            previous_text[len(previous_text) - prev_overlap:]
+            if prev_overlap > 0 else ""
+        )
+        combined = withheld_from_prev + delta_text
+        curr_overlap = partial_tag_overlap(current_text, self._tool_call_tag)
+        sendable_len = len(combined) - curr_overlap
+        if sendable_len > 0:
+            return DeltaMessage(reasoning=combined[:sendable_len])
+        if curr_overlap > 0:
+            # Still withholding a partial tag — emit nothing yet but keep
+            # processing alive (None would signal "stop processing").
             return DeltaMessage()
-
-        # No end token yet: still in reasoning phase.
-        return DeltaMessage(reasoning=delta_text)
+        return None

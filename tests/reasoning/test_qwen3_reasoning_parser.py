@@ -698,6 +698,134 @@ def test_extract_reasoning_streaming_fragmented_end_and_tool_call(qwen3_tokenize
             "Parser corrupted the tool call tag by splitting it across reasoning and content."
 
 
+def test_streaming_thinking_disabled_treats_output_as_content(qwen3_tokenizer):
+    """When ``enable_thinking=False`` the chat template injects
+    ``<think>\\n\\n</think>\\n\\n`` into the prompt, so the model output
+    starts with content, not reasoning.
+
+    The non-streaming ``extract_reasoning`` honours ``self.thinking_enabled``
+    and returns the output as content.  The streaming path was relying on
+    the serving layer to detect this via ``prompt_is_reasoning_end`` and
+    bypass the parser entirely — but if the parser is invoked directly
+    (or if that bypass ever regresses) the streaming path silently routes
+    the model output to the reasoning channel.
+
+    Streaming should be self-consistent with the non-streaming path:
+    when thinking is explicitly disabled and no ``</think>`` arrives in
+    the output, every delta is content.
+    """
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    delta_text = "Hello world, no thinking."
+    msg = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta_text,
+        delta_text=delta_text,
+        previous_token_ids=[],
+        current_token_ids=[1, 2],
+        delta_token_ids=[1, 2],
+    )
+    assert msg is not None
+    assert msg.content == delta_text, (
+        f"With enable_thinking=False, streaming output must be content. "
+        f"Got: content={msg.content!r}, reasoning={msg.reasoning!r}"
+    )
+    assert msg.reasoning is None, (
+        f"With enable_thinking=False, no token should be marked reasoning. "
+        f"Got reasoning={msg.reasoning!r}"
+    )
+
+
+def test_count_reasoning_tokens_qwen35_template(qwen3_tokenizer):
+    """For the Qwen3.5+ chat template ``<think>`` lives in the prompt,
+    so the model output starts with reasoning tokens and only ``</think>``
+    ever appears.  The inherited depth-counter starts at depth=0 and is
+    never incremented (no ``<think>`` seen in output), so it returns 0
+    even when the output begins with a long reasoning span.
+
+    The Qwen3 parser must override this to "treat the start of the
+    output as the reasoning region until ``</think>`` (or implicit
+    ``<tool_call>``) is seen".
+    """
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+    vocab = qwen3_tokenizer.get_vocab()
+    end_token_id = vocab["</think>"]
+    reason_token = qwen3_tokenizer.encode("hello", add_special_tokens=False)[0]
+    content_token = qwen3_tokenizer.encode("world", add_special_tokens=False)[0]
+
+    # Output: 3 reasoning tokens, then </think>, then 2 content tokens.
+    output_ids = [reason_token, reason_token, reason_token, end_token_id,
+                  content_token, content_token]
+
+    n = parser.count_reasoning_tokens(output_ids)
+    assert n == 3, (
+        f"count_reasoning_tokens returned {n} for a Qwen3.5-style output "
+        f"with 3 reasoning tokens before </think>; the inherited counter "
+        f"never sees <think> (it lives in the prompt) so depth stays at 0."
+    )
+
+
+def test_streaming_partial_tool_call_prefix_is_not_lost(qwen3_tokenizer):
+    """Held-back partial-``<tool_call>`` overlap must be re-emitted as
+    reasoning when the next deltas reveal it was NOT actually a tool call.
+
+    The parser holds back the tail of the current text whenever it looks
+    like the prefix of ``<tool_call>``.  If the model then emits unrelated
+    text (e.g. ``<tool_use>`` or just ``<tool_belt``), the held-back
+    characters must be flushed as reasoning rather than silently dropped.
+    """
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    # Delta 1 ends with "<tool" — looks like the start of "<tool_call>",
+    # so the parser holds those 5 chars back.
+    prev_text = "thinking "
+    delta_text_1 = "<tool"
+    curr_text_1 = prev_text + delta_text_1
+    msg1 = parser.extract_reasoning_streaming(
+        previous_text=prev_text,
+        current_text=curr_text_1,
+        delta_text=delta_text_1,
+        previous_token_ids=[1],
+        current_token_ids=[1, 2],
+        delta_token_ids=[2],
+    )
+
+    # Delta 2 turns out to NOT be "<tool_call>": the model emitted
+    # "<tool_use>" instead. The held-back "<tool" must not be lost.
+    prev_text_2 = curr_text_1
+    delta_text_2 = "_use>"
+    curr_text_2 = prev_text_2 + delta_text_2
+    msg2 = parser.extract_reasoning_streaming(
+        previous_text=prev_text_2,
+        current_text=curr_text_2,
+        delta_text=delta_text_2,
+        previous_token_ids=[1, 2],
+        current_token_ids=[1, 2, 3],
+        delta_token_ids=[3],
+    )
+
+    reasoning_emitted = ""
+    for msg in (msg1, msg2):
+        if msg and msg.reasoning:
+            reasoning_emitted += msg.reasoning
+
+    assert "<tool" in reasoning_emitted, (
+        f"Held-back '<tool' was silently dropped when the next delta "
+        f"revealed it was not a tool_call. Reasoning emitted: "
+        f"{reasoning_emitted!r}"
+    )
+    assert "_use>" in reasoning_emitted, (
+        f"Second delta '_use>' missing from reasoning: {reasoning_emitted!r}"
+    )
+
+
 def test_is_reasoning_end_false_for_prompt_with_paired_tool_call_examples(
     qwen3_tokenizer,
 ) -> None:
