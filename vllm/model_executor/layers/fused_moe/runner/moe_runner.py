@@ -578,7 +578,9 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
-        if shared_output is not None and hidden_dim_was_padded:
+        if (
+            shared_output is not None or self.routed_output_transform is not None
+        ) and hidden_dim_was_padded:
             fused_output = fused_output[..., :routed_hidden_dim]
 
         # If combine kernel already reduced fused, reduce shared to match.
