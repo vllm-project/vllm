@@ -37,7 +37,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -349,7 +352,6 @@ class Gemma4MoE(nn.Module):
                 "moe_intermediate_size",
                 getattr(config, "expert_intermediate_size", None),
             ),
-            reduce_results=True,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",

@@ -103,13 +103,20 @@ class ToolParser:
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseTextConfig()
-                request.text.format = ResponseFormatTextJSONSchemaConfig(
-                    name="tool_calling_response",
-                    schema=json_schema_from_tool,
-                    type="json_schema",
-                    description="Response format for tool calling",
-                    strict=True,
+                # Single-shot construction so Pydantic v2 tracks `format`
+                # in __fields_set__ — assigning to `.format` after the bare
+                # `ResponseTextConfig()` constructor does not, which can
+                # drop the nested config from `model_dump`. Also drop the
+                # `description` kwarg: it is not a field on
+                # ResponseFormatTextJSONSchemaConfig and was being silently
+                # passed through as extra.
+                request.text = ResponseTextConfig(
+                    format=ResponseFormatTextJSONSchemaConfig(
+                        type="json_schema",
+                        name="tool_calling_response",
+                        schema=json_schema_from_tool,
+                        strict=True,
+                    )
                 )
 
         return request

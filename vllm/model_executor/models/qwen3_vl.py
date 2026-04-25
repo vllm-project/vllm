@@ -1640,6 +1640,7 @@ class Qwen3VLForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
@@ -1783,6 +1784,15 @@ class Qwen3VLForConditionalGeneration(
             return "image"
         return "video"
 
+    def get_max_frames_per_video(self) -> int:
+        mm_registry = MULTIMODAL_REGISTRY
+        info = mm_registry.get_processing_info(self.model_config)
+        max_frames_per_video = info.get_num_frames_with_most_features(
+            seq_len=self.model_config.max_model_len,
+            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+        )
+        return max_frames_per_video
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config,
@@ -1792,7 +1802,11 @@ class Qwen3VLForConditionalGeneration(
         #                 spatial_merge_size=2 → 8x8 = 64 tokens
         min_budget = 64
         # Max: capped by max_num_batched_tokens
-        max_budget = vllm_config.scheduler_config.max_num_batched_tokens
+        # TODO(shen-shanshan): the max_budget auto-infer needs to be optimized later.
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
         return (min_budget, max_budget)
 
     def _get_pixel_values_by_modality(

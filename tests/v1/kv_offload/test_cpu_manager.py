@@ -35,8 +35,12 @@ class ExpectedPrepareStoreOutput:
     evicted_keys: list[int]
 
 
-def to_keys(int_ids: list[int]) -> list[OffloadKey]:
-    return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+def to_key(int_hash: int) -> OffloadKey:
+    return make_offload_key(str(int_hash).encode(), 0)
+
+
+def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
+    return [to_key(i) for i in int_hashes]
 
 
 def verify_store_output(
@@ -136,7 +140,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     manager.complete_store(to_keys([2, 3, 4, 5]))
 
     # block 2 must still be present in the cache
-    assert manager.lookup(to_keys([2]), _EMPTY_REQ_CTX) == 1
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
 
 
 def test_cpu_manager():
@@ -160,7 +164,8 @@ def test_cpu_manager():
     )
 
     # lookup [1, 2] -> not ready
-    assert cpu_manager.lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
 
     # no events so far
     assert list(cpu_manager.take_events()) == []
@@ -170,9 +175,9 @@ def test_cpu_manager():
     verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
     # lookup [1, 2]
-    assert cpu_manager.lookup(to_keys([1]), _EMPTY_REQ_CTX) == 1
-    assert cpu_manager.lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 2
-    assert cpu_manager.lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) == 2
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is False
 
     # prepare store [2, 3, 4, 5] -> evicts [1]
     prepare_store_output = cpu_manager.prepare_store(
@@ -195,6 +200,14 @@ def test_cpu_manager():
 
     # complete store [2, 3, 4, 5]
     cpu_manager.complete_store(to_keys([2, 3, 4, 5]))
+
+    # lookup (now that we have [2, 3, 4, 5])
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(4), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(0), _EMPTY_REQ_CTX) is False
 
     # prepare load [2, 3]
     prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
@@ -238,8 +251,8 @@ def test_cpu_manager():
     cpu_manager.complete_store(to_keys([7, 9]), success=False)
 
     # assert [7] is still stored, but [9] is not
-    assert cpu_manager.lookup(to_keys([7]), _EMPTY_REQ_CTX) == 1
-    assert cpu_manager.lookup(to_keys([9]), _EMPTY_REQ_CTX) == 0
+    assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is True
+    assert cpu_manager.lookup(to_key(9), _EMPTY_REQ_CTX) is False
 
     verify_events(
         cpu_manager.take_events(),
@@ -284,7 +297,8 @@ class TestARCPolicy:
         )
 
         # lookup [1, 2] -> not ready
-        assert cpu_manager.lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
+        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
 
         # no events so far
         assert list(cpu_manager.take_events()) == []
@@ -294,9 +308,9 @@ class TestARCPolicy:
         verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
         # lookup [1, 2]
-        assert cpu_manager.lookup(to_keys([1]), _EMPTY_REQ_CTX) == 1
-        assert cpu_manager.lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 2
-        assert cpu_manager.lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) == 2
+        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is True
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
+        assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is False
 
         # blocks should be in T1 (recent)
         assert len(arc_policy.t1) == 2
@@ -500,7 +514,7 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([5]), success=False)
 
         # block 5 should not be in cache
-        assert cpu_manager.lookup(to_keys([5]), _EMPTY_REQ_CTX) == 0
+        assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is False
         # block 5 should not be in T1 or T2
         assert to_keys([5])[0] not in arc_policy.t1
         assert to_keys([5])[0] not in arc_policy.t2
@@ -541,8 +555,8 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([6]))
 
         # verify blocks 2, 3 (in T2) are still present
-        assert cpu_manager.lookup(to_keys([2]), _EMPTY_REQ_CTX) == 1
-        assert cpu_manager.lookup(to_keys([3]), _EMPTY_REQ_CTX) == 1
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
+        assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is True
 
         # verify events
         events = list(cpu_manager.take_events())
@@ -562,7 +576,8 @@ def test_filter_reused_manager():
     )
 
     # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
-    assert manager.lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
 
     # prepare store [1, 2] -> should be filtered
     prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -570,7 +585,7 @@ def test_filter_reused_manager():
     assert prepare_store_output.keys_to_store == []
 
     # Lookup [1] -> 2nd time, eligible now
-    assert manager.lookup(to_keys([1]), _EMPTY_REQ_CTX) == 0
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
 
     # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
     prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -579,12 +594,13 @@ def test_filter_reused_manager():
 
     # Lookup [3, 4] -> 1st time
     # (evicts [2] from tracker since max_size is 3 and tracker has [1])
-    assert manager.lookup(to_keys([3, 4]), _EMPTY_REQ_CTX) == 0
+    assert manager.lookup(to_key(3), _EMPTY_REQ_CTX) is False
+    assert manager.lookup(to_key(4), _EMPTY_REQ_CTX) is False
     # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
     assert to_keys([2])[0] not in manager.counts
 
     # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
-    assert manager.lookup(to_keys([2]), _EMPTY_REQ_CTX) == 0
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
     # Verify [2] was re-added with count=1 (not eligible yet)
     assert manager.counts.get(to_keys([2])[0]) == 1
 
