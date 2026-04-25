@@ -110,7 +110,6 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
         self._sent_content_idx = 0
-        self.current_tool_index = 0
 
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
@@ -297,6 +296,36 @@ class Qwen3CoderToolParser(ToolParser):
             if stripped == "" or stripped.startswith(self.tool_call_end_token):
                 return idx
             search_pos = idx + len(self.function_end_token)
+
+    def _advance_to_next_tool(self, current_text: str) -> None:
+        """Advance streaming state to the next tool call.
+
+        Updates _sent_content_idx to skip past the completed tool call's
+        closing tag, then resets per-tool state for the next invocation.
+        Called both on normal delta boundaries and during speculative-
+        decoding recursion when multiple complete tool calls arrive in one
+        delta.
+        """
+        search_idx = 0
+        for _ in range(self.current_tool_index + 1):
+            search_idx = current_text.find(self.tool_call_start_token, search_idx)
+            if search_idx == -1:
+                break
+            end_idx = current_text.find(self.tool_call_end_token, search_idx)
+            if end_idx != -1:
+                self._sent_content_idx = max(
+                    self._sent_content_idx,
+                    end_idx + len(self.tool_call_end_token),
+                )
+            search_idx += len(self.tool_call_start_token)
+
+        self.current_tool_index += 1
+        self.header_sent = False
+        self.param_count = 0
+        self.json_started = False
+        self.json_closed = False
+        self.accumulated_params = {}
+        self.is_tool_call_started = False
 
     def _find_true_tool_call_end(self, text: str) -> int:
         """Return the index of the real structural ``</tool_call>`` in
@@ -601,35 +630,9 @@ class Qwen3CoderToolParser(ToolParser):
             # Check if this tool call has ended
             tool_ends = current_text.count(self.tool_call_end_token)
             if tool_ends > self.current_tool_index:
-                # Find the end of the tool call that just finished and update
-                # _sent_content_idx to prevent it from leaking into content.
-                search_idx = 0
-                for _ in range(self.current_tool_index + 1):
-                    search_idx = current_text.find(self.tool_call_start_token,
-                                                  search_idx)
-                    if search_idx == -1:
-                        break
-                    end_idx = current_text.find(self.tool_call_end_token,
-                                               search_idx)
-                    if end_idx != -1:
-                        self._sent_content_idx = max(
-                            self._sent_content_idx,
-                            end_idx + len(self.tool_call_end_token))
-                    search_idx += len(self.tool_call_start_token)
-
-                # This tool has ended, advance to next
-                self.current_tool_index += 1
-                self.header_sent = False
-                self.param_count = 0
-                self.json_started = False
-                self.json_closed = False
-                self.accumulated_params = {}
-
-                # Always reset is_tool_call_started when a tool call ends.
-                # This allows correctly sending any content between or after
-                # tool calls.
-                self.is_tool_call_started = False
-                # Continue processing next tool
+                # Advance to next tool; is_tool_call_started is reset so
+                # content between or after tool calls is emitted correctly.
+                self._advance_to_next_tool(current_text)
                 return None
 
         content_message = None
@@ -1001,32 +1004,9 @@ class Qwen3CoderToolParser(ToolParser):
                 and current_text.count(self.tool_call_end_token)
                 > self.current_tool_index + 1
             ):
-                # Manually advance to the next tool: this mirrors the
-                # "advance to next tool" block executed at the top of
-                # this method on the next delta arrival.
-                search_idx = 0
-                for _ in range(self.current_tool_index + 1):
-                    search_idx = current_text.find(
-                        self.tool_call_start_token, search_idx
-                    )
-                    if search_idx == -1:
-                        break
-                    end_idx = current_text.find(
-                        self.tool_call_end_token, search_idx
-                    )
-                    if end_idx != -1:
-                        self._sent_content_idx = max(
-                            self._sent_content_idx,
-                            end_idx + len(self.tool_call_end_token),
-                        )
-                    search_idx += len(self.tool_call_start_token)
-                self.current_tool_index += 1
-                self.header_sent = False
-                self.param_count = 0
-                self.json_started = False
-                self.json_closed = False
-                self.accumulated_params = {}
-                self.is_tool_call_started = False
+                # Speculative decoding delivered multiple complete tool
+                # calls in one delta; advance and recurse for the next.
+                self._advance_to_next_tool(current_text)
 
                 # Recurse with a sentinel previous_text so the entry
                 # check `if not previous_text` does NOT reset the state.
