@@ -884,7 +884,7 @@ def make_mxfp4_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_deepep_ll_kernels
+            if moe_config.moe_parallel_config.use_batched_activation_format
             else None
         ),
         inplace=(

@@ -404,6 +404,7 @@ def _build_attention_metadata(
         query_start_loc=q_start_gpu,
         query_start_loc_cpu=q_start_cpu,
         seq_lens=seq_lens_gpu,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
         slot_mapping=slot_mapping,
