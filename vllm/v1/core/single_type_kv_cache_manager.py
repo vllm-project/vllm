@@ -479,9 +479,63 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
-    def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
+    def __init__(
+        self,
+        kv_cache_spec: SlidingWindowSpec,
+        *,
+        max_admission_blocks_per_request: int,
+        **kwargs,
+    ) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
+        # Recycling-aware admission cap: matches the bound used to size the
+        # pool at startup in `SlidingWindowSpec.max_memory_usage_bytes`. Per
+        # request, `remove_skipped_blocks` keeps the real-held block count
+        # from exceeding this; the admission gate composes per-request caps
+        # so total reservations never exceed the pool.
+        self._max_admission_blocks_per_request = max_admission_blocks_per_request
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_tokens_main_model: int,
+    ) -> int:
+        """Return the admission *reservation* (not lifetime block touches).
+
+        For a fresh request, the base implementation would ask for
+        ``cdiv(num_tokens, block_size)`` blocks because
+        ``get_num_skipped_tokens(0) == 0``. That over-counts: chunked prefill
+        invokes :meth:`remove_skipped_blocks` between chunks, which swaps
+        out-of-window blocks for ``null_block`` and returns their slots to
+        the pool, so per-request real-held blocks plateau at roughly one
+        window's worth.
+
+        We therefore cap demand at the same recycling-aware bound that
+        :meth:`SlidingWindowSpec.max_memory_usage_bytes
+        <vllm.v1.kv_cache_interface.SlidingWindowSpec.max_memory_usage_bytes>`
+        used to size the pool at startup. The two formulas MUST stay in sync
+        (drift re-introduces the deadlock from issue #39734 or, worse,
+        mid-prefill OOM); both derive from
+        :meth:`SlidingWindowSpec.max_admission_blocks_per_request
+        <vllm.v1.kv_cache_interface.SlidingWindowSpec.max_admission_blocks_per_request>`.
+
+        Safety: per-request peak ≤ reservation (guaranteed by
+        :meth:`remove_skipped_blocks`), and the admission gate ensures
+        ``sum(reservations) ≤ pool``, so ``sum( peak_real_held) ≤ pool``.
+        """
+        capped_num_tokens = min(
+            num_tokens, self._max_admission_blocks_per_request * self.block_size
+        )
+        return super().get_num_blocks_to_allocate(
+            request_id,
+            capped_num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_tokens_main_model,
+        )
 
     @classmethod
     def find_longest_cache_hit(
@@ -618,9 +672,50 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
-    def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
+    def __init__(
+        self,
+        kv_cache_spec: ChunkedLocalAttentionSpec,
+        *,
+        max_admission_blocks_per_request: int,
+        **kwargs,
+    ) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
+        # Recycling-aware admission cap, mirroring the startup pool sizer in
+        # `ChunkedLocalAttentionSpec.max_memory_usage_bytes`. See
+        # `SlidingWindowManager` for the safety argument.
+        self._max_admission_blocks_per_request = max_admission_blocks_per_request
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_tokens_main_model: int,
+    ) -> int:
+        """Return the admission *reservation* (not lifetime block touches).
+
+        Caps demand at the recycling-aware bound mirroring
+        :meth:`ChunkedLocalAttentionSpec.max_memory_usage_bytes
+        <vllm.v1.kv_cache_interface.ChunkedLocalAttentionSpec.max_memory_usage_bytes>`,
+        which the startup pool sizer uses. Both formulas derive from
+        :meth:`ChunkedLocalAttentionSpec.max_admission_blocks_per_request
+        <vllm.v1.kv_cache_interface.ChunkedLocalAttentionSpec.max_admission_blocks_per_request>`
+        and MUST stay in sync. See :meth:`SlidingWindowManager.get_num_blocks_to_allocate`
+        for the recycling-vs-reservation safety argument; the same invariant
+        holds here via :meth:`remove_skipped_blocks`.
+        """
+        capped_num_tokens = min(
+            num_tokens, self._max_admission_blocks_per_request * self.block_size
+        )
+        return super().get_num_blocks_to_allocate(
+            request_id,
+            capped_num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_tokens_main_model,
+        )
 
     @classmethod
     def find_longest_cache_hit(
@@ -1126,8 +1221,20 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 
 
 def get_manager_for_kv_cache_spec(
-    kv_cache_spec: KVCacheSpec, **kwargs
+    kv_cache_spec: KVCacheSpec,
+    max_num_batched_tokens: int,
+    max_model_len: int,
+    **kwargs,
 ) -> SingleTypeKVCacheManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
+    # SlidingWindow / ChunkedLocalAttention managers recycle blocks across
+    # chunks; the runtime admission cap must match the recycling-aware bound
+    # the startup pool sizer uses (single source of truth: the spec method).
+    if isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
+        kwargs["max_admission_blocks_per_request"] = (
+            kv_cache_spec.max_admission_blocks_per_request(
+                max_num_batched_tokens, max_model_len
+            )
+        )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
