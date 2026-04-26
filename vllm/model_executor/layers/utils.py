@@ -228,7 +228,8 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
-    N, K = layer.weight.size()
+    weight_shape = layer.weight.size()
+    N, K = weight_shape[-2], weight_shape[-1]
     dtype = layer.weight.dtype
 
     # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
