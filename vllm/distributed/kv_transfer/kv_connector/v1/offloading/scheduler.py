@@ -562,7 +562,7 @@ class OffloadingConnectorScheduler:
             # same request (on re-schedule) doesn't trip the
             # "no other jobs pending" invariant in update_state_after_alloc.
             for jid in req_status.transfer_jobs:
-                self._jobs.pop(jid, None)
+                del self._jobs[jid]
             req_status.transfer_jobs.clear()
 
         meta = OffloadingConnectorMetadata(
@@ -613,16 +613,12 @@ class OffloadingConnectorScheduler:
         # Worker acks: scheduler is about to free blocks (base-scheduler
         # side, right after this call). Drop our per-request bookkeeping.
         for req_id in connector_output.finished_sending or ():
-            req_status = self._req_status.pop(req_id, None)
-            if req_status is None:
-                continue
+            req_status = self._req_status.pop(req_id)
             for job_id in req_status.transfer_jobs:
-                self._jobs.pop(job_id, None)
+                del self._jobs[job_id]
 
         for req_id in connector_output.finished_recving or ():
-            req_status = self._req_status.get(req_id)
-            if req_status is None:
-                continue
+            req_status = self._req_status[req_id]
             # A finished_recving ack corresponds to a single load job
             # for this request (per the one-load-or-many-stores
             # invariant). Drop it from transfer_jobs so a subsequent
@@ -636,11 +632,11 @@ class OffloadingConnectorScheduler:
                 None,
             )
             if load_job_id is not None:
-                req_status.transfer_jobs.discard(load_job_id)
-                self._jobs.pop(load_job_id, None)
+                req_status.transfer_jobs.remove(load_job_id)
+                del self._jobs[load_job_id]
             # Aborted while loading: request is terminal, drop state.
             if req_status.req.is_finished():
-                self._req_status.pop(req_id, None)
+                del self._req_status[req_id]
 
     def request_finished(
         self,
@@ -661,13 +657,10 @@ class OffloadingConnectorScheduler:
 
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
-        req_status = self._req_status.get(req_id)
-        if req_status is None:
-            return False, None
-
+        req_status = self._req_status[req_id]
         req_has_transfers = bool(req_status.transfer_jobs)
         if not req_has_transfers:
-            self._req_status.pop(req_id, None)
+            del self._req_status[req_id]
         return req_has_transfers, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:

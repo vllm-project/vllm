@@ -379,7 +379,7 @@ class OffloadingConnectorWorker:
             # only once the engine has signaled the request finished.
             if req_state.is_finished:
                 finished_sending.add(job_info.req_id)
-                self._req_state.pop(job_info.req_id, None)
+                del self._req_state[job_info.req_id]
 
         for req_id in finished_req_ids:
             req_state = self._req_state.get(req_id)
@@ -389,7 +389,7 @@ class OffloadingConnectorWorker:
                 req_state.is_finished = True
             else:
                 finished_sending.add(req_id)
-                self._req_state.pop(req_id, None)
+                del self._req_state[req_id]
 
         return finished_sending, finished_recving
 
