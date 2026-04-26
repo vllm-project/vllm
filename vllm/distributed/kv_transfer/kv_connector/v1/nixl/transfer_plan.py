@@ -58,6 +58,12 @@ class RegionPlan:
     Everything needed to build NIXL descriptors and compute descriptor
     IDs is baked in.  The caller plugs in ``base_addr`` and
     ``device_id`` when constructing the final descriptor tuples.
+
+    When ``descs_per_block > 1``, each physical block produces multiple
+    NIXL descriptors.  This happens when the remote page is larger than
+    the local page (e.g. Gemma4 2p4d where P page = 65536 bytes,
+    D page = 32768 bytes → ``descs_per_block = 2``).  Each descriptor
+    covers one local-page-sized chunk of the remote block.
     """
 
     layer_idx: int
@@ -68,6 +74,13 @@ class RegionPlan:
     page_stride: int
     num_blocks: int
 
+    # How many NIXL descriptors to register per physical block.
+    # Default 1 (one desc per block).  When the remote page is N times
+    # larger than local, set to N so each block produces N descriptors.
+    descs_per_block: int = 1
+    # Byte offset between consecutive descriptors within the same block.
+    desc_stride_bytes: int = 0
+
 
 @dataclass(frozen=True)
 class EngineTransferPlan:
@@ -76,9 +89,12 @@ class EngineTransferPlan:
     Generated once during handshake.  Regions are split into
     ``fa_regions`` and ``ssm_regions`` matching the descriptor
     handle layout.
+
+    Per-group HeteroTP fields enable models where different attention
+    groups have different transfer behaviors (e.g. Gemma4 SWA + FA).
     """
 
-    # Regions in descriptor handle order
+    # --- Core regions (descriptor handle order) ---
     fa_regions: tuple[RegionPlan, ...]
     ssm_regions: tuple[RegionPlan, ...]
 
@@ -91,13 +107,34 @@ class EngineTransferPlan:
     # Superset of all source ranks (union of all groups).
     all_source_ranks: tuple[int, ...]
 
-    # Maps each source rank to its FA head slot index.
-    rank_to_attention_slot: dict[int, int]
+    # Per-group head slot mapping.  Each dict maps source rank → slot.
+    # Per-group because different groups can have different num_kv_heads,
+    # leading to different head-to-slot assignments.
+    # Example: Gemma4 has SWA K=8 and FA K=2; at 4p2d these would
+    # produce genuinely different slot mappings.
+    rank_to_attention_slot: tuple[dict[int, int], ...]
 
     # Stride for expanding remote logical block IDs to kernel block IDs.
-    # Dense: local_physical_blocks_per_logical.
-    # Mamba: remote_physical_blocks_per_logical.
     remote_expansion_stride: int
+
+    # --- HeteroTP per-group fields (e.g. Gemma4 SWA + FA) ---
+    # Active only when remote_to_local_page_ratio > 1.
+    # For Dense/Mamba (ratio=1), these are unused and default to empty.
+
+    # remote_page_size_bytes / local_page_size_bytes.
+    # Gemma4 2p4d: 65536 / 32768 = 2.
+    remote_to_local_page_ratio: int = 1
+
+    # Per-group: how many local (D) blocks correspond to one remote (P)
+    # block. Computed as remote_block_size / local_block_size per group.
+    # Gemma4 2p4d: SWA = 16/16 = 1, FA = 32/16 = 2.
+    local_blocks_per_remote_block: tuple[int, ...] = ()
+
+    # Per-group: which descriptor index to read from a multi-descriptor
+    # remote block (for head-split groups where local reads a portion).
+    # Gemma4 2p4d rank 0: SWA = 0 (first half), FA = 0 (unused, reads all).
+    # Gemma4 2p4d rank 1: SWA = 1 (second half), FA = 0.
+    sub_desc_index_per_group: tuple[int, ...] = ()
 
     @property
     def all_regions(self) -> tuple[RegionPlan, ...]:
@@ -306,7 +343,7 @@ def generate_dense_plan(
         group_spec_types=group_spec_types,
         source_ranks_per_group=tp_mapping.source_ranks_per_group,
         all_source_ranks=tp_mapping.all_source_ranks,
-        rank_to_attention_slot=tp_mapping.rank_to_attention_slot,
+        rank_to_attention_slot=(tp_mapping.rank_to_attention_slot,),
         remote_expansion_stride=local_physical_blocks_per_logical,
     )
 
@@ -416,15 +453,199 @@ def generate_mamba_plan(
             )
         )
 
+    n_groups = len(group_spec_types)
     return EngineTransferPlan(
         fa_regions=tuple(fa_regions),
         ssm_regions=tuple(ssm_regions),
         group_spec_types=group_spec_types,
         source_ranks_per_group=tp_mapping.source_ranks_per_group,
         all_source_ranks=tp_mapping.all_source_ranks,
-        rank_to_attention_slot=tp_mapping.rank_to_attention_slot,
+        rank_to_attention_slot=(tp_mapping.rank_to_attention_slot,) * n_groups,
         remote_expansion_stride=remote_phys_ratio,
     )
+
+
+def generate_gemma4_plan(
+    *,
+    transfer_topo: TransferTopology,
+    block_len_per_layer: list[int],
+    remote_info: EngineTransferInfo,
+    remote_meta: NixlAgentMetadata,
+    group_spec_types: tuple[type[KVCacheSpec], ...],
+    total_num_kv_heads_per_group: tuple[int, ...],
+    local_tokens_per_block: tuple[int, ...],
+    remote_tokens_per_block: tuple[int, ...],
+) -> EngineTransferPlan:
+    """Generate transfer plan for Gemma4-style heterogeneous attention.
+
+    Gemma4 has multiple attention groups (SWA, FA) with different
+    ``total_num_kv_heads`` and ``head_dim``.  With page unification and
+    HMA, all groups share physical memory pools.  This generator:
+
+    1. Calls ``_compute_tp_mapping`` per group with group-specific K.
+    2. Builds FA regions with multiple descriptors per block when P and
+       D have different page sizes.
+    3. Encodes per-group transfer behavior via
+       ``local_blocks_per_remote_block`` and ``sub_desc_index_per_group``.
+    """
+    tp_rank = transfer_topo.tp_rank
+    tp_size = transfer_topo.tp_size
+    remote_tp_size = remote_info.remote_tp_size
+    is_mla = transfer_topo.is_mla
+    is_blocks_first = transfer_topo.is_kv_layout_blocks_first
+    n_groups = len(group_spec_types)
+
+    local_page = block_len_per_layer[0]
+    remote_page = remote_meta.block_lens[0]
+    page_ratio = remote_page // local_page
+    assert page_ratio >= 1, (
+        f"Remote page {remote_page} must be >= local page {local_page}"
+    )
+
+    blocks_per_remote: list[int] = []
+    sub_desc_idx: list[int] = []
+
+    source_ranks_all: list[tuple[int, ...]] = []
+    rank_to_slot_all: list[dict[int, int]] = []
+
+    for g in range(n_groups):
+        n_local = remote_tokens_per_block[g] // local_tokens_per_block[g]
+        blocks_per_remote.append(n_local)
+
+        K_g = total_num_kv_heads_per_group[g]
+        m_g = _compute_tp_mapping(
+            tp_rank,
+            tp_size,
+            remote_tp_size,
+            is_mla,
+            K_g,
+            (group_spec_types[g],),
+        )
+        source_ranks_all.append(m_g.source_ranks_per_group[0])
+        rank_to_slot_all.append(m_g.rank_to_attention_slot)
+
+        # Head-split groups: rank_offset_factor selects which descriptor.
+        if n_local == 1 and page_ratio > 1:
+            sub_desc_idx.append(m_g.rank_offset_factor)
+        else:
+            sub_desc_idx.append(0)
+
+    all_ranks: set[int] = set()
+    for ranks in source_ranks_all:
+        all_ranks.update(ranks)
+    all_source_ranks = tuple(sorted(all_ranks))
+
+    # HMA: one K pool (+ optional V pool) shared by all groups.
+    # Register descs_per_block descriptors per physical block.
+    fa_regions: list[RegionPlan] = []
+    for i in range(len(remote_meta.block_lens)):
+        local_block_len = _get_kv_block_len(
+            i,
+            block_len_per_layer,
+            is_blocks_first,
+        )
+        page_stride = remote_meta.block_lens[i]
+
+        fa_regions.append(
+            RegionPlan(
+                kind=RegionKind.FA_K,
+                layer_idx=i,
+                descriptor_bytes=local_block_len,
+                offset_in_page=0,
+                page_stride=page_stride,
+                num_blocks=remote_meta.num_blocks,
+                descs_per_block=page_ratio,
+                desc_stride_bytes=local_block_len,
+            )
+        )
+
+        if is_blocks_first:
+            fa_regions.append(
+                RegionPlan(
+                    kind=RegionKind.FA_V,
+                    layer_idx=i,
+                    descriptor_bytes=local_block_len,
+                    offset_in_page=page_stride // 2,
+                    page_stride=page_stride,
+                    num_blocks=remote_meta.num_blocks,
+                    descs_per_block=page_ratio,
+                    desc_stride_bytes=local_block_len,
+                )
+            )
+
+    return EngineTransferPlan(
+        fa_regions=tuple(fa_regions),
+        ssm_regions=(),
+        group_spec_types=group_spec_types,
+        source_ranks_per_group=tuple(source_ranks_all),
+        all_source_ranks=all_source_ranks,
+        rank_to_attention_slot=tuple(rank_to_slot_all),
+        remote_expansion_stride=1,
+        remote_to_local_page_ratio=page_ratio,
+        local_blocks_per_remote_block=tuple(blocks_per_remote),
+        sub_desc_index_per_group=tuple(sub_desc_idx),
+    )
+
+
+# ======================================================================
+# 4. Local descriptor building
+# ======================================================================
+
+
+def _remap_remote_blocks_to_subdesc_ids(
+    plan: EngineTransferPlan,
+    remote_block_ids: BlockIds,
+    local_block_ids: BlockIds,
+) -> tuple[BlockIds, BlockIds]:
+    """Convert remote block IDs into descriptor-level indices.
+
+    When ``remote_to_local_page_ratio > 1``, each remote physical block
+    is registered as multiple descriptors (one per local-page-sized
+    chunk).  This function converts remote block IDs into the
+    descriptor index space so that ``_compute_desc_ids_from_plan`` can
+    look up the correct descriptors.
+
+    Two per-group cases:
+
+    * **Multi-block** (``local_blocks_per_remote_block > 1``, e.g. FA):
+      One remote block covers multiple local blocks.
+      Remote block ``b`` → descriptor indices
+      ``[b*ratio, b*ratio+1, ..., b*ratio+(n-1)]``.
+      Example: FA block 10, ratio=2 → desc indices [20, 21].
+
+    * **Head-split** (``local_blocks_per_remote_block == 1``, e.g. SWA):
+      Local reads one specific chunk of the remote block.
+      Remote block ``b`` → descriptor index
+      ``b*ratio + sub_desc_index_per_group[g]``.
+      Example: SWA block 10, ratio=2, index=1 → desc index 21.
+
+    Local block IDs are returned unchanged.
+    """
+    if plan.remote_to_local_page_ratio <= 1:
+        return remote_block_ids, local_block_ids
+
+    ratio = plan.remote_to_local_page_ratio
+    num_groups = len(remote_block_ids)
+    new_remote: list[list[int]] = []
+    new_local: list[list[int]] = []
+
+    for g in range(num_groups):
+        n_local = plan.local_blocks_per_remote_block[g]
+        r_ids = list(remote_block_ids[g])
+        l_ids = list(local_block_ids[g])
+
+        if n_local > 1:
+            remapped: list[int] = []
+            for b in r_ids:
+                remapped.extend(b * ratio + s for s in range(n_local))
+            new_remote.append(remapped)
+        else:
+            idx = plan.sub_desc_index_per_group[g]
+            new_remote.append([b * ratio + idx for b in r_ids])
+
+        new_local.append(l_ids)
+
+    return new_remote, new_local
 
 
 # ======================================================================

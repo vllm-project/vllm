@@ -133,6 +133,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    total_num_kv_heads: int | None = None
 
     @property
     def page_size_bytes(self) -> int:

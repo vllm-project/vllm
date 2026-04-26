@@ -492,6 +492,7 @@ class Gemma4Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
             logits_soft_cap=attn_logits_soft_cap,

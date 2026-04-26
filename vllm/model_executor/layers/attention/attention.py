@@ -203,6 +203,7 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        total_num_kv_heads: int | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -285,6 +286,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.head_size = head_size
         self.head_size_v = self.head_size if head_size_v is None else head_size_v
         self.num_kv_heads = num_kv_heads
+        self.total_num_kv_heads = total_num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
@@ -552,6 +554,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                total_num_kv_heads=self.total_num_kv_heads,
                 sliding_window=self.sliding_window,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):
@@ -579,6 +582,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                total_num_kv_heads=self.total_num_kv_heads,
             )
 
 

@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
     RegionPlan,
     generate_dense_plan,
+    generate_gemma4_plan,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
@@ -414,7 +415,7 @@ def _make_mamba_plan_for_desc_ids(
         group_spec_types=group_spec_types,
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=(0,),
-        rank_to_attention_slot={0: 0},
+        rank_to_attention_slot=({0: 0},) * len(group_kinds),
         remote_expansion_stride=1,
     )
 
@@ -487,7 +488,7 @@ class TestMambaPlanReadSpecs:
             group_spec_types=(FullAttentionSpec, MambaSpec),
             source_ranks_per_group=(both, both),
             all_source_ranks=(0, 1),
-            rank_to_attention_slot={0: 0, 1: 1},
+            rank_to_attention_slot=({0: 0, 1: 1}, {0: 0, 1: 1}),
             remote_expansion_stride=1,
         )
 
@@ -512,7 +513,7 @@ class TestMambaPlanReadSpecs:
             group_spec_types=(FullAttentionSpec, MambaSpec),
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1, 2),
-            rank_to_attention_slot={0: 0},
+            rank_to_attention_slot=({0: 0}, {0: 0}),
             remote_expansion_stride=1,
         )
 
@@ -558,7 +559,7 @@ class TestMambaPlanSplitHandles:
             group_spec_types=(FullAttentionSpec, MambaSpec),
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1),
-            rank_to_attention_slot={0: 0, 1: 0},
+            rank_to_attention_slot=({0: 0, 1: 0}, {0: 0, 1: 0}),
             remote_expansion_stride=1,
         )
 
@@ -584,3 +585,194 @@ class TestMambaPlanSplitHandles:
         # FA: chunk=200//1=200, slot=0 (skip_fa) → (1000, 200, 0), (2000, 200, 0)
         # SSM: chunk=400//2=200, idx=1 → (3200, 200, 0)
         assert splits[1] == [(1000, 200, 0), (2000, 200, 0), (3200, 200, 0)]
+
+
+# ======================================================================
+# Gemma4 HeteroTP tests
+# ======================================================================
+
+
+def _make_gemma4_plan_params(
+    tp_rank: int = 0,
+    tp_size: int = 4,
+    remote_tp_size: int = 2,
+) -> dict:
+    """Build kwargs for generate_gemma4_plan at 2p4d.
+
+    Gemma4-26B at P_TP=2, D_TP=4:
+      SWA: 25 layers, K=8, head_dim=256, block_size=16 on both sides
+      FA:   5 layers, K=2, head_dim=512, P block_size=32, D block_size=16
+
+    With page unification + HMA, all groups share one physical pool.
+    page_size: P=65536, D=32768 → remote_to_local_page_ratio=2.
+    For simplicity, use 2 physical layers in tests.
+    """
+    # D side (local): kv_heads_per_rank for all groups = page_size / block_size
+    # page_size = 32768 for both groups at D_TP=4.
+    d_page = 32768
+    p_page = 65536
+    num_layers = 2
+
+    return dict(
+        transfer_topo=_make_fake_topo(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            is_mla=False,
+            total_num_kv_heads=8,
+            block_size=16,
+            is_blocks_first=False,
+        ),
+        block_len_per_layer=[d_page] * num_layers,
+        remote_info=EngineTransferInfo(
+            remote_tp_size=remote_tp_size,
+            remote_block_size=16,
+            remote_block_len=p_page,
+            remote_physical_blocks_per_logical=1,
+        ),
+        remote_meta=_make_nixl_meta(
+            base_addrs=[0x10000 * (i + 1) for i in range(num_layers)],
+            num_blocks=500,
+            block_lens=[p_page] * num_layers,
+            block_size=16,
+        ),
+        group_kinds=(GroupKind.SWA, GroupKind.FA),
+        total_num_kv_heads_per_group=(8, 2),
+        local_tokens_per_block=(16, 16),
+        remote_tokens_per_block=(16, 32),
+    )
+
+
+class TestGemma4PlanStructure:
+    """Verify plan structure for Gemma4-style heterogeneous attention."""
+
+    def test_plan_fields_2p4d_rank0(self):
+        """D rank 0 at 2p4d: ratio=2, SWA head-split, FA multi-block."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params(tp_rank=0))
+
+        assert plan.remote_to_local_page_ratio == 2
+        assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
+        assert plan.local_blocks_per_remote_block == (1, 2)
+        assert plan.sub_desc_index_per_group == (0, 0)  # rank 0: index=0
+        assert plan.all_source_ranks == (0,)
+        assert plan.source_ranks_per_group == ((0,), (0,))
+
+    def test_plan_fields_2p4d_rank1(self):
+        """D rank 1 at 2p4d: SWA reads second descriptor (index=1)."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params(tp_rank=1))
+
+        assert plan.sub_desc_index_per_group == (1, 0)  # rank 1: SWA=1
+        assert plan.local_blocks_per_remote_block == (1, 2)
+        assert plan.all_source_ranks == (0,)
+
+    def test_plan_fields_2p4d_rank2(self):
+        """D rank 2 reads from P rank 1."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params(tp_rank=2))
+
+        assert plan.all_source_ranks == (1,)
+        assert plan.sub_desc_index_per_group == (0, 0)
+
+    def test_fa_regions_have_multiple_descs_per_block(self):
+        """FA regions should have descs_per_block = page ratio."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params())
+
+        for region in plan.fa_regions:
+            assert region.descs_per_block == 2
+            assert region.desc_stride_bytes == 32768  # D page size
+
+
+class TestGemma4RemoteDescs:
+    """Verify remote descriptor building with sub-descriptors."""
+
+    def test_descs_per_block(self):
+        """Each region produces num_blocks * descs_per_block descriptors."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params())
+        meta = _make_nixl_meta(
+            base_addrs=[0x10000, 0x20000],
+            num_blocks=500,
+            block_lens=[65536, 65536],
+        )
+        descs = build_remote_descs_from_plan(plan, meta)
+
+        # 2 layers × 1 region/layer × 500 blocks × 2 descs/block = 2000
+        expected_count = 2 * 500 * 2
+        assert len(descs) == expected_count
+
+    def test_desc_stride_within_block(self):
+        """Descriptors within a block should be desc_stride_bytes apart."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params())
+        meta = _make_nixl_meta(
+            base_addrs=[0x10000, 0x20000],
+            num_blocks=500,
+            block_lens=[65536, 65536],
+        )
+        descs = build_remote_descs_from_plan(plan, meta)
+
+        # First block, layer 0: descriptor 0 and descriptor 1
+        addr_d0, len_d0, _ = descs[0]
+        addr_d1, len_d1, _ = descs[1]
+        assert addr_d1 - addr_d0 == 32768  # desc_stride_bytes
+        assert len_d0 == len_d1 == 32768  # descriptor_bytes
+
+
+class TestGemma4DescIds:
+    """Verify desc ID computation with sub-desc block IDs."""
+
+    def test_remapped_block_ids(self):
+        """After remapping, descriptor indices are correct."""
+        plan = generate_gemma4_plan(**_make_gemma4_plan_params())
+
+        # SWA blocks [3, 7], FA blocks [10, 11]
+        # Remapped to descriptor indices:
+        #   SWA (sub_desc_index=0): [3*2+0, 7*2+0] = [6, 14]
+        #   FA  (2 local per remote): [10*2, 10*2+1, 11*2, 11*2+1] = [20,21,22,23]
+        #
+        # dst_num_blocks = 500 * 2 = 1000 (num_blocks * descs_per_block)
+        # 2 fa_regions (2 layers), each with 1000 desc slots
+        # SWA: [0*1000+6, 0*1000+14, 1*1000+6, 1*1000+14]
+        #    = [6, 14, 1006, 1014]
+        # FA:  [0*1000+20, 0*1000+21, 0*1000+22, 0*1000+23,
+        #       1*1000+20, 1*1000+21, 1*1000+22, 1*1000+23]
+        #    = [20, 21, 22, 23, 1020, 1021, 1022, 1023]
+
+        # First remap via read specs to get descriptor-level block IDs
+        local_swa = [10, 11]
+        local_fa = [20, 21, 22, 23]
+        remote_swa = [3, 7]
+        remote_fa = [10, 11]
+
+        specs = compute_read_specs_from_plan(
+            plan,
+            local_block_ids=(local_swa, local_fa),
+            remote_block_ids=(remote_swa, remote_fa),
+        )
+        assert len(specs) == 1  # Single source rank
+        spec = specs[0]
+
+        # Verify remapped remote block IDs
+        assert list(spec.remote_block_ids[0]) == [6, 14]  # SWA: b*2+0
+        assert list(spec.remote_block_ids[1]) == [20, 21, 22, 23]  # FA: 2 per
+
+        # Verify local block IDs unchanged
+        assert list(spec.local_block_ids[0]) == [10, 11]
+        assert list(spec.local_block_ids[1]) == [20, 21, 22, 23]
+
+        # Now compute desc IDs with the remapped remote blocks
+        remote_ids = compute_desc_ids_from_plan(
+            plan,
+            block_ids=spec.remote_block_ids,
+            dst_num_blocks=500 * 2,  # num_blocks * descs_per_block
+        )
+        expected_remote = [6, 14, 1006, 1014, 20, 21, 22, 23, 1020, 1021, 1022, 1023]
+        assert list(remote_ids) == expected_remote
+
+        # Local desc IDs (standard, descs_per_block=1 locally)
+        local_ids = compute_desc_ids_from_plan(
+            plan,
+            block_ids=spec.local_block_ids,
+            dst_num_blocks=1000,  # local num_blocks
+        )
+        expected_local = [10, 11, 1010, 1011, 20, 21, 22, 23, 1020, 1021, 1022, 1023]
+        assert list(local_ids) == expected_local
+
+        # Both have same length → can be paired for transfer
+        assert len(remote_ids) == len(local_ids)

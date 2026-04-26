@@ -50,6 +50,12 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    # Per-group block_size in tokens after page unification, indexed by
+    # kv_cache_group position.  Needed for HeteroTP models (e.g. Gemma4)
+    # where groups have different token counts per block.
+    # Example — Gemma4 at P_TP=2: [16, 32] for [SWA, FA].
+    # None for homogeneous models (all groups share the same block_size).
+    tokens_per_block_per_group: list[int] | None = None
 
 
 @dataclass

@@ -51,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     build_fa_local_regions,
     build_mamba_local_regions,
     generate_dense_plan,
+    generate_gemma4_plan,
     generate_mamba_plan,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
@@ -71,6 +72,7 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -363,6 +365,29 @@ class NixlConnectorWorker:
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
+
+        # ---- Heterogeneous attention detection (e.g. Gemma4 SWA + FA) ----
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        attn_specs = [
+            g.kv_cache_spec
+            for g in kv_cache_config.kv_cache_groups
+            if isinstance(g.kv_cache_spec, AttentionSpec)
+        ]
+        self._is_hetero_attn = (
+            len(attn_specs) > 1 and len({s.num_kv_heads for s in attn_specs}) > 1
+        )
+        if self._is_hetero_attn:
+            self._total_kv_heads_per_group = tuple(
+                s.total_num_kv_heads
+                if s.total_num_kv_heads is not None
+                else s.num_kv_heads * tp_size
+                for s in attn_specs
+            )
+            unified_page = max(s.page_size_bytes for s in attn_specs)
+            self._local_tokens_per_block_per_group = tuple(
+                s.block_size * unified_page // s.real_page_size_bytes
+                for s in attn_specs
+            )
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1049,6 +1074,11 @@ class NixlConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            tokens_per_block_per_group=(
+                list(self._local_tokens_per_block_per_group)
+                if self._is_hetero_attn
+                else None
+            ),
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1178,6 +1208,26 @@ class NixlConnectorWorker:
                 ),
                 conv_decomp=self._conv_decomp,
                 ssm_sizes=self._mamba_ssm_size,
+            )
+        elif self._is_hetero_attn:
+            remote_tpb = tuple(nixl_agent_meta.tokens_per_block_per_group or ())
+            group_spec_types = tuple(
+                type(g.kv_cache_spec)
+                for g in self.kv_cache_config.kv_cache_groups
+            )
+            assert len(remote_tpb) == len(group_spec_types), (
+                f"Remote tokens_per_block_per_group length "
+                f"{len(remote_tpb)} != {len(group_spec_types)} groups"
+            )
+            self._transfer_plans[engine_id] = generate_gemma4_plan(
+                transfer_topo=transfer_topo,
+                block_len_per_layer=self.block_len_per_layer,
+                remote_info=transfer_info,
+                remote_meta=nixl_agent_meta,
+                group_spec_types=group_spec_types,
+                total_num_kv_heads_per_group=(self._total_kv_heads_per_group),
+                local_tokens_per_block=(self._local_tokens_per_block_per_group),
+                remote_tokens_per_block=remote_tpb,
             )
         else:
             self._transfer_plans[engine_id] = generate_dense_plan(
@@ -1963,10 +2013,15 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
+        # For HeteroTP (page_ratio > 1), each remote block is registered as
+        # multiple descriptors, so scale the descriptor-space block count.
+        remote_desc_blocks = (
+            self.dst_num_blocks[dst_engine_id] * plan.remote_to_local_page_ratio
+        )
         remote_block_descs_ids = self._compute_desc_ids_from_plan(
             plan,
             block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+            dst_num_blocks=remote_desc_blocks,
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
         )
