@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=13.0.0
+ARG CUDA_VERSION=13.0.2
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
 

@@ -107,7 +107,7 @@ def backend_to_kernel_cls(
         return [FlashInferCuteDSLBatchedExperts]
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassExpertsFp4,
         )
 
@@ -168,10 +168,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
 
-    # NOTE(rob): this is kind of a hack. We need to peak into
-    # the prepare-finalize selection to determine if we are using
-    # the batched or standard expert format.
-    use_batched = config.moe_parallel_config.use_deepep_ll_kernels
+    use_batched = config.moe_parallel_config.use_batched_activation_format
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if use_batched

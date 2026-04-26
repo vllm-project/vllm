@@ -24,13 +24,14 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10,<3.15"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -123,7 +124,8 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
     "examples/pooling/token_embed/*", "tests/models/language/pooling/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", "tests/entrypoints/openai/speech_to_text/test_transcription_validation.py",
-    "docs/governance/process.md", "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
+    "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
+    "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
 ignore-hidden = false
 
 [tool.typos.default]

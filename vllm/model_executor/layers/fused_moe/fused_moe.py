@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -1886,7 +1887,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEExpertsModular):
+class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
     def __init__(
@@ -2094,6 +2095,33 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             B_bias=self.w1_bias,
         )
 
+        # LoRA w13: applied to intermediate_cache1 before activation, using
+        # hidden_states as the lora_a input.  moe_lora_align_block_size is
+        # called once here and results reused for the w2 LoRA below.
+        sorted_token_ids_lora = None
+        expert_ids_lora = None
+        num_tokens_post_padded_lora = None
+        token_lora_mapping = None
+        lora_context = self._lora_context
+        if lora_context is not None:
+            (
+                sorted_token_ids_lora,
+                expert_ids_lora,
+                num_tokens_post_padded_lora,
+                token_lora_mapping,
+            ) = self.apply_w13_lora(
+                lora_context,
+                y=intermediate_cache1,
+                x=hidden_states,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                expert_map=expert_map,
+                w1=w1,
+                w2=w2,
+                num_tokens=num_tokens,
+                top_k_num=top_k_num,
+            )
+
         self.activation(
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
@@ -2131,6 +2159,25 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
         )
+
+        # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
+        # unquantized intermediate_cache2 as the lora_a input.  Reuses the
+        # sorted_token_ids_lora computed above.
+        if lora_context is not None:
+            self.apply_w2_lora(
+                lora_context,
+                y=intermediate_cache3,
+                x=intermediate_cache2,
+                topk_weights=topk_weights,
+                sorted_token_ids_lora=sorted_token_ids_lora,
+                expert_ids_lora=expert_ids_lora,
+                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
+                token_lora_mapping=token_lora_mapping,
+                num_tokens=num_tokens,
+                w1=w1,
+                w2=w2,
+                top_k_num=top_k_num,
+            )
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)

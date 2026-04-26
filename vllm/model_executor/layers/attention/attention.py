@@ -597,6 +597,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
+                head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
