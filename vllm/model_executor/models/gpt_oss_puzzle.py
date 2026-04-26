@@ -11,14 +11,18 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_dp_group,
     get_ep_group,
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -94,88 +98,140 @@ class GptOssPuzzleModel(gpt_oss.GptOssModel):
             ["hidden_states", "residual"], self.config.hidden_size
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        We override load_weights to accommodate per-layer weight sizes:
-        num experts, expert intermediate size.
-        """
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-        ]
+    def _get_layer_expert_bounds(
+        self, name: str, ep_size: int, ep_rank: int
+    ) -> tuple[int, int, int] | None:
+        """Compute per-layer (num_experts, ep_rank_start, ep_rank_end).
 
-        quant_method = (
-            self.config.quantization_config["quant_method"]
-            if hasattr(self.config, "quantization_config")
-            else None
-        )
-        if quant_method == "mxfp4":
-            return self._load_weights_mxfp4(weights, stacked_params_mapping)
+        Puzzle models are heterogeneous, so the number of experts may differ
+        per layer. Returns None for weight names that do not carry a layer
+        index (e.g. embeddings), in which case the caller should not hit any
+        of the MoE-specific branches.
+        """
+        try:
+            layer_idx = extract_layer_index(name)
+        except AssertionError:
+            return None
+        block_config = self.config.block_configs[layer_idx]
+        num_experts = block_config.num_local_experts
+        experts_per_rank = num_experts // ep_size
+        ep_rank_start = ep_rank * experts_per_rank
+        ep_rank_end = (ep_rank + 1) * experts_per_rank
+        return num_experts, ep_rank_start, ep_rank_end
+
+    def _load_qkv_scale(
+        self,
+        name: str,
+        weight: torch.Tensor,
+        qkv_scale_counts: dict[str, int],
+        qkv_scale_ignore_counts: dict[str, int],
+    ) -> None:
+        """Load a per-attention-layer .q_scale/.k_scale/.v_scale weight.
+
+        Puzzle-specific: heterogeneous attention layers may individually opt
+        into quantized Q and/or quantized KV cache, so these scales are loaded
+        directly onto the attention module when applicable.
+        """
+        module_name, scale_name = name.rsplit(".", 1)
+        # support both layers.#.attn.x_scale and layers.#.attn.x_proj.x_scale
+        if module_name.endswith("_proj"):
+            module_name = module_name.rsplit(".", 1)[0]
+        module = self.get_submodule(module_name).attn
+        if scale_name == "q_scale":
+            should_ignore = module.query_quant is None
         else:
-            return self._load_weights_other(weights, stacked_params_mapping)
+            should_ignore = module.kv_cache_torch_dtype not in {
+                torch.float8_e4m3fn,
+                torch.uint8,
+                torch.int8,
+            }
+        if should_ignore:
+            qkv_scale_ignore_counts[scale_name] += 1
+            return
+        qkv_scale_counts[scale_name] += 1
+        assert hasattr(module, f"_{scale_name}"), (
+            f"Module {module_name} does not have {scale_name}"
+        )
+        getattr(module, f"_{scale_name}").copy_(weight)
+        assert hasattr(module, f"_{scale_name}_float"), (
+            f"Module {module_name} does not have {scale_name}_float"
+        )
+        setattr(module, f"_{scale_name}_float", weight.item())
+
+    @staticmethod
+    def _log_qkv_scale_stats(
+        qkv_scale_counts: dict[str, int],
+        qkv_scale_ignore_counts: dict[str, int],
+    ) -> None:
+        if sum(qkv_scale_counts.values()) > 0:
+            logger.info(
+                "Loaded qkv scales: %s",
+                ", ".join(
+                    f"{count} x {k}"
+                    for k, count in qkv_scale_counts.items()
+                    if count != 0
+                ),
+            )
+        if sum(qkv_scale_ignore_counts.values()) > 0:
+            logger.warning(
+                "Skipped loading qkv scales (maybe try"
+                " passing --kv-cache-dtype fp8): %s",
+                ", ".join(
+                    f"{count} x {k}"
+                    for k, count in qkv_scale_ignore_counts.items()
+                    if count != 0
+                ),
+            )
 
     def _load_weights_mxfp4(
         self,
-        weights,
+        ep_size: int,
+        ep_rank: int,
+        heads_per_rank: int,
+        head_start: int,
+        weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, ...]],
     ) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        qkv_scale_counts = defaultdict[str, int](int)  # just for logging
-        qkv_scale_ignore_counts = defaultdict[str, int](int)
+        # Puzzle-specific: tracks q/k/v cache scale loads for diagnostic logging.
+        qkv_scale_counts: dict[str, int] = defaultdict(int)
+        qkv_scale_ignore_counts: dict[str, int] = defaultdict(int)
 
-        mxfp4_block = 32
         use_ep = self.parallel_config.enable_expert_parallel
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
-
-        # Attention heads per rank
-        heads_per_rank = self.config.num_attention_heads // tp_size
-        head_start = tp_rank * heads_per_rank
-
-        ep_size = get_ep_group().world_size
-        ep_rank = get_ep_group().rank
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+            pcp_size=get_pcp_group().world_size,
+            pcp_rank=get_pcp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
+        intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
+        per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
+        per_rank_intermediate_size = (
+            per_rank_intermediate_size_block * OCP_MX_BLOCK_SIZE
+        )
+
+        # Calculate common slicing bounds for current rank
+        tp_rank_start = tp_rank * per_rank_intermediate_size
+        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
         for name, weight in weights:
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
 
-            # FIXME(woosuk): Remove this after testing.
-            weight = weight.cuda()
-
-            try:
-                layer_idx = extract_layer_index(name)
-            except AssertionError:  # no layer index e.g. embeddings layer
-                layer_idx = None
-
-            if layer_idx is not None:
-                block_config = self.config.block_configs[layer_idx]
-
-                num_experts = block_config.num_local_experts
-                experts_per_rank = num_experts // ep_size
-                ep_rank_start = ep_rank * experts_per_rank
-                ep_rank_end = (ep_rank + 1) * experts_per_rank
-
-                intermediate_size_block = intermediate_size // mxfp4_block
-                per_rank_intermediate_size_block = cdiv(
-                    intermediate_size_block, tp_size
-                )
-                per_rank_intermediate_size = (
-                    per_rank_intermediate_size_block * mxfp4_block
-                )
-
-                # Calculate common slicing bounds for current rank
-                tp_rank_start = tp_rank * per_rank_intermediate_size
-                tp_rank_end = min(
-                    (tp_rank + 1) * per_rank_intermediate_size, intermediate_size
-                )
+            # Puzzle-specific: heterogeneous expert counts require per-layer
+            # expert bounds (returns None for non-layer names e.g. embeddings).
+            bounds = self._get_layer_expert_bounds(name, ep_size, ep_rank)
+            if bounds is not None:
+                num_experts, ep_rank_start, ep_rank_end = bounds
 
             if ".w13_weight_scale" in name:
                 # Handle MLP gate and up projection weights scale
@@ -201,7 +257,9 @@ class GptOssPuzzleModel(gpt_oss.GptOssModel):
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[
-                        ..., tp_rank_start // mxfp4_block : tp_rank_end // mxfp4_block
+                        ...,
+                        tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end
+                        // OCP_MX_BLOCK_SIZE,
                     ]
 
                 param = params_dict[name]
@@ -306,31 +364,10 @@ class GptOssPuzzleModel(gpt_oss.GptOssModel):
                 loaded_params.add(name)
                 continue
             elif name.endswith((".q_scale", ".k_scale", ".v_scale")):
-                module_name, scale_name = name.rsplit(".", 1)
-                # support both layers.#.attn.x_scale and layers.#.attn.x_proj.x_scale
-                if module_name.endswith("_proj"):
-                    module_name = module_name.rsplit(".", 1)[0]
-                module = self.get_submodule(module_name).attn
-                if scale_name == "q_scale":
-                    should_ignore = module.query_quant is None
-                else:
-                    should_ignore = module.kv_cache_torch_dtype not in {
-                        torch.float8_e4m3fn,
-                        torch.uint8,
-                        torch.int8,
-                    }
-                if should_ignore:
-                    qkv_scale_ignore_counts[scale_name] += 1
-                else:
-                    qkv_scale_counts[scale_name] += 1
-                    assert hasattr(module, f"_{scale_name}"), (
-                        f"Module {module_name} does not have {scale_name}"
-                    )
-                    getattr(module, f"_{scale_name}").copy_(weight)
-                    assert hasattr(module, f"_{scale_name}_float"), (
-                        f"Module {module_name} does not have {scale_name}_float"
-                    )
-                    setattr(module, f"_{scale_name}_float", weight.item())
+                # Puzzle-specific: per-attention-layer kv-cache quant scales.
+                self._load_qkv_scale(
+                    name, weight, qkv_scale_counts, qkv_scale_ignore_counts
+                )
                 loaded_params.add(name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -347,88 +384,59 @@ class GptOssPuzzleModel(gpt_oss.GptOssModel):
             else:
                 # Handle all other weights with potential renaming
                 if name not in params_dict:
-                    logger.warning(
-                        "Weight %s not found in params_dict"
-                        " and was not handled by any other"
-                        " case, therefore it will be ignored",
-                        name,
-                    )
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, weight)
             loaded_params.add(name)
 
-        if sum(qkv_scale_counts.values()) > 0:
-            logger.info(
-                "Loaded qkv scales: %s",
-                ", ".join(
-                    f"{count} x {k}"
-                    for k, count in qkv_scale_counts.items()
-                    if count != 0
-                ),
-            )
-        if sum(qkv_scale_ignore_counts.values()) > 0:
-            logger.warning(
-                "Skipped loading qkv scales (maybe try"
-                " passing --kv-cache-dtype fp8): %s",
-                ", ".join(
-                    f"{count} x {k}"
-                    for k, count in qkv_scale_ignore_counts.items()
-                    if count != 0
-                ),
-            )
-
+        self._log_qkv_scale_stats(qkv_scale_counts, qkv_scale_ignore_counts)
         return loaded_params
 
     def _load_weights_other(
         self,
-        weights,
+        ep_size: int,
+        ep_rank: int,
+        heads_per_rank: int,
+        head_start: int,
+        weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, ...]],
     ) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        qkv_scale_counts = defaultdict[str, int](int)  # just for logging
-        qkv_scale_ignore_counts = defaultdict[str, int](int)
+        # Puzzle-specific: tracks q/k/v cache scale loads for diagnostic logging.
+        qkv_scale_counts: dict[str, int] = defaultdict(int)
+        qkv_scale_ignore_counts: dict[str, int] = defaultdict(int)
 
         use_ep = self.parallel_config.enable_expert_parallel
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
-
-        # Attention heads per rank
-        heads_per_rank = self.config.num_attention_heads // tp_size
-        head_start = tp_rank * heads_per_rank
-
-        ep_size = get_ep_group().world_size
-        ep_rank = get_ep_group().rank
+        # In MoE, we need to flatten the tensor parallel size across the data
+        # parallel size when EP is disabled.
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+            pcp_size=get_pcp_group().world_size,
+            pcp_rank=get_pcp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
+        per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
+        # Calculate common slicing bounds for current rank
+        tp_rank_start = tp_rank * per_rank_intermediate_size
+        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
         for name, weight in weights:
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
 
-            try:
-                layer_idx = extract_layer_index(name)
-            except AssertionError:  # no layer index e.g. embeddings layer
-                layer_idx = None
-
-            if layer_idx is not None:
-                block_config = self.config.block_configs[layer_idx]
-
-                num_experts = block_config.num_local_experts
-                experts_per_rank = num_experts // ep_size
-                ep_rank_start = ep_rank * experts_per_rank
-                ep_rank_end = (ep_rank + 1) * experts_per_rank
-
-                per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
-                tp_rank_start = tp_rank * per_rank_intermediate_size
-                tp_rank_end = min(
-                    (tp_rank + 1) * per_rank_intermediate_size, intermediate_size
-                )
+            # Puzzle-specific: heterogeneous expert counts require per-layer
+            # expert bounds (returns None for non-layer names e.g. embeddings).
+            bounds = self._get_layer_expert_bounds(name, ep_size, ep_rank)
+            if bounds is not None:
+                _, ep_rank_start, ep_rank_end = bounds
 
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
@@ -488,31 +496,10 @@ class GptOssPuzzleModel(gpt_oss.GptOssModel):
                 loaded_params.add(name)
                 continue
             elif name.endswith((".q_scale", ".k_scale", ".v_scale")):
-                module_name, scale_name = name.rsplit(".", 1)
-                # support both layers.#.attn.x_scale and layers.#.attn.x_proj.x_scale
-                if module_name.endswith("_proj"):
-                    module_name = module_name.rsplit(".", 1)[0]
-                module = self.get_submodule(module_name).attn
-                if scale_name == "q_scale":
-                    should_ignore = module.query_quant is None
-                else:
-                    should_ignore = module.kv_cache_torch_dtype not in {
-                        torch.float8_e4m3fn,
-                        torch.uint8,
-                        torch.int8,
-                    }
-                if should_ignore:
-                    qkv_scale_ignore_counts[scale_name] += 1
-                else:
-                    qkv_scale_counts[scale_name] += 1
-                    assert hasattr(module, f"_{scale_name}"), (
-                        f"Module {module_name} does not have {scale_name}"
-                    )
-                    getattr(module, f"_{scale_name}").copy_(weight)
-                    assert hasattr(module, f"_{scale_name}_float"), (
-                        f"Module {module_name} does not have {scale_name}_float"
-                    )
-                    setattr(module, f"_{scale_name}_float", weight.item())
+                # Puzzle-specific: per-attention-layer kv-cache quant scales.
+                self._load_qkv_scale(
+                    name, weight, qkv_scale_counts, qkv_scale_ignore_counts
+                )
                 loaded_params.add(name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -535,27 +522,62 @@ class GptOssPuzzleModel(gpt_oss.GptOssModel):
                 weight_loader(param, weight)
             loaded_params.add(name)
 
-        if sum(qkv_scale_counts.values()) > 0:
-            logger.info(
-                "Loaded qkv scales: %s",
-                ", ".join(
-                    f"{count} x {k}"
-                    for k, count in qkv_scale_counts.items()
-                    if count != 0
-                ),
-            )
-        if sum(qkv_scale_ignore_counts.values()) > 0:
-            logger.warning(
-                "Skipped loading qkv scales (maybe try"
-                " passing --kv-cache-dtype fp8): %s",
-                ", ".join(
-                    f"{count} x {k}"
-                    for k, count in qkv_scale_ignore_counts.items()
-                    if count != 0
-                ),
-            )
-
+        self._log_qkv_scale_stats(qkv_scale_counts, qkv_scale_ignore_counts)
         return loaded_params
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+        ]
+
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # Attention heads per rank
+        heads_per_rank = self.config.num_attention_heads // tp_size
+        head_start = tp_rank * heads_per_rank
+
+        # NOTE: puzzle models are heterogeneous — the number of experts may
+        # differ per layer. Unlike the vanilla dispatch, we pass ep_size/ep_rank
+        # to the sub-methods and compute ep_rank_start/ep_rank_end per-layer
+        # inside the weight loop (see _get_layer_expert_bounds).
+        ep_size = get_ep_group().world_size
+        ep_rank = get_ep_group().rank
+
+        quant_method = (
+            self.config.quantization_config["quant_method"]
+            if hasattr(self.config, "quantization_config")
+            else None
+        )
+        # Normalize the checkpoint's quant_method to the internal name. See
+        # the note in gpt_oss.GptOssModel.load_weights for details on the
+        # three places where "mxfp4" -> "gpt_oss_mxfp4" normalization occurs;
+        # here we read directly from self.config which may still carry the
+        # original "mxfp4" string from the checkpoint.
+        if quant_method == "mxfp4":
+            quant_method = "gpt_oss_mxfp4"
+
+        if quant_method == "gpt_oss_mxfp4":
+            return self._load_weights_mxfp4(
+                ep_size,
+                ep_rank,
+                heads_per_rank,
+                head_start,
+                weights,
+                stacked_params_mapping,
+            )
+        else:
+            return self._load_weights_other(
+                ep_size,
+                ep_rank,
+                heads_per_rank,
+                head_start,
+                weights,
+                stacked_params_mapping,
+            )
 
 
 class GptOssPuzzleForCausalLM(gpt_oss.GptOssForCausalLM):
