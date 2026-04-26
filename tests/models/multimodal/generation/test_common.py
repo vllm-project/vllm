@@ -823,12 +823,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         dtype="bfloat16",
-        hf_model_kwargs={
-            "hf_tokenizer_name": "moondream/starmie-v1",
-            # Skip AutoProcessor (model repo has no processor files);
-            # moondream3_patch_hf_runner sets the real processor.
-            "skip_processor_init": True,
-        },
+        hf_processor=model_utils.moondream3_processor,
         patch_hf_runner=model_utils.moondream3_patch_hf_runner,
         # Single size factor to avoid GPU OOM when running multiple test
         # cases sequentially (9B MoE model uses ~18 GiB per instance).

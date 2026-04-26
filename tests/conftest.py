@@ -371,6 +371,8 @@ class HfRunner:
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        tokenizer_name: str | None = None,
+        processor: Any | None = None,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
     ) -> None:
@@ -391,6 +393,8 @@ class HfRunner:
                 is_cross_encoder=is_cross_encoder,
                 skip_tokenizer_init=skip_tokenizer_init,
                 auto_cls=auto_cls,
+                tokenizer_name=tokenizer_name,
+                processor=processor,
             )
 
     def _init(
@@ -405,6 +409,8 @@ class HfRunner:
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        tokenizer_name: str | None = None,
+        processor: Any | None = None,
     ) -> None:
         model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
@@ -433,13 +439,6 @@ class HfRunner:
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("dtype", dtype)
-
-        # Allow overriding tokenizer/processor initialization for models
-        # whose repos do not ship standard assets (e.g. moondream3 stores its
-        # tokenizer in a separate repo and uses a custom processor patch).
-        hf_tokenizer_name = model_kwargs.pop("hf_tokenizer_name", None)
-        hf_processor = model_kwargs.pop("hf_processor", None)
-        skip_processor_init = model_kwargs.pop("skip_processor_init", False)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
@@ -491,20 +490,18 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
-                    hf_tokenizer_name or model_name,
+                    tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
                 )
             )
 
-        # don't put this import at the top level
-        # it will call torch.accelerator.device_count()
-        from transformers import AutoProcessor
-
-        if skip_processor_init:
-            self.processor = None
-        elif hf_processor is not None:
-            self.processor = hf_processor
+        if processor is not None:
+            self.processor = processor
         else:
+            # don't put this import at the top level
+            # it will call torch.accelerator.device_count()
+            from transformers import AutoProcessor
+
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 trust_remote_code=trust_remote_code,
@@ -539,8 +536,8 @@ class HfRunner:
                 if self.processor is None:
                     raise RuntimeError(
                         "HfRunner.processor is not initialized. "
-                        "Use skip_processor_init only with a patch_hf_runner "
-                        "that sets hf_model.processor before generation."
+                        "Pass processor=... to HfRunner or set "
+                        "hf_model.processor before generation."
                     )
                 # Create a copy to avoid modifying the original dict
                 processor_kwargs = (

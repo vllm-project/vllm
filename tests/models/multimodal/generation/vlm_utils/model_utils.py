@@ -1338,13 +1338,15 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     return hf_model
 
 
-def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patch HfRunner for Moondream3."""
+def moondream3_processor(model: str):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    moondream_processor = Moondream3Processor.from_pretrained(
-        hf_model.model_name, trust_remote_code=True
-    )
+    return Moondream3Processor.from_pretrained(model, trust_remote_code=True)
+
+
+def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patch HfRunner for Moondream3."""
+    moondream_processor = hf_model.processor
 
     def processor(*args, text="", images=None, **kwargs):
         if images is None:
