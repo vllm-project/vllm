@@ -200,9 +200,9 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self._wo_a_act_quant.use_deep_gemm_supported = False
         self.wo_b = mla_modules.wo_b
 
-        # Pick fp8_einsum recipe based on the implementation path:
-        # DeepGEMM uses packed/TMA-aligned scales on SM100-class GPUs.
-        # The Triton fallback consumes ordinary FP32 block scales.
+        # Pick fp8_einsum recipe based on GPU arch:
+        # SM90 or SM120: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
+        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
         from vllm.platforms import current_platform
 
         cap = current_platform.get_device_capability()
