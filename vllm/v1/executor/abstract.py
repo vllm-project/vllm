@@ -322,7 +322,12 @@ class Executor(ABC):
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
+
+        if level == 3:
+            self.sleeping_tags = {"kv_cache"}
+        else:
+            self.sleeping_tags = {"weights", "kv_cache"}
+
         self.is_sleeping = True
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep

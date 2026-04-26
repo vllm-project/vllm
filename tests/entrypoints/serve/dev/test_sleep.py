@@ -6,7 +6,8 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+# "meta-llama/Llama-3.2-1B"
 
 
 def test_sleep_mode():
@@ -81,6 +82,62 @@ def test_sleep_mode():
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
         awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+        assert awake == 1
+        assert weights_offloaded == 0
+        assert discard_all == 0
+
+
+def test_sleep_mode_level3_metrics():
+    """
+    Sleep level 3: weights stay on GPU
+    Prometheus gauges match level-3 semantics.
+    """
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "128",
+        "--enable-sleep-mode",
+    ]
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_SERVER_DEV_MODE": "1", "CUDA_VISIBLE_DEVICES": "0"},
+    ) as remote_server:
+        response = requests.post(remote_server.url_for("sleep"), params={"level": "3"})
+        assert response.status_code == 200
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.status_code == 200
+        assert response.json().get("is_sleeping") is True
+
+        response = requests.get(remote_server.url_for("metrics"))
+        assert response.status_code == 200
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+
+        """
+        For sleep 3:
+        1. after it is sleeping, it should not be awake
+        2. the weights should not be offloaded (since they stay on GPU)
+        3. discard_all should be false since we did not discard the weights
+        """
+        assert awake == 0
+        assert weights_offloaded == 0
+        assert discard_all == 0
+
+        response = requests.post(remote_server.url_for("wake_up"))
+        assert response.status_code == 200
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.status_code == 200
+        assert response.json().get("is_sleeping") is False
+
+        response = requests.get(remote_server.url_for("metrics"))
+        assert response.status_code == 200
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+
+        # Should be awake now
         assert awake == 1
         assert weights_offloaded == 0
         assert discard_all == 0

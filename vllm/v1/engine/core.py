@@ -736,6 +736,11 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
         """
+        if level >= 1 and level not in (1, 2, 3):
+            raise ValueError(
+                f"""Invalid sleep level {level}; supported GPU sleep levels are 
+                1, 2, and 3."""
+            )
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1

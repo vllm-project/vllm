@@ -824,6 +824,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
+                - Level 3: Keep model weights on GPU; discard KV cache and
+                           other non-weight pooled memory. No CPU backup of
+                           weights. Useful to reclaim KV VRAM while avoiding
+                           weight offload latency and CPU RAM use.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
         """

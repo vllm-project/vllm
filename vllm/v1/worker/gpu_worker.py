@@ -174,7 +174,22 @@ class Worker(WorkerBase):
             }
 
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+
+        if level == 1:
+            allocator.sleep(offload_tags=("weights",))
+        elif level == 3:
+            # Keep weights on GPU, discard KV and other pooled allocations
+            allocator.sleep(
+                offload_tags=tuple(),
+                preserve_tags_on_gpu=frozenset(
+                    {
+                        "weights",
+                    }
+                ),
+            )
+        else:
+            allocator.sleep(offload_tags=tuple())
+
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep

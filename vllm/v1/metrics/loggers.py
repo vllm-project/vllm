@@ -497,6 +497,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "awake = 1 means engine is awake; "
                 "weights_offloaded = 1 means sleep level 1; "
                 "discard_all = 1 means sleep level 2."
+                "sleep level 3 leaves both at 0 (weights on GPU, KV discarded)."
             ),
             labelnames=labelnames + ["sleep_state"],
             multiprocess_mode="mostrecent",
@@ -1227,6 +1228,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 weights_offloaded = 1
             elif level == 2:
                 discard_all = 1
+            # Level 3: weights stay on GPU; neither legacy gauge applies
 
         for engine_idx in self.engine_indexes:
             self.gauge_engine_sleep_state["discard_all"][engine_idx].set(discard_all)

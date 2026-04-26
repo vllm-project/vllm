@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import gc
 
 import pytest
 import torch
@@ -280,3 +281,162 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_sleep_level3_preserves_weights_tag():
+    """
+    CuMem sleep with preserve_tags_on_gpu: weights stay mapped, kv_cache discarded.
+    """
+    allocator = CuMemAllocator.get_instance()
+
+    # Allocates a GPU tensor tagged as "weights" and fills it with 7
+    with allocator.use_memory_pool(tag="weights"):
+        w = torch.empty(4096, dtype=torch.uint8, device=DEVICE_TYPE)
+        w.fill_(7)
+    # Allocates a GPU tensor tagged as "kv_cache"
+    with allocator.use_memory_pool(tag="kv_cache"):
+        torch.empty(4096, dtype=torch.uint8, device=DEVICE_TYPE)
+
+    # Puts to sleep mode 3, which should preserve "weights" on GPU but not "kv_cache"
+    allocator.sleep(
+        offload_tags=tuple(),
+        preserve_tags_on_gpu=frozenset({"weights"}),
+    )
+
+    # Checking the internal state of the allocator to ensure "weights" is preserved
+    # and "kv_cache" is not
+    for _ptr, d in allocator.pointer_to_data.items():
+        if d.tag == "weights":
+            assert d.preserved_during_sleep is True
+            assert d.cpu_backup_tensor is None
+        elif d.tag == "kv_cache":
+            assert d.preserved_during_sleep is False
+            assert d.cpu_backup_tensor is None
+
+    allocator.wake_up(None)
+    # The weights tensor should contain 7, proving the weight allocation stayed
+    # valid on the GPU
+    assert torch.all(w == 7)
+    for d in allocator.pointer_to_data.values():
+        assert d.preserved_during_sleep is False
+
+
+@create_new_process_for_each_test()
+def test_sleep_level3_llm_same_greedy_output():
+    """
+    Sleep level 3: weights stay on GPU; greedy decode unchanged after wake_up.
+    End-to-end test with LLM to verify sleep(3) semantics.
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model=model,
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        max_model_len=512,
+        gpu_memory_utilization=0.05,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+    output = llm.generate(prompt, sampling_params)
+    text_before = output[0].outputs[0].text
+
+    torch.accelerator.synchronize()
+
+    # Records free GPU memory
+    free_before, _ = torch.cuda.mem_get_info()
+    llm.sleep(level=3)
+    torch.accelerator.synchronize()
+    free_after, _ = torch.cuda.mem_get_info()
+
+    message = "sleep(3) should return some KV pool VRAM"
+    assert (free_after - free_before) > 0, message
+
+    # Proves that after wake up, the model behaves identally for
+    # deterministic generation
+    llm.wake_up()
+    output2 = llm.generate(prompt, sampling_params)
+    assert output2[0].outputs[0].text == text_before
+
+
+@create_new_process_for_each_test()
+def test_sleep_level3_llm_partial_wake_kv_only():
+    """
+    After sleep(3), wake_up(tags=['kv_cache']) is enough; greedy output unchanged.
+    Tests that after sleep(3) wakeup, the output is the same with deterministic model
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model=model,
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        max_model_len=512,
+        gpu_memory_utilization=0.05,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+    output = llm.generate(prompt, sampling_params)
+    text_before = output[0].outputs[0].text
+
+    # Check if the second generated output is the same as the first one
+    llm.sleep(level=3)
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+    assert output2[0].outputs[0].text == text_before
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_sleep_level3_allocator_frees_less_than_sleep1():
+    """
+    This tests proves that sleep 3 frees less GPU memory than sleep 1
+    Sleep 3 does not free the weights from the GPU memory
+    """
+
+    # creates two large tensors, "weight" and "kv cache"
+    allocator = CuMemAllocator.get_instance()
+    mb = 1024 * 1024
+    size_w = 64 * mb
+    size_kv = 64 * mb
+
+    with allocator.use_memory_pool(tag="weights"):
+        w = torch.empty(size_w, dtype=torch.uint8, device=DEVICE_TYPE)
+    with allocator.use_memory_pool(tag="kv_cache"):
+        kv = torch.empty(size_kv, dtype=torch.uint8, device=DEVICE_TYPE)
+
+    # determine the amount of memory freed during sleep(3)
+    torch.accelerator.synchronize()
+    free_before_s3, _ = torch.cuda.mem_get_info()
+    allocator.sleep(
+        offload_tags=tuple(),
+        preserve_tags_on_gpu=frozenset({"weights"}),
+    )
+    torch.accelerator.synchronize()
+    free_after_s3, _ = torch.cuda.mem_get_info()
+    freed_s3 = (free_after_s3 - free_before_s3) / mb
+
+    allocator.wake_up(None)
+    torch.accelerator.synchronize()
+
+    # determine the amount of memory freed during sleep(1)
+    free_before_s1, _ = torch.cuda.mem_get_info()
+    allocator.sleep(offload_tags=("weights",))
+    torch.accelerator.synchronize()
+    free_after_s1, _ = torch.cuda.mem_get_info()
+    freed_s1 = (free_after_s1 - free_before_s1) / mb
+
+    allocator.wake_up(None)
+    torch.accelerator.synchronize()
+
+    del w, kv
+    gc.collect()
+
+    assert freed_s3 < freed_s1, (
+        f"sleep(3) should free less GPU memory than sleep(1); "
+        f"got {freed_s3:.1f} MB vs {freed_s1:.1f} MB"
+    )
+    assert freed_s3 > size_kv / mb * 0.5, (
+        f"sleep(3) should free a substantial KV-sized amount; got {freed_s3:.1f} MB"
+    )
+    assert freed_s3 < size_w / mb + size_kv / mb * 1.5, (
+        f"sleep(3) should not free weights+KV combined; got {freed_s3:.1f} MB"
+    )
