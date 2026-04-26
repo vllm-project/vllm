@@ -336,7 +336,9 @@ def _selective_scan_update_kernel(
 
     if not IS_SPEC_DECODING:
         if USE_RS_ROUNDING:
+            # Load random seed
             rand_seed = tl.load(rand_seed_ptr)
+            # Generate random offsets for each element in state
             if HAS_STATE_BATCH_INDICES:
                 rand_offsets = (
                     state_batch_idx * stride_state_batch + pid_h * stride_state_head
@@ -347,6 +349,7 @@ def _selective_scan_update_kernel(
                 offs_m[:, None] * stride_state_dim
                 + offs_n[None, :] * stride_state_dstate
             )
+            # Generate random 32-bits for each element in state
             if PHILOX_ROUNDS > 0:
                 rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
             else:
