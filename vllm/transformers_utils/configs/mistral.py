@@ -272,7 +272,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
                 "global_log_mel_max"
             ),
             # only needed for RoPE
-            max_position_embeddings=block_pool_size * config["max_position_embeddings"],
+            max_position_embeddings=block_pool_size * config.get("max_position_embeddings", 128_000),
         ),
     }
     # Sometimes max_source_positions is explicitly set to None in params.json but this
