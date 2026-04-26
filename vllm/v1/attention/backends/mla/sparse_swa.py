@@ -16,7 +16,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.attention.ops.flashmla import (
+    FlashMLASchedMeta,
+    _is_flashmla_available,
+    get_mla_metadata,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -362,7 +366,11 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         }
         if num_decode_tokens == 0:
             return out
+        flashmla_available = _is_flashmla_available()[0]
         for layer_type in self._layer_types:
+            if not flashmla_available:
+                out[layer_type] = FlashMLASchedMeta()
+                continue
             # get_mla_metadata() is the official FlashMLA entry point that
             # returns a fresh empty FlashMLASchedMeta; using it keeps this
             # call site aligned with the rest of the vLLM FlashMLA backends

@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.model_executor.layers.deepseek_v4_triton_kernels import (
+    tf32_hc_prenorm_gemm_triton,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
@@ -272,15 +275,25 @@ def mhc_pre(
         device=residual.device,
     )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    x_flat = residual_flat.view(num_tokens, hc_mult * hidden_size)
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
 
-    tf32_hc_prenorm_gemm(
-        residual_flat.view(num_tokens, hc_mult * hidden_size),
-        fn_flat,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
-    )
+    if is_deep_gemm_supported():
+        tf32_hc_prenorm_gemm(
+            x_flat,
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
+    else:
+        tf32_hc_prenorm_gemm_triton(
+            x_flat,
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
 
     mhc_pre_big_fuse_tilelang(
         gemm_out_mul,

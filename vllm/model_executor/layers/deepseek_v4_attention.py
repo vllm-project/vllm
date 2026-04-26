@@ -12,11 +12,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+from vllm.model_executor.layers.deepseek_v4_triton_kernels import (
+    decode_sparse_attention_triton,
+    deepseek_v4_fp8_einsum_triton,
+    sparse_attention_triton,
+)
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.utils.deep_gemm import fp8_einsum
+from vllm.utils.deep_gemm import fp8_einsum, is_deep_gemm_supported
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,
@@ -64,6 +69,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.attention.ops.flashmla import (
+    _is_flashmla_available,
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
@@ -76,6 +82,10 @@ logger = init_logger(__name__)
 # workspace allocated at _forward_prefill (and the matching profile-time
 # reservation in attention_impl's dummy-run branch).
 PREFILL_CHUNK_SIZE = 4
+
+
+def _flashmla_available() -> bool:
+    return _is_flashmla_available()[0]
 
 
 @dataclass
@@ -190,15 +200,20 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self._wo_a_act_quant.use_deep_gemm_supported = False
         self.wo_b = mla_modules.wo_b
 
-        # Pick fp8_einsum recipe based on GPU arch:
-        # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
-        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
+        # Pick fp8_einsum recipe based on the implementation path:
+        # DeepGEMM uses packed/TMA-aligned scales on SM100-class GPUs.
+        # The Triton fallback consumes ordinary FP32 block scales.
         from vllm.platforms import current_platform
 
         cap = current_platform.get_device_capability()
         assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-        self._tma_aligned_scales = cap.major >= 10
+        self._deep_gemm_supported = is_deep_gemm_supported()
+        self._einsum_recipe = (
+            (1, 128, 128)
+            if cap.major <= 9 or not self._deep_gemm_supported
+            else (1, 1, 128)
+        )
+        self._tma_aligned_scales = cap.major >= 10 and self._deep_gemm_supported
 
         self.rotary_emb = mla_modules.rotary_emb
         self.indexer_rotary_emb = mla_modules.indexer_rotary_emb
@@ -314,6 +329,21 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         wo_a_fp8 = self.wo_a.weight
         wo_a_scale = self.wo_a.weight_scale_inv
+        if not self._deep_gemm_supported:
+            # ColumnParallelLinear stores wo_a as a flattened 2D matrix.
+            # DeepGEMM hides the grouped-BMM interpretation inside its
+            # fp8_einsum path, but the Triton fallback indexes the group
+            # dimension explicitly for "bhr,hdr->bhd". Restore
+            # [group, out_rank, in_dim] and matching per-128-block scales
+            # only when DeepGEMM is not selected.
+            if wo_a_fp8.ndim == 2:
+                wo_a_fp8 = wo_a_fp8.view(self.n_local_groups, self.o_lora_rank, -1)
+            if wo_a_scale.ndim == 2:
+                wo_a_scale = wo_a_scale.view(
+                    self.n_local_groups,
+                    ((self.o_lora_rank + 127) // 128),
+                    ((wo_a_fp8.shape[-1] + 127) // 128),
+                )
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
@@ -494,6 +524,13 @@ def deepseek_v4_fp8_einsum(
     equation: str,
     recipe: list[int],
 ) -> None:
+    if not is_deep_gemm_supported():
+        if equation != "bhr,hdr->bhd":
+            raise NotImplementedError(
+                f"DeepSeek V4 Triton fp8_einsum does not support {equation}."
+            )
+        deepseek_v4_fp8_einsum_triton(a, a_scale, b, b_scale, out)
+        return
     fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
 
 
@@ -739,6 +776,21 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
 
+        if not _flashmla_available():
+            decode_sparse_attention_triton(
+                q=q,
+                swa_cache=self.swa_cache_layer.kv_cache,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                scale=self.scale,
+                attn_sink=self.attn_sink,
+                out=output,
+                extra_cache=kv_cache if not swa_only else None,
+                extra_indices=topk_indices,
+                extra_lens=topk_lens,
+            )
+            return
+
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
         # q arrives pre-padded to self.padded_heads by the outer wrapper.
@@ -903,15 +955,26 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 N,
             )
 
-            output_chunk, _, _ = flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-                out=output[query_start:query_end],
-            )
+            if _flashmla_available():
+                flash_mla_sparse_fwd(
+                    q=q[query_start:query_end],
+                    kv=kv[:chunk_size].reshape(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=output[query_start:query_end],
+                )
+            else:
+                sparse_attention_triton(
+                    q=q[query_start:query_end],
+                    kv=kv[:chunk_size].reshape(-1, q.shape[-1]),
+                    indices=combined_indices,
+                    lengths=combined_lens,
+                    scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    out=output[query_start:query_end],
+                )
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):

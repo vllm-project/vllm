@@ -9,11 +9,15 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.deepseek_v4_triton_kernels import (
+    fp8_mqa_logits_triton,
+    fp8_paged_mqa_logits_triton,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
-    has_deep_gemm,
+    is_deep_gemm_supported,
 )
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -220,14 +224,28 @@ def sparse_attn_indexer(
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            logits = fp8_fp4_mqa_logits(
-                (q_slice_cast, q_scale_slice),
-                (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                clean_logits=False,
-            )
+            if not is_deep_gemm_supported():
+                if use_fp4_cache:
+                    raise RuntimeError(
+                        "Sparse Attention Indexer MXFP4 fallback for CUDA "
+                        "requires DeepGEMM."
+                    )
+                logits = fp8_mqa_logits_triton(
+                    q_slice_cast,
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                )
+            else:
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    clean_logits=False,
+                )
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
@@ -307,16 +325,31 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        logits = fp8_fp4_paged_mqa_logits(
-            (padded_q_quant_cast, padded_q_scale),
-            kv_cache,
-            weights[:num_padded_tokens],
-            seq_lens,
-            decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
-            clean_logits=False,
-        )
+        if not is_deep_gemm_supported():
+            if use_fp4_cache:
+                raise RuntimeError(
+                    "Sparse Attention Indexer MXFP4 fallback for CUDA "
+                    "requires DeepGEMM."
+                )
+            logits = fp8_paged_mqa_logits_triton(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                max_model_len=max_model_len,
+            )
+        else:
+            logits = fp8_fp4_paged_mqa_logits(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_model_len,
+                clean_logits=False,
+            )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
@@ -438,9 +471,14 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
-        if current_platform.is_cuda() and not has_deep_gemm():
+        if (
+            current_platform.is_cuda()
+            and use_fp4_cache
+            and not is_deep_gemm_supported()
+        ):
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
+                "Sparse Attention Indexer CUDA MXFP4 path requires DeepGEMM "
+                "to be installed."
             )
 
     def forward_native(

@@ -1284,6 +1284,12 @@ def process_fp8_weight_block_strategy(
             weight=weight, weight_scale=weight_scale
         )
 
+    if (
+        current_platform.is_device_capability(120)
+        and weight_scale.dtype == torch.float8_e8m0fnu
+    ):
+        weight_scale = _upcast_e8m0_to_fp32(weight_scale)
+
     weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale
 
