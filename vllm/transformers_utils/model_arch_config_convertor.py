@@ -418,7 +418,28 @@ class MimoMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+def _strip_mimo_v2_attention_chunk_size(
+    hf_config: PretrainedConfig, hf_text_config: PretrainedConfig
+) -> None:
+    # MiMo-V2-Flash's config.json sets `attention_chunk_size=128` but the
+    # architecture does not actually use chunked local attention. Leaving it
+    # set makes vLLM disable the hybrid KV cache manager
+    for cfg in (hf_text_config, hf_config):
+        if cfg is not None and hasattr(cfg, "attention_chunk_size"):
+            delattr(cfg, "attention_chunk_size")
+
+
+class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        super().__init__(hf_config, hf_text_config)
+        _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
+
+
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        super().__init__(hf_config, hf_text_config)
+        _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
+
     def get_num_hidden_layers(self) -> int:
         n = getattr(self.hf_text_config, "num_nextn_predict_layers", None)
         if n is not None:
@@ -488,6 +509,8 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
+    "mimo_v2_pro": MimoV2ModelArchConfigConvertor,
+    "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
