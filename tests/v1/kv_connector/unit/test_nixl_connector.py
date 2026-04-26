@@ -472,7 +472,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             tensor_shape=test_shape,
         )
 
@@ -727,7 +726,6 @@ class TestNixlHandshake:
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
         worker.src_blocks_data = [(0, worker.block_len_per_layer[0], worker.tp_rank)]
-        worker.num_descs = len(worker.src_blocks_data)
 
         def check_handshake(remote_tp_size: int):
             tp_ratio = remote_tp_size // local_tp_size
@@ -2437,7 +2435,6 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         is_mamba=False,
         total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
         attn_backends=[backend],
-        physical_blocks_per_logical=decode_worker._physical_blocks_per_logical_kv_block,
         tensor_shape=test_shape,
     )
 
