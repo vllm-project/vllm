@@ -260,6 +260,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
+    "DeepseekV4ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
@@ -1481,6 +1484,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepSeekV4MTPModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",

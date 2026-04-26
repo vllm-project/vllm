@@ -53,6 +53,11 @@ class EagleSpeculator:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        # Widen for HC-multiplexed residuals (e.g. DeepSeek V4 feeds the MTP
+        # draft the target's pre-hc_head (T, hc_mult * hidden_size) residual).
+        # Non-HC models default to hc_mult=1 and are unaffected.
+        hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
+        self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
 

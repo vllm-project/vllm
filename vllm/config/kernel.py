@@ -108,6 +108,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "triton_unfused",
     "deep_gemm",
     "cutlass",
     "flashinfer_trtllm",
@@ -136,7 +137,8 @@ class KernelConfig:
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
-    - "triton": Use Triton-based fused MoE kernels
+    - "triton": Use Triton-based fused MoE kernels (SWIGLUOAI activation only)
+    - "triton_unfused": Use Triton-based unfused MoE kernels (supports SILU/GELU)
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
