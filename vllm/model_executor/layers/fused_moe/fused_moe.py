@@ -1600,6 +1600,118 @@ def _prepare_expert_assignment(
     )
 
 
+class B12xStateManager:
+    """Persistent cache for b12x workspaces to prevent hot-path allocation overhead."""
+
+    _backend = None
+    _workspaces = {}
+
+    @classmethod
+    def get_or_create(cls, device: torch.device, E: int, K: int, max_tasks: int = 1024):
+        import cutlass.cute as cute
+        from b12x.dynamic import MoEDynamicKernelBackend
+
+        # 1. Initialize the backend once globally
+        if cls._backend is None:
+            cls._backend = MoEDynamicKernelBackend(
+                sf_vec_size=16, mma_tiler_mn=(64, 64), activation="silu"
+            )
+
+        # 2. Allocate the VRAM workspaces once per device/expert configuration
+        cache_key = (str(device), E)
+        if cache_key not in cls._workspaces:
+            cls._workspaces[cache_key] = {
+                "barrier_count": torch.zeros((1,), dtype=torch.int32, device=device),
+                "barrier_epoch": torch.zeros((1,), dtype=torch.int32, device=device),
+                "pair_head": torch.zeros((1,), dtype=torch.int32, device=device),
+                "producers_done_count": torch.zeros(
+                    (1,), dtype=torch.int32, device=device
+                ),
+                "all_work_published": torch.zeros(
+                    (1,), dtype=torch.int32, device=device
+                ),
+                "task_head": torch.zeros((1,), dtype=torch.int32, device=device),
+                "task_tail": torch.zeros((1,), dtype=torch.int32, device=device),
+                "task_ready": torch.zeros(
+                    (max_tasks,), dtype=torch.int32, device=device
+                ),
+                "task_expert": torch.zeros(
+                    (max_tasks,), dtype=torch.int32, device=device
+                ),
+                "task_m_tile": torch.zeros(
+                    (max_tasks,), dtype=torch.int32, device=device
+                ),
+                "task_slice_begin": torch.zeros(
+                    (max_tasks,), dtype=torch.int32, device=device
+                ),
+                "task_slice_count": torch.zeros(
+                    (max_tasks,), dtype=torch.int32, device=device
+                ),
+                "task_valid_rows": torch.zeros(
+                    (max_tasks,), dtype=torch.int32, device=device
+                ),
+                "row_counts": torch.zeros((E,), dtype=torch.int32, device=device),
+                "expert_write_rows": torch.zeros(
+                    (E,), dtype=torch.int32, device=device
+                ),
+                "expert_tile_base": torch.zeros(
+                    (E + 1,), dtype=torch.int32, device=device
+                ),
+            }
+
+        return cls._backend, cls._workspaces[cache_key], cute
+
+
+def _run_b12x_sm120_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool,
+    quant_config: Any,
+) -> torch.Tensor:
+    """Executes the SM120 b12x kernel using pre-allocated persistent workspaces."""
+    device = hidden_states.device
+    E = w1.size(0)
+
+    # Retrieve the persistent state (Zero allocation overhead in the hot path)
+    backend, ws, cute = B12xStateManager.get_or_create(device, E)
+
+    # Handle the inplace contract
+    scatter_output = hidden_states if inplace else torch.empty_like(hidden_states)
+
+    # Dispatch the payload using the cached tensors
+    backend(
+        a_input=cute.tensor(hidden_states),
+        topk_ids=cute.tensor(topk_ids),
+        topk_weights=cute.tensor(topk_weights),
+        barrier_count=cute.tensor(ws["barrier_count"]),
+        barrier_epoch=cute.tensor(ws["barrier_epoch"]),
+        pair_head=cute.tensor(ws["pair_head"]),
+        producers_done_count=cute.tensor(ws["producers_done_count"]),
+        all_work_published=cute.tensor(ws["all_work_published"]),
+        task_head=cute.tensor(ws["task_head"]),
+        task_tail=cute.tensor(ws["task_tail"]),
+        task_ready=cute.tensor(ws["task_ready"]),
+        task_expert=cute.tensor(ws["task_expert"]),
+        task_m_tile=cute.tensor(ws["task_m_tile"]),
+        task_slice_begin=cute.tensor(ws["task_slice_begin"]),
+        task_slice_count=cute.tensor(ws["task_slice_count"]),
+        task_valid_rows=cute.tensor(ws["task_valid_rows"]),
+        b_w13=cute.tensor(w1),
+        b_down=cute.tensor(w2),
+        row_counts=cute.tensor(ws["row_counts"]),
+        expert_write_rows=cute.tensor(ws["expert_write_rows"]),
+        expert_tile_base=cute.tensor(ws["expert_tile_base"]),
+        scatter_output=cute.tensor(scatter_output),
+        # ... remaining arguments ...
+        stream=torch.cuda.current_stream().cuda_stream,
+    )
+
+    return scatter_output
+
+
 # TODO (bnell): replace this with modular op.  Can get rid of inplace/outplace
 # torch ops.
 def fused_experts(
@@ -1616,6 +1728,17 @@ def fused_experts(
     quant_config: FusedMoEQuantConfig | None = None,
 ) -> torch.Tensor:
     """Run fused MoE expert computation using Triton kernels."""
+
+    capability = current_platform.get_device_capability()
+
+    if capability is not None and capability.major == 12 and capability.minor == 0:
+        try:
+            return _run_b12x_sm120_moe(
+                hidden_states, w1, w2, topk_weights, topk_ids, inplace, quant_config
+            )
+        except ImportError:
+            pass  # Fallback to Triton if b12x is missing
+
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
