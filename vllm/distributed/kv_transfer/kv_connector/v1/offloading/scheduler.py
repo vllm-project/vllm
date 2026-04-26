@@ -427,7 +427,6 @@ class OffloadingConnectorScheduler:
         )
         for bid in self._jobs[load_job_id].gpu_block_ids:
             self._block_id_to_pending_jobs.setdefault(bid, set()).add(load_job_id)
-        group_state.next_stored_block_idx = num_blocks
 
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(offload_keys)
