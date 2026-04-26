@@ -6,7 +6,7 @@
 This validates that a real compressed-tensors W4A16 model can run inference
 end-to-end (which will exercise the Triton W4A16 kernel when selected).
 
-Run `pytest tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py`.
+Run `pytest tests/kernels/quantization/rocm/test_rocm_compressed_tensors_w4a16.py`.
 """
 
 import pytest
