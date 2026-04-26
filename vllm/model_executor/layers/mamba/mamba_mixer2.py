@@ -857,7 +857,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     varlen_states, decode_scale = quantize_scaled(
                         varlen_states, ssm_state.dtype
                     )
-                    ssm_state_scales[state_indices_tensor_p] = decode_scale.unsqueeze(-1)
+                    ssm_state_scales[state_indices_tensor_p] = decode_scale.unsqueeze(
+                        -1
+                    )
                 ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests

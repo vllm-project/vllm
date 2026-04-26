@@ -732,8 +732,7 @@ class VllmConfig:
         _SR_SUPPORTED_SSM_DTYPES = ("float16", "int8", "int16", "fp8_e4m3fn")
         if (
             self.mamba_config.enable_stochastic_rounding
-            and self.cache_config.mamba_ssm_cache_dtype
-            not in _SR_SUPPORTED_SSM_DTYPES
+            and self.cache_config.mamba_ssm_cache_dtype not in _SR_SUPPORTED_SSM_DTYPES
         ):
             raise ValueError(
                 "Stochastic rounding for Mamba cache requires the SSM cache "
