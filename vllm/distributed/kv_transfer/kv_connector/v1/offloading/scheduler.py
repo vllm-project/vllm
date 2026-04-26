@@ -556,14 +556,6 @@ class OffloadingConnectorScheduler:
             any_jid = next(iter(req_status.transfer_jobs))
             assert self._jobs[any_jid].is_store
             jobs_to_flush.update(req_status.transfer_jobs)
-            # worker.wait() in handle_preemptions will block until these
-            # stores settle, so the offloaded blocks are safely committed.
-            # Drop scheduler-side tracking so a subsequent load for the
-            # same request (on re-schedule) doesn't trip the
-            # "no other jobs pending" invariant in update_state_after_alloc.
-            for jid in req_status.transfer_jobs:
-                del self._jobs[jid]
-            req_status.transfer_jobs.clear()
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
