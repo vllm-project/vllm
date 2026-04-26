@@ -478,3 +478,59 @@ class TestSlidingWindowLookup:
             sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX)
             is None
         )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bool):
+    """With do_remote_decode=True, after loading prefix blocks from CPU,
+    all blocks must be re-stored — not just the newly computed ones.
+
+    This supports P/D disaggregation where the prefill instance offloads the
+    complete KV cache so a remote decode node can consume it."""
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+    )
+
+    # Store 1 offloaded block (3 GPU blocks) via a normal request.
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # Reset GPU prefix cache so the next request must load from CPU.
+    runner.scheduler.reset_prefix_cache()
+
+    # New request with do_remote_decode=True and 2 offloaded blocks.
+    # The first offloaded block matches what we stored in CPU.
+    runner.new_request(
+        token_ids=[0] * offloaded_block_size * 2,
+        kv_transfer_params={"do_remote_decode": True},
+    )
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    # Load the first offloaded block from CPU.
+    runner.run(
+        decoded_tokens=[0],
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # Store must include ALL 6 GPU blocks (both the loaded prefix and
+    # the newly computed block), not just the 3 new ones.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2, 3, 4, 5),
+    )

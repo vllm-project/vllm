@@ -270,7 +270,11 @@ class RequestRunner:
             slot_mapping={},
         )
 
-    def new_request(self, token_ids: list[int]):
+    def new_request(
+        self,
+        token_ids: list[int],
+        kv_transfer_params: dict | None = None,
+    ):
         self.req_id += 1
 
         sampling_params = SamplingParams(max_tokens=1000)
@@ -283,6 +287,8 @@ class RequestRunner:
             pooling_params=None,
             block_hasher=self._block_hasher,
         )
+        if kv_transfer_params is not None:
+            req.kv_transfer_params = kv_transfer_params
 
         self.scheduler.add_request(req)
 
