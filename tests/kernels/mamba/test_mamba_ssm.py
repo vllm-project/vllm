@@ -434,9 +434,11 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Stochastic rounding in the triton kernel requires a CUDA device"
-    " (SM_100a+ uses cvt.rs, older archs use the Triton software fallback).",
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="Stochastic rounding in triton is only supported"
+    " on compute capability 10.0 CUDA devices.",
 )
 def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_rounds):
     device = "cuda"
