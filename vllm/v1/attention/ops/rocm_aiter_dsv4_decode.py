@@ -18,6 +18,12 @@ Key design decisions (validated on MI355X, see benchmarks/dsv4_mi355/PLAN.md §1
     output buffer, and the constant scale tensors are preallocated in
     `AiterSparseScratch` and rewritten in-place so cudagraph capture sees
     stable memory layouts.
+  - Per-layer-sized intermediates (the bf16 dequant of the paged K cache and
+    its bf16->fp8 cast) are NOT owned by `AiterSparseScratch`; they are
+    routed through `current_workspace_manager()` by the caller via the
+    `kv_fp8_buf` / `extra_kv_fp8_buf` arguments. That lets a single pair of
+    bf16+fp8 buffers be shared across all 61 DSv4 layers instead of
+    growing the cudagraph memory pool by 61x worth of fresh allocations.
 """
 
 from __future__ import annotations
@@ -252,6 +258,8 @@ def aiter_sparse_attn_decode(
     extra_topk_length: torch.Tensor | None = None,
     scratch: AiterSparseScratch | None = None,
     extra_scratch: AiterSparseScratch | None = None,
+    kv_fp8_buf: torch.Tensor | None = None,
+    extra_kv_fp8_buf: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """AITER-backed replacement for _ref_sparse_attn_decode.
 
@@ -268,6 +276,11 @@ def aiter_sparse_attn_decode(
         extra_topk_length: optional second scope lengths
         scratch: persistent scratch for SWA scope
         extra_scratch: persistent scratch for extra scope
+        kv_fp8_buf: optional preallocated fp8 buffer (same shape as `blocked_k`)
+            for the SWA scope's bf16->fp8 cast. Lets the caller route the cast
+            through `current_workspace_manager()` so the buffer is shared
+            across all 61 DSv4 layers; otherwise allocates fresh per call.
+        extra_kv_fp8_buf: same idea for the extra scope.
 
     Returns: (b, h_q, d_v) bf16
     """
@@ -287,6 +300,7 @@ def aiter_sparse_attn_decode(
         sm_scale=scale,
         d_v=d_v,
         scratch=scratch,
+        kv_fp8_buf=kv_fp8_buf,
     )
 
     if extra_blocked_k is not None:
@@ -299,6 +313,7 @@ def aiter_sparse_attn_decode(
             sm_scale=scale,
             d_v=d_v,
             scratch=extra_scratch,
+            kv_fp8_buf=extra_kv_fp8_buf,
         )
         lse_total = torch.logsumexp(
             torch.stack([lse_swa, lse_ext], dim=0), dim=0)
@@ -331,11 +346,20 @@ def _aiter_decode_one_scope(
     sm_scale: float,
     d_v: int,
     scratch: AiterSparseScratch,
+    kv_fp8_buf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Single-scope AITER mla_decode_fwd call.
 
     Writes into `scratch`'s preallocated buffers in-place so the entire
     decode call is cudagraph-capture friendly.
+
+    Args:
+        q, blocked_k, indices, lens, sm_scale, d_v, scratch: see
+            `aiter_sparse_attn_decode`.
+        kv_fp8_buf: optional preallocated fp8 buffer same shape as `blocked_k`.
+            When provided, the bf16->fp8 cast writes into this buffer in place
+            instead of allocating a fresh one. Used by the caller to share one
+            workspace-backed buffer across all DSv4 layers.
 
     Returns (output, lse) where:
       output: (total_q, h_q, d_v) bf16 — alias of `scratch.out_buf`
@@ -402,11 +426,24 @@ def _aiter_decode_one_scope(
     # ---- Cast q to FP8 in-place into the preallocated buffer ----------- #
     scratch.q_fp8.copy_(q.reshape(total_q, h_q, d_qk))
 
-    # ---- Cast blocked_k to FP8 (per-layer-sized, not in scratch) ------- #
-    # Note: kv cache dequantize + FP8 cast itself is the bigger perf concern
-    # tracked separately. Here we just cast to satisfy the kernel's dtype.
-    kv_fp8 = blocked_k.to(fp8_dtype)
-    kv_view = kv_fp8.view(-1, 1, 1, d_qk)
+    # ---- Cast blocked_k to FP8 ----------------------------------------- #
+    # When the caller provides a preallocated `kv_fp8_buf` (typically backed
+    # by `current_workspace_manager()` so it is shared across all 61 DSv4
+    # layers), copy in place; otherwise allocate fresh. Either way the
+    # AITER kernel sees a stable pointer for the duration of one call.
+    if kv_fp8_buf is not None:
+        assert kv_fp8_buf.shape == blocked_k.shape, (
+            f"kv_fp8_buf shape {tuple(kv_fp8_buf.shape)} must match blocked_k "
+            f"shape {tuple(blocked_k.shape)}"
+        )
+        assert kv_fp8_buf.dtype == fp8_dtype, (
+            f"kv_fp8_buf dtype {kv_fp8_buf.dtype} must be {fp8_dtype}"
+        )
+        kv_fp8_buf.copy_(blocked_k)
+        kv_view = kv_fp8_buf.view(-1, 1, 1, d_qk)
+    else:
+        kv_fp8 = blocked_k.to(fp8_dtype)
+        kv_view = kv_fp8.view(-1, 1, 1, d_qk)
 
     # ---- Refresh AITER work plan against the current kv_indptr --------- #
     # The persistent ASM kernel encodes per-batch lengths into work_*; if we

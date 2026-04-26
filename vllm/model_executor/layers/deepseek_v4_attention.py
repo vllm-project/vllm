@@ -1149,11 +1149,56 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         if self._aiter_extra_scratch is None:
             self._aiter_extra_scratch = AiterSparseScratch()
 
+        # Route the per-layer-sized dequant + fp8-cast intermediates through
+        # the shared workspace manager so all 61 DSv4 layers reuse the same
+        # bf16 / fp8 buffers across each decode step. Without this, each layer
+        # allocates two ~kv-cache-sized fresh tensors per step, which inflates
+        # the cudagraph memory pool by ~60x. The buffer sizes only depend on
+        # static kv-cache shape (num_blocks, block_size, head_dim), so they
+        # reach their max on the first warmup call and stay stable through
+        # capture and lock_workspace().
+        swa_kv_cache = self.swa_cache_layer.kv_cache
+        fp8_dtype = current_platform.fp8_dtype()
+        swa_dequant_shape = (
+            swa_kv_cache.shape[0],
+            swa_kv_cache.shape[1],
+            1,
+            self.head_dim,
+        )
+        if swa_only:
+            swa_bf16, swa_fp8 = current_workspace_manager().get_simultaneous(
+                (swa_dequant_shape, torch.bfloat16),
+                (swa_dequant_shape, fp8_dtype),
+            )
+            extra_bf16 = None
+            extra_fp8 = None
+        else:
+            assert kv_cache is not None
+            extra_dequant_shape = (
+                kv_cache.shape[0],
+                kv_cache.shape[1],
+                1,
+                self.head_dim,
+            )
+            (
+                swa_bf16,
+                swa_fp8,
+                extra_bf16,
+                extra_fp8,
+            ) = current_workspace_manager().get_simultaneous(
+                (swa_dequant_shape, torch.bfloat16),
+                (swa_dequant_shape, fp8_dtype),
+                (extra_dequant_shape, torch.bfloat16),
+                (extra_dequant_shape, fp8_dtype),
+            )
+
         blocked_swa = self._dequantize_blocked_k_cache(
-            self.swa_cache_layer.kv_cache)
+            swa_kv_cache, out=swa_bf16
+        )
         blocked_extra = (
-            None if swa_only
-            else self._dequantize_blocked_k_cache(kv_cache)
+            None
+            if swa_only
+            else self._dequantize_blocked_k_cache(kv_cache, out=extra_bf16)
         )
 
         attn_out = aiter_sparse_attn_decode(
@@ -1169,6 +1214,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             extra_topk_length=topk_lens,
             scratch=self._aiter_scratch,
             extra_scratch=self._aiter_extra_scratch,
+            kv_fp8_buf=swa_fp8,
+            extra_kv_fp8_buf=extra_fp8,
         )
         output.copy_(attn_out.to(output.dtype))
 
@@ -1198,7 +1245,22 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         )
         output.copy_(attn_out.to(output.dtype))
 
-    def _dequantize_blocked_k_cache(self, quant_k_cache: torch.Tensor) -> torch.Tensor:
+    def _dequantize_blocked_k_cache(
+        self,
+        quant_k_cache: torch.Tensor,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Dequantize the packed FP8/bf16 paged K cache to a contiguous bf16 view.
+
+        Args:
+            quant_k_cache: (num_blocks, block_size, head_bytes) uint8 packed cache.
+            out: Optional preallocated bf16 buffer of shape
+                (num_blocks, block_size, 1, head_dim). When provided, the result
+                is written into this buffer in-place and returned. This lets the
+                caller route the output through `current_workspace_manager()` so
+                the buffer is shared across all 61 DSv4 layers instead of
+                allocating fresh per layer per step.
+        """
         fp8_dtype = current_platform.fp8_dtype()
         d = self.head_dim
         d_nope = self.nope_head_dim
@@ -1219,11 +1281,21 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             .view(torch.float8_e8m0fnu)
         )
 
-        result = torch.empty(
-            (num_blocks, block_size, 1, d),
-            dtype=torch.bfloat16,
-            device=quant_k_cache.device,
-        )
+        if out is None:
+            result = torch.empty(
+                (num_blocks, block_size, 1, d),
+                dtype=torch.bfloat16,
+                device=quant_k_cache.device,
+            )
+        else:
+            assert out.shape == (num_blocks, block_size, 1, d), (
+                f"out buffer shape {tuple(out.shape)} must match expected "
+                f"({num_blocks}, {block_size}, 1, {d})"
+            )
+            assert out.dtype == torch.bfloat16, (
+                f"out buffer dtype {out.dtype} must be bf16"
+            )
+            result = out
         result[..., d_nope:] = input_rope.unsqueeze(2)
         for tile_idx in range(num_tiles):
             cur_nope = input_nope[
