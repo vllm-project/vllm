@@ -720,6 +720,27 @@ class ParallelConfig:
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
+    def metrics_info(self) -> dict[str, str]:
+        """Return stable, low-cardinality fields for Prometheus info metrics."""
+        return {
+            "pipeline_parallel_size": str(self.pipeline_parallel_size),
+            "tensor_parallel_size": str(self.tensor_parallel_size),
+            "prefill_context_parallel_size": str(
+                self.prefill_context_parallel_size
+            ),
+            "decode_context_parallel_size": str(self.decode_context_parallel_size),
+            "data_parallel_size": str(self.data_parallel_size),
+            "data_parallel_size_local": str(self.data_parallel_size_local),
+            "world_size": str(self.world_size),
+            "world_size_across_dp": str(self.world_size_across_dp),
+            "dcp_comm_backend": str(self.dcp_comm_backend),
+            "cp_kv_cache_interleave_size": str(self.cp_kv_cache_interleave_size),
+            "enable_expert_parallel": str(self.enable_expert_parallel),
+            "enable_dbo": str(self.enable_dbo),
+            "disable_custom_all_reduce": str(self.disable_custom_all_reduce),
+            "distributed_executor_backend": str(self.distributed_executor_backend),
+        }
+
     def __post_init__(self) -> None:
         # Continue with the rest of the initialization
         self.world_size = (

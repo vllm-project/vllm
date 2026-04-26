@@ -191,6 +191,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:generation_tokens_total",
     "vllm:iteration_tokens_total",
     "vllm:cache_config_info",
+    "vllm:parallel_config_info",
     "vllm:request_success_total",
     "vllm:request_prompt_tokens_sum",
     "vllm:request_prompt_tokens_bucket",
@@ -288,6 +289,9 @@ async def test_metrics_exist(
         if metric in HIDDEN_DEPRECATED_METRICS and not server.show_hidden_metrics:
             continue
         assert metric in response.text
+
+    assert 'decode_context_parallel_size="1"' in response.text
+    assert 'tensor_parallel_size="1"' in response.text
 
 
 @pytest.mark.asyncio
