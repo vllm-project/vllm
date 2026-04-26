@@ -492,14 +492,9 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        # MNNVL workspace allocation is driven by the comm_backend's group:
-        # MnnvlMemory.set_comm_from_config calls comm_backend.Split(...) (vLLM's
-        # CustomCommunicator.Split is a no-op returning self) and the resulting
-        # strided workspace tensor has size(0) == comm_backend.Get_size(). The
-        # flashinfer kernels here key off mapping.tp_size, which is set to
-        # self.world_size (the EP group size = DP * PCP * TP). Pass the EP
-        # group, not the DP group, so the two sizes match whenever TP > 1 or
-        # PCP > 1.
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
         ep_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
             fabric_page_size=1 << 29,  # 512MB
