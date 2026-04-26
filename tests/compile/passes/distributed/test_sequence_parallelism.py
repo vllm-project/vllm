@@ -35,6 +35,8 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
+
 pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -228,7 +230,7 @@ def sequence_parallelism_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -258,7 +260,7 @@ def sequence_parallelism_pass_on_test_model(
             eliminate_noops=True,
         ),
     )  # NoOp needed for fusion
-    device_config = DeviceConfig(device=torch.device("cuda"))
+    device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.

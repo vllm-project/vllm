@@ -181,7 +181,6 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    encoder_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -226,6 +225,7 @@ class FinishedRequestStats:
     """Stats associated with a finished request."""
 
     finish_reason: "FinishReason"
+    request_id: str | None = None
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
@@ -428,6 +428,7 @@ class IterationStats:
     def update_from_finished_request(
         self,
         finish_reason: "FinishReason",
+        request_id: str,
         num_prompt_tokens: int,
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
@@ -459,6 +460,7 @@ class IterationStats:
 
         finished_req = FinishedRequestStats(
             finish_reason=finish_reason,
+            request_id=request_id,
             e2e_latency=e2e_latency,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=req_stats.num_generation_tokens,

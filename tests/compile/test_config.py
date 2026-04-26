@@ -31,6 +31,8 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_version():
     # Test the version comparison logic using the private function
@@ -198,6 +200,22 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m", enforce_eager=True, gpu_memory_utilization=0.4
+        ) as _,
+    ):
+        pass
+
+
+@pytest.mark.forked
+def test_torch_compile_disable(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    with (
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
+        vllm_runner(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.4,
         ) as _,
     ):
         pass
@@ -456,7 +474,7 @@ def test_cached_compilation_config(default_vllm_config):
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     dtype = torch.bfloat16
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     batch_size, num_qo_heads, head_size = 8, 16, 128
 
     # access and cache default compilation config
@@ -478,7 +496,7 @@ def test_cached_compilation_config(default_vllm_config):
         query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         query_quant = torch.compile(query_quant)
 
-        _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        _q_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
         query = torch.randn(
             batch_size, num_qo_heads * head_size, dtype=dtype, device=device
         )
@@ -613,6 +631,24 @@ def test_inductor_asserts_enabled_in_debug(monkeypatch):
         assert config.inductor_compile_config.get("size_asserts") is True
         assert config.inductor_compile_config.get("alignment_asserts") is True
         assert config.inductor_compile_config.get("scalar_asserts") is True
+
+
+def test_get_inductor_factors_includes_configs():
+    """Changing inductor or functorch config must change the cache key factors."""
+    from torch._functorch import config as functorch_config
+    from torch._inductor import config as inductor_config
+
+    from vllm.compilation.compiler_interface import get_inductor_factors
+
+    baseline = get_inductor_factors()
+
+    with inductor_config.patch("max_autotune", not inductor_config.max_autotune):
+        patched = get_inductor_factors()
+    assert baseline != patched, "inductor config change was not reflected"
+
+    with functorch_config.patch("donated_buffer", not functorch_config.donated_buffer):
+        patched = get_inductor_factors()
+    assert baseline != patched, "functorch config change was not reflected"
 
 
 def test_inductor_asserts_user_override(monkeypatch):

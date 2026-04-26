@@ -3,6 +3,7 @@
 
 import tempfile
 from collections import OrderedDict
+from importlib import reload
 from unittest.mock import MagicMock
 
 import pytest
@@ -47,6 +48,11 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 def maybe_enable_lora_dual_stream(monkeypatch: pytest.MonkeyPatch):
     if current_platform.is_cuda():
         monkeypatch.setenv("VLLM_LORA_ENABLE_DUAL_STREAM", "1")
+        import vllm.lora.layers.base_linear
+
+        if not hasattr(vllm.lora.layers.base_linear, "lora_linear_async"):
+            # Reload the module to ensure the environment variable takes effect.
+            reload(vllm.lora.layers.base_linear)
     yield
 
 

@@ -527,7 +527,7 @@ def probabilistic_rejection_sample(
     sampled = draft_sampled.new_empty(
         num_reqs, num_speculative_steps + 1, dtype=torch.int64
     )
-    num_sampled = sampled.new_empty(num_reqs)
+    num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _probabilistic_rejection_kernel[(num_reqs,)](

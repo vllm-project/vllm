@@ -609,6 +609,51 @@ def test_register_kv_caches():
                 assert bl == tensor1[0].nbytes // tensor1.shape[1]
 
 
+def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
+    """Mixed MLA+Eagle caches should register by byte length, not shape."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        worker.use_mla = True
+        worker.transfer_topo.is_mla = True
+
+        # MLA cache tensor: shape[-2] is the block size.
+        mla_cache = torch.zeros((2, 16, 96), dtype=torch.float16)
+        # Eagle3/GQA-like cache tensor: shape[-2] is num_kv_heads, not block size.
+        eagle_cache = torch.zeros((2, 16, 8, 64), dtype=torch.float16)
+        kv_caches = {"mla_layer": mla_cache, "eagle_layer": eagle_cache}
+
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as mock_batch_register:
+            connector.register_kv_caches(kv_caches)
+
+        mock_batch_register.assert_called_once()
+        registered_ptrs, registered_lens = mock_batch_register.call_args[0]
+        assert registered_ptrs == [mla_cache.data_ptr(), eagle_cache.data_ptr()]
+        assert registered_lens == [mla_cache.nbytes, eagle_cache.nbytes]
+        assert worker.block_len_per_layer == [
+            mla_cache.nbytes // mla_cache.shape[0],
+            eagle_cache.nbytes // eagle_cache.shape[0],
+        ]
+
+
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
@@ -647,9 +692,9 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         # Override TP rank/size to simulate P TP=2
         prefill_worker.tp_rank = P_TP_RANK
         prefill_worker.tp_size = P_TP_SIZE
-        # Update shared dict so kv_topo sees correct TP size
         prefill_worker._tp_size[prefill_worker.engine_id] = P_TP_SIZE
-        prefill_worker.kv_topo.tp_rank = P_TP_RANK
+        prefill_worker.transfer_topo.tp_rank = P_TP_RANK
+        prefill_worker.transfer_topo.tp_size = P_TP_SIZE
 
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [local_block_len]
@@ -669,7 +714,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         send_meta.ready.set()
 
         # Compute target D ranks using the production code path
-        target_d_ranks = prefill_worker.kv_topo.get_target_remote_ranks(d_tp_size)
+        target_d_ranks = prefill_worker.transfer_topo.handshake_target_ranks(d_tp_size)
 
         mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
         mock_socket.send_multipart = AsyncMock()
