@@ -360,19 +360,15 @@ class OffloadingConnectorWorker:
                 )
 
             self._connector_worker_meta.mark_completed(job_id)
-            job_info = self._jobs.pop(job_id, None)
-            if job_info is None:
-                continue
+            job_info = self._jobs.pop(job_id)
 
             if not job_info.is_store:
                 finished_recving.add(job_info.req_id)
                 continue
 
             # Store completed.
-            req_state = self._req_state.get(job_info.req_id)
-            if req_state is None:
-                continue
-            req_state.store_jobs.discard(job_id)
+            req_state = self._req_state[job_info.req_id]
+            req_state.store_jobs.remove(job_id)
             if req_state.store_jobs:
                 continue
             # All in-flight stores done for this req — emit finished_sending
@@ -382,11 +378,11 @@ class OffloadingConnectorWorker:
                 del self._req_state[job_info.req_id]
 
         for req_id in finished_req_ids:
-            req_state = self._req_state.get(req_id)
-            if req_state is None:
+            finishing_state = self._req_state.get(req_id)
+            if finishing_state is None:
                 continue
-            if req_state.store_jobs:
-                req_state.is_finished = True
+            if finishing_state.store_jobs:
+                finishing_state.is_finished = True
             else:
                 finished_sending.add(req_id)
                 del self._req_state[req_id]
