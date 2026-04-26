@@ -146,6 +146,9 @@ def test_engine_core_aborts_requests():
         def _process_aborts_queue(self):
             pass
 
+        def _should_throttle_prefills(self) -> bool:
+            return False
+
         def step(self):
             """Dummy step method to satisfy mypy."""
             return {}, True

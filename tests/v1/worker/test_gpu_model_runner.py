@@ -1666,8 +1666,14 @@ def test_observation_hook_integration(model_runner):
     # Create PluginManager with mock plugin
     plugin_manager = PluginManager([mock_plugin])
 
-    # Inject hook into model_runner
-    model_runner.observation_hook = ObservationHook(plugin_manager, model_runner.model)
+    from vllm.plugins.observation.model_runner_helper import init_observation
+    from unittest.mock import patch
+
+    vllm_config = MagicMock()
+    vllm_config.observation_plugins = ["dummy"]
+
+    with patch("vllm.plugins.observation.model_runner_helper.load_observation_plugins", return_value=plugin_manager):
+        init_observation(model_runner, vllm_config)
 
     # Setup mock input batch
     model_runner.input_batch = MagicMock()

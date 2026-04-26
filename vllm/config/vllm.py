@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, Union, Type, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -63,6 +63,8 @@ else:
     QuantizationConfig = Any
 
     KVCacheConfig = Any
+
+    ObservationPlugin = Any
 
 logger = init_logger(__name__)
 
@@ -330,7 +332,7 @@ class VllmConfig:
     )
     """Observability configuration."""
 
-    observation_plugins: list["ObservationPlugin"] | None = None
+    observation_plugins: list[Union[str, "ObservationPlugin", Type["ObservationPlugin"]]] | None = None
     """List of observation plugins to load for extracting activations
     and modifying execution."""
 

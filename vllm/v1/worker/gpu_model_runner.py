@@ -106,12 +106,6 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
-from vllm.plugins.observation.hook import ObservationHook
-from vllm.plugins.observation.interface import (
-    ObservationAction,
-    RequestContext,
-    load_observation_plugins,
-)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -461,18 +455,8 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
-        # Observation API
-        self.plugin_manager = None
-        self.observation_hook = None
-
-        self.plugin_manager = load_observation_plugins(
-            self.vllm_config.observation_plugins, self.vllm_config
-        )
-        if self.plugin_manager and self.plugin_manager.observe_decode:
-            logger.warning(
-                "observe_decode=True requested but decode observation is not yet "
-                "implemented. Only prefill phases will be observed."
-            )
+        from vllm.plugins.observation.model_runner_helper import init_observation
+        init_observation(self, vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -1176,8 +1160,6 @@ class GPUModelRunner(
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
-            if self.plugin_manager:
-                self.plugin_manager.on_request_complete(req_id)
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
@@ -1236,8 +1218,6 @@ class GPUModelRunner(
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
-            if self.plugin_manager:
-                self.plugin_manager.on_request_start(req_id, prompt=None)
             if req_id in self.requests:
                 # For streaming case only.
                 req_state = self._update_streaming_request(req_id, new_req_data)
@@ -4327,14 +4307,6 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
-            is_prefill_batch = False
-            if self.observation_hook:
-                for req_id in self.input_batch.req_ids:
-                    req_state = self.requests[req_id]
-                    if req_state.num_computed_tokens < req_state.num_prompt_tokens:
-                        is_prefill_batch = True
-                        break
-
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -4380,53 +4352,13 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
-            if is_prefill_batch and self.observation_hook:
-                self.observation_hook.install_hooks()
-
-            try:
-                model_output = self._model_forward(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
-            finally:
-                if is_prefill_batch and self.observation_hook:
-                    self.observation_hook.remove_hooks()
-
-            if is_prefill_batch and self.observation_hook:
-                request_contexts = []
-                current_offset = 0
-                for req_id in self.input_batch.req_ids:
-                    num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
-                    req_state = self.requests[req_id]
-                    is_prefill = req_state.num_computed_tokens < req_state.num_prompt_tokens
-                    
-                    request_contexts.append(RequestContext(
-                        request_id=req_id,
-                        is_prefill=is_prefill,
-                        batch_offset=current_offset,
-                        num_tokens=num_tokens,
-                        num_cached_tokens=req_state.num_computed_tokens,
-                    ))
-                    current_offset += num_tokens
-
-                observation_results = self.observation_hook.process_step(
-                    request_contexts
-                )
-
-                for req_ctx, result in zip(request_contexts, observation_results):
-                    if result.action == ObservationAction.ABORT:
-                        req_id = req_ctx.request_id
-                        message = result.metadata.get("message", "No message")
-                        logger.warning(
-                            "Aborting request %s due to observation plugin trigger: %s",
-                            req_id,
-                            message,
-                        )
-                        req_state = self.requests[req_id]
-                        req_state.aborted_by_observation = True
+            model_output = self._model_forward(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4710,12 +4642,7 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
-            aborted_req_ids = []
-            for req_id in req_ids_output_copy:
-                if req_id in self.requests:
-                    req_state = self.requests[req_id]
-                    if getattr(req_state, "aborted_by_observation", False):
-                        aborted_req_ids.append(req_id)
+
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4730,7 +4657,6 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
-                aborted_req_ids=aborted_req_ids,
             )
 
         if not self.use_async_scheduling:
@@ -5279,11 +5205,6 @@ class GPUModelRunner(
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
-                    )
-
-                if self.plugin_manager:
-                    self.observation_hook = ObservationHook(
-                        self.plugin_manager, self.model
                     )
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")

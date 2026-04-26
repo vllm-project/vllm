@@ -148,14 +148,14 @@ class PluginManager:
 
 
 def load_observation_plugins(
-    plugin_names: list[str] | None,
+    plugin_configs: list[str | ObservationPlugin | type[ObservationPlugin]] | None,
     vllm_config: VllmConfig,
 ) -> PluginManager:
     """
-    Load observation plugins specified by names in the config.
+    Load observation plugins specified by names, class types, or instances in the config.
     Returns a PluginManager containing the initialized plugins.
     """
-    if not plugin_names:
+    if not plugin_configs:
         return PluginManager([])
 
     # Load all installed plugin in the group
@@ -172,32 +172,54 @@ def load_observation_plugins(
             logger.warning("Failed to load plugin %s.", name, exc_info=True)
 
     loaded_plugins = []
-    for requested_plugin in plugin_names:
-        if requested_plugin not in loadable_plugins:
-            logger.warning(
-                "Requested observation plugin '%s' is not installed or "
-                "failed to load. Available plugins: %s",
-                requested_plugin,
-                list(loadable_plugins.keys()),
-            )
+    for config_item in plugin_configs:
+        if isinstance(config_item, ObservationPlugin):
+            loaded_plugins.append(config_item)
+            logger.info("Loaded pre-initialized observation plugin: %s", type(config_item).__name__)
             continue
 
-        try:
-            plugin_cls = resolve_obj_by_qualname(loadable_plugins[requested_plugin])
+        if inspect.isclass(config_item) and issubclass(config_item, ObservationPlugin):
+            try:
+                init_signature = inspect.signature(config_item.__init__)
+                if "vllm_config" in init_signature.parameters:
+                    plugin_instance = config_item(vllm_config=vllm_config)
+                else:
+                    plugin_instance = config_item()
+                loaded_plugins.append(plugin_instance)
+                logger.info("Successfully loaded observation plugin class: %s", config_item.__name__)
+            except Exception:
+                logger.exception("Failed to initialize observation plugin class %s", config_item.__name__)
+            continue
 
-            # Conditionally pass vllm_config if accepted by the plugin constructor
-            init_signature = inspect.signature(plugin_cls.__init__)
-            if "vllm_config" in init_signature.parameters:
-                plugin_instance = plugin_cls(vllm_config=vllm_config)
-            else:
-                plugin_instance = plugin_cls()
+        if isinstance(config_item, str):
+            if config_item not in loadable_plugins:
+                logger.warning(
+                    "Requested observation plugin '%s' is not installed or "
+                    "failed to load. Available plugins: %s",
+                    config_item,
+                    list(loadable_plugins.keys()),
+                )
+                continue
 
-            loaded_plugins.append(plugin_instance)
-            logger.info("Successfully loaded observation plugin: %s", requested_plugin)
-        except Exception:
-            logger.exception(
-                "Failed to initialize observation plugin %s",
-                requested_plugin,
-            )
+            try:
+                plugin_cls = resolve_obj_by_qualname(loadable_plugins[config_item])
+
+                # Conditionally pass vllm_config if accepted by the plugin constructor
+                init_signature = inspect.signature(plugin_cls.__init__)
+                if "vllm_config" in init_signature.parameters:
+                    plugin_instance = plugin_cls(vllm_config=vllm_config)
+                else:
+                    plugin_instance = plugin_cls()
+
+                loaded_plugins.append(plugin_instance)
+                logger.info("Successfully loaded observation plugin: %s", config_item)
+            except Exception:
+                logger.exception(
+                    "Failed to initialize observation plugin %s",
+                    config_item,
+                )
+            continue
+
+        logger.warning("Unsupported observation plugin configuration type: %s", type(config_item))
 
     return PluginManager(loaded_plugins)
