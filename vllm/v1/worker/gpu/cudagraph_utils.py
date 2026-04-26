@@ -333,13 +333,12 @@ class ModelCudaGraphManager(CudaGraphManager):
             )
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
-                batch_descriptor = (
-                    BatchDescriptor(num_tokens=num_tokens)
-                    if cg_mode == CUDAGraphMode.PIECEWISE
-                    else None
-                )
+                batch_descriptor = None
+                if cg_mode == CUDAGraphMode.PIECEWISE:
+                    assert attn_metadata is None
+                    batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
                 with set_forward_context(
-                    attn_metadata if cg_mode != CUDAGraphMode.PIECEWISE else None,
+                    attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     cudagraph_runtime_mode=cg_mode,
