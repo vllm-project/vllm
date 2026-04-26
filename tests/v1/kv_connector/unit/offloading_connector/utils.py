@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -52,7 +51,6 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferResult,
     TransferSpec,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -446,30 +444,8 @@ class RequestRunner:
 
         self._parse_transfers()
 
-        # run one more step to update finished stored
         if EOS_TOKEN_ID in decoded_tokens:
             assert not self.scheduler.running
-
-            while self.scheduler.requests:
-                scheduler_output = self.scheduler.schedule()
-
-                finished_sending, finished_recving = self.worker_connector.get_finished(
-                    scheduler_output.finished_req_ids
-                )
-                worker_meta = (
-                    self.worker_connector.build_connector_worker_meta()
-                    or OffloadingWorkerMetadata()
-                )
-
-                assert not finished_recving
-
-                model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-                model_runner_output.kv_connector_output = KVConnectorOutput(
-                    finished_sending=finished_sending,
-                    kv_connector_worker_meta=worker_meta,
-                )
-
-                self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
     def run(
         self,
