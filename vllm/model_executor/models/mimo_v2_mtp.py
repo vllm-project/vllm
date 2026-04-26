@@ -40,8 +40,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    _require_is_multimodal,
+)
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
-from .utils import maybe_prefix
+from .utils import maybe_prefix, _merge_multimodal_embeddings
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
 # only the first layer and only one speculative token.
@@ -338,3 +343,31 @@ class MiMoV2MTP(nn.Module):
             loaded_params.add(name)
 
         return loaded_params
+
+
+class MiMoV2OmniMTP(MiMoV2MTP, SupportsMultiModal):
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self._embed_text_input_ids(
+            input_ids,
+            self.model.embed_input_ids,
+            is_multimodal=is_multimodal,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        is_multimodal = _require_is_multimodal(is_multimodal)
+
+        inputs_embeds = _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+        return inputs_embeds
