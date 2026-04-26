@@ -983,19 +983,16 @@ class VllmConfig:
             )
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # async tp is built on top of sequence parallelism
-        # and requires it to be enabled.
-        if self.compilation_config.pass_config.fuse_gemm_comms:
-            self.compilation_config.pass_config.enable_sp = True
-        if self.compilation_config.pass_config.enable_sp:
+        # async tp is built on top of sequence parallelism and requires it.
+        pass_config = self.compilation_config.pass_config
+        if pass_config.fuse_gemm_comms:
+            pass_config.enable_sp = True
+        if pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
-                self.compilation_config.pass_config.enable_sp = False
-                self.compilation_config.pass_config.fuse_gemm_comms = False
+                pass_config.enable_sp = False
+                pass_config.fuse_gemm_comms = False
             else:
-                # Compute SP threshold early; disable if None (model too
-                # small for SP to be beneficial).
-                pass_config = self.compilation_config.pass_config
                 if pass_config.sp_min_token_num is None:
                     from vllm.compilation.passes.fusion.sequence_parallelism import (
                         get_sequence_parallelism_threshold,
@@ -1015,8 +1012,8 @@ class VllmConfig:
                         "threshold heuristic, disabling. To force SP, "
                         "set pass_config.sp_min_token_num manually."
                     )
-                    self.compilation_config.pass_config.enable_sp = False
-                    self.compilation_config.pass_config.fuse_gemm_comms = False
+                    pass_config.enable_sp = False
+                    pass_config.fuse_gemm_comms = False
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
@@ -1098,6 +1095,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
+
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1171,8 +1169,8 @@ class VllmConfig:
         )
 
         if self.compilation_config.pass_config.enable_sp:
-            # With pipeline parallelism or dynamo partitioning,
-            # native rms norm tracing errors due to incorrect residual shape.
+            # With pipeline parallelism, native rms norm tracing errors due to
+            # incorrect residual shape.
             # Use custom rms norm to unblock. In the future,
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
@@ -1183,24 +1181,15 @@ class VllmConfig:
                     self.compilation_config.mode,
                 )
 
-            is_fullgraph = (
-                self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops or []) == 0
-            )
-            if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
+            if self.parallel_config.pipeline_parallel_size > 1:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
                     self.compilation_config.custom_ops.append("+rms_norm")
                 else:
-                    regime = (
-                        "Dynamo partition"
-                        if not is_fullgraph
-                        else "pipeline parallelism"
-                    )
                     logger.warning_once(
                         "Sequence parallelism not supported with "
                         "native rms_norm when using %s, "
                         "this will likely lead to an error.",
-                        regime,
+                        "pipeline parallelism",
                     )
 
         # final check of cudagraph mode after all possible updates
@@ -1212,9 +1201,9 @@ class VllmConfig:
                 and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
             ):
                 logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention."
-                    " Will fall back to eager execution if a batch runs "
-                    "into cascade attentions."
+                    "No piecewise cudagraph for executing cascade attention. "
+                    "Will fall back to eager execution if a batch runs into "
+                    "cascade attentions."
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
