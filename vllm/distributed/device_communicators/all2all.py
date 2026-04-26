@@ -492,15 +492,23 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        dp_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        # MNNVL workspace allocation is driven by the comm_backend's group:
+        # MnnvlMemory.set_comm_from_config calls comm_backend.Split(...) (vLLM's
+        # CustomCommunicator.Split is a no-op returning self) and the resulting
+        # strided workspace tensor has size(0) == comm_backend.Get_size(). The
+        # flashinfer kernels here key off mapping.tp_size, which is set to
+        # self.world_size (the EP group size = DP * PCP * TP). Pass the EP
+        # group, not the DP group, so the two sizes match whenever TP > 1 or
+        # PCP > 1.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
             fabric_page_size=1 << 29,  # 512MB
             allocation_granularity=0,  # Auto-detect
         )
 
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, dp_config)
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
         self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, dp_config
+            self.mapping, ep_config
         )
 
         self.world_size = world_size
