@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,41 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    # Regex for detecting <function=…> or <function name="…"> in text.
+    _RE_FUNCTION_OPEN = re.compile(r"<function[\s=]")
+
+    # Number of tokens to decode after <tool_call> when checking whether a
+    # genuine <function=…> tag follows.  The gap is always "\n<function=" in
+    # the Qwen3 format, which is typically 3 tokens:
+    #   \n          → 1 token
+    #   <function   → 1 token (special token in the Qwen3 vocabulary)
+    #   =           → 1 token
+    # We use 8 to stay correct even when the tokenizer does not have
+    # <function> as a single special token and encodes it character-by-character
+    # (worst case: '<', 'f', 'u', 'n', 'c', 't', 'i', 'o', 'n', '=' = 10 chars,
+    # but most sub-word tokenizers merge runs like this into 3-5 tokens).
+    _FUNCTION_LOOKAHEAD_TOKENS: int = 8
+
+    def _tool_call_is_genuine_end(
+        self, input_ids: Sequence[int], tool_call_pos: int
+    ) -> bool:
+        """Return True iff <function=…> follows <tool_call> at tool_call_pos.
+
+        Decodes a small window of tokens after the <tool_call> position and
+        checks for a function-open tag (with optional leading whitespace).
+        Returns False when no tokens follow or decoding fails.
+        """
+        after = list(
+            input_ids[tool_call_pos + 1 : tool_call_pos + 1 + self._FUNCTION_LOOKAHEAD_TOKENS]
+        )
+        if not after:
+            return False
+        try:
+            text = self.model_tokenizer.decode(after, skip_special_tokens=False)
+            return bool(self._RE_FUNCTION_OPEN.match(text.lstrip()))
+        except Exception:
+            return False
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
@@ -74,13 +110,16 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             if token_id == end_token_id:
                 return True
             if tool_call_token_id is not None and token_id == tool_call_token_id:
-                # Only treat as implicit reasoning end if this <tool_call>
-                # is NOT followed by </tool_call>.  Paired occurrences are
-                # template examples in the prompt, not model output.
+                # Skip paired occurrences (prompt few-shot examples).
                 if tool_call_end_token_id is not None and any(
                     input_ids[j] == tool_call_end_token_id
                     for j in range(i + 1, len(input_ids))
                 ):
+                    continue
+                # Lookahead: only treat as implicit end if <function=…> follows.
+                # Reasoning text often mentions <tool_call> without following
+                # it with a function tag; wait for confirmation.
+                if not self._tool_call_is_genuine_end(input_ids, i):
                     continue
                 return True
         return False
@@ -88,10 +127,19 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        if super().is_reasoning_end_streaming(input_ids, delta_ids):
+        # Materialise once to avoid double-consuming a one-pass iterable.
+        delta_set = set(delta_ids)
+        if self.end_token_id in delta_set:
             return True
-        if self._tool_call_token_id is not None:
-            return self._tool_call_token_id in delta_ids
+        if self._tool_call_token_id is not None and self._tool_call_token_id in delta_set:
+            # Require <function=…> to follow in the accumulated sequence.
+            tc_id = self._tool_call_token_id
+            ids = list(input_ids)
+            try:
+                pos = len(ids) - 1 - ids[::-1].index(tc_id)
+                return self._tool_call_is_genuine_end(ids, pos)
+            except ValueError:
+                pass
         return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -148,11 +196,16 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             return None, model_output
 
         # No </think> — check for implicit reasoning end via <tool_call>.
+        # The <tool_call> is only a genuine implicit end when followed
+        # (modulo whitespace) by <function=…>.  Bare <tool_call> mentions in
+        # reasoning text must not prematurely terminate reasoning.
         tool_call_index = model_output.find(self._tool_call_tag)
         if tool_call_index != -1:
-            reasoning = model_output[:tool_call_index]
-            content = model_output[tool_call_index:]
-            return reasoning or None, content or None
+            after_tc = model_output[tool_call_index + len(self._tool_call_tag):]
+            if self._RE_FUNCTION_OPEN.match(after_tc.lstrip()):
+                reasoning = model_output[:tool_call_index]
+                content = model_output[tool_call_index:]
+                return reasoning or None, content or None
         # Thinking enabled but no </think>: output was truncated.
         # Everything generated so far is reasoning.
         return model_output, None
@@ -201,18 +254,38 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             return None
 
         # Implicit reasoning end via <tool_call>.
-        if (
-            self._tool_call_token_id is not None
-            and self._tool_call_token_id in delta_token_ids
-        ):
-            tool_index = delta_text.find(self._tool_call_tag)
-            if tool_index >= 0:
-                reasoning = delta_text[:tool_index]
-                content = delta_text[tool_index:]
-                return DeltaMessage(
-                    reasoning=reasoning if reasoning else None,
-                    content=content if content else None,
-                )
+        # Apply the same <function=…> lookahead used by is_reasoning_end so
+        # that a bare <tool_call> token in reasoning text (e.g. a code
+        # example) does not prematurely terminate reasoning.
+        # We use current_token_ids (which already includes the delta) so the
+        # check works whether <function=…> arrives in the same delta or the
+        # next one.
+        if self._tool_call_token_id is not None:
+            tc_id = self._tool_call_token_id
+            tc_in_delta = tc_id in delta_token_ids
+            tc_in_prev = tc_id in previous_token_ids
+            if tc_in_delta or tc_in_prev:
+                ids = list(current_token_ids)
+                try:
+                    pos = len(ids) - 1 - ids[::-1].index(tc_id)
+                    if self._tool_call_is_genuine_end(ids, pos):
+                        if tc_in_delta:
+                            tool_index = delta_text.find(self._tool_call_tag)
+                            if tool_index >= 0:
+                                reasoning = delta_text[:tool_index]
+                                content = delta_text[tool_index:]
+                                return DeltaMessage(
+                                    reasoning=reasoning if reasoning else None,
+                                    content=content if content else None,
+                                )
+                        else:
+                            # <tool_call> was in previous delta; current delta
+                            # is all content.
+                            return DeltaMessage(content=delta_text)
+                except ValueError:
+                    pass
+                # Lookahead returned False or <function=…> not yet arrived:
+                # treat as reasoning — fall through.
 
         # No end token in this delta.
         if not delta_text:
@@ -220,11 +293,6 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             return None
         elif self.end_token_id in previous_token_ids:
             # End token already passed: everything is content now.
-            return DeltaMessage(content=delta_text)
-        elif (
-            self._tool_call_token_id is not None
-            and self._tool_call_token_id in previous_token_ids
-        ):
             return DeltaMessage(content=delta_text)
         else:
             # No end token yet: still in reasoning phase.

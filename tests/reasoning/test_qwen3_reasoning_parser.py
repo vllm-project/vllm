@@ -373,3 +373,72 @@ def test_reasoning_thinking_disabled(
 
     assert reasoning == expected_reasoning
     assert content == expected_content
+
+
+# ---------------------------------------------------------------------------
+# Tests for <tool_call> lookahead in extract_reasoning (non-streaming)
+# ---------------------------------------------------------------------------
+# A bare <tool_call> without a following <function=…> must NOT end reasoning.
+
+
+FAKE_TOOL_CALL_BODY = "<tool_call>"
+FAKE_TOOL_CALL_NO_FUNCTION = (
+    "I'll use the <tool_call> syntax here. "
+    "Let me think more."
+)
+FAKE_TOOL_CALL_CLOSING = "<tool_call></tool_call> is the format."
+
+
+@pytest.mark.parametrize(
+    "output, expected_reasoning, expected_content",
+    [
+        pytest.param(
+            FAKE_TOOL_CALL_NO_FUNCTION,
+            FAKE_TOOL_CALL_NO_FUNCTION,
+            None,
+            id="fake_tool_call_inline_text",
+        ),
+        pytest.param(
+            FAKE_TOOL_CALL_BODY,
+            FAKE_TOOL_CALL_BODY,
+            None,
+            id="fake_tool_call_tag_only",
+        ),
+        pytest.param(
+            FAKE_TOOL_CALL_CLOSING,
+            FAKE_TOOL_CALL_CLOSING,
+            None,
+            id="fake_tool_call_with_closing_tag",
+        ),
+        # Genuine: <tool_call> followed by <function=…> — should still split.
+        pytest.param(
+            TOOL_CALL_NO_THINK_END["output"],
+            TOOL_CALL_NO_THINK_END["reasoning"],
+            TOOL_CALL_NO_THINK_END["content"],
+            id="genuine_tool_call_still_splits",
+        ),
+        # Genuine with <function name="…"> attribute syntax.
+        pytest.param(
+            'I need the result.\n\n<tool_call>\n<function name="bash">',
+            "I need the result.\n\n",
+            '<tool_call>\n<function name="bash">',
+            id="genuine_tool_call_attr_syntax",
+        ),
+    ],
+)
+def test_reasoning_tool_call_lookahead(
+    output: str,
+    expected_reasoning: str | None,
+    expected_content: str | None,
+    qwen3_tokenizer,
+):
+    """<tool_call> is only an implicit reasoning end when followed by <function=…>."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+    reasoning, content = parser.extract_reasoning(
+        model_output=output,
+        request=ChatCompletionRequest(messages=[], model="test-model"),
+    )
+    assert reasoning == expected_reasoning
+    assert content == expected_content
