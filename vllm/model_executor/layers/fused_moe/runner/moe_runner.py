@@ -335,11 +335,16 @@ class MoERunner(MoERunnerInterface):
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
 
-        This is the "early" all-reduce path. When the combine kernel produces
-        already-reduced fused output, shared output must be reduced separately
-        to match.
+        * If the combine kernel does the reduction for fused_output, reduce
+          shared_output separately. O.w, reduce fused_output+shared_output later.
+        * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
+          in the model.
         """
-        if shared_output is not None and self._fused_output_is_reduced:
+        if (
+            shared_output is not None
+            and not self.moe_config.is_sequence_parallel
+            and self._fused_output_is_reduced
+        ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
@@ -545,10 +550,16 @@ class MoERunner(MoERunnerInterface):
             hidden_states
         )
 
+        # Record before `_maybe_pad_hidden_states` pads activations to match
+        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # so routed output can be trimmed before
+        # shared+routed add / latent up proj if needed.
+        routed_hidden_dim = hidden_states.shape[-1]
         hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
             shared_experts_input,
             hidden_states,
         )
+        hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
 
         result = self._forward_entry(
             hidden_states,
@@ -568,6 +579,10 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
+        if (
+            shared_output is not None or self.routed_output_transform is not None
+        ) and hidden_dim_was_padded:
+            fused_output = fused_output[..., :routed_hidden_dim]
 
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.

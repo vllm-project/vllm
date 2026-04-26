@@ -56,6 +56,7 @@ def _cold_start(vllm_runner):
 def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache, mega_aot_artifact):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", mega_aot_artifact)
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
     # Cold start in a forked child (must fork before CUDA init).
     # This model has 32 identical transformer layers which produce
@@ -235,6 +236,7 @@ def _cold_start_model(vllm_runner, spec: ModelStartupSpec):
 @fork_new_process_for_each_test
 def test_model_startup(monkeypatch, vllm_runner, fresh_vllm_cache, spec):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
     # Cold start in a forked child (must fork before CUDA init).
     ctx = mp.get_context("fork")

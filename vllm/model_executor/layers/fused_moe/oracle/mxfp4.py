@@ -141,7 +141,7 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExpertsMXFp4
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
 
         return [XPUExpertsMXFp4]
 
@@ -884,7 +884,7 @@ def make_mxfp4_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_deepep_ll_kernels
+            if moe_config.moe_parallel_config.use_batched_activation_format
             else None
         ),
         inplace=(
