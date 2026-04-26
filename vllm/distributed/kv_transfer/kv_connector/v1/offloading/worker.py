@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -47,16 +47,6 @@ class _JobInfo:
     is_store: bool
 
 
-@dataclass(slots=True)
-class _RequestState:
-    """Per-request worker-side state. Created lazily for requests with stores."""
-
-    store_jobs: set[int] = field(default_factory=set)
-    # True once the engine has signaled this request finished generating;
-    # finished_sending fires when the last in-flight store completes.
-    is_finished: bool = False
-
-
 class OffloadingConnectorWorker:
     """Implementation of Worker side methods"""
 
@@ -67,7 +57,6 @@ class OffloadingConnectorWorker:
         self.kv_connector_stats = OffloadingConnectorStats()
         # job_id -> (req_id, is_store)
         self._jobs: dict[int, _JobInfo] = {}
-        self._req_state: dict[ReqId, _RequestState] = {}
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
@@ -328,22 +317,19 @@ class OffloadingConnectorWorker:
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
             self._jobs[job_id] = _JobInfo(req_id=entry.req_id, is_store=True)
-            req_state = self._req_state.setdefault(entry.req_id, _RequestState())
-            req_state.store_jobs.add(job_id)
             self._unsubmitted_store_jobs.append((job_id, entry.transfer_spec))
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
-        Returns a list of request IDs that finished loading or storing.
-
         Returns:
-            ids of requests that have finished asynchronous transfer
-            tuple of (sending/saving ids, recving/loading ids).
+            tuple of (finished_sending, finished_recving). Stores never
+            emit finished_sending — the scheduler tracks store completion
+            via kv_connector_worker_meta.completed_jobs and fences any
+            block reuse via jobs_to_flush. Loads still emit
+            finished_recving so the base scheduler can resume requests
+            blocked on remote KV (and free aborted-during-load reqs).
         """
-        finished_sending = set()
-        finished_recving = set()
+        finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
@@ -361,33 +347,10 @@ class OffloadingConnectorWorker:
 
             self._connector_worker_meta.mark_completed(job_id)
             job_info = self._jobs.pop(job_id)
-
             if not job_info.is_store:
                 finished_recving.add(job_info.req_id)
-                continue
 
-            # Store completed.
-            req_state = self._req_state[job_info.req_id]
-            req_state.store_jobs.remove(job_id)
-            if req_state.store_jobs:
-                continue
-            # All in-flight stores done for this req — emit finished_sending
-            # only once the engine has signaled the request finished.
-            if req_state.is_finished:
-                finished_sending.add(job_info.req_id)
-                del self._req_state[job_info.req_id]
-
-        for req_id in finished_req_ids:
-            finishing_state = self._req_state.get(req_id)
-            if finishing_state is None:
-                continue
-            if finishing_state.store_jobs:
-                finishing_state.is_finished = True
-            else:
-                finished_sending.add(req_id)
-                del self._req_state[req_id]
-
-        return finished_sending, finished_recving
+        return set(), finished_recving
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
@@ -412,6 +375,5 @@ class OffloadingConnectorWorker:
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._jobs.clear()
-        self._req_state.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
         self.worker.shutdown()
