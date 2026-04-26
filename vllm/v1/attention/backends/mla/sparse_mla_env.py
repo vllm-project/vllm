@@ -70,21 +70,28 @@ def is_sparse_mla_reference_attention_enabled(device: torch.device) -> bool:
     return _is_sm12x_device(device)
 
 
-def sparse_mla_reference_cudagraphs_allowed() -> bool:
+def _uses_speculative_decoding(vllm_config) -> bool:
+    return bool(getattr(vllm_config, "speculative_config", None))
+
+
+def sparse_mla_reference_cudagraphs_allowed(vllm_config=None) -> bool:
     configured = _optional_env_flag(_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH_ENV)
     if configured is not None:
         return configured
-    return True
+    return not (
+        vllm_config is not None and _uses_speculative_decoding(vllm_config)
+    )
 
 
 def disable_sparse_mla_reference_cudagraphs_if_enabled(vllm_config) -> None:
     if not is_sparse_mla_reference_attention_enabled_for_platform():
         return
-    if sparse_mla_reference_cudagraphs_allowed():
+    if sparse_mla_reference_cudagraphs_allowed(vllm_config):
         logger.warning_once(
             "Keeping vLLM compile and CUDA graphs enabled for the DeepSeek V4 "
             "Triton sparse MLA fallback because "
-            f"{_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH_ENV}=1. This is an "
+            f"{_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH_ENV}=1 or speculative "
+            "decoding is not configured. This is an "
             "experimental performance mode."
         )
         return
@@ -101,7 +108,8 @@ def disable_sparse_mla_reference_cudagraphs_if_enabled(vllm_config) -> None:
     logger.warning_once(
         "Disabling vLLM compile and CUDA graphs for the DeepSeek V4 Triton "
         "sparse MLA fallback because the current fallback path is not "
-        "compile/graph-safe yet."
+        "compile/graph-safe yet, or because speculative decoding uses "
+        "multi-token sparse MLA decode."
     )
     compilation_config.mode = CompilationMode.NONE
     compilation_config.compile_sizes = []

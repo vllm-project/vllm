@@ -8,6 +8,9 @@ import pytest
 import torch
 
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.model_executor.layers import (
+    deepseek_v4_attention as deepseek_v4_attention_module,
+)
 from vllm.model_executor.layers.deepseek_v4_attention import (
     _deepseek_v4_fp8_einsum_config,
     _sparse_mla_prefill_workspace_bounds,
@@ -64,6 +67,12 @@ _FP8_DIM = 448
 _ROPE_DIM = 64
 _SCALE_DIM = 8
 _TOKEN_DATA_SIZE = _FP8_DIM + _ROPE_DIM * 2
+
+
+class _FakeWorkspaceManager:
+
+    def get_simultaneous(self, *specs):
+        return tuple(torch.empty(shape, dtype=dtype) for shape, dtype in specs)
 
 
 def test_triton_sparse_mla_default_topk_chunk_size(monkeypatch) -> None:
@@ -153,6 +162,147 @@ def test_triton_sparse_mla_decode_head_block_size_ignores_invalid_env_override(
     )
 
     assert sparse_mla_decode_head_block_size(8) == 2
+
+
+def test_swa_mtp_decode_reference_uses_global_swa_slots(monkeypatch) -> None:
+    captured: dict[str, torch.Tensor] = {}
+
+    def fail_paged_attention_with_sink_multihead(**kwargs) -> None:
+        raise AssertionError("MTP SWA decode must use explicit SWA indices")
+
+    def fake_accumulate_global_slots(**kwargs) -> None:
+        captured["slot_ids"] = kwargs["slot_ids"]
+        captured["lens"] = kwargs["lens"]
+
+    def fake_finish_with_sink(*args, **kwargs) -> None:
+        kwargs["output"].zero_()
+
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "current_workspace_manager",
+        lambda: _FakeWorkspaceManager(),
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "fp8ds_paged_sparse_mla_attention_with_sink_multihead",
+        fail_paged_attention_with_sink_multihead,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead",
+        fake_accumulate_global_slots,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "finish_sparse_mla_attention_with_sink",
+        fake_finish_with_sink,
+    )
+
+    attention = SimpleNamespace(
+        num_heads=2,
+        scale=0.1,
+        attn_sink=torch.zeros(2, dtype=torch.float32),
+    )
+    swa_indices = torch.arange(48, dtype=torch.int32).reshape(6, 1, 8)
+    swa_lens = torch.tensor([2, 3, 4, 2, 3, 4], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_decodes=2,
+        num_decode_tokens=6,
+        decode_swa_lens=swa_lens,
+        decode_swa_indices=swa_indices,
+        seq_lens=torch.tensor([11, 22], dtype=torch.int32),
+        block_table=torch.empty((2, 4), dtype=torch.int32),
+        block_size=256,
+        token_to_req_indices=torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32),
+    )
+
+    deepseek_v4_attention_module.DeepseekV4MLAAttention._forward_sparse_mla_swa_decode_reference(
+        attention,
+        q=torch.empty((6, 1, 2, 512), dtype=torch.bfloat16),
+        swa_k_cache=torch.empty((1, 256, 584), dtype=torch.uint8),
+        swa_metadata=metadata,
+        output=torch.empty((6, 2, 512), dtype=torch.bfloat16),
+    )
+
+    torch.testing.assert_close(captured["slot_ids"], swa_indices)
+    torch.testing.assert_close(captured["lens"], swa_lens)
+
+
+def test_compressed_mtp_decode_reference_uses_global_swa_slots(monkeypatch) -> None:
+    captured: list[torch.Tensor] = []
+
+    def fail_matmul_decode(**kwargs) -> None:
+        raise AssertionError("MTP compressed decode must not stage paged SWA")
+
+    def fail_direct_global_paged(**kwargs) -> None:
+        raise AssertionError("MTP compressed decode must not use paged SWA window")
+
+    def fake_accumulate_global_slots(**kwargs) -> None:
+        captured.append(kwargs["slot_ids"])
+
+    def fake_finish_two_states(*args, **kwargs) -> None:
+        kwargs["output"].zero_()
+
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "current_workspace_manager",
+        lambda: _FakeWorkspaceManager(),
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "dequantize_combined_sparse_mla_decode_kv",
+        fail_matmul_decode,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "fp8ds_global_paged_sparse_mla_attention_with_sink_multihead",
+        fail_direct_global_paged,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead",
+        fake_accumulate_global_slots,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "finish_two_sparse_mla_attention_states_with_sink",
+        fake_finish_two_states,
+    )
+
+    attention = SimpleNamespace(
+        num_heads=2,
+        scale=0.1,
+        attn_sink=torch.zeros(2, dtype=torch.float32),
+        compress_ratio=4,
+    )
+    swa_indices = torch.arange(48, dtype=torch.int32).reshape(6, 1, 8)
+    topk_slot_ids = torch.arange(24, dtype=torch.int32).reshape(6, 1, 4)
+    swa_metadata = SimpleNamespace(
+        num_decodes=2,
+        num_decode_tokens=6,
+        decode_swa_lens=torch.full((6,), 3, dtype=torch.int32),
+        decode_swa_indices=swa_indices,
+        seq_lens=torch.tensor([11, 22], dtype=torch.int32),
+        block_table=torch.empty((2, 4), dtype=torch.int32),
+        block_size=256,
+        token_to_req_indices=torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32),
+    )
+
+    deepseek_v4_attention_module.DeepseekV4MLAAttention._forward_sparse_mla_compressed_decode_reference(
+        attention,
+        q=torch.empty((6, 1, 2, 512), dtype=torch.bfloat16),
+        compressed_k_cache=torch.empty((1, 64, 584), dtype=torch.uint8),
+        swa_k_cache=torch.empty((1, 256, 584), dtype=torch.uint8),
+        topk_indices=topk_slot_ids,
+        topk_lens=torch.full((6,), 4, dtype=torch.int32),
+        swa_metadata=swa_metadata,
+        attn_metadata=SimpleNamespace(block_size=256),
+        output=torch.empty((6, 2, 512), dtype=torch.bfloat16),
+    )
+
+    assert len(captured) == 2
+    torch.testing.assert_close(captured[0], topk_slot_ids[:, 0])
+    torch.testing.assert_close(captured[1], swa_indices)
 
 
 @pytest.mark.parametrize(
@@ -2245,6 +2395,66 @@ def test_triton_sparse_mla_fallback_can_disable_cudagraphs(monkeypatch) -> None:
             max_cudagraph_capture_size=4,
         )
     )
+    disable_sparse_mla_reference_cudagraphs_if_enabled(vllm_config)
+
+    assert vllm_config.compilation_config.mode == CompilationMode.NONE
+    assert vllm_config.compilation_config.compile_sizes == []
+    assert vllm_config.compilation_config.compile_ranges_endpoints == []
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert vllm_config.compilation_config.cudagraph_capture_sizes == []
+    assert vllm_config.compilation_config.max_cudagraph_capture_size == 0
+
+
+def test_triton_sparse_mla_fallback_disables_cudagraphs_for_mtp(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VLLM_TRITON_MLA_SPARSE", "1")
+    monkeypatch.delenv("VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH", raising=False)
+
+    mla_spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        cache_dtype_str="fp8_ds_mla",
+        alignment=576,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        sliding_window=128,
+        cache_dtype_str="fp8_ds_mla",
+        alignment=576,
+        model_version="deepseek_v4",
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="mtp",
+            num_speculative_tokens=2,
+        ),
+        compilation_config=SimpleNamespace(
+            mode=CompilationMode.VLLM_COMPILE,
+            compile_sizes=[1, 2],
+            compile_ranges_endpoints=[8192],
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 4],
+            max_cudagraph_capture_size=4,
+        ),
+    )
+
+    assert FlashMLASparseMetadataBuilder.get_cudagraph_support(
+        vllm_config,
+        mla_spec,
+    ) is AttentionCGSupport.NEVER
+    assert DeepseekSparseSWAMetadataBuilder.get_cudagraph_support(
+        vllm_config,
+        swa_spec,
+    ) is AttentionCGSupport.NEVER
+
     disable_sparse_mla_reference_cudagraphs_if_enabled(vllm_config)
 
     assert vllm_config.compilation_config.mode == CompilationMode.NONE

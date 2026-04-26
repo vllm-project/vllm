@@ -212,7 +212,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         if (
             getattr(kv_cache_spec, "model_version", None) == "deepseek_v4"
             and is_sparse_mla_reference_attention_enabled_for_platform()
-            and not sparse_mla_reference_cudagraphs_allowed()
+            and not sparse_mla_reference_cudagraphs_allowed(vllm_config)
         ):
             return AttentionCGSupport.NEVER
         return cls._cudagraph_support

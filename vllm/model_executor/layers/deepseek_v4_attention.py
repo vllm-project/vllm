@@ -850,28 +850,62 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
-        assert num_decodes == num_decode_tokens, (
-            "Sparse MLA reference SWA decode currently supports one query token per "
-            f"request, got {num_decode_tokens=} and {num_decodes=}"
-        )
+        mtp_decode = num_decode_tokens != num_decodes
 
         swa_lens = swa_metadata.decode_swa_lens[:num_decode_tokens]
+        swa_indices = swa_metadata.decode_swa_indices[:num_decode_tokens]
         max_swa_len = swa_metadata.decode_swa_indices.shape[-1]
         head_block_size = sparse_mla_decode_head_block_size(num_decode_tokens)
-        fp8ds_paged_sparse_mla_attention_with_sink_multihead(
+        if not mtp_decode:
+            fp8ds_paged_sparse_mla_attention_with_sink_multihead(
+                q=q,
+                k_cache=swa_k_cache,
+                seq_lens=swa_metadata.seq_lens[:num_decodes],
+                gather_lens=swa_lens,
+                block_table=swa_metadata.block_table[:num_decodes],
+                block_size=swa_metadata.block_size,
+                candidate_offset=0,
+                num_candidates=max_swa_len,
+                scale=self.scale,
+                attn_sink=self.attn_sink,
+                output=output,
+                head_block_size=head_block_size,
+                num_heads=self.num_heads,
+            )
+            if output.shape[1] > self.num_heads:
+                output[:, self.num_heads :].zero_()
+            return
+
+        (
+            swa_max_score,
+            swa_denom,
+            swa_acc,
+        ) = current_workspace_manager().get_simultaneous(
+            ((num_decode_tokens, self.num_heads), torch.float32),
+            ((num_decode_tokens, self.num_heads), torch.float32),
+            ((num_decode_tokens, self.num_heads, q.shape[-1]), torch.float32),
+        )
+        swa_max_score.fill_(float("-inf"))
+        swa_denom.zero_()
+        swa_acc.zero_()
+        accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead(
             q=q,
             k_cache=swa_k_cache,
-            seq_lens=swa_metadata.seq_lens[:num_decodes],
-            gather_lens=swa_lens,
-            block_table=swa_metadata.block_table[:num_decodes],
+            slot_ids=swa_indices,
+            lens=swa_lens,
             block_size=swa_metadata.block_size,
-            candidate_offset=0,
-            num_candidates=max_swa_len,
             scale=self.scale,
-            attn_sink=self.attn_sink,
-            output=output,
+            max_score=swa_max_score,
+            denom=swa_denom,
+            acc=swa_acc,
             head_block_size=head_block_size,
-            num_heads=self.num_heads,
+        )
+        finish_sparse_mla_attention_with_sink(
+            swa_max_score,
+            swa_denom,
+            swa_acc,
+            self.attn_sink,
+            output=output,
         )
         if output.shape[1] > self.num_heads:
             output[:, self.num_heads :].zero_()
@@ -895,10 +929,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
-        assert num_decodes == num_decode_tokens, (
-            "Sparse MLA reference compressed decode currently supports one query "
-            f"token per request, got {num_decode_tokens=} and {num_decodes=}"
-        )
+        mtp_decode = num_decode_tokens != num_decodes
 
         max_swa_len = swa_metadata.decode_swa_indices.shape[-1]
         compressed_block_size = attn_metadata.block_size // self.compress_ratio
@@ -909,9 +940,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         )
         compressed_slot_ids = topk_indices[:, 0, :]
         swa_lens = swa_metadata.decode_swa_lens[:num_decode_tokens]
+        swa_indices = swa_metadata.decode_swa_indices[:num_decode_tokens]
         head_block_size = sparse_mla_decode_head_block_size(num_decode_tokens)
         if (
-            compressed_topk <= topk_chunk_size
+            not mtp_decode
+            and compressed_topk <= topk_chunk_size
             and sparse_mla_matmul_decode_enabled()
         ):
             total_candidates = compressed_topk + max_swa_len
@@ -954,7 +987,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             )
             return
 
-        if compressed_topk <= topk_chunk_size:
+        if not mtp_decode and compressed_topk <= topk_chunk_size:
             fp8ds_global_paged_sparse_mla_attention_with_sink_multihead(
                 q=q,
                 compressed_k_cache=compressed_k_cache,
@@ -1015,21 +1048,35 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 acc=comp_acc,
                 head_block_size=head_block_size,
             )
-        accumulate_fp8ds_paged_sparse_mla_attention_chunk_multihead(
-            q=q,
-            k_cache=swa_k_cache,
-            seq_lens=swa_metadata.seq_lens[:num_decodes],
-            gather_lens=swa_lens,
-            block_table=swa_metadata.block_table[:num_decodes],
-            block_size=swa_metadata.block_size,
-            candidate_offset=0,
-            num_candidates=max_swa_len,
-            scale=self.scale,
-            max_score=swa_max_score,
-            denom=swa_denom,
-            acc=swa_acc,
-            head_block_size=head_block_size,
-        )
+        if mtp_decode:
+            accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead(
+                q=q,
+                k_cache=swa_k_cache,
+                slot_ids=swa_indices,
+                lens=swa_lens,
+                block_size=swa_metadata.block_size,
+                scale=self.scale,
+                max_score=swa_max_score,
+                denom=swa_denom,
+                acc=swa_acc,
+                head_block_size=head_block_size,
+            )
+        else:
+            accumulate_fp8ds_paged_sparse_mla_attention_chunk_multihead(
+                q=q,
+                k_cache=swa_k_cache,
+                seq_lens=swa_metadata.seq_lens[:num_decodes],
+                gather_lens=swa_lens,
+                block_table=swa_metadata.block_table[:num_decodes],
+                block_size=swa_metadata.block_size,
+                candidate_offset=0,
+                num_candidates=max_swa_len,
+                scale=self.scale,
+                max_score=swa_max_score,
+                denom=swa_denom,
+                acc=swa_acc,
+                head_block_size=head_block_size,
+            )
         finish_two_sparse_mla_attention_states_with_sink(
             comp_max_score,
             comp_denom,
