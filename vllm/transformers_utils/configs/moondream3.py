@@ -112,8 +112,6 @@ class Moondream3Config(PretrainedConfig):
         config: dict | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
         config = config or {}
 
         # Parse text config
@@ -128,6 +126,8 @@ class Moondream3Config(PretrainedConfig):
         self.config = config
         tokenizer_config = config.get("tokenizer", {})
         self.answer_token_id = tokenizer_config.get("answer_id", 3)
+
+        super().__init__(**kwargs)
 
         # Expose key attributes at top level for vLLM compatibility
         self.hidden_size = self.text_config.hidden_size
