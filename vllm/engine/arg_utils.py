@@ -17,6 +17,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    Type,
     TypeAlias,
     TypeVar,
     Union,
@@ -131,6 +132,7 @@ else:
     QuantizationMethods = str
     LoadFormats = str
     UsageContext = Any
+    ObservationPlugin = Any
 
 
 logger = init_logger(__name__)
@@ -711,7 +713,7 @@ class EngineArgs:
 
     stream_interval: int = SchedulerConfig.stream_interval
 
-    observation_plugins: list["ObservationPlugin"] | None = None
+    observation_plugins: list[Union[str, "ObservationPlugin", Type["ObservationPlugin"]]] | None = None
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
