@@ -9,6 +9,7 @@ Includes:
 - Pixel normalization tests
 """
 
+import numpy as np
 import pytest
 import torch
 
@@ -237,6 +238,66 @@ def test_chat_template_with_image(
     assert token_ids[0] == bos_token_id
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(
+            [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.invalid/image.png"},
+                },
+                {"type": "text", "text": "What is in this image?"},
+            ],
+            id="image-first",
+        ),
+        pytest.param(
+            [
+                {"type": "text", "text": "What is in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.invalid/image.png"},
+                },
+            ],
+            id="text-first",
+        ),
+    ],
+)
+@pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
+def test_chat_template_content_list_uses_moondream_image_prefix(
+    image_assets: ImageTestAssets,
+    content: list[dict[str, object]],
+    model_id: str,
+):
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    prompt = hf_processor.tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}],
+        chat_template=hf_processor.chat_template,
+        tokenize=False,
+    )
+
+    expected_prompt = (
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        "What is in this image?<|md_reserved_2|>"
+    )
+    assert prompt == expected_prompt
+
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"image": [image_assets[0].pil_image]}),
+        hf_processor_mm_kwargs={},
+    )
+    image_placeholders = processed_inputs["mm_placeholders"]["image"]
+    assert len(image_placeholders) == 1
+    assert image_placeholders[0].length == EXPECTED_IMAGE_TOKENS
+
+
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
 def test_bos_token_always_first(
     image_assets: ImageTestAssets,
@@ -285,6 +346,74 @@ def test_processor_with_small_image(
     assert tiling == (1, 1)
     # Should have 2 crops (global + 1 local)
     assert pixel_values.shape[0] == 2
+
+
+@pytest.mark.parametrize(
+    "image_kind",
+    [
+        pytest.param("numpy_hwc", id="numpy-hwc"),
+        pytest.param("numpy_chw", id="numpy-chw"),
+        pytest.param("torch_chw", id="torch-chw"),
+    ],
+)
+@pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
+def test_preprocess_image_accepts_non_pil_inputs(
+    image_assets: ImageTestAssets,
+    image_kind: str,
+    model_id: str,
+):
+    from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
+
+    processor = Moondream3Processor.from_pretrained(model_id, trust_remote_code=True)
+    pil_image = image_assets[0].pil_image.convert("RGB")
+    hwc_array = np.asarray(pil_image)
+    expected_pixel_values, expected_tiling = processor.preprocess_image(pil_image)
+
+    if image_kind == "numpy_hwc":
+        image = hwc_array
+    elif image_kind == "numpy_chw":
+        image = np.transpose(hwc_array, (2, 0, 1))
+    else:
+        image = torch.from_numpy(np.transpose(hwc_array, (2, 0, 1)).copy())
+
+    pixel_values, tiling = processor.preprocess_image(image)
+
+    assert tiling == expected_tiling
+    assert pixel_values.shape == expected_pixel_values.shape
+    assert pixel_values.dtype == torch.bfloat16
+    assert torch.equal(pixel_values, expected_pixel_values)
+
+
+@pytest.mark.parametrize("image_kind", ["numpy_chw", "torch_chw"])
+@pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
+def test_processor_apply_accepts_non_pil_image_inputs(
+    image_assets: ImageTestAssets,
+    image_kind: str,
+    model_id: str,
+):
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is this?<|md_reserved_2|>"  # noqa: E501
+    hwc_array = np.asarray(image_assets[0].pil_image.convert("RGB"))
+    chw_array = np.transpose(hwc_array, (2, 0, 1)).copy()
+    image = chw_array if image_kind == "numpy_chw" else torch.from_numpy(chw_array)
+
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"image": [image]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    image_placeholders = processed_inputs["mm_placeholders"]["image"]
+    assert len(image_placeholders) == 1
+    assert image_placeholders[0].length == EXPECTED_IMAGE_TOKENS
+
+    mm_kwargs = processed_inputs["mm_kwargs"].get_data()
+    assert mm_kwargs["pixel_values"].shape[2:] == (3, 378, 378)
 
 
 class TestMoondream3TilingLogic:

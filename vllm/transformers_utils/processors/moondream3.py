@@ -127,12 +127,16 @@ class Moondream3Processor(ProcessorMixin):
         "query<|md_reserved_1|>{{ message['content'] }}<|md_reserved_2|>"
         "{% endif %}"
         "{% else %}"
-        # List content - always start with BOS
+        # List content - build Moondream's image prefix independently of
+        # OpenAI-style content part order, then render the text task.
         "<|endoftext|>"
         "{% for content in message['content'] %}"
-        "{% if content['type'] == 'image' or content['type'] == 'image_url' %}"
+        "{% if content['type'] in ['image', 'image_url', 'input_image', 'image_pil'] %}"  # noqa: E501
         "<image>"
-        "{% elif content['type'] == 'text' %}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% for content in message['content'] %}"
+        "{% if content['type'] == 'text' %}"
         "<|md_reserved_0|>"
         "{% if content['text'] == 'caption' %}"
         "describe<|md_reserved_1|>normal<|md_reserved_2|>"
@@ -355,9 +359,68 @@ class Moondream3Processor(ProcessorMixin):
         # If only images were provided
         return BatchFeature(data=image_features)
 
+    @staticmethod
+    def _image_array_to_uint8(array: np.ndarray) -> np.ndarray:
+        if array.dtype == np.uint8:
+            return np.ascontiguousarray(array)
+
+        if array.dtype == np.bool_:
+            return np.ascontiguousarray(array.astype(np.uint8) * 255)
+
+        if np.issubdtype(array.dtype, np.floating):
+            array = np.nan_to_num(array, nan=0.0, posinf=255.0, neginf=0.0)
+            if array.size > 0 and array.max() <= 1.0:
+                array = array * 255.0
+            array = np.rint(array)
+
+        return np.ascontiguousarray(np.clip(array, 0, 255).astype(np.uint8))
+
+    @staticmethod
+    def _to_pil_image(image: ImageInput) -> Image.Image:
+        if isinstance(image, Image.Image):
+            return image
+
+        if isinstance(image, torch.Tensor):
+            tensor = image.detach().cpu()
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.to(torch.float32)
+            image_array = tensor.numpy()
+        elif isinstance(image, np.ndarray):
+            image_array = image
+        else:
+            raise TypeError(
+                "Moondream3 images must be PIL images, numpy arrays, "
+                f"or torch tensors, got {type(image)!r}."
+            )
+
+        if image_array.ndim == 2:
+            image_array = Moondream3Processor._image_array_to_uint8(image_array)
+            return Image.fromarray(image_array)
+
+        if image_array.ndim != 3:
+            raise ValueError(
+                "Moondream3 image arrays must have 2 or 3 dimensions, "
+                f"got shape {image_array.shape}."
+            )
+
+        channel_dims = (1, 3, 4)
+        if image_array.shape[-1] not in channel_dims:
+            if image_array.shape[0] not in channel_dims:
+                raise ValueError(
+                    "Moondream3 image arrays must be HWC or CHW with 1, 3, "
+                    f"or 4 channels, got shape {image_array.shape}."
+                )
+            image_array = np.transpose(image_array, (1, 2, 0))
+
+        image_array = Moondream3Processor._image_array_to_uint8(image_array)
+        if image_array.shape[-1] == 1:
+            image_array = image_array[..., 0]
+
+        return Image.fromarray(image_array)
+
     def preprocess_image(
         self,
-        image: Image.Image,
+        image: ImageInput,
         max_crops: int = 12,
         overlap_margin: int = 4,
         crop_size: int = 378,
@@ -369,7 +432,7 @@ class Moondream3Processor(ProcessorMixin):
         Preprocess an image using overlap-and-resize cropping strategy.
 
         Args:
-            image: Input PIL Image.
+            image: Input PIL image, numpy array, or torch tensor.
             max_crops: Maximum number of crops.
             overlap_margin: Margin for overlapping in patches.
             crop_size: Size of each crop.
@@ -380,6 +443,7 @@ class Moondream3Processor(ProcessorMixin):
         Returns:
             Tuple of (pixel_values tensor, tiling tuple).
         """
+        image = self._to_pil_image(image)
         if convert_to_rgb:
             image = convert_image_mode(image, "RGB")
 
