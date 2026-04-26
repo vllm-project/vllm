@@ -1741,8 +1741,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
   - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
   - tests/kernels/quantization/rocm/aiter/
   commands:
   - pytest -v -s kernels/quantization/rocm/aiter/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -1994,23 +1996,6 @@ steps:
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
-
-#-----------------------------------------------------------  mi300 · rocm  ------------------------------------------------------------#
-
-- label: ROCm AITER Ops Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  - tests/rocm/aiter/
-  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
-  - vllm/v1/attention/selector.py
-  commands:
-  - pytest -v -s rocm/aiter/
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
