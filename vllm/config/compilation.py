@@ -139,6 +139,14 @@ class PassConfig:
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
+    fuse_qk_norm_rope_cache_quant: bool = False
+    """Fuse QK RMSNorm + RoPE + KV cache write into a single op (CUDA).
+    Useful for models with per-head QK norm (e.g. Qwen3) especially when
+    combined with FP8 KV cache.  Do not enable together with
+    enable_qk_norm_rope_fusion (this pass is a strict superset).
+    The fused op currently falls back to sequential kernel calls; a proper
+    fused CUDA kernel is tracked in vllm-project/vllm#36066."""
+
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
@@ -1118,8 +1126,11 @@ class CompilationConfig:
                             "to enable RoPE+KV cache fusion."
                         )
                         self.pass_config.fuse_rope_kvcache = False
-                    self.splitting_ops.append("vllm::unified_kv_cache_update")
-                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+                    if not self.pass_config.fuse_qk_norm_rope_cache_quant:
+                        self.splitting_ops.append(
+                            "vllm::unified_kv_cache_update")
+                        self.splitting_ops.append(
+                            "vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
