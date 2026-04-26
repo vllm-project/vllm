@@ -118,7 +118,7 @@ class Moondream3Config(PretrainedConfig):
 
         # Parse text config
         text_config = config.get("text", {})
-        self.text_config = Moondream3TextConfig(**text_config)
+        self.text_config: Moondream3TextConfig = Moondream3TextConfig(**text_config)
 
         # Parse vision config
         vision_config = config.get("vision", {})
@@ -149,4 +149,4 @@ class Moondream3Config(PretrainedConfig):
         Args:
             decoder: Ignored. Only used for encoder-decoder models.
         """
-        return getattr(self, "text_config", Moondream3TextConfig())
+        return self.text_config

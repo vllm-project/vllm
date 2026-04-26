@@ -121,6 +121,7 @@ def test_query_skill(llm, image_assets: ImageTestAssets):
     assert output_text is not None
     assert len(output_text) > 0
 
+
 @large_gpu_mark(min_gb=48)
 def test_caption_skill(llm, image_assets: ImageTestAssets):
     from vllm import SamplingParams

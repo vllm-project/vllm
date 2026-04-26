@@ -102,7 +102,9 @@ def multi_video_multi_aspect_ratio_inputs(
 def different_patch_input_cases_internvl():
     images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
     formatter = (
-        lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+        lambda img_prompt: (
+            f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
+        )  # noqa: E501
     )
     single_img_prompts = [
         "<image>\nWhat's the content in the center of the image?",
@@ -157,8 +159,7 @@ def video_with_metadata_glm4_1v():
 
 
 def moondream3_skill_inputs():
-    """Builds inputs for Moondream3 testing query and caption skills.
-    """
+    """Builds inputs for Moondream3 testing query and caption skills."""
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image
 
