@@ -370,7 +370,12 @@ class RequestRunner:
         prev_scheduler_output = None
         prev_model_runner_output = None
         while True:
-            assert self.scheduler.requests
+            # Strict-always-False frees the request immediately on EOS, but
+            # the worker may still have a deferred store queued. In production
+            # the next request's step drains it; in single-request tests we
+            # must keep stepping until the scheduler sees no in-flight jobs.
+            if not self.scheduler.requests and not self.connector_scheduler._jobs:
+                break
 
             scheduler_output = self.scheduler.schedule()
             self._update_gpu_block_idx()
@@ -426,7 +431,7 @@ class RequestRunner:
             if (
                 prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
-                and self.scheduler.requests
+                and (self.scheduler.requests or self.connector_scheduler._jobs)
             ):
                 # continue for one more step to allow offloading to kick off
                 continue
