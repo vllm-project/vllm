@@ -879,6 +879,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         attn_metadata: T,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         """MHA-style prefill forward pass."""
         raise NotImplementedError
@@ -906,6 +907,14 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kFp8Dynamic128Sym,
             kFp8Dynamic64Sym,
         )
+
+    def mha_merge_state_fusion_supported(
+        self, quant_key: "QuantKey", attn_metadata: T
+    ) -> bool:
+        """Whether forward_mha's chunked-prefill ``merge_attn_states`` call
+        can write the quantized output directly for this quant_key + metadata
+        combination, skipping the bf16 round-trip."""
+        return False
 
     def do_kv_cache_update(
         self,
