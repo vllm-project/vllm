@@ -4,6 +4,9 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import os
+import threading
+
 import torch
 from packaging import version
 
@@ -46,20 +49,8 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
 
 @triton.jit
 def convert_rs_fp8x4_e4m3(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
-    # PTX hardware stochastic-round conversion fp32 -> fp8 E4M3 (SM_100a+).
-    # Packs 4 fp32 inputs, consumes one 32-bit random seed, and emits a packed
-    # 32-bit (4 x fp8) result with saturate-to-finite semantics.  Triton packs
-    # pack=4 elements per asm call: 4 fp32 inputs occupy 4 regs ($1..$4), 4
-    # random u32 inputs occupy 4 regs ($5..$8) of which only $5 is consumed.
-    #
-    # Critical: the fp32 source regs in the {...} list are REVERSED.  Triton's
-    # inline_asm_elementwise places lane `i` at the low-i byte of the packed
-    # output (little-endian), but PTX `cvt.rs.satfinite.e4m3x4.f32` writes the
-    # leftmost source argument to the HIGH byte of the destination register.
-    # Same convention as the existing `convert_rs_fp16x2` helper (which swaps
-    # `$1` and `$2`).  Using the natural `{$1, $2, $3, $4}` order silently
-    # transposes every group of 4 contiguous elements along the innermost
-    # (dstate) axis — see triton-lang/triton#8822.
+    # PTX fp32 -> fp8 E4M3 stochastic rounding.  The source regs are reversed
+    # to match Triton's packed lane order (same issue as convert_rs_fp16x2).
     y = tl.inline_asm_elementwise(
         asm="cvt.rs.satfinite.e4m3x4.f32 $0, {$4, $3, $2, $1}, $5;",
         constraints="=r,r,r,r,r,r,r,r,r",
@@ -346,9 +337,6 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_batch
 
     if not IS_SPEC_DECODING:
-        # Compute a per-element uniform random u32 once up front when SR is
-        # enabled; it is then consumed by whichever store path is active
-        # (integer-domain SR for the quantized branch, PTX fp16 SR otherwise).
         if USE_RS_ROUNDING:
             rand_seed = tl.load(rand_seed_ptr)
             if HAS_STATE_BATCH_INDICES:
@@ -424,6 +412,101 @@ def _quant_max(dtype: torch.dtype) -> float:
     if dtype not in QUANTIZED_SSM_STATE_DTYPES:
         return 0.0
     return torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic logging — activated by VLLM_SSM_QUANT_DEBUG=1
+#
+# Tracks, for every decode batch that passes through selective_state_update:
+#   • the quantised state's per-block-max (amax = scale * QMAX)
+#   • the raw decode_scale values (mean, max, min) — one scale per (head,dim)
+#   • whether stochastic rounding is active
+#
+# Because this is a hot path, stats are only printed every LOG_INTERVAL calls.
+# All numbers are gathered with non-blocking async copies so the GPU is not
+# stalled; the first sync happens inside the print().
+# ---------------------------------------------------------------------------
+_SSM_QUANT_DEBUG: bool = os.environ.get("VLLM_SSM_QUANT_DEBUG", "0") == "1"
+_SSM_QUANT_DEBUG_LOG_INTERVAL: int = int(
+    os.environ.get("VLLM_SSM_QUANT_DEBUG_LOG_INTERVAL", "100")
+)
+_ssu_call_counter_lock = threading.Lock()
+_ssu_call_counter: int = 0
+
+
+def _maybe_log_ssm_state_stats(
+    state: torch.Tensor,
+    state_scale: torch.Tensor | None,
+    enable_stochastic_rounding: bool,
+    state_batch_indices: torch.Tensor | None,
+    null_block_id: int,
+) -> None:
+    """Print SSM state quantisation statistics every LOG_INTERVAL calls.
+
+    Reads the state and scale tensors WITHOUT stalling the GPU (uses
+    non-blocking H2D copies).  The printed values correspond to the state
+    BEFORE the current decode step (i.e. what was loaded from the cache),
+    so they show the distribution that the dequant-on-load path sees.
+    """
+    global _ssu_call_counter
+    with _ssu_call_counter_lock:
+        _ssu_call_counter += 1
+        call_idx = _ssu_call_counter
+
+    if call_idx % _SSM_QUANT_DEBUG_LOG_INTERVAL != 0:
+        return
+
+    # Never touch GPU tensors while a CUDA graph is being captured — .item()
+    # is a host-device sync which raises cudaErrorStreamCaptureUnsupported.
+    if torch.cuda.is_current_stream_capturing():
+        return
+
+    tag = "SR" if enable_stochastic_rounding else "RN"
+    dtype = state.dtype
+
+    with torch.no_grad():
+        # Gather active slots when paged indices are available.  CUDA-graph
+        # capture pads metadata with NULL_BLOCK_ID; those slots are not touched
+        # by the kernel and may contain stale/uninitialised diagnostic values.
+        if state_batch_indices is not None and state_batch_indices.numel() > 0:
+            idx = state_batch_indices.flatten()
+            idx = idx[idx != null_block_id]
+            if idx.numel() == 0:
+                return
+            idx = idx.clamp(0, state.shape[0] - 1)
+            s = state[idx].to(torch.float32)
+        else:
+            s = state.to(torch.float32)
+
+        state_amax = s.abs().max().item()
+        state_mean_abs = s.abs().mean().item()
+
+        if state_scale is not None:
+            if state_batch_indices is not None and state_batch_indices.numel() > 0:
+                sc = state_scale[idx]
+            else:
+                sc = state_scale
+            # scale tensor shape: (..., nheads, head_dim, 1)
+            sc_flat = sc.flatten().float()
+            sc_mean = sc_flat.mean().item()
+            sc_max = sc_flat.max().item()
+            sc_min = sc_flat.min().item()
+            # Effective amax of the dequantised state = scale * QMAX
+            quant_max = _quant_max(dtype)
+            eff_amax = (sc_flat * quant_max).max().item() if quant_max > 0 else float("nan")
+            scale_info = (
+                f"scale mean={sc_mean:.4e} max={sc_max:.4e} min={sc_min:.4e} "
+                f"eff_amax={eff_amax:.4e}"
+            )
+        else:
+            scale_info = "scale=None"
+
+    print(
+        f"[SSM_QUANT_DEBUG call={call_idx} dtype={dtype} {tag}] "
+        f"state amax={state_amax:.4e} mean_abs={state_mean_abs:.4e} "
+        f"{scale_info}",
+        flush=True,
+    )
 
 
 def selective_state_update(
@@ -590,6 +673,15 @@ def selective_state_update(
         if enable_stochastic_rounding
         else None
     )
+
+    if _SSM_QUANT_DEBUG and quant_max > 0.0:
+        _maybe_log_ssm_state_stats(
+            state,
+            state_scale,
+            enable_stochastic_rounding,
+            state_batch_indices,
+            null_block_id,
+        )
 
     with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](

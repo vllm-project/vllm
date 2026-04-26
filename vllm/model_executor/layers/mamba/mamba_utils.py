@@ -79,13 +79,8 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        # Mamba2 allocates a third `ssm_state_scales` tensor alongside the
-        # conv + temporal states to support block-scaled SSM-state
-        # quantization (int8 / int16 / fp8_e4m3fn).  The scale tensor is
-        # always fp32 and always present so the kv_cache tuple has a fixed
-        # arity; for non-quantized dtypes it is cheap and unused.  The
-        # matching third entry is returned by `mamba2_state_shape` and
-        # `mamba2_state_copy_func`.
+        # Keep a fixed kv_cache tuple by always allocating fp32 SSM scales.
+        # They are only used for block-scaled quantized SSM state.
         return (
             *cls._mamba_state_dtype(
                 model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -199,7 +194,7 @@ class MambaStateShapeCalculator:
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
         # Block-scale factors for quantized SSM state: one fp32 value per
         # (head, dim) channel, covering the dstate axis.  Trailing 1 lets the
-        # scale broadcast over dstate in Python without an explicit expand.
+        # scale broadcast over dstate.
         temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim, 1)
         return conv_state_shape, temporal_state_shape, temporal_state_scales_shape
 
@@ -405,7 +400,7 @@ def quantize_scaled(
 
     Args:
         state: fp32 tensor of shape (..., nheads, head_dim, dstate).
-        dtype: target quantized dtype (int8, int16, or float8_e4m3fn).
+        dtype: target quantized dtype
 
     Returns:
         (state_q, decode_scale) where:
