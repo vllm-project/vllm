@@ -343,9 +343,9 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
     ) -> int:
         """Per-request admission cap, in blocks.
 
-        Matches the recycling-aware bound used to size the pool at startup
-        (see `max_memory_usage_bytes`). Used by the runtime admission gate so
-        that requests admitted by startup can also be admitted at runtime.
+        Single source of truth for both startup pool sizing
+        (`max_memory_usage_bytes`) and the runtime admission gate, so requests
+        admitted by startup can also be admitted at runtime.
         """
         # During chunked prefill, we hold KV for at most one chunk window.
         num_tokens = min(
@@ -386,13 +386,11 @@ class SlidingWindowSpec(AttentionSpec):
     ) -> int:
         """Per-request admission cap, in blocks.
 
-        Matches the recycling-aware bound used to size the pool at startup
-        (see `max_memory_usage_bytes`). Used by the runtime admission gate so
-        that requests admitted by startup can also be admitted at runtime.
-
-        Safety: `SlidingWindowManager.remove_skipped_blocks` is invoked from
-        `allocate_slots` before each chunk's `get_num_blocks_to_allocate`, so
-        the per-request real-held block count plateaus at this bound.
+        Single source of truth for both startup pool sizing
+        (`max_memory_usage_bytes`) and the runtime admission gate. Per-request
+        real-held blocks plateau at this bound because
+        `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
+        before each chunk's `get_num_blocks_to_allocate`.
         """
         # During chunked prefill, we hold KV for the last `sliding_window-1`
         # computed tokens plus the newly scheduled tokens, and never more
