@@ -64,6 +64,7 @@ from vllm.transformers_utils.configs.moondream3 import (
     Moondream3TextConfig,
     Moondream3VisionConfig,
 )
+from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -880,8 +881,6 @@ class Moondream3ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object):
-        from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
-
         return self.ctx.get_hf_processor(Moondream3Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
