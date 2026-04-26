@@ -1723,11 +1723,15 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/
+  - csrc/rocm/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/kernels/
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
+  - vllm/utils/platform_utils.py
   - tests/kernels/quantization/
+  - tests/kernels/quant_utils.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -3014,11 +3018,15 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/
+  - csrc/rocm/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/kernels/
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
+  - vllm/utils/platform_utils.py
   - tests/kernels/quantization/
+  - tests/kernels/quant_utils.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
