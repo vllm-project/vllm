@@ -269,7 +269,7 @@ class Worker(WorkerBase):
             )
 
             if self.use_v2_model_runner:
-                logger.info_once("Using V2 Model Runner", scope="local")
+                logger.info_once("Using V2 Model Runner")
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
@@ -374,10 +374,14 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager and not current_platform.is_rocm():
+            if (
+                not current_platform.is_rocm()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
@@ -436,7 +440,6 @@ class Worker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
-            scope="local",
         )
 
         if cudagraph_memory_estimate > 0:
@@ -450,14 +453,13 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "CUDA graph memory profiling is enabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
-                    "This will become the default in v0.19. "
-                    "The current --gpu-memory-utilization=%.4f is equivalent "
-                    "to --gpu-memory-utilization=%.4f without CUDA graph "
-                    "memory profiling. To maintain the same effective KV "
-                    "cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f.",
+                    "CUDA graph memory profiling is enabled (default since "
+                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                    "equivalent to --gpu-memory-utilization=%.4f without "
+                    "CUDA graph memory profiling. To maintain the same "
+                    "effective KV cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f. To disable, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
                     current_util,
                     equiv_util,
                     suggested_util,
@@ -467,14 +469,14 @@ class Worker(WorkerBase):
                     round(current_util + cg_util_delta, 4),
                     1.0,
                 )
-                logger.info(
-                    "In v0.19, CUDA graph memory profiling will be enabled "
-                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
-                    "which more accurately accounts for CUDA graph memory "
-                    "during KV cache allocation. To try it now, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
-                    "--gpu-memory-utilization from %.4f to %.4f to maintain "
-                    "the same effective KV cache size.",
+                logger.warning(
+                    "CUDA graph memory profiling is disabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                    "Without it, CUDA graph memory is not accounted for "
+                    "during KV cache allocation, which may require lowering "
+                    "--gpu-memory-utilization to avoid OOM. Consider "
+                    "re-enabling it (the default as of v0.21.0) and increasing "
+                    "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
                 )
@@ -1013,6 +1015,11 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        # Release GPU resources held by the model runner so that memory
+        # can be reclaimed when running in-process
+        if model_runner := getattr(self, "model_runner", None):
+            model_runner.shutdown()
+
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
@@ -1025,11 +1032,10 @@ def init_worker_distributed_environment(
     backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
-    attention_config = vllm_config.attention_config
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
-    init_batch_invariance(attention_config.backend)
+    init_batch_invariance()
     override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
