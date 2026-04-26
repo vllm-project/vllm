@@ -582,13 +582,6 @@ class OffloadingConnectorScheduler:
                 connectors output.
         """
         meta = connector_output.kv_connector_worker_meta
-        # Per-job completion: fire complete_store/complete_load for
-        # cache-reuse as soon as the DMA finishes. The job stays in
-        # transfer_jobs (and self._jobs) until the worker's per-request
-        # ack arrives via finished_sending / finished_recving, which is
-        # what the base scheduler uses to free held blocks. Meta is None
-        # on steps where the output only carries request-level acks /
-        # invalid_block_ids — still need to run the ack cleanup below.
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
@@ -607,33 +600,11 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-        # Worker acks: scheduler is about to free blocks (base-scheduler
-        # side, right after this call). Drop our per-request bookkeeping.
-        for req_id in connector_output.finished_sending or ():
-            req_status = self._req_status.pop(req_id)
-            for job_id in req_status.transfer_jobs:
-                del self._jobs[job_id]
-
-        for req_id in connector_output.finished_recving or ():
-            req_status = self._req_status[req_id]
-            # A finished_recving ack corresponds to a single load job
-            # for this request (per the one-load-or-many-stores
-            # invariant). Drop it from transfer_jobs so a subsequent
-            # store can be issued for the same request.
-            load_job_id = next(
-                (
-                    jid
-                    for jid in req_status.transfer_jobs
-                    if not self._jobs[jid].is_store
-                ),
-                None,
-            )
-            if load_job_id is not None:
-                req_status.transfer_jobs.remove(load_job_id)
-                del self._jobs[load_job_id]
-            # Aborted while loading: request is terminal, drop state.
-            if req_status.req.is_finished():
-                del self._req_status[req_id]
+            del self._jobs[job_id]
+            req_status = self._req_status[job_status.req_id]
+            req_status.transfer_jobs.remove(job_id)
+            if not req_status.transfer_jobs and req_status.req.is_finished():
+                del self._req_status[job_status.req_id]
 
     def request_finished(
         self,
