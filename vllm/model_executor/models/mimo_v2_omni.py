@@ -1157,6 +1157,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
         # Omni ViT/Audio Encoder BF16
         vision_config = (
             Mimo_VLVisionConfig.from_dict(config.vision_config)
@@ -1175,10 +1176,11 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             self.audio_encoder = MimoAudioEncoder(audio_config, model_path=model_path)
         else:
             self.audio_encoder = None
-        self.language_model = MiMoV2FlashForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = MiMoV2FlashForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

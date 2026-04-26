@@ -1324,6 +1324,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
