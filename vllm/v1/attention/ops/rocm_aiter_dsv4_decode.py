@@ -36,12 +36,19 @@ class AiterSparseScratch:
     and reuse across all 61 DSv4 attention layers in the same decode step.
     Buffers fall into three groups:
 
-      * AITER persistent metadata (`work_*`, `reduce_*`) — written once per
-        rebuild by `aiter.get_mla_metadata_v1`, read every step by the kernel.
+      * AITER persistent metadata (`work_*`, `reduce_*`) — sized at rebuild
+        from `get_mla_metadata_info_v1` (purely shape-determined), but rewritten
+        in-place by `aiter.get_mla_metadata_v1` every step, because the work
+        plan encodes the *actual* kv lengths and the persistent ASM kernel
+        reads out-of-bounds if it is left stale.
       * Per-step indexing/IO buffers (`qo_indptr`, `kv_indptr`, `kv_indices_2d`,
         `kv_last_page_lens`, `valid_mask`, `valid_lens`, `col_arange`, `q_fp8`,
         `out_buf`) — written in-place each step.
       * Constant scale tensors (`q_scale`, `kv_scale`) — initialised once.
+
+    The metadata buffers, the per-step buffers and the scale tensors all keep
+    stable `data_ptr()`s across the entire lifetime of a shape key, so a
+    HIP/CUDA graph captured around the second or later step replays correctly.
     """
 
     __slots__ = (
@@ -66,6 +73,15 @@ class AiterSparseScratch:
         # Constant scale tensors (always 1.0 for our quantization scheme)
         "q_scale",
         "kv_scale",
+        # GQA ratios captured at rebuild time so per-step refresh can call
+        # `get_mla_metadata_v1` with the same parameters every time.
+        "_gqa_ratio",
+        "_nhead_kv",
+        "_page_size",
+        "_topk",
+        "_dtype",
+        "_kvtype",
+        "_max_split_per_batch",
         # Identity key for cache lookups
         "_key",
     )
@@ -102,16 +118,19 @@ class AiterSparseScratch:
         device: torch.device,
         max_split_per_batch: int = 256,
     ) -> None:
-        """Allocate every persistent buffer for the given shape key and run
-        `aiter.get_mla_metadata_v1` once to populate the AITER metadata.
+        """Allocate every persistent buffer for the given shape key.
 
-        Static buffers (`qo_indptr`, `kv_last_page_lens`, `col_arange`,
-        `q_scale`, `kv_scale`) are filled here and never rewritten on the
-        per-step path.
+        Buffer sizes returned by `get_mla_metadata_info_v1` are determined by
+        shapes and `max_split_per_batch` only, so they are large enough for
+        any kv-length distribution. The actual work plan is computed on the
+        per-step path by `refresh_metadata`, which writes these buffers
+        in-place using the freshly populated `qo_indptr`/`kv_indptr`/
+        `kv_last_page_lens` -- those pointers stay stable for the lifetime
+        of this scratch.
         """
         import aiter
 
-        # ---- AITER persistent metadata ---------------------------------- #
+        # ---- AITER persistent metadata buffers (sizes only) ------------- #
         (
             (wmd_size, wmd_type),
             (wi_size, wi_type),
@@ -141,7 +160,6 @@ class AiterSparseScratch:
         self.qo_indptr = torch.arange(
             total_q + 1, dtype=torch.int32, device=device
         )
-        # kv_indptr is rewritten in-place every step.
         self.kv_indptr = torch.zeros(
             total_q + 1, dtype=torch.int32, device=device
         )
@@ -172,16 +190,35 @@ class AiterSparseScratch:
         self.q_scale = torch.ones(1, dtype=torch.float32, device=device)
         self.kv_scale = torch.ones(1, dtype=torch.float32, device=device)
 
-        # ---- Run AITER metadata builder once --------------------------- #
-        # The kv_indptr passed here only needs to be a valid placeholder of
-        # the right shape — the metadata buffers describe split points based
-        # on shape, not per-step lengths.
+        # Cache parameters for `refresh_metadata`.
+        self._gqa_ratio = nhead // nhead_kv
+        self._nhead_kv = nhead_kv
+        self._page_size = page_size
+        self._topk = topk
+        self._dtype = dtype
+        self._kvtype = kvtype
+        self._max_split_per_batch = max_split_per_batch
+
+        self._key = (total_q, nhead, topk, d_qk, d_v, dtype, kvtype)
+
+    def refresh_metadata(self) -> None:
+        """Re-run `aiter.get_mla_metadata_v1` against the current
+        `kv_indptr` / `kv_last_page_lens`, writing the new work plan into the
+        same `work_*` / `reduce_*` buffers in-place.
+
+        Must be called every step *after* `kv_indptr` is updated and *before*
+        `aiter.mla.mla_decode_fwd`. The persistent ASM kernel reads
+        out-of-bounds if it is left with a stale work plan, so this call is
+        not optional even when shapes are unchanged.
+        """
+        import aiter
+
         aiter.get_mla_metadata_v1(
             self.qo_indptr,
             self.kv_indptr,
             self.kv_last_page_lens,
-            nhead // nhead_kv,
-            nhead_kv,
+            self._gqa_ratio,
+            self._nhead_kv,
             True,
             self.work_meta_data,
             self.work_info_set,
@@ -189,18 +226,16 @@ class AiterSparseScratch:
             self.reduce_indptr,
             self.reduce_final_map,
             self.reduce_partial_map,
-            page_size=page_size,
-            kv_granularity=max(page_size, 16),
+            page_size=self._page_size,
+            kv_granularity=max(self._page_size, 16),
             max_seqlen_qo=1,
             uni_seqlen_qo=1,
             fast_mode=True,
-            max_split_per_batch=max_split_per_batch,
-            topk=topk,
-            dtype_q=dtype,
-            dtype_kv=kvtype,
+            max_split_per_batch=self._max_split_per_batch,
+            topk=self._topk,
+            dtype_q=self._dtype,
+            dtype_kv=self._kvtype,
         )
-
-        self._key = (total_q, nhead, topk, d_qk, d_v, dtype, kvtype)
 
 
 def aiter_sparse_attn_decode(
@@ -316,9 +351,9 @@ def _aiter_decode_one_scope(
     topk_max = indices_2d.size(-1)
 
     fp8_dtype = torch.float8_e4m3fn
-
-    # ---- Lazy/keyed scratch (re)build ---------------------------------- #
-    if not scratch.matches(total_q, h_q, topk_max, d_qk, d_v, fp8_dtype, fp8_dtype):
+    if not scratch.matches(
+        total_q, h_q, topk_max, d_qk, d_v, fp8_dtype, fp8_dtype
+    ):
         scratch.rebuild(
             total_q=total_q,
             nhead=h_q,
@@ -332,7 +367,7 @@ def _aiter_decode_one_scope(
             device=device,
         )
 
-    # ---- Build valid_mask + valid_lens in-place ------------------------ #
+    # ---- Build valid_mask + valid_lens directly into scratch ----------- #
     if lens is not None:
         if lens.numel() == b and s_q > 1:
             lens_per_tok = lens.repeat_interleave(s_q)
@@ -348,16 +383,21 @@ def _aiter_decode_one_scope(
     else:
         torch.ge(indices_2d, 0, out=scratch.valid_mask)
 
-    torch.sum(scratch.valid_mask, dim=-1, dtype=torch.int32, out=scratch.valid_lens)
+    torch.sum(
+        scratch.valid_mask, dim=-1, dtype=torch.int32, out=scratch.valid_lens
+    )
+
+    # ---- Compute kv_indptr in place (cumsum(min(valid_lens, topk))) ---- #
+    scratch.kv_indptr[0] = 0
+    torch.cumsum(
+        scratch.valid_lens.clamp(max=topk_max),
+        dim=0,
+        out=scratch.kv_indptr[1:],
+    )
 
     # ---- Fill kv_indices_2d in-place: keep valid, sentinel -1 elsewhere - #
     scratch.kv_indices_2d.copy_(indices_2d)
     scratch.kv_indices_2d.masked_fill_(~scratch.valid_mask, -1)
-
-    # ---- kv_indptr = cumsum(min(valid_lens, topk_max)), prefixed by 0 -- #
-    seq_lens_kv = scratch.valid_lens.clamp(max=topk_max)
-    scratch.kv_indptr[0] = 0
-    torch.cumsum(seq_lens_kv, dim=0, out=scratch.kv_indptr[1:])
 
     # ---- Cast q to FP8 in-place into the preallocated buffer ----------- #
     scratch.q_fp8.copy_(q.reshape(total_q, h_q, d_qk))
@@ -367,6 +407,12 @@ def _aiter_decode_one_scope(
     # tracked separately. Here we just cast to satisfy the kernel's dtype.
     kv_fp8 = blocked_k.to(fp8_dtype)
     kv_view = kv_fp8.view(-1, 1, 1, d_qk)
+
+    # ---- Refresh AITER work plan against the current kv_indptr --------- #
+    # The persistent ASM kernel encodes per-batch lengths into work_*; if we
+    # leave that stale, the kernel reads out of bounds. Rewrite into the same
+    # buffers in place so pointers stay stable for cudagraph capture.
+    scratch.refresh_metadata()
 
     # ---- Persistent-mode FP8 mla_decode_fwd ---------------------------- #
     _, lse = aiter.mla.mla_decode_fwd(
