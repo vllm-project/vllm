@@ -594,10 +594,7 @@ class OffloadingConnectorScheduler:
             meta = OffloadingWorkerMetadata()
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
-            job_status = self._jobs.get(job_id)
-            if job_status is None:
-                # Already cleaned up scheduler-side (preemption flush).
-                continue
+            job_status = self._jobs[job_id]
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
