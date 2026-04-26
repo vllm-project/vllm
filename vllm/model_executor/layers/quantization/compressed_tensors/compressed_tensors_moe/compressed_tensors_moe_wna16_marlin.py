@@ -87,7 +87,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         logger.info_once(
             f"Using {self.kernel_backend} backend for WNA16 MoE "
             f"(group_size={self.group_size}, num_bits={self.num_bits})",
-            scope="local",
         )
 
     def get_weight_shape(

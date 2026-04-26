@@ -13,12 +13,12 @@ ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
 buildkite-agent annotate --style 'info' --context 'release-workflow' << EOF
 To download the wheel (by commit):
 \`\`\`
-aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}-cp38-abi3-manylinux_2_31_x86_64.whl .
-aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}-cp38-abi3-manylinux_2_31_aarch64.whl .
+aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}-cp38-abi3-manylinux_2_35_x86_64.whl .
+aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}-cp38-abi3-manylinux_2_35_aarch64.whl .
 
-(Optional) For CUDA 13.0:
-aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}+cu130-cp38-abi3-manylinux_2_35_x86_64.whl .
-aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}+cu130-cp38-abi3-manylinux_2_35_aarch64.whl .
+(Optional) For CUDA 12.9:
+aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}+cu129-cp38-abi3-manylinux_2_31_x86_64.whl .
+aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}+cu129-cp38-abi3-manylinux_2_31_aarch64.whl .
 
 (Optional) For CPU:
 aws s3 cp s3://vllm-wheels/${BUILDKITE_COMMIT}/vllm-${RELEASE_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl .
@@ -33,8 +33,8 @@ To download and upload the image:
 
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64
-docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64-cu130
-docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64-cu130
+docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64-cu129
+docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64-cu129
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}
@@ -50,11 +50,11 @@ docker tag vllm/vllm-openai:x86_64 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64
 docker push vllm/vllm-openai:latest-x86_64
 docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64
 
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64-cu130 vllm/vllm-openai:x86_64-cu130
-docker tag vllm/vllm-openai:x86_64-cu130 vllm/vllm-openai:latest-x86_64-cu130
-docker tag vllm/vllm-openai:x86_64-cu130 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu130
-docker push vllm/vllm-openai:latest-x86_64-cu130
-docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu130
+docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64-cu129 vllm/vllm-openai:x86_64-cu129
+docker tag vllm/vllm-openai:x86_64-cu129 vllm/vllm-openai:latest-x86_64-cu129
+docker tag vllm/vllm-openai:x86_64-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129
+docker push vllm/vllm-openai:latest-x86_64-cu129
+docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129
 
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64 vllm/vllm-openai:aarch64
 docker tag vllm/vllm-openai:aarch64 vllm/vllm-openai:latest-aarch64
@@ -62,11 +62,11 @@ docker tag vllm/vllm-openai:aarch64 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
 docker push vllm/vllm-openai:latest-aarch64
 docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
 
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64-cu130 vllm/vllm-openai:aarch64-cu130
-docker tag vllm/vllm-openai:aarch64-cu130 vllm/vllm-openai:latest-aarch64-cu130
-docker tag vllm/vllm-openai:aarch64-cu130 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu130
-docker push vllm/vllm-openai:latest-aarch64-cu130
-docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu130
+docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64-cu129 vllm/vllm-openai:aarch64-cu129
+docker tag vllm/vllm-openai:aarch64-cu129 vllm/vllm-openai:latest-aarch64-cu129
+docker tag vllm/vllm-openai:aarch64-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129
+docker push vllm/vllm-openai:latest-aarch64-cu129
+docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129
 
 ## ROCm
 
@@ -104,11 +104,11 @@ docker manifest create vllm/vllm-openai:v${RELEASE_VERSION} vllm/vllm-openai:v${
 docker manifest push vllm/vllm-openai:latest
 docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}
 
-docker manifest rm vllm/vllm-openai:latest-cu130
-docker manifest create vllm/vllm-openai:latest-cu130 vllm/vllm-openai:latest-x86_64-cu130 vllm/vllm-openai:latest-aarch64-cu130
-docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-cu130 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu130 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu130
-docker manifest push vllm/vllm-openai:latest-cu130
-docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-cu130
+docker manifest rm vllm/vllm-openai:latest-cu129
+docker manifest create vllm/vllm-openai:latest-cu129 vllm/vllm-openai:latest-x86_64-cu129 vllm/vllm-openai:latest-aarch64-cu129
+docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu129 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu129
+docker manifest push vllm/vllm-openai:latest-cu129
+docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-cu129
 
 docker manifest rm vllm/vllm-openai-cpu:latest || true
 docker manifest create vllm/vllm-openai-cpu:latest vllm/vllm-openai-cpu:latest-x86_64 vllm/vllm-openai-cpu:latest-arm64
