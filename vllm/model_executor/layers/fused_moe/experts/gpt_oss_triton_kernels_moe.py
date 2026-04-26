@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -16,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -654,7 +654,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         )
 
 
-class UnfusedOAITritonExperts(BaseOAITritonExperts):
+class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
     """
     A Triton based MoE expert class that operates on expert standard
     format and explicitly keeps the activation and reduction (moe_sum) steps
@@ -721,6 +721,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         if quant_config is None:
             quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
+        global_topk_ids = topk_ids
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
@@ -775,10 +776,40 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
             y=intermediate_cache1,
         )
 
+        # w13 LoRA: gather the activation input from expert-sorted
+        # intermediate_cache1, then add the LoRA delta in-place on that copy
+        # before passing it to activation — exactly mirroring the old
+        # decorator approach which modified the gathered tensor in-place.
+        act_input = intermediate_cache1.view(-1, N)[gather_indx.dst_indx]
+
+        sorted_token_ids_lora = None
+        expert_ids_lora = None
+        num_tokens_post_padded_lora = None
+        token_lora_mapping = None
+        lora_context = self._lora_context
+        if lora_context is not None:
+            (
+                sorted_token_ids_lora,
+                expert_ids_lora,
+                num_tokens_post_padded_lora,
+                token_lora_mapping,
+            ) = self.apply_w13_lora(
+                lora_context,
+                y=act_input,
+                x=hidden_states,
+                topk_ids=global_topk_ids,
+                topk_weights=topk_weights,
+                expert_map=expert_map,
+                w1=w1,
+                w2=w2,
+                num_tokens=M,
+                top_k_num=topk,
+            )
+
         self.activation(
             activation,
             intermediate_cache2,
-            intermediate_cache1.view(-1, N)[gather_indx.dst_indx],
+            act_input,
         )
 
         # matmul_ogs grouped reduction fuse sum across multiple experts:
@@ -796,6 +827,24 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
             gammas=None if apply_router_weight_on_input else gammas,
             y=intermediate_cache3,
         )
+
+        # w2 LoRA: after matmul_ogs with scatter_indx, intermediate_cache3 is
+        # in token-topk order, matching the (M, topk, K) layout add_lora_w2 expects.
+        if lora_context is not None:
+            self.apply_w2_lora(
+                lora_context,
+                y=intermediate_cache3.view(-1, topk, K),
+                x=intermediate_cache2,
+                topk_weights=topk_weights,
+                sorted_token_ids_lora=sorted_token_ids_lora,
+                expert_ids_lora=expert_ids_lora,
+                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
+                token_lora_mapping=token_lora_mapping,
+                num_tokens=M,
+                w1=w1,
+                w2=w2,
+                top_k_num=topk,
+            )
 
         self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
 
