@@ -72,7 +72,7 @@ def run_vllm(
             else TextPrompt(prompt=request.prompt)
         )
         if request.multi_modal_data:
-            assert isinstance(request.multi_modal_data, dict)
+            assert isinstance(request.multi_modal_data, (dict, list))
             prompt["multi_modal_data"] = request.multi_modal_data
         prompts.append(prompt)
 
@@ -213,7 +213,7 @@ async def run_vllm_async(
             )
 
             if request.multi_modal_data:
-                assert isinstance(request.multi_modal_data, dict)
+                assert isinstance(request.multi_modal_data, (dict, list))
                 prompt["multi_modal_data"] = request.multi_modal_data
 
             sampling_params.append(
@@ -398,6 +398,9 @@ def get_requests(args, tokenizer):
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
             sample_kwargs["enable_multimodal_chat"] = True
+            sample_kwargs["limit_mm_per_prompt"] = getattr(
+                args, "random_mm_limit_mm_per_prompt", None
+            )
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = InstructCoderDataset
             common_kwargs["dataset_split"] = "train"
