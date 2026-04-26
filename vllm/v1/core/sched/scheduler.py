@@ -1492,8 +1492,9 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
-
-        if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
+            
+        # TODO(Soya) Directly finish requests that failed to load KV blocks, without waiting for them to be scheduled again.
+        if failed_kv_load_req_ids:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
@@ -2048,16 +2049,9 @@ class Scheduler(SchedulerInterface):
         assert self.connector is not None
 
         if request.request_id in self.failed_recving_kv_req_ids:
-            # Request had KV load failures; num_computed_tokens was already
-            # updated in _update_requests_with_invalid_blocks
-            if request.num_computed_tokens:
-                # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
-            else:
-                # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
-                self.kv_cache_manager.free(request)
-
+            # NOTE: Directly free the blocks, since we have removed per-block error handling
+            # TODO(Soya): Check if this is right
+            self.kv_cache_manager.free(request)
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
@@ -2245,15 +2239,14 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
-        should_fail = not self.recompute_kv_load_failures
-
+        
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
             req
             for req in self.skipped_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
-        async_failed_req_ids, num_failed_tokens, _ = (
+        async_failed_req_ids, _, _ = (
             self._update_requests_with_invalid_blocks(
                 async_load_reqs,
                 invalid_block_ids,
@@ -2261,19 +2254,21 @@ class Scheduler(SchedulerInterface):
                 evict_blocks=False,
             )
         )
+        
+        for req in async_load_reqs:
+            if req.request_id in async_failed_req_ids:
+                self.kv_cache_manager.free(req)
 
         total_failed_requests = len(async_failed_req_ids)
-        total_failed_tokens = num_failed_tokens
 
         # handle sync loads (may be cached, collect blocks for eviction)
-        sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
+        sync_failed_req_ids, _, sync_blocks_to_evict = (
             self._update_requests_with_invalid_blocks(
                 self.running, invalid_block_ids, num_scheduled_tokens, evict_blocks=True
             )
         )
 
         total_failed_requests += len(sync_failed_req_ids)
-        total_failed_tokens += num_failed_tokens
 
         if not total_failed_requests:
             return set()
@@ -2281,28 +2276,14 @@ class Scheduler(SchedulerInterface):
         # evict invalid blocks and downstream dependent blocks from cache
         # only when not using recompute policy (where blocks will be recomputed
         # and reused by other requests sharing them)
-        if sync_blocks_to_evict and not self.recompute_kv_load_failures:
+        if sync_blocks_to_evict:
             self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
-        if should_fail:
-            all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
-            logger.error(
-                "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
-                total_failed_requests,
-                total_failed_tokens,
-                all_failed_req_ids,
-            )
-            return all_failed_req_ids
-
-        logger.warning(
-            "Recovered from KV load failure: "
-            "%d request(s) rescheduled (%d tokens affected).",
+        all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
+        logger.error(
+            "Failing %d request(s) due to KV load failure Request IDs: %s",
             total_failed_requests,
-            total_failed_tokens,
+            all_failed_req_ids,
         )
+        return all_failed_req_ids
 
-        # Mark async requests with KV load failures for retry once loading completes
-        self.failed_recving_kv_req_ids |= async_failed_req_ids
-        # Return sync affected IDs to skip in update_from_output
-        return sync_failed_req_ids
