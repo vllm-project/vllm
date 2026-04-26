@@ -212,10 +212,27 @@ class NixlConnectorWorker:
         SSM uses the rank's positional index.
         """
         # Mamba-HMA: FA and Mamba use different split factors.
-        fa_num_splits = len(plan.source_ranks_per_group[0])
+        fa_num_splits = next(
+            len(ranks)
+            for t, ranks in zip(plan.group_spec_types, plan.source_ranks_per_group)
+            if _is_attention_spec(t)
+        )
 
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
-        ssm_num_splits = len(plan.source_ranks_per_group[-1]) if has_ssm_descs else 0
+        ssm_num_splits = (
+            next(
+                (
+                    len(ranks)
+                    for t, ranks in zip(
+                        plan.group_spec_types, plan.source_ranks_per_group
+                    )
+                    if _is_ssm_spec(t)
+                ),
+                0,
+            )
+            if has_ssm_descs
+            else 0
+        )
 
         result: list[list[tuple[int, int, int]]] = []
 

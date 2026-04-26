@@ -281,12 +281,17 @@ def generate_dense_plan(
         group_spec_types=group_spec_types,
     )
 
+    num_attn_reads = next(
+        len(ranks)
+        for t, ranks in zip(group_spec_types, tp_mapping.source_ranks_per_group)
+        if _is_attention_spec(t)
+    )
     fa_regions = _build_fa_regions(
         block_len_per_layer=block_len_per_layer,
         remote_block_lens=remote_meta.block_lens,
         is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         block_size_ratio=block_size_ratio,
-        num_attn_reads=len(tp_mapping.source_ranks_per_group[0]),
+        num_attn_reads=num_attn_reads,
         rank_offset_factor=tp_mapping.rank_offset_factor,
         remote_num_blocks=remote_meta.num_blocks,
     )
@@ -313,9 +318,6 @@ def generate_mamba_plan(
     ssm_sizes: tuple[int, int],
 ) -> EngineTransferPlan:
     """Generate transfer plan for hybrid Mamba (SSM + FA) models."""
-    assert _is_attention_spec(group_spec_types[0]), (
-        f"First group must be an attention spec, got {group_spec_types[0]}"
-    )
     tp_rank = transfer_topo.tp_rank
     tp_size = transfer_topo.tp_size
     remote_tp_size = remote_info.remote_tp_size
@@ -339,12 +341,17 @@ def generate_mamba_plan(
     )
 
     # ---- FA regions ----
+    num_attn_reads = next(
+        len(ranks)
+        for t, ranks in zip(group_spec_types, tp_mapping.source_ranks_per_group)
+        if _is_attention_spec(t)
+    )
     fa_regions = _build_fa_regions(
         block_len_per_layer=block_len_per_layer,
         remote_block_lens=remote_block_lens,
         is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         block_size_ratio=block_size_ratio,
-        num_attn_reads=len(tp_mapping.source_ranks_per_group[0]),
+        num_attn_reads=num_attn_reads,
         rank_offset_factor=tp_mapping.rank_offset_factor,
         remote_num_blocks=remote_meta.num_blocks,
     )
