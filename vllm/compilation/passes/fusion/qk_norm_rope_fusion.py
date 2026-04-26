@@ -216,7 +216,16 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
                 if RotaryEmbedding.enabled():
-                    for rope_flashinfer in [False, True]:
+                    # NOTE: skip the flashinfer-rope variant of the pattern.
+                    # PyTorch Inductor's pattern matcher trips an over-strict
+                    # assertion when matching custom ops that mutate multiple
+                    # tensor arguments sharing a symbolic dim — which is the
+                    # case for `flashinfer_rotary_embedding(query, key, ...)`
+                    # used by DeepSeek-V3.2 sparse-MLA. Models that don't use
+                    # flashinfer rope (Qwen, Llama, etc.) still match the
+                    # `rope_flashinfer=False` pattern and get the fusion.
+                    # Tracked in vllm-project/vllm#40587.
+                    for rope_flashinfer in [False]:
                         QkNormRopePattern(
                             head_dim=layer.head_size,
                             num_heads=layer.num_heads,
