@@ -46,7 +46,7 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
-from .utils import maybe_prefix, _merge_multimodal_embeddings
+from .utils import _merge_multimodal_embeddings, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
 # only the first layer and only one speculative token.

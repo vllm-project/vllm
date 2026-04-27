@@ -14,7 +14,6 @@ import os
 import typing as tp
 from dataclasses import dataclass
 from functools import wraps
-from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -231,7 +230,7 @@ class EuclideanCodebook(nn.Module):
     ):
         super().__init__()
         self.decay = decay
-        init_fn: tp.Union[tp.Callable[..., torch.Tensor], tp.Any] = (
+        init_fn: tp.Callable[..., torch.Tensor] | tp.Any = (
             _uniform_init if not kmeans_init else torch.zeros
         )
         embed = init_fn(codebook_size, dim)
@@ -323,9 +322,7 @@ class EuclideanCodebook(nn.Module):
             embed_sum = x.t() @ embed_onehot
             _ema_inplace(self.embed_avg, embed_sum.t().contiguous(), self.decay)
             cluster_size = (
-                _laplace_smoothing(
-                    self.cluster_size, self.codebook_size, self.epsilon
-                )
+                _laplace_smoothing(self.cluster_size, self.codebook_size, self.epsilon)
                 * self.cluster_size.sum()
             )
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(1)
@@ -339,7 +336,7 @@ class VectorQuantization(nn.Module):
         self,
         dim: int,
         codebook_size: int,
-        codebook_dim: tp.Optional[int] = None,
+        codebook_dim: int | None = None,
         decay: float = 0.99,
         epsilon: float = 1e-5,
         kmeans_init: bool = True,
@@ -397,11 +394,6 @@ class VectorQuantization(nn.Module):
 
         loss = torch.tensor([0.0], device=device, requires_grad=self.training)
 
-        if self.training:
-            if self.commitment_weight > 0:
-                commit_loss = F.mse_loss(quantize.detach(), x)
-                loss = loss + commit_loss * self.commitment_weight
-
         quantize = self.project_out(quantize)
         return quantize, embed_ind, loss
 
@@ -420,9 +412,7 @@ class ResidualVectorQuantization(nn.Module):
             ]
         )
 
-    def forward(
-        self, x, n_q: tp.Optional[int] = None, layers: tp.Optional[list] = None
-    ):
+    def forward(self, x, n_q: int | None = None, layers: list | None = None):
         quantized_out = 0.0
         residual = x
 
@@ -446,7 +436,7 @@ class ResidualVectorQuantization(nn.Module):
         return quantized_out, out_indices, out_losses, out_quantized
 
     def encode(
-        self, x: torch.Tensor, n_q: tp.Optional[int] = None, st: tp.Optional[int] = None
+        self, x: torch.Tensor, n_q: int | None = None, st: int | None = None
     ) -> torch.Tensor:
         residual = x
         all_indices = []
@@ -501,8 +491,8 @@ class ResidualVectorQuantizer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        n_q: tp.Optional[int] = None,
-        layers: tp.Optional[list] = None,
+        n_q: int | None = None,
+        layers: list | None = None,
     ):
         n_q = n_q if n_q else self.n_q
         quantized, codes, commit_loss, quantized_list = self.vq(
@@ -511,7 +501,7 @@ class ResidualVectorQuantizer(nn.Module):
         return quantized, codes, torch.mean(commit_loss), quantized_list
 
     def encode(
-        self, x: torch.Tensor, n_q: tp.Optional[int] = None, st: tp.Optional[int] = None
+        self, x: torch.Tensor, n_q: int | None = None, st: int | None = None
     ) -> torch.Tensor:
         n_q = n_q if n_q else self.n_q
         st = st or 0
@@ -678,7 +668,7 @@ class AudioEncoderAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
-        window_size: Tuple[int, int] = (-1, -1),
+        window_size: tuple[int, int] = (-1, -1),
         causal: bool = False,
     ):
         super().__init__()
@@ -740,7 +730,7 @@ class AudioEncoderTransformerLayer(nn.Module):
         self,
         config: MiMoAudioTokenizerConfig,
         causal: bool,
-        attn_window_size: Tuple[int, int] = (-1, -1),
+        attn_window_size: tuple[int, int] = (-1, -1),
     ):
         super().__init__()
         self.embed_dim = config.d_model
@@ -763,7 +753,7 @@ class AudioEncoderTransformerLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rope_position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        rope_position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -1243,11 +1233,9 @@ class MimoAudioEncoder(nn.Module):
                 config.out_hidden_size,
             )
         else:
-            raise ValueError(
-                f"Invalid projection_layers: {config.projection_layers}"
-            )
+            raise ValueError(f"Invalid projection_layers: {config.projection_layers}")
 
-        self.audio_tokenizer: Optional[MiMoAudioTokenizer] = None
+        self.audio_tokenizer: MiMoAudioTokenizer | None = None
         if model_path:
             audio_tokenizer_path = os.path.join(model_path, "audio_tokenizer")
             if os.path.exists(audio_tokenizer_path):
@@ -1262,9 +1250,7 @@ class MimoAudioEncoder(nn.Module):
                 )
 
     @staticmethod
-    def _load_audio_tokenizer(
-        path: str, device: torch.device
-    ) -> MiMoAudioTokenizer:
+    def _load_audio_tokenizer(path: str, device: torch.device) -> MiMoAudioTokenizer:
         """Load MiMoAudioTokenizer from directory."""
         from safetensors.torch import load_file
 
@@ -1290,7 +1276,7 @@ class MimoAudioEncoder(nn.Module):
         model.requires_grad_(False)
         return model
 
-    def _parse_maybe_list(self, value, length: int) -> List[int]:
+    def _parse_maybe_list(self, value, length: int) -> list[int]:
         if isinstance(value, str) and "-" in value:
             return [int(s) for s in value.split("-")]
         return [int(value)] * length
@@ -1351,8 +1337,8 @@ class MimoAudioEncoder(nn.Module):
         return padded_audio
 
     def get_audio_feature(
-        self, mel_specs: List[torch.Tensor]
-    ) -> Tuple[torch.Tensor, List[int]]:
+        self, mel_specs: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, list[int]]:
         """Encode mel spectrograms into LLM embedding space.
 
         Args:
@@ -1385,7 +1371,7 @@ class MimoAudioEncoder(nn.Module):
             device=device,
         )
 
-        item_token_lens: List[int] = []
+        item_token_lens: list[int] = []
         codecs_to_concat = []
         for codecs in code_list:
             padded_codes = self.process_audio(codecs)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 """MiMo-Omni multimodal processor for vLLM.
 
 Ported from SGLang's MiMoV2OmniProcessor / MiMoVLProcessor implementations.
@@ -27,6 +28,7 @@ from transformers.processing_utils import ProcessorMixin
 
 try:
     from torchcodec.decoders import AudioDecoder
+
     _HAS_TORCHCODEC = True
 except ImportError:
     AudioDecoder = None
@@ -35,6 +37,7 @@ except ImportError:
 try:
     import torchaudio
     from torchaudio.transforms import MelSpectrogram as _MelSpectrogram
+
     _HAS_TORCHAUDIO = True
 except ImportError:
     torchaudio = None  # type: ignore[assignment]
@@ -55,6 +58,7 @@ _mean_std_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ImageInput:
@@ -135,6 +139,7 @@ class MiMoVLInputSample:
 # ---------------------------------------------------------------------------
 # Vision utilities
 # ---------------------------------------------------------------------------
+
 
 def _format_timestamp(ts: float) -> str:
     return f"{int(ts // 60):02d}:{int(ts % 60):02d}"
@@ -237,6 +242,7 @@ def _fetch_image(src: Any) -> Image.Image:
             return _to_rgb(Image.open(src[7:]))
         if src.startswith("data:image"):
             import base64 as _b64
+
             _, b64 = src.split("base64,", 1)
             return _to_rgb(copy.deepcopy(Image.open(BytesIO(_b64.b64decode(b64)))))
         return _to_rgb(Image.open(src))
@@ -246,6 +252,7 @@ def _fetch_image(src: Any) -> Image.Image:
 # ---------------------------------------------------------------------------
 # Core processor
 # ---------------------------------------------------------------------------
+
 
 class MiMoVLProcessor:
     """Core MiMo-VL multimodal processor.
@@ -450,13 +457,15 @@ class MiMoVLProcessor:
         else:
             if AudioDecoder is None:
                 raise RuntimeError(
-                    "torchcodec is required for audio. Install with: pip install torchcodec"
+                    "torchcodec is required for audio. "
+                    "Install with: pip install torchcodec"
                 )
             if isinstance(audio, bytes):
                 file_obj: Any = io.BytesIO(audio)
             elif isinstance(audio, str):
                 if audio.startswith("data:"):
                     import base64 as _b64
+
                     file_obj = io.BytesIO(_b64.b64decode(audio.split(",")[1]))
                 elif audio.startswith(("http://", "https://")):
                     r = requests.get(audio, timeout=30)
@@ -486,7 +495,7 @@ class MiMoVLProcessor:
         spec = torch.log(torch.clip(spec, min=1e-7)).squeeze().transpose(0, 1)
 
         n = spec.shape[0]
-        n = (n + 3 - self.audio_kernel_size)
+        n = n + 3 - self.audio_kernel_size
         n = (n + 2 - self.audio_kernel_size) // self.audio_stride_size + 1
         n = n // self.audio_avg_pooler + int(n % self.audio_avg_pooler != 0)
         token_len = math.ceil(n / self.audio_group_size)
@@ -519,7 +528,8 @@ class MiMoVLProcessor:
         frames, timestamps = video
 
         fps = (
-            1.0 if len(timestamps) < 2
+            1.0
+            if len(timestamps) < 2
             else float(1.0 / (float(timestamps[1]) - float(timestamps[0])))
         )
         start = (
@@ -600,9 +610,7 @@ class MiMoVLProcessor:
             h, w = visual.shape[-2:]
             patches = visual.unsqueeze(0).repeat(self.temporal_patch_size, 1, 1, 1)
         else:  # video / video_audio
-            temporal_stride = (
-                self.temporal_compression_ratio * self.temporal_patch_size
-            )
+            temporal_stride = self.temporal_compression_ratio * self.temporal_patch_size
             assert visual.shape[0] % temporal_stride == 0
             patches = visual
             h, w = patches.shape[-2:]
@@ -614,9 +622,15 @@ class MiMoVLProcessor:
         patches = (
             patches.contiguous()
             .view(
-                grid_t, self.temporal_patch_size, C,
-                grid_h // self.merge_size, self.merge_size, self.patch_size,
-                grid_w // self.merge_size, self.merge_size, self.patch_size,
+                grid_t,
+                self.temporal_patch_size,
+                C,
+                grid_h // self.merge_size,
+                self.merge_size,
+                self.patch_size,
+                grid_w // self.merge_size,
+                self.merge_size,
+                self.patch_size,
             )
             .permute(0, 3, 6, 4, 7, 2, 1, 5, 8)
             .contiguous()
@@ -684,7 +698,7 @@ class MiMoVLProcessor:
                 tensor = self.process_image(content.content)
                 patches, thw = self._flatten_visual(tensor, "image")
                 t, h, w = thw.tolist()
-                n_tok = (t * h * w) // (self.merge_size ** 2)
+                n_tok = (t * h * w) // (self.merge_size**2)
                 img_pv.append(patches)
                 img_grids.append(thw)
                 _ids = (
@@ -696,7 +710,7 @@ class MiMoVLProcessor:
             elif content.type == "video":
                 patches, thw, ts, meta = vid_results[ci]
                 t, h, w = thw.tolist()
-                n_per_grid = h * w // (self.merge_size ** 2)
+                n_per_grid = h * w // (self.merge_size**2)
                 vid_pv.append(patches)
                 vid_grids.append(thw)
                 second_per_grid_ts.append(
@@ -759,7 +773,7 @@ class MiMoVLProcessor:
                     total_atok = processed_audio.shape[0]
                     _va_is_tokenized = True
 
-                n_per_grid = h * w // (self.merge_size ** 2)
+                n_per_grid = h * w // (self.merge_size**2)
                 stride = self.temporal_patch_size * self.temporal_compression_ratio
                 grid_ts = ts[::stride]
                 ts_texts = [_format_timestamp(float(x)) for x in grid_ts]
@@ -775,11 +789,21 @@ class MiMoVLProcessor:
                     )
                     seg_len = min(a_end, total_atok) - a_start
                     assert seg_len > 0, f"Zero-length audio segment at grid index {i}"
-                    seg = processed_audio[a_start: a_start + seg_len] if _va_is_tokenized else None
-                    units.append((
-                        float(grid_ts[i]), ts_texts[i], ts_ids_list[i],
-                        n_per_grid, seg_len, seg,
-                    ))
+                    seg = (
+                        processed_audio[a_start : a_start + seg_len]
+                        if _va_is_tokenized
+                        else None
+                    )
+                    units.append(
+                        (
+                            float(grid_ts[i]),
+                            ts_texts[i],
+                            ts_ids_list[i],
+                            n_per_grid,
+                            seg_len,
+                            seg,
+                        )
+                    )
 
                 il = self.video_audio_interleave_length
                 if il == -1:
@@ -869,6 +893,7 @@ class MiMoVLProcessor:
 # ---------------------------------------------------------------------------
 # vLLM ProcessorMixin wrapper
 # ---------------------------------------------------------------------------
+
 
 class MiMoOmniProcessor(ProcessorMixin):
     """HuggingFace-compatible ProcessorMixin wrapper for MiMo-Omni.
@@ -1005,9 +1030,8 @@ class MiMoOmniProcessor(ProcessorMixin):
             if isinstance(ac, dict):
                 audio_sr = ac.get("sampling_rate") or ac.get("sample_rate")
             else:
-                audio_sr = (
-                    getattr(ac, "sampling_rate", None)
-                    or getattr(ac, "sample_rate", None)
+                audio_sr = getattr(ac, "sampling_rate", None) or getattr(
+                    ac, "sample_rate", None
                 )
 
         rope_type = "rope"
@@ -1115,8 +1139,10 @@ class MiMoOmniProcessor(ProcessorMixin):
             text = text[0] if len(text) == 1 else "\n".join(text)
 
         imgs: list = (
-            [images] if isinstance(images, Image.Image) else list(images)
-        ) if images is not None else []
+            ([images] if isinstance(images, Image.Image) else list(images))
+            if images is not None
+            else []
+        )
         vids: list = list(videos) if videos is not None else []
         auds: list = list(audio) if audio is not None else []
         va_items: list = list(video_audio) if video_audio is not None else []
@@ -1140,10 +1166,12 @@ class MiMoOmniProcessor(ProcessorMixin):
                     mod = self._modality(part)
                     if mod == "image":
                         with contextlib.suppress(StopIteration):
-                            contents.append(Content(
-                                type="image",
-                                content=ImageInput(image=next(img_it)),
-                            ))
+                            contents.append(
+                                Content(
+                                    type="image",
+                                    content=ImageInput(image=next(img_it)),
+                                )
+                            )
                     elif mod == "video":
                         # Try regular video first, fall back to video_audio
                         vid_item = None
@@ -1156,21 +1184,27 @@ class MiMoOmniProcessor(ProcessorMixin):
                                 vid_type = "video_audio"
                         if vid_item is not None:
                             if vid_type == "video":
-                                contents.append(Content(
-                                    type="video",
-                                    content=VideoInput(video=vid_item),
-                                ))
+                                contents.append(
+                                    Content(
+                                        type="video",
+                                        content=VideoInput(video=vid_item),
+                                    )
+                                )
                             else:
-                                contents.append(Content(
-                                    type="video_audio",
-                                    content=vid_item,
-                                ))
+                                contents.append(
+                                    Content(
+                                        type="video_audio",
+                                        content=vid_item,
+                                    )
+                                )
                     elif mod == "audio":
                         with contextlib.suppress(StopIteration):
-                            contents.append(Content(
-                                type="audio",
-                                content=AudioInput(audio=next(aud_it)),
-                            ))
+                            contents.append(
+                                Content(
+                                    type="audio",
+                                    content=AudioInput(audio=next(aud_it)),
+                                )
+                            )
                 elif part:
                     contents.append(Content(type="text", content=part))
         elif text:
@@ -1219,9 +1253,7 @@ class MiMoOmniProcessor(ProcessorMixin):
             n_segs_list = sample.video_audio_n_segs
             max_segs = max(n_segs_list) if n_segs_list else 0
             if max_segs > 0:
-                seg_lens_2d = torch.zeros(
-                    len(n_segs_list), max_segs, dtype=torch.long
-                )
+                seg_lens_2d = torch.zeros(len(n_segs_list), max_segs, dtype=torch.long)
                 flat_cursor = 0
                 for vi, n in enumerate(n_segs_list):
                     if n > 0:

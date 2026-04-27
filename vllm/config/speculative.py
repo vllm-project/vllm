@@ -314,7 +314,10 @@ class SpeculativeConfig:
                 }
             )
 
-        if (arch := hf_config.architectures[0]) in ("MiMoV2ProForCausalLM", "MiMoV2OmniForCausalLM"):
+        if (arch := hf_config.architectures[0]) in (
+            "MiMoV2ProForCausalLM",
+            "MiMoV2OmniForCausalLM",
+        ):
             from vllm.model_executor.models.mimo_v2_mtp import (
                 _MIMO_V2_PRO_NUM_MTP_LAYERS,
             )

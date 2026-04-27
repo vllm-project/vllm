@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any
-
-import math
 
 import einops
 import numpy as np
@@ -18,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -31,7 +31,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -61,7 +60,6 @@ from .mimo_v2 import MiMoV2FlashForCausalLM
 from .qwen2_5_vl import (
     Qwen2_5_VisionMLP,
     Qwen2_5_VisionPatchEmbed,
-    Qwen2_5_VisionPatchMerger,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLImagePixelInputs,
@@ -673,6 +671,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
 
     def get_data_parser(self):
         from vllm.multimodal.parse import MultiModalDataParser
+
         return MultiModalDataParser(target_sr=24000.0)
 
     def get_mm_max_tokens_per_item(
@@ -724,7 +723,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
         # For video, MiMo resamples to tokens_per_second fps before temporal patching,
-        # so effective temporal tokens = num_frames * tokens_per_second / temporal_patch_size.
+        # effective tokens = num_frames * tokens_per_second / temporal_patch_size.
         # For images (num_frames == 1) no resampling is applied.
         if num_frames > 1:
             effective_frames = num_frames * tokens_per_second
@@ -954,10 +953,12 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         frames = frames.float()
                     T = frames.shape[0]
                     timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
-                    va_converted.append(VideoAudioInput(
-                        video=(frames, timestamps),
-                        audio=va_item.audio,
-                    ))
+                    va_converted.append(
+                        VideoAudioInput(
+                            video=(frames, timestamps),
+                            audio=va_item.audio,
+                        )
+                    )
             mm_data = {**mm_data, "video_audio": va_converted}
 
         if "videos" in mm_data:
@@ -987,9 +988,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         frames = frames.float()
 
                     T = frames.shape[0]
-                    timestamps = torch.arange(
-                        T, dtype=torch.float32
-                    ) / self._INPUT_FPS
+                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
                     converted.append((frames, timestamps))
 
             mm_data = {**mm_data, "videos": converted}
@@ -1023,7 +1022,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
-            n_tokens = int(grid_thw.prod()) // merge_size ** 2
+            n_tokens = int(grid_thw.prod()) // merge_size**2
             return [image_pad_id] * n_tokens
 
         def get_video_replacement(item_idx: int) -> PromptUpdateDetails:
@@ -1347,18 +1346,13 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 mm_input_by_modality["video"] = self._parse_and_validate_video_input(
                     **kwargs
                 )
-            if (
-                input_key == "audio_features"
-                and "audio" not in mm_input_by_modality
-            ):
+            if input_key == "audio_features" and "audio" not in mm_input_by_modality:
                 mm_input_by_modality["audio"] = self._parse_and_validate_audio_input(
                     **kwargs
                 )
         return mm_input_by_modality
 
-    def _process_audio_input(
-        self, audio_input: dict
-    ) -> tuple[torch.Tensor, ...]:
+    def _process_audio_input(self, audio_input: dict) -> tuple[torch.Tensor, ...]:
         mel_specs = audio_input["audio_features"]
         if self.audio_encoder is None:
             return ()
@@ -1367,7 +1361,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         # into [1, T, 128] via unsqueeze(0) or stacks N same-T items into
         # [N, T, 128]. Indexing along dim-0 extracts the per-item [T, 128].
         if isinstance(mel_specs, torch.Tensor):
-            mel_specs = list(mel_specs)   # [1,T,128] or [N,T,128] → [[T,128],...]
+            mel_specs = list(mel_specs)  # [1,T,128] or [N,T,128] → [[T,128],...]
         if not mel_specs:
             return ()
         audio_embeds, item_token_lens = self.audio_encoder.get_audio_feature(mel_specs)
@@ -1483,7 +1477,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
         audio_loaded: set[str] = set()
 
         loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
