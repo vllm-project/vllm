@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Monitor unexpected kernel JIT compilation during inference.
+Monitor unexpected Triton kernel JIT compilation during inference.
 
 After server warmup completes, any Triton JIT compilation or autotuning
 event indicates a cache miss or unexpected input shape that causes a
@@ -12,9 +12,6 @@ Currently monitors:
 - Triton ``@triton.autotune`` cache misses (via ``knobs.autotuning.print``)
 - Triton ``@triton.jit`` first-time compilations
   (via ``knobs.runtime.jit_post_compile_hook``)
-
-Designed to be extended in the future with monitors for DeepGEMM,
-FlashInfer, and other JIT-compiled kernel backends.
 """
 
 import os

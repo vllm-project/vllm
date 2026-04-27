@@ -7,15 +7,15 @@ from unittest import mock
 
 import pytest
 
-from vllm.compilation import kernel_jit_monitor
+from vllm.triton_utils import jit_monitor
 
 
 @pytest.fixture(autouse=True)
 def _reset_monitor():
     """Reset global monitor state between tests."""
-    kernel_jit_monitor._active = False
+    jit_monitor._active = False
     yield
-    kernel_jit_monitor._active = False
+    jit_monitor._active = False
 
 
 # ------------------------------------------------------------------
@@ -43,25 +43,25 @@ def _patch_triton_knobs(fake_knobs):
 
 class TestActivateBasic:
     def test_sets_active(self):
-        assert not kernel_jit_monitor.is_active()
+        assert not jit_monitor.is_active()
         with _patch_triton_knobs(_make_fake_knobs()):
-            kernel_jit_monitor.activate()
-        assert kernel_jit_monitor.is_active()
+            jit_monitor.activate()
+        assert jit_monitor.is_active()
 
     def test_idempotent(self):
         fake = _make_fake_knobs()
         with _patch_triton_knobs(fake):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
             first_hook = fake.runtime.jit_post_compile_hook
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
             assert fake.runtime.jit_post_compile_hook is first_hook
 
     def test_logs_debug_on_activation(self):
         with (
-            mock.patch.object(kernel_jit_monitor.logger, "debug") as m,
+            mock.patch.object(jit_monitor.logger, "debug") as m,
             _patch_triton_knobs(_make_fake_knobs()),
         ):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
         m.assert_called_once()
         assert "Kernel JIT monitor activated" in m.call_args[0][0]
 
@@ -70,7 +70,7 @@ class TestAutotuningPrint:
     def test_enables_autotuning_print(self):
         fake = _make_fake_knobs(autotuning_print=False)
         with _patch_triton_knobs(fake):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
         assert fake.autotuning.print is True
 
     def test_respects_user_opt_out(self):
@@ -79,7 +79,7 @@ class TestAutotuningPrint:
             mock.patch.dict(os.environ, {"TRITON_PRINT_AUTOTUNING": "0"}),
             _patch_triton_knobs(fake),
         ):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
         assert fake.autotuning.print is False
 
     def test_noop_when_user_already_enabled(self):
@@ -88,7 +88,7 @@ class TestAutotuningPrint:
             mock.patch.dict(os.environ, {"TRITON_PRINT_AUTOTUNING": "1"}),
             _patch_triton_knobs(fake),
         ):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
         assert fake.autotuning.print is True
 
 
@@ -97,18 +97,18 @@ class TestJitHook:
         fake = _make_fake_knobs()
         assert fake.runtime.jit_post_compile_hook is None
         with _patch_triton_knobs(fake):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
         assert fake.runtime.jit_post_compile_hook is not None
 
     def test_hook_logs_warning(self):
         fake = _make_fake_knobs()
         with _patch_triton_knobs(fake):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
 
         hook = fake.runtime.jit_post_compile_hook
         mock_fn = SimpleNamespace(name="test_kernel")
 
-        with mock.patch.object(kernel_jit_monitor.logger, "warning") as m:
+        with mock.patch.object(jit_monitor.logger, "warning") as m:
             hook(
                 key="some_key",
                 repr="some_repr",
@@ -127,7 +127,7 @@ class TestJitHook:
         existing = mock.MagicMock(return_value="existing_result")
         fake = _make_fake_knobs(jit_hook=existing)
         with _patch_triton_knobs(fake):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
 
         hook = fake.runtime.jit_post_compile_hook
         mock_fn = SimpleNamespace(name="chained_kernel")
@@ -147,7 +147,7 @@ class TestJitHook:
     def test_hook_works_without_existing_hook(self):
         fake = _make_fake_knobs(jit_hook=None)
         with _patch_triton_knobs(fake):
-            kernel_jit_monitor.activate()
+            jit_monitor.activate()
 
         hook = fake.runtime.jit_post_compile_hook
         mock_fn = SimpleNamespace(name="solo_kernel")
@@ -165,8 +165,8 @@ class TestJitHook:
 class TestNoTritonFallback:
     def test_activate_without_triton(self):
         with mock.patch.dict(sys.modules, {"triton": None}):
-            kernel_jit_monitor.activate()
-        assert kernel_jit_monitor.is_active()
+            jit_monitor.activate()
+        assert jit_monitor.is_active()
 
 
 # ------------------------------------------------------------------
@@ -223,16 +223,16 @@ class TestTritonJitHookIntegration:
     def test_no_warning_on_cached_shape(self):
         _run_add_kernel(1024)
 
-        kernel_jit_monitor.activate()
-        with mock.patch.object(kernel_jit_monitor.logger, "warning") as w:
+        jit_monitor.activate()
+        with mock.patch.object(jit_monitor.logger, "warning") as w:
             _run_add_kernel(1024)
         w.assert_not_called()
 
     def test_warning_on_new_constexpr(self):
         _run_add_kernel(1024, block=256)
 
-        kernel_jit_monitor.activate()
-        with mock.patch.object(kernel_jit_monitor.logger, "warning") as w:
+        jit_monitor.activate()
+        with mock.patch.object(jit_monitor.logger, "warning") as w:
             # Different BLOCK (a tl.constexpr) forces recompilation.
             _run_add_kernel(1024, block=512)
         w.assert_called()
