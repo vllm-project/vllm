@@ -623,19 +623,16 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            # .get because a store completing before its request
-            # finishes never had an index entry.
-            for bid in job_status.gpu_block_ids or ():
-                pending = self._block_id_to_pending_jobs.get(bid)
-                if pending is None:
-                    continue
-                pending.remove(job_id)
-                if not pending:
-                    del self._block_id_to_pending_jobs[bid]
-                    self._unprotected_block_ids.discard(bid)
+            req_status = self._req_status[job_status.req_id]
+            if self._block_id_to_pending_jobs and req_status.req.is_finished():
+                for bid in job_status.gpu_block_ids or ():
+                    pending = self._block_id_to_pending_jobs[bid]
+                    pending.remove(job_id)
+                    if not pending:
+                        del self._block_id_to_pending_jobs[bid]
+                        self._unprotected_block_ids.discard(bid)
 
             del self._jobs[job_id]
-            req_status = self._req_status[job_status.req_id]
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
                 del self._req_status[job_status.req_id]
