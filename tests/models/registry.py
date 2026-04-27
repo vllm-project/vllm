@@ -1465,7 +1465,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "EagleMistralForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Medium-3.5-128B",
-        speculative_model="mistralai/Mistral-Medium-3.5-128B-Eagle",
+        speculative_model="mistralai/Mistral-Medium-3.5-128B-EAGLE",
         is_available_online=False,
     ),
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
