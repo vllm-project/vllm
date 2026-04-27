@@ -437,19 +437,6 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
         num_groups = input_size_per_partition // group_size
 
-        qzeros = PackedvLLMParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
-
         scales = GroupQuantScaleParameter(
             data=torch.empty(
                 num_groups,
@@ -462,14 +449,28 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         )
 
         layer.register_parameter("qweight", qweight)
-        layer.register_parameter("qzeros", qzeros)
         layer.register_parameter("scales", scales)
+
+        if self.quant_config.zero_point:
+            qzeros = PackedvLLMParameter(
+                data=torch.empty(
+                    num_groups,
+                    output_size_per_partition // self.quant_config.pack_factor,
+                    dtype=torch.int32,
+                ),
+                input_dim=0,
+                output_dim=1,
+                packed_dim=1,
+                packed_factor=self.quant_config.pack_factor,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("qzeros", qzeros)
 
         self.kernel = kernel_type(
             mp_linear_kernel_config,
             w_q_param_name="qweight",
             w_s_param_name="scales",
-            w_zp_param_name="qzeros",
+            w_zp_param_name="qzeros" if self.quant_config.zero_point else None,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

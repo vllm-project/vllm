@@ -105,15 +105,18 @@ class MPLinearKernel(ABC):
                     "zero_points=True requires a zero-point parameter to be "
                     "present on the layer"
                 )
-        else:
-            if (
-                self.w_zp_name is not None
-                and getattr(layer, self.w_zp_name, None) is not None
-            ):
-                raise AssertionError(
-                    "zero_points=False does not allow a zero-point parameter "
-                    "to be provided on the layer"
-                )
+        # Uses `and` not `or`: reject only when the kernel both knows a
+        # zp name AND the layer has it populated.  A param registered for
+        # checkpoint loading but hidden from the kernel (w_zp_name=None)
+        # is intentionally allowed (e.g. GPTQ symmetric qzeros).
+        elif (
+            self.w_zp_name is not None
+            and getattr(layer, self.w_zp_name, None) is not None
+        ):
+            raise AssertionError(
+                "zero_points=False does not allow a zero-point parameter "
+                "to be provided on the layer"
+            )
 
     def _get_weight_params(
         self, layer: torch.nn.Module
