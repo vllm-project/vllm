@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import torch
 
@@ -39,14 +39,6 @@ from vllm.v1.kv_offload.worker.worker import (
 logger = init_logger(__name__)
 
 
-@dataclass(slots=True)
-class _JobInfo:
-    """Per-job worker-side state."""
-
-    req_id: ReqId
-    is_store: bool
-
-
 class OffloadingConnectorWorker:
     """Implementation of Worker side methods"""
 
@@ -55,8 +47,8 @@ class OffloadingConnectorWorker:
         self.worker = OffloadingWorker()
 
         self.kv_connector_stats = OffloadingConnectorStats()
-        # job_id -> (req_id, is_store)
-        self._jobs: dict[int, _JobInfo] = {}
+        # job_id -> req_id for in-flight loads.
+        self._load_jobs: dict[int, ReqId] = {}
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
@@ -307,7 +299,7 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs.clear()
 
         for job_id, entry in metadata.load_jobs.items():
-            self._jobs[job_id] = _JobInfo(req_id=entry.req_id, is_store=False)
+            self._load_jobs[job_id] = entry.req_id
             success = self.worker.transfer_async(job_id, entry.transfer_spec)
             assert success
 
@@ -316,7 +308,6 @@ class OffloadingConnectorWorker:
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
-            self._jobs[job_id] = _JobInfo(req_id=entry.req_id, is_store=True)
             self._unsubmitted_store_jobs.append((job_id, entry.transfer_spec))
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -346,9 +337,9 @@ class OffloadingConnectorWorker:
                 )
 
             self._connector_worker_meta.mark_completed(job_id)
-            job_info = self._jobs.pop(job_id)
-            if not job_info.is_store:
-                finished_recving.add(job_info.req_id)
+            req_id = self._load_jobs.pop(job_id, None)
+            if req_id is not None:
+                finished_recving.add(req_id)
 
         return set(), finished_recving
 
@@ -374,6 +365,6 @@ class OffloadingConnectorWorker:
 
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
-        self._jobs.clear()
+        self._load_jobs.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
         self.worker.shutdown()
