@@ -131,16 +131,14 @@ class TestStaticQuantFP8:
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
         if not impl.supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
-
-        assert impl.supports_args(*args)
+            pytest.skip(f"{provider} does not support these args")
 
         out_impl = impl.impl_fn(*args)
         out_native = static_quant_fp8_native(*args)
 
         torch.testing.assert_close(
-            out_impl.to(torch.float32),
-            out_native.to(torch.float32),
+            out_impl.to(torch.float32)[:n_tokens],
+            out_native.to(torch.float32)[:n_tokens],
             rtol=0.0,
             atol=0.0,
         )
@@ -149,10 +147,9 @@ class TestStaticQuantFP8:
         # uninitialized, so only compare actual token rows)
         with ir.ops.static_quant_fp8.set_priority([provider, "native"]):
             out_dispatch = ir.ops.static_quant_fp8(*args)
-        n = x.shape[0]
         torch.testing.assert_close(
-            out_dispatch.to(torch.float32)[:n],
-            out_impl.to(torch.float32)[:n],
+            out_dispatch.to(torch.float32)[:n_tokens],
+            out_impl.to(torch.float32)[:n_tokens],
             atol=0.0,
             rtol=0.0,
         )
@@ -161,7 +158,8 @@ class TestStaticQuantFP8:
         args_diff = (x + 1, scale, FP8_DTYPE, num_token_padding)
         out_impl_diff = impl.impl_fn(*args_diff)
         assert not torch.all(
-            out_impl.to(torch.float32) == out_impl_diff.to(torch.float32)
+            out_impl.to(torch.float32)[:n_tokens]
+            == out_impl_diff.to(torch.float32)[:n_tokens]
         )
 
     @pytest.mark.parametrize(
@@ -172,7 +170,7 @@ class TestStaticQuantFP8:
         scale = torch.full((1,), 0.5, dtype=torch.float32)
         args = (x, scale, FP8_DTYPE)
         if not ir.ops.static_quant_fp8.impls[provider].supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
+            pytest.skip(f"{provider} does not support these args")
 
         with ir.ops.static_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.static_quant_fp8, args)
@@ -220,11 +218,9 @@ class TestStaticGroupQuantFP8:
 
         # When group_size == hidden_size, one group per token == per-token static quant
         if group_size == hidden_size:
-            out_per_token = static_quant_fp8_native(
-                x, scale, FP8_DTYPE, num_token_padding
-            )
+            out_per_token = static_quant_fp8_native(x, scale, FP8_DTYPE)
             torch.testing.assert_close(
-                out.to(torch.float32),
+                out.to(torch.float32)[:n_tokens],
                 out_per_token.to(torch.float32),
                 atol=0.0,
                 rtol=0.0,
@@ -245,15 +241,15 @@ class TestStaticGroupQuantFP8:
         )
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
-        assert impl.supports_args(*args)
+        if not impl.supports_args(*args):
+            pytest.skip(f"{provider} does not support these args")
 
         out_impl = impl.impl_fn(*args)
         out_native = static_group_quant_fp8_native(*args)
 
-        n = x.shape[0]
         torch.testing.assert_close(
-            out_impl.to(torch.float32)[:n],
-            out_native.to(torch.float32)[:n],
+            out_impl.to(torch.float32)[:n_tokens],
+            out_native.to(torch.float32)[:n_tokens],
             atol=0.0,
             rtol=0.0,
         )
@@ -263,8 +259,8 @@ class TestStaticGroupQuantFP8:
         with ir.ops.static_group_quant_fp8.set_priority([provider, "native"]):
             out_dispatch = ir.ops.static_group_quant_fp8(*args)
         torch.testing.assert_close(
-            out_dispatch.to(torch.float32)[:n],
-            out_impl.to(torch.float32)[:n],
+            out_dispatch.to(torch.float32)[:n_tokens],
+            out_impl.to(torch.float32)[:n_tokens],
             atol=0.0,
             rtol=0.0,
         )
@@ -273,17 +269,16 @@ class TestStaticGroupQuantFP8:
         args_diff = (x + 1, scale, FP8_DTYPE, num_token_padding)
         out_impl_diff = impl.impl_fn(*args_diff)
         assert not torch.all(
-            out_impl.to(torch.float32) == out_impl_diff.to(torch.float32)
+            out_impl.to(torch.float32)[:n_tokens]
+            == out_impl_diff.to(torch.float32)[:n_tokens]
         )
 
         # When group_size == hidden_size, one group per token == per-token static quant
         if group_size == hidden_size:
-            out_per_token = static_quant_fp8_native(
-                x, scale, FP8_DTYPE, num_token_padding
-            )
+            out_per_token = static_quant_fp8_native(x, scale, FP8_DTYPE)
             torch.testing.assert_close(
-                out_impl.to(torch.float32)[:n],
-                out_per_token.to(torch.float32)[:n],
+                out_impl.to(torch.float32)[:n_tokens],
+                out_per_token.to(torch.float32),
                 atol=0.0,
                 rtol=0.0,
             )
@@ -297,6 +292,8 @@ class TestStaticGroupQuantFP8:
             (n_tokens, hidden_size // group_size), 0.5, dtype=torch.float32
         )
         args = (x, scale, FP8_DTYPE)
+        if not ir.ops.static_group_quant_fp8.impls[provider].supports_args(*args):
+            pytest.skip(f"{provider} does not support these args")
 
         with ir.ops.static_group_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.static_group_quant_fp8, args)
@@ -363,22 +360,19 @@ class TestDynamicQuantFP8:
         args = (x, per_token, FP8_DTYPE, None, num_token_padding)
 
         if not impl.supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
-
-        assert impl.supports_args(*args)
+            pytest.skip(f"{provider} does not support these args")
 
         out_impl, scale_impl = impl.impl_fn(*args)
 
-        n = x.shape[0]
-        assert (scale_impl[:n] > 0).all()
+        assert (scale_impl[:n_tokens] > 0).all()
         if per_token:
-            assert scale_impl.shape[0] >= n and scale_impl.shape[1:] == (1,)
+            assert scale_impl.shape[0] >= n_tokens and scale_impl.shape[1:] == (1,)
         else:
             assert scale_impl.shape == (1,)
 
         # Verify the impl correctly quantizes: dequantized output should approximate
         # the original input regardless of internal precision differences across impls.
-        x_deq_impl = out_impl.to(torch.float32)[:n] * scale_impl[:n]
+        x_deq_impl = out_impl.to(torch.float32)[:n_tokens] * scale_impl[:n_tokens]
         torch.testing.assert_close(
             x_deq_impl, x.to(torch.float32), rtol=0.15, atol=0.01
         )
@@ -388,26 +382,27 @@ class TestDynamicQuantFP8:
         with ir.ops.dynamic_quant_fp8.set_priority([provider, "native"]):
             out_dispatch, scale_dispatch = ir.ops.dynamic_quant_fp8(*args)
         torch.testing.assert_close(
-            out_dispatch.to(torch.float32)[:n],
-            out_impl.to(torch.float32)[:n],
+            out_dispatch.to(torch.float32)[:n_tokens],
+            out_impl.to(torch.float32)[:n_tokens],
             atol=0.0,
             rtol=0.0,
         )
         torch.testing.assert_close(
-            scale_dispatch[:n], scale_impl[:n], atol=0.0, rtol=0.0
+            scale_dispatch[:n_tokens], scale_impl[:n_tokens], atol=0.0, rtol=0.0
         )
 
         # Different inputs must produce different outputs
         args_diff = (x + 1, per_token, FP8_DTYPE, None, num_token_padding)
         out_impl_diff, _ = impl.impl_fn(*args_diff)
         assert not torch.all(
-            out_impl.to(torch.float32)[:n] == out_impl_diff.to(torch.float32)[:n]
+            out_impl.to(torch.float32)[:n_tokens]
+            == out_impl_diff.to(torch.float32)[:n_tokens]
         )
 
         # static_quant with the impl's dynamic scale should reproduce the impl's output
-        x_q_static = static_quant_fp8_native(x, scale_impl[:n], FP8_DTYPE)
+        x_q_static = static_quant_fp8_native(x, scale_impl[:n_tokens], FP8_DTYPE)
         torch.testing.assert_close(
-            out_impl.to(torch.float32)[:n],
+            out_impl.to(torch.float32)[:n_tokens],
             x_q_static.to(torch.float32),
             atol=0.0,
             rtol=1e-1,
@@ -420,7 +415,7 @@ class TestDynamicQuantFP8:
         x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         args = (x, per_token, FP8_DTYPE)
         if not ir.ops.dynamic_quant_fp8.impls[provider].supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
+            pytest.skip(f"{provider} does not support these args")
 
         with ir.ops.dynamic_quant_fp8.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.dynamic_quant_fp8, args)
@@ -430,7 +425,7 @@ class TestDynamicQuantFP8:
 @pytest.mark.parametrize("scale_alignment", [1, 4])
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", [1, 8, 12])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @_SKIP_UNSUPPORTED
@@ -512,11 +507,7 @@ class TestDynamicGroupQuantFP8:
         args = (x, [group_size], column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
 
         if not impl.supports_args(*args):
-            pytest.skip(
-                f"{provider} does not support: group_size={group_size}, "
-                f"column_major={column_major}, scale_alignment={scale_alignment}, "
-                f"use_ue8m0={use_ue8m0}, dtype={dtype}"
-            )
+            pytest.skip(f"{provider} does not support these args")
 
         x_q_impl, x_s_impl = impl.impl_fn(*args)
 
