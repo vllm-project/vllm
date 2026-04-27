@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -315,7 +316,6 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
-        self._sparse_decode_out: torch.Tensor | None = None
 
     def _forward_sparse_mla(
         self,
@@ -325,7 +325,6 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         attn_metadata: ROCMAiterMLASparseMetadata,
         layer: AttentionLayer,
     ) -> torch.Tensor:
-        from vllm.platforms import current_platform
         num_tokens = q.shape[0]
         attn_out_dtype = q.dtype
 
@@ -355,17 +354,11 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
         kv_indptr = attn_metadata.paged_kv_indptr[:num_tokens + 1]
 
-        if (
-            self._sparse_decode_out is None
-            or self._sparse_decode_out.shape[0] < num_tokens
-            or self._sparse_decode_out.dtype != attn_out_dtype
-        ):
-            self._sparse_decode_out = torch.zeros(
-                [num_tokens, mla_num_heads, self.kv_lora_rank],
-                dtype=attn_out_dtype,
-                device=q.device,
-            )
-        output = self._sparse_decode_out[:num_tokens]
+        output = torch.empty(
+            [num_tokens, mla_num_heads, self.kv_lora_rank],
+            dtype=attn_out_dtype,
+            device=q.device,
+        )
 
         fetch_id_to_ragged_triton(
             topk_indices,
