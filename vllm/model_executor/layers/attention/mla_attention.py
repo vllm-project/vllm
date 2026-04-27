@@ -1422,6 +1422,20 @@ class MLADims:
 def get_mla_dims(model_config: ModelConfig) -> MLADims:
     hf_text_config = model_config.hf_text_config
 
+    # Check if this is a DeepseekV4 config (uses unified head_dim + rope_head_dim)
+    if hasattr(hf_text_config, "compress_ratios"):
+        # DeepseekV4 style config: unified head_dim with rope_head_dim
+        head_dim = hf_text_config.head_dim
+        rope_head_dim = hf_text_config.qk_rope_head_dim
+        return MLADims(
+            q_lora_rank=hf_text_config.q_lora_rank,
+            kv_lora_rank=head_dim,
+            qk_nope_head_dim=head_dim - rope_head_dim,
+            qk_rope_head_dim=rope_head_dim,
+            v_head_dim=head_dim,
+        )
+
+    # DeepseekV2/V3 style config
     return MLADims(
         q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
         kv_lora_rank=hf_text_config.kv_lora_rank,
@@ -1822,13 +1836,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
-            num_computed_tokens_cpu = (
-                common_attn_metadata.compute_num_computed_tokens().cpu()
-            )
-
             reqs_start = num_decodes  # prefill_start
 
-            context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
+            # Upper bound is exact for prefill rows (no D2H sync).
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
+            prefill_query_lens_cpu = (
+                query_start_loc_cpu[reqs_start + 1 : num_reqs + 1]
+                - query_start_loc_cpu[reqs_start:num_reqs]
+            )
+            context_lens_cpu = (
+                seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
+            )
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
@@ -2186,6 +2205,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        # DSV3.2 MLA Specific Arguments
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
@@ -2208,6 +2228,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
