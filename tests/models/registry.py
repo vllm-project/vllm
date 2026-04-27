@@ -594,7 +594,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
     ),
-    "MiMoV2ProForCausalLM": _HfExamplesInfo(
+    "MiMoV2ForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True, is_available_online=False
     ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
