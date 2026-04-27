@@ -11,7 +11,7 @@ The [`context_extension.py`](../../examples/offline_inference/context_extension)
 ### Usage
 
 ```bash
-python examples/offline_inference/context_extension.py
+python examples/offline_inference/context_extension_offline.py
 ```
 
 ## OpenAI Online Method

@@ -15,7 +15,7 @@ Requirements:
 - transformers
 
 Run:
-    python examples/offline_inference/prompt_embed_inference.py
+    python examples/offline_inference/prompt_embed_offline.py
 """
 
 import torch
