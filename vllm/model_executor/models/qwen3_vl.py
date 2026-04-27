@@ -101,6 +101,8 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
+from ...utils.gpu_sync_debug import gpu_sync_allowed
+from ...utils.torch_utils import async_tensor_h2d
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -2156,7 +2158,9 @@ class Qwen3VLForConditionalGeneration(
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
-                positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+                positions = compute_mrope_for_media(size, merge_size).to(
+                    emb.device, non_blocking=True
+                )
                 positions = torch.cat(
                     [
                         positions,
@@ -2211,19 +2215,25 @@ class Qwen3VLForConditionalGeneration(
                     spatial_merge_size=self.visual.spatial_merge_size,
                     q=self.video_pruning_rate,
                 )
-                # Apply retention mask.
-                emb = emb[retention_mask]
+                # Boolean-mask indexing has a data-dependent output shape and
+                # always syncs on CUDA. The `.tolist()` below is also a sync
+                # but is required because `num_tokens_per_frame` is consumed
+                # downstream as Python ints. Runs once per video in the EVS
+                # path.
+                with gpu_sync_allowed():
+                    # Apply retention mask.
+                    emb = emb[retention_mask]
 
-                # Calculate the actual number of retained tokens per frame.
-                num_frames, rows, cols = (
-                    t,
-                    h // merge_size,
-                    w // merge_size,
-                )
-                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
-                num_tokens_per_frame = (
-                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
-                )
+                    # Calculate the actual number of retained tokens per frame.
+                    num_frames, rows, cols = (
+                        t,
+                        h // merge_size,
+                        w // merge_size,
+                    )
+                    retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
+                    num_tokens_per_frame = (
+                        retention_mask_thw.sum(dim=(1, 2)).long().tolist()
+                    )
             else:
                 feature_size = emb.shape[0] // num_frames
                 num_tokens_per_frame = [feature_size] * num_frames
@@ -2387,14 +2397,19 @@ class Qwen3VLForConditionalGeneration(
                 input_tokens=unpruned_token_ids,
                 mm_features=[mm_feature],
             )[0]
-            .to(device)
+            .to(device, non_blocking=True)
             .permute(1, 0)
         )
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
-        expanded_positions[is_video_embed, :3] = original_mrope[full_is_video_embed][
-            retention_mask
-        ]
-        expanded_positions[~is_video_embed, :3] = original_mrope[~full_is_video_embed]
+        # Boolean-mask indexing has data-dependent output shapes and always
+        # syncs on CUDA; runs once per video in the EVS path.
+        with gpu_sync_allowed():
+            expanded_positions[is_video_embed, :3] = original_mrope[
+                full_is_video_embed
+            ][retention_mask]
+            expanded_positions[~is_video_embed, :3] = original_mrope[
+                ~full_is_video_embed
+            ]
         expanded_positions[..., 3] = is_vision_start
         expanded_positions[..., 4] = is_video_embed
 
@@ -2635,7 +2650,7 @@ class Qwen3VLForConditionalGeneration(
         )
 
         # Tensors
-        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+        input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
 
         mm_embeddings_out = []
         mm_embeddings_pos = []
@@ -2653,15 +2668,16 @@ class Qwen3VLForConditionalGeneration(
                     torch.empty(5, 0, device=device, dtype=torch.long)
                 )
 
-        positions, mrope_positions_delta = recompute_mrope_positions(
-            input_ids_t,
-            mm_embeddings_pos,
-            mrope_positions,
-            num_computed_tokens,
-            vision_start_token_id,
-            image_token_id,
-            video_token_id,
-        )
+        with gpu_sync_allowed():
+            positions, mrope_positions_delta = recompute_mrope_positions(
+                input_ids_t,
+                mm_embeddings_pos,
+                mrope_positions,
+                num_computed_tokens,
+                vision_start_token_id,
+                image_token_id,
+                video_token_id,
+            )
 
         return tuple(mm_embeddings_out), positions, mrope_positions_delta
 
