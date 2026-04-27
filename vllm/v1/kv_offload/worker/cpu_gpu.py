@@ -9,9 +9,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
+from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
@@ -135,9 +136,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
 
-        # assert a single KV group until transfer_async supports multiple groups
-        assert len(kv_cache_groups_data_refs) == 1
-
         # assert input tensors are as expected
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8
@@ -157,28 +155,12 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
+        self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * block_size_factor.
         self.src_block_size_factor = 1 if self.gpu_to_cpu else block_size_factor
         self.dst_block_size_factor = block_size_factor if self.gpu_to_cpu else 1
-
-        # per-tensor block size in byte
-        self.tensor_block_size_in_bytes = [
-            gpu_tensor.shape[1] for gpu_tensor in gpu_tensors
-        ]
-
-        # per-group block size in bytes
-        self.group_block_size_in_bytes = []
-        for kv_cache_group_data_refs in kv_cache_groups_data_refs:
-            group_block_size_in_bytes = 0
-            for kv_cache_data_ref in kv_cache_group_data_refs:
-                # TODO(orozery): use kv_cache_data_ref.page_size_bytes
-                # once swap_blocks support it
-                group_block_size_in_bytes += self.tensor_block_size_in_bytes[
-                    kv_cache_data_ref.tensor_idx
-                ]
-            self.group_block_size_in_bytes.append(group_block_size_in_bytes)
 
         self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
         # job_id -> event
@@ -190,11 +172,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
-        # Pre-compute block sizes for batch copies.
-        self._block_size_in_bytes_arr = np.array(
-            self.tensor_block_size_in_bytes, dtype=np.int64
-        )
-
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
@@ -205,37 +182,108 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert src_blocks.ndim == 1
         assert dst_blocks.ndim == 1
 
-        src_sub_block_count = src_blocks.size * self.src_block_size_factor
-        dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
-        src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
+        num_src_blocks = len(src_blocks)
+        num_dst_blocks = len(dst_blocks)
 
-        assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
+        # There are 2 types of transfers:
+        # 1. GPU -> CPU
+        # 2. CPU -> GPU
+        #
+        # transfers are also to CPU blocks, EXCEPT MAYBE for the first and last block.
+        # i.e. the first and last CPU blocks in src_blocks can match against
+        # a smaller (byte-wise) set of GPU blocks in dst_blocks.
+        # In such cases, we may need to skip some gpu-sized sub-blocks,
+        # and start reading/writing from the middle of the first CPU block.
+        # If we have multiple KV cache groups (when using HMA with hybrid models),
+        # we may have a partial first/last CPU block per each group.
+        # The group_sizes parameter encodes the size of each group of blocks
+        # in the GPU dst_blocks.
+        # If group_sizes is None, we assume all blocks belong to a single group.
+        # The logical_offset parameter maps each group of blocks to its logical
+        # offset inside the request, counting in GPU blocks.
+        # This allows us to find the correct starting position
+        # in the matching first CPU block.
 
-        num_pairs = dst_sub_block_count
-        num_tensors = len(self.src_tensors)
-        total = num_pairs * num_tensors
+        # extract group_sizes from the GPU spec
+        gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
+        assert isinstance(gpu_spec, GPULoadStoreSpec)
+        group_sizes = gpu_spec.group_sizes
+        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
 
-        all_src = np.empty(total, dtype=np.int64)
-        all_dst = np.empty(total, dtype=np.int64)
-        all_sizes = np.empty(total, dtype=np.int64)
+        # extract block indices from the GPU spec
+        block_indices = gpu_spec.block_indices
+        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
 
-        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
-            start = t_idx * num_pairs
-            end = start + num_pairs
-            compute_sub_block_ptrs(
-                block_ids=src_blocks,
-                block_size_factor=self.src_block_size_factor,
-                output=all_src[start:end],
-                tensor=self.src_tensors[t_idx],
-                skip_count=src_sub_blocks_to_skip,
+        num_copy_ops = 0
+        for group_size, group_data_refs in zip(
+            group_sizes, self.kv_cache_groups_data_refs
+        ):
+            num_copy_ops += group_size * len(group_data_refs)
+
+        all_src = np.empty(num_copy_ops, dtype=np.int64)
+        all_dst = np.empty(num_copy_ops, dtype=np.int64)
+        all_sizes = np.empty(num_copy_ops, dtype=np.int64)
+
+        src_offset = 0
+        dst_offset = 0
+        op_idx = 0
+        # count total number of bytes copied
+        num_transfer_bytes = 0
+        for group_size, block_idx, group_data_refs in zip(
+            group_sizes, block_indices, self.kv_cache_groups_data_refs
+        ):
+            if group_size == 0:
+                continue
+
+            src_logical_blocks_to_skip = block_idx % self.src_block_size_factor
+            dst_logical_blocks_to_skip = block_idx % self.dst_block_size_factor
+            src_logical_blocks_count = group_size + src_logical_blocks_to_skip
+            dst_logical_blocks_count = group_size + dst_logical_blocks_to_skip
+
+            dst_blocks_count = cdiv(
+                dst_logical_blocks_count, self.dst_block_size_factor
             )
-            compute_sub_block_ptrs(
-                block_ids=dst_blocks,
-                block_size_factor=self.dst_block_size_factor,
-                output=all_dst[start:end],
-                tensor=self.dst_tensors[t_idx],
+            dst_end_offset = dst_offset + dst_blocks_count
+            assert dst_end_offset <= num_dst_blocks
+
+            src_blocks_count = cdiv(
+                src_logical_blocks_count, self.src_block_size_factor
             )
-            all_sizes[start:end] = bsz
+            src_end_offset = src_offset + src_blocks_count
+            assert src_end_offset <= num_src_blocks
+
+            group_src = src_blocks[src_offset:src_end_offset]
+            group_dst = dst_blocks[dst_offset:dst_end_offset]
+
+            for data_ref in group_data_refs:
+                t_idx = data_ref.tensor_idx
+                end_idx = op_idx + group_size
+
+                compute_sub_block_ptrs(
+                    group_src,
+                    self.src_block_size_factor,
+                    all_src[op_idx:end_idx],
+                    self.src_tensors[t_idx],
+                    skip_count=src_logical_blocks_to_skip,
+                )
+                compute_sub_block_ptrs(
+                    group_dst,
+                    self.dst_block_size_factor,
+                    all_dst[op_idx:end_idx],
+                    self.dst_tensors[t_idx],
+                    skip_count=dst_logical_blocks_to_skip,
+                )
+
+                all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
+                num_transfer_bytes += group_size * data_ref.page_size_bytes
+                op_idx = end_idx
+
+            src_offset = src_end_offset
+            dst_offset = dst_end_offset
+
+        assert src_offset == num_src_blocks
+        assert dst_offset == num_dst_blocks
+        assert op_idx == num_copy_ops
 
         batch_src = torch.from_numpy(all_src)
         batch_dst = torch.from_numpy(all_dst)
@@ -263,7 +311,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             stream.wait_event(last_event)
         with torch.cuda.stream(stream):
             start_event.record(stream)
-            if total > 0:
+            if num_copy_ops > 0:
                 ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
             end_event.record(stream)
 
@@ -274,7 +322,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 stream=stream,
                 start_event=start_event,
                 end_event=end_event,
-                num_bytes=dst_sub_block_count * self.group_block_size_in_bytes[0],
+                num_bytes=num_transfer_bytes,
             )
         )
 
