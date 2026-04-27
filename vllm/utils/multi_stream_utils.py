@@ -2,9 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from enum import Enum
 from typing import Any
 
 import torch
+
+
+class AuxStreamType(Enum):
+    Attention = 1
+
+
+class EventType(Enum):
+    Main = 0
+    Attention = 1
 
 
 def maybe_execute_in_parallel(
