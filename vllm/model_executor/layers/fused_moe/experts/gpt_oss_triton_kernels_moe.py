@@ -28,7 +28,161 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
+from ..utils import swiglu_limit_func
+
 logger = init_logger(__name__)
+
+
+def _patch_make_bitmatrix_metadata() -> None:
+    """Monkey-patch make_bitmatrix_metadata to support non-power-of-2 top_k.
+
+    triton's tl.arange requires a power-of-2 range.  The original kernel
+    computes BLOCK_SIZE = BLOCK_PER_TOK * TOKS_PER_ROW (= 32 * top_k).  For
+    DeepSeek-V4 with top_k=6 this gives 192, which is not a power of 2 and
+    causes a compile error at the first forward pass.
+
+    Fix: define a drop-in replacement kernel that accepts an extra constexpr
+    BLOCK_SIZE_PADDED (next power of 2 >= BLOCK_SIZE) and uses it for the
+    tl.arange call while keeping the actual BLOCK_SIZE as the stride between
+    thread-blocks so that all flat indices into NonzeroIndx stay correct.
+    Elements beyond BLOCK_SIZE are masked out (col_indx = 0xffff) and ignored.
+
+    This function is called once at module load time and patches the function
+    inside the triton_kernels tensor module so that SparseMatrix.__post_init__
+    picks up the fixed version transparently.
+    """
+    import torch
+    import triton
+    import triton.language as tl
+
+    try:
+        from vllm.third_party.triton_kernels.tensor_details import (
+            bitmatrix as _bm,
+        )
+        from vllm.third_party.triton_kernels.tensor_details.bitmatrix import (
+            BitmatrixMetadata,
+            _keyed_add,
+            cdiv,
+        )
+        from vllm.third_party.triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+            sum_bitmatrix_rows,
+        )
+    except ImportError:
+        return
+
+    @triton.jit
+    def _stage2_pow2(
+        ColSortedIndx,
+        RowSortedIndx,
+        NonzeroIndx,
+        n_tokens,
+        ColPartialSum,
+        stride_pm,
+        stride_pn,
+        ColOffs,
+        TOKS_PER_ROW: tl.constexpr,
+        BLOCK_PER_TOK: tl.constexpr,
+        BLOCK_SIZE_PADDED: tl.constexpr,
+    ):
+        # Actual number of elements per block (may not be a power of 2).
+        BLOCK_SIZE: tl.constexpr = BLOCK_PER_TOK * TOKS_PER_ROW
+        tl.static_assert(BLOCK_SIZE_PADDED <= 32768)
+        if isinstance(n_tokens, tl.tensor) and n_tokens.dtype.is_ptr():
+            n_tokens = tl.load(n_tokens)
+        nonzero_indx_size = n_tokens * TOKS_PER_ROW
+        pid_m = tl.program_id(0)
+        # Use BLOCK_SIZE_PADDED (a power of 2) for tl.arange, but stride by
+        # the actual BLOCK_SIZE so flat positions in NonzeroIndx are correct.
+        # Elements with offs_local >= BLOCK_SIZE have offs_global beyond the
+        # valid range, get col_indx = 0xffff, and are filtered by the mask
+        # below without producing any output.
+        offs_local = tl.arange(0, BLOCK_SIZE_PADDED)
+        offs_global = pid_m * BLOCK_SIZE + offs_local
+        mask = offs_global < nonzero_indx_size
+        col_indx = tl.load(NonzeroIndx + offs_global, mask=mask, other=-1).to(tl.uint32)
+        kv_pairs = ((col_indx << 16) | offs_local).to(tl.uint32)
+        kv_pairs = tl.sort(kv_pairs, 0)
+        col_indx = kv_pairs >> 16
+        offs_global = pid_m * BLOCK_SIZE + (kv_pairs & 0xFFFF)
+        mask = col_indx != 0xFFFF
+        x = kv_pairs & 0xFFFF0000 | 0x00000001
+        cols_and_inclusive_run_lengths = tl.associative_scan(x, 0, _keyed_add)
+        exclusive_run_lengths = (cols_and_inclusive_run_lengths - 1) & 0xFFFF
+        row_sorted_indx = tl.load(
+            ColPartialSum + pid_m * stride_pm + col_indx * stride_pn, mask=mask
+        )
+        row_sorted_indx += tl.load(ColOffs + col_indx, mask=mask)
+        row_sorted_indx += exclusive_run_lengths
+        tl.store(RowSortedIndx + offs_global, row_sorted_indx, mask=mask)
+        tl.store(ColSortedIndx + row_sorted_indx, offs_global, mask=mask)
+
+    def _make_bitmatrix_metadata_pow2_safe(nonzero_indx, bitmatrix):
+        assert nonzero_indx.ndim == 2
+        PARTIAL_BLOCK_M = 32
+        col_sum, col_partial_sum = sum_bitmatrix_rows(
+            bitmatrix, partials_block_size=PARTIAL_BLOCK_M
+        )
+        device = bitmatrix.device
+        n_indx = nonzero_indx.numel()
+        n_cols = bitmatrix.shape[1]
+        col_offs = torch.empty(n_cols, dtype=torch.int32, device=device)
+        combined_indx = torch.empty(n_indx * 2, dtype=torch.int32, device=device)
+        col_sorted_indx = combined_indx[:n_indx]
+        row_sorted_indx = combined_indx[n_indx:]
+        MEMSET_BLOCK = 1024
+        memset_grid = (cdiv(n_indx * 2, MEMSET_BLOCK) + n_cols + 1,)
+        _bm._bitmatrix_metadata_compute_stage1[memset_grid](
+            combined_indx,
+            n_indx * 2,
+            -1,
+            MEMSET_BLOCK,
+            col_sum,
+            col_offs,
+            col_sum.shape[0],
+            col_partial_sum,
+            col_partial_sum.shape[0],
+            col_partial_sum.stride(0),
+            col_partial_sum.stride(1),
+            BLOCK_M=512,
+            BLOCK_N=512,
+        )
+        toks_per_row = nonzero_indx.shape[-1]
+        block_size = PARTIAL_BLOCK_M * toks_per_row
+        # Next power of 2 >= block_size (required by tl.arange).
+        block_size_padded = 1 << (max(block_size, 1) - 1).bit_length()
+        compute_grid = (cdiv(bitmatrix.shape_max[0], PARTIAL_BLOCK_M),)
+        _stage2_pow2[compute_grid](
+            col_sorted_indx,
+            row_sorted_indx,
+            nonzero_indx,
+            bitmatrix.shape[0],
+            col_partial_sum,
+            col_partial_sum.stride(0),
+            col_partial_sum.stride(1),
+            col_offs,
+            TOKS_PER_ROW=toks_per_row,
+            BLOCK_PER_TOK=PARTIAL_BLOCK_M,
+            BLOCK_SIZE_PADDED=block_size_padded,
+        )
+        return BitmatrixMetadata(
+            col_sum=col_sum,
+            col_sorted_indx=col_sorted_indx,
+            row_sorted_indx=row_sorted_indx,
+        )
+
+    # The most reliable patch point: SparseMatrix.__post_init__ looks up
+    # make_bitmatrix_metadata via its own __globals__ dict (the tensor.py
+    # module dict).  Patching through __globals__ works regardless of how
+    # sys.modules maps "triton_kernels.tensor" vs
+    # "vllm.third_party.triton_kernels.tensor".
+    from triton_kernels.tensor import SparseMatrix as _SparseMatrix
+
+    _SparseMatrix.__post_init__.__globals__["make_bitmatrix_metadata"] = (
+        _make_bitmatrix_metadata_pow2_safe
+    )
+    # Also patch the bitmatrix module itself in case it is imported directly.
+    _bm.make_bitmatrix_metadata = _make_bitmatrix_metadata_pow2_safe
+
 
 use_legacy_triton_kernels = False
 
@@ -59,6 +213,8 @@ if has_triton_kernels():
                 use_legacy_triton_kernels = True
             else:
                 raise
+        if not use_legacy_triton_kernels:
+            _patch_make_bitmatrix_metadata()
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -497,6 +653,8 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
             return False
         # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
         # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        if not has_triton_kernels():
+            return False
         return (9, 0) <= (cap.major, cap.minor) < (11, 0)
 
     @staticmethod
@@ -698,6 +856,37 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
         ops.moe_sum(input, output)
 
+    def activation(
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+    ) -> None:
+        quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
+        if activation == MoEActivation.SWIGLUOAI:
+            alpha = (
+                quant_config.gemm1_alpha
+                if quant_config.gemm1_alpha is not None
+                else 1.702
+            )
+            limit = (
+                quant_config.gemm1_clamp_limit
+                if quant_config.gemm1_clamp_limit is not None
+                else 7.0
+            )
+            torch.ops._C.swigluoai_and_mul(output, input, alpha, limit)
+        elif (
+            activation == MoEActivation.SILU
+            and quant_config.gemm1_clamp_limit is not None
+        ):
+            swiglu_limit_func(
+                output,
+                input,
+                quant_config.gemm1_clamp_limit,
+            )
+        else:
+            super().activation(activation, output, input)
+
     def apply(
         self,
         output: torch.Tensor,
@@ -812,9 +1001,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             act_input,
         )
 
-        # matmul_ogs grouped reduction fuse sum across multiple experts:
+        # matmul_ogs grouped reduction fuses sum across multiple experts:
         # y[dst_indx // n_expts_act, :] += x
-        # Need to set n_expts_act to 1 to unfuse moe_sum
+        # Set n_expts_act to 1 to unfuse the sum so we can do it manually via moe_sum.
         routing_data.n_expts_act = 1
 
         matmul_ogs(
@@ -878,6 +1067,8 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             return False
         # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
         # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        if not has_triton_kernels():
+            return False
         return (9, 0) <= (cap.major, cap.minor) < (11, 0)
 
     @staticmethod
