@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -304,10 +305,19 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 "w1_scale and w2_scale must not be None for FlashInfer "
                 "FP8 per-token/per-channel MoE"
             )
+            assert self.g1_alphas is not None, (
+                "g1_alphas must carry FC1 gate scales for FlashInfer "
+                "FP8 per-token/per-channel MoE"
+            )
             assert a1q_scale is not None, (
                 "a1q_scale must not be None for FlashInfer FP8 "
                 "per-token/per-channel MoE"
             )
+            routing_method_type = self.moe_config.routing_method
+            if routing_method_type == RoutingMethodType.Llama4:
+                assert apply_router_weight_on_input
+            else:
+                assert not apply_router_weight_on_input
             packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
             result = flashinfer_trtllm_fp8_per_channel_scale_routed_moe(
                 topk_ids=packed_topk_ids,
@@ -316,7 +326,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 hidden_states_scale=a1q_scale.contiguous(),
                 gemm1_weights=w1.view(torch.float8_e4m3fn),
                 gemm1_per_channel_weight_scale=self.w1_scale,
-                gemm1_per_channel_gate_weight_scale=self.w1_scale,
+                gemm1_per_channel_gate_weight_scale=self.g1_alphas,
                 gemm2_weights=w2.view(torch.float8_e4m3fn),
                 gemm2_per_channel_weight_scale=self.w2_scale,
                 num_experts=global_num_experts,
@@ -327,9 +337,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 local_expert_offset=self.ep_rank * self.num_experts,
                 local_num_experts=self.num_experts,
                 routed_scaling_factor=None,
-                use_routing_scales_on_input=False,
-                routing_method_type=1,
-                activation_type=activation_str_to_value_map[activation],
+                use_routing_scales_on_input=bool(apply_router_weight_on_input),
+                routing_method_type=int(routing_method_type),
+                activation_type=activation_str_to_value_map[activation].value,
                 tune_max_num_tokens=max(self.max_capture_size, 1),
             )
             output.copy_(result)
