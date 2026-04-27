@@ -3,7 +3,7 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_offload.abstract import OffloadKey
 from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
 
 
@@ -12,35 +12,35 @@ class LRUCachePolicy(CachePolicy):
 
     def __init__(self, cache_capacity: int):
         # cache_capacity unused by LRU but accepted for a uniform constructor
-        self.blocks: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
+        self.blocks: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
 
-    def get(self, block_hash: BlockHash) -> BlockStatus | None:
-        return self.blocks.get(block_hash)
+    def get(self, key: OffloadKey) -> BlockStatus | None:
+        return self.blocks.get(key)
 
-    def insert(self, block_hash: BlockHash, block: BlockStatus) -> None:
-        self.blocks[block_hash] = block
+    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
+        self.blocks[key] = block
 
-    def remove(self, block_hash: BlockHash) -> None:
-        del self.blocks[block_hash]
+    def remove(self, key: OffloadKey) -> None:
+        del self.blocks[key]
 
-    def touch(self, block_hashes: Iterable[BlockHash]) -> None:
-        for block_hash in reversed(list(block_hashes)):
-            if block_hash in self.blocks:
-                self.blocks.move_to_end(block_hash)
+    def touch(self, keys: Iterable[OffloadKey]) -> None:
+        for key in reversed(list(keys)):
+            if key in self.blocks:
+                self.blocks.move_to_end(key)
 
     def evict(
-        self, n: int, protected: set[BlockHash]
-    ) -> list[tuple[BlockHash, BlockStatus]] | None:
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         if n == 0:
             return []
-        candidates: list[tuple[BlockHash, BlockStatus]] = []
-        for block_hash, block in self.blocks.items():
-            if block.ref_cnt == 0 and block_hash not in protected:
-                candidates.append((block_hash, block))
+        candidates: list[tuple[OffloadKey, BlockStatus]] = []
+        for key, block in self.blocks.items():
+            if block.ref_cnt == 0 and key not in protected:
+                candidates.append((key, block))
                 if len(candidates) == n:
                     break
         if len(candidates) < n:
             return None
-        for block_hash, _ in candidates:
-            del self.blocks[block_hash]
+        for key, _ in candidates:
+            del self.blocks[key]
         return candidates

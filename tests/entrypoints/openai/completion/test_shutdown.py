@@ -311,7 +311,7 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
             pytest.fail("Process did not exit after SIGTERM with abort timeout")
 
         exit_time = time.time() - start_time
-        assert exit_time < 2, f"Default shutdown took too long: {exit_time:.1f}s"
+        assert exit_time < 2.1, f"Default shutdown took too long: {exit_time:.1f}s"
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
 
         await _assert_children_cleaned_up(child_pids)

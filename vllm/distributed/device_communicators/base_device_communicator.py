@@ -7,6 +7,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.utils import is_moe_layer
+
 
 class Cache:
     def __init__(self):
@@ -317,16 +319,7 @@ class DeviceCommunicatorBase:
         if not self.is_ep_communicator:
             return
 
-        moe_modules = [
-            module
-            for module in model.modules()
-            # TODO(bnell): Should use isinstance but can't.  Maybe search for
-            # presence of quant_method.maybe_init_modular_kernel?
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
-        ]
+        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
         for module in moe_modules:
             module.maybe_init_modular_kernel()
 
