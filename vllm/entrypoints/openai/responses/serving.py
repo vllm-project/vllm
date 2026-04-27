@@ -1375,9 +1375,7 @@ class OpenAIServingResponses(OpenAIServing):
             if not delta_message:
                 continue
 
-            target_state, tool_call = processor.resolve_target_state(
-                delta_message
-            )
+            target_state, tool_call = processor.resolve_target_state(delta_message)
             if target_state == _StateType.NONE:
                 continue
 
@@ -1387,9 +1385,7 @@ class OpenAIServingResponses(OpenAIServing):
                 for event in processor.open(target_state, tool_call):
                     yield _increment_sequence_number_and_return(event)
 
-            for event in processor.emit_delta(
-                delta_message, output, _get_logprobs
-            ):
+            for event in processor.emit_delta(delta_message, output, _get_logprobs):
                 yield _increment_sequence_number_and_return(event)
 
         for event in processor.close_current():

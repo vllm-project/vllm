@@ -1103,13 +1103,27 @@ def emit_simple_tool_call_done(
 
 
 class _StateHandlers(NamedTuple):
+    """Tuple for each state: open(start), delta(chunk), done(finish)."""
+
     open_fn: Callable[..., list[StreamingResponsesResponse]]
     delta_fn: Callable[..., list[StreamingResponsesResponse]]
     done_fn: Callable[..., list[StreamingResponsesResponse]]
 
 
 class SimpleStreamingEventProcessor:
-    """State-machine processor for the simple (non-Harmony) streaming path."""
+    """
+    State-machine processor for the simple (non-Harmony) streaming path.
+
+    Core flow:
+      1. Resolve the target state from the delta_message
+         (CONTENT / REASONING / TOOL_CALL).
+      2. If the target state differs from the current one,
+         close_current() then open() the new state.
+      3. emit_delta() produces the incremental events for the state.
+
+    State lifecycle:
+      open()  ->  repeated emit_delta()  ->  close_current()
+    """
 
     _STATE_HANDLERS: ClassVar[dict[_StateType, _StateHandlers]] = {
         _StateType.CONTENT: _StateHandlers(
@@ -1135,6 +1149,13 @@ class SimpleStreamingEventProcessor:
     def resolve_target_state(
         self, delta_message: DeltaMessage
     ) -> tuple[_StateType, Any]:
+        """
+        Decide which state the next delta belongs to.
+
+        Priority: TOOL_CALL > REASONING > CONTENT, fallback to NONE.
+        For TOOL_CALL the first tool_call object is also returned so
+        callers can detect a switch between consecutive tools.
+        """
         if (
             delta_message.tool_calls
             and delta_message.tool_calls[0].function is not None
@@ -1147,6 +1168,15 @@ class SimpleStreamingEventProcessor:
         return _StateType.NONE, None
 
     def needs_transition(self, target_state: _StateType, tool_call: Any) -> bool:
+        """
+        Return True when we must close the current state and open a new one.
+
+        Two cases trigger a transition:
+          1. The target state differs from the current state
+             (e.g. CONTENT -> TOOL_CALL).
+          2. We are already in TOOL_CALL but the next tool_call has a
+             different index (multiple consecutive tool calls).
+        """
         if self.state.current_state != target_state:
             return True
         return (
@@ -1158,6 +1188,7 @@ class SimpleStreamingEventProcessor:
         )
 
     def close_current(self) -> list[StreamingResponsesResponse]:
+        """Close the current state and emit its 'done' event sequence."""
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
@@ -1166,6 +1197,7 @@ class SimpleStreamingEventProcessor:
     def open(
         self, target_state: _StateType, tool_call: Any = None
     ) -> list[StreamingResponsesResponse]:
+        """Open a new state and emit its 'added' / 'open' event sequence."""
         handlers = self._STATE_HANDLERS[target_state]
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
@@ -1183,10 +1215,17 @@ class SimpleStreamingEventProcessor:
         ]
         | None = None,
     ) -> list[StreamingResponsesResponse]:
+        """
+        Emit incremental events for the current state from the delta.
+
+        Special case: when already in REASONING and the same delta also
+        carries content, we emit the reasoning delta, close reasoning,
+        open content, and then emit the content delta.
+        """
         handlers = self._STATE_HANDLERS[self.state.current_state]
         events: list[StreamingResponsesResponse] = []
 
-        # Special case: reasoning -> content in the same delta
+        # Special case: reasoning -> content inside a single delta.
         if (
             self.state.current_state == _StateType.REASONING
             and delta_message.reasoning is not None
@@ -1198,9 +1237,7 @@ class SimpleStreamingEventProcessor:
             content_handlers = self._STATE_HANDLERS[_StateType.CONTENT]
             logprobs = get_logprobs(output) if get_logprobs else []
             events.extend(
-                content_handlers.delta_fn(
-                    self.state, delta_message.content, logprobs
-                )
+                content_handlers.delta_fn(self.state, delta_message.content, logprobs)
             )
             return events
 
@@ -1209,9 +1246,7 @@ class SimpleStreamingEventProcessor:
             tool_call_function = delta_message.tool_calls[0].function
             assert tool_call_function is not None
             if tool_call_function.arguments:
-                return handlers.delta_fn(
-                    self.state, tool_call_function.arguments
-                )
+                return handlers.delta_fn(self.state, tool_call_function.arguments)
             return []
         elif self.state.current_state == _StateType.REASONING:
             assert delta_message.reasoning is not None
@@ -1219,7 +1254,5 @@ class SimpleStreamingEventProcessor:
         elif self.state.current_state == _StateType.CONTENT:
             assert delta_message.content is not None
             logprobs = get_logprobs(output) if get_logprobs else []
-            return handlers.delta_fn(
-                self.state, delta_message.content, logprobs
-            )
+            return handlers.delta_fn(self.state, delta_message.content, logprobs)
         return []
