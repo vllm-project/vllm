@@ -28,10 +28,12 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.inputs import EmbedsPrompt, MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 from vllm.multimodal.processing.processor import (
+    MultiModalPromptUpdates,
     PromptReplacement,
+    ResolvedPromptUpdate,
     apply_token_matches,
     find_mm_placeholders,
 )
@@ -107,27 +109,27 @@ def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
 def _build_prompt_embeds_updates(
     prompt_embeds_tensors: Sequence[torch.Tensor],
     placeholder_token_id: int,
-) -> dict[str, list[list]]:
+) -> MultiModalPromptUpdates:
     """Build `MultiModalPromptUpdates` for `prompt_embeds` expansion.
 
     Each tensor produces a `PromptReplacement` that maps
     `[placeholder_token_id]` -> `[placeholder_token_id] x N`
     (where `N = tensor.shape[0]`).
     """
-    mm_prompt_updates: dict[str, list[list]] = {"prompt_embeds": []}
+    updates: list[Sequence[ResolvedPromptUpdate]] = []
     for i, tensor in enumerate(prompt_embeds_tensors):
         update = PromptReplacement(
             modality="prompt_embeds",
             target=[placeholder_token_id],
             replacement=[placeholder_token_id] * tensor.shape[0],
         )
-        mm_prompt_updates["prompt_embeds"].append([update.resolve(item_idx=i)])
-    return mm_prompt_updates
+        updates.append([update.resolve(item_idx=i)])
+    return {"prompt_embeds": updates}
 
 
 def _expand_prompt_embeds_placeholders(
     token_ids: list[int],
-    mm_prompt_updates: dict[str, list[list]],
+    mm_prompt_updates: MultiModalPromptUpdates,
 ) -> list[int]:
     """Expand each 1-token `prompt_embeds` sentinel into an N-token span.
 
@@ -142,7 +144,7 @@ def _expand_prompt_embeds_placeholders(
 def _build_prompt_embeds_positions(
     token_ids: list[int],
     num_tensors: int,
-    mm_prompt_updates: dict[str, list[list]],
+    mm_prompt_updates: MultiModalPromptUpdates,
 ) -> list[tuple[int, int]]:
     """Locate each prompt_embeds placeholder span in `token_ids`.
 
@@ -799,7 +801,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # the unknown key). Extract them here.
         prompt_embeds_tensors: list[torch.Tensor] | None = None
         if mm_data is not None and "prompt_embeds" in mm_data:
-            prompt_embeds_tensors = list(mm_data.pop("prompt_embeds"))
+            prompt_embeds_tensors = list(
+                cast(Sequence[torch.Tensor], mm_data["prompt_embeds"])
+            )
+            mm_data = {k: v for k, v in mm_data.items() if k != "prompt_embeds"}
             if not mm_data:
                 mm_data = None
 
@@ -886,7 +891,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None
         if mm_data is not None and "prompt_embeds" in mm_data:
-            prompt_embeds_tensors = list(mm_data.pop("prompt_embeds"))
+            prompt_embeds_tensors = list(
+                cast(Sequence[torch.Tensor], mm_data["prompt_embeds"])
+            )
+            mm_data = {k: v for k, v in mm_data.items() if k != "prompt_embeds"}
             if not mm_data:
                 mm_data = None
 
@@ -949,7 +957,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> None:
         """In-place populate `prompt` with mixed-mode fields.
 
-        The tokenized chat template output contains one placeholder token
+        This mutates a TokensPrompt-shaped dict into an EmbedsPrompt-shaped dict
+        in place. The tokenized chat template output contains one placeholder token
         per `prompt_embeds` content part. This method:
 
         1. **Expands** each 1-token sentinel into an N-token span matching
@@ -958,7 +967,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         3. **Builds** a full-length `prompt_embeds` tensor + `is_token_ids`
            mask aligned to the expanded token IDs.
         """
-        token_ids = prompt.get("prompt_token_ids")
+        embeds_prompt = cast(EmbedsPrompt, prompt)
+        token_ids = embeds_prompt.get("prompt_token_ids")
         if token_ids is None:
             raise RuntimeError(_MISSING_PROMPT_TOKEN_IDS_ERROR)
 
@@ -969,7 +979,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         # Step 1: Expand 1-token sentinels into N-token spans.
         expanded = _expand_prompt_embeds_placeholders(token_ids, mm_updates)
-        prompt["prompt_token_ids"] = expanded
+        embeds_prompt["prompt_token_ids"] = expanded
 
         # Step 2: Locate the expanded spans.
         positions = _build_prompt_embeds_positions(
@@ -981,5 +991,5 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             expanded, prompt_embeds_tensors, positions
         )
 
-        prompt["prompt_embeds"] = full_embeds
-        prompt["prompt_is_token_ids"] = is_token_ids_mask
+        embeds_prompt["prompt_embeds"] = full_embeds
+        embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask

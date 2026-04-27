@@ -744,13 +744,11 @@ def _resolve_items(
         raise RuntimeError(
             _REQUIRE_MM_PROCESSOR_ERROR.format(modality=processor_modalities)
         )
-    # Narrowing hint for mypy.
-    if processor_modalities:
-        assert mm_processor is not None
 
     mm_data = {}
     mm_uuids = {}
     if "image_embeds" in items_by_modality:
+        assert mm_processor is not None
         mm_data["image"] = _get_embeds_data(
             "image",
             [data for data, uuid in items_by_modality["image_embeds"]],
@@ -761,6 +759,7 @@ def _resolve_items(
         mm_data["image"] = [data for data, uuid in items_by_modality["image"]]
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image"]]
     if "audio_embeds" in items_by_modality:
+        assert mm_processor is not None
         mm_data["audio"] = _get_embeds_data(
             "audio",
             [data for data, uuid in items_by_modality["audio_embeds"]],
@@ -774,6 +773,7 @@ def _resolve_items(
         mm_data["video"] = [data for data, uuid in items_by_modality["video"]]
         mm_uuids["video"] = [uuid for data, uuid in items_by_modality["video"]]
     if "vision_chunk" in items_by_modality:
+        assert mm_processor is not None
         # Process vision_chunk items - extract from (data, modality) tuples
         # and convert to VisionChunk types with proper UUID handling
         processed_chunks, vision_chunk_uuids = _resolve_vision_chunk_items(
