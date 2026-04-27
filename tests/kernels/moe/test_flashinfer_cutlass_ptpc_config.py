@@ -44,7 +44,7 @@ def test_flashinfer_cutlass_ptpc_quant_config_preserves_dynamic_scales():
     assert quant_config.w2_scale is w2_scale
 
 
-def test_flashinfer_cutlass_ptpc_apply_passes_activation_and_weight_scales(
+def test_flashinfer_cutlass_ptpc_apply_uses_trtllm_routed_moe(
     monkeypatch,
 ):
     core_module = types.ModuleType("flashinfer.fused_moe.core")
@@ -63,15 +63,26 @@ def test_flashinfer_cutlass_ptpc_apply_passes_activation_and_weight_scales(
     monkeypatch.setitem(sys.modules, "flashinfer.fused_moe.core", core_module)
 
     captured_kwargs = {}
+    packed_topk_ids = torch.full((3, 1), 7, dtype=torch.int32)
 
-    def fake_flashinfer_cutlass_fused_moe(**kwargs):
+    def fake_pack_topk_ids_weights(topk_ids, topk_weights):
+        captured_kwargs["pack_topk_ids"] = topk_ids
+        captured_kwargs["pack_topk_weights"] = topk_weights
+        return packed_topk_ids
+
+    def fake_trtllm_fp8_per_channel_scale_routed_moe(**kwargs):
         captured_kwargs.update(kwargs)
-        return kwargs["output"]
+        return torch.full((3, 5), 3, dtype=torch.bfloat16)
 
     monkeypatch.setattr(
         fi_cutlass_moe,
-        "flashinfer_cutlass_fused_moe",
-        fake_flashinfer_cutlass_fused_moe,
+        "trtllm_moe_pack_topk_ids_weights",
+        fake_pack_topk_ids_weights,
+    )
+    monkeypatch.setattr(
+        fi_cutlass_moe,
+        "flashinfer_trtllm_fp8_per_channel_scale_routed_moe",
+        fake_trtllm_fp8_per_channel_scale_routed_moe,
     )
 
     w1_scale = torch.ones((2, 4), dtype=torch.float32)
@@ -92,6 +103,8 @@ def test_flashinfer_cutlass_ptpc_apply_passes_activation_and_weight_scales(
     experts.ep_size = 1
     experts.ep_rank = 0
     experts.max_capture_size = 1
+    experts.num_experts = 2
+    experts.moe_config = types.SimpleNamespace(intermediate_size_per_partition=3)
 
     hidden_states = torch.ones((3, 5), dtype=torch.bfloat16)
     w1 = torch.empty((2, 4, 5), dtype=torch.uint8)
@@ -119,12 +132,17 @@ def test_flashinfer_cutlass_ptpc_apply_passes_activation_and_weight_scales(
         apply_router_weight_on_input=False,
     )
 
-    quant_scales = captured_kwargs["quant_scales"]
-    assert quant_scales[0] is w1_scale
-    assert quant_scales[1] is w2_scale
-    assert captured_kwargs["input_sf"] is a1q_scale
-    assert captured_kwargs["fc1_expert_weights"] is w1
-    assert captured_kwargs["fc2_expert_weights"] is w2
+    assert captured_kwargs["pack_topk_ids"] is topk_ids
+    assert captured_kwargs["pack_topk_weights"] is topk_weights
+    assert captured_kwargs["topk_ids"] is packed_topk_ids
+    assert captured_kwargs["hidden_states_scale"] is a1q_scale
+    assert captured_kwargs["gemm1_weights"].dtype == torch.float8_e4m3fn
+    assert captured_kwargs["gemm1_per_channel_weight_scale"] is w1_scale
+    assert captured_kwargs["gemm1_per_channel_gate_weight_scale"] is w1_scale
+    assert captured_kwargs["gemm2_weights"].dtype == torch.float8_e4m3fn
+    assert captured_kwargs["gemm2_per_channel_weight_scale"] is w2_scale
+    assert captured_kwargs["intermediate_size"] == 3
+    assert torch.equal(output, torch.full((3, 5), 3, dtype=torch.bfloat16))
 
 
 def test_flashinfer_cutlass_prepare_pads_and_swaps_per_channel_w13_scales():

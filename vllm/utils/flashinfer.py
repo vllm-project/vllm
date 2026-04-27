@@ -111,6 +111,9 @@ flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
 flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"
 )
+flashinfer_trtllm_fp8_per_channel_scale_routed_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "trtllm_fp8_per_channel_scale_routed_moe"
+)
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
@@ -236,6 +239,16 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe() -> bool:
+    """Return `True` if FlashInfer FP8 PTPC routed MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+
+    mod = _get_submodule("flashinfer.fused_moe")
+    return mod is not None and hasattr(mod, "trtllm_fp8_per_channel_scale_routed_moe")
 
 
 @functools.cache

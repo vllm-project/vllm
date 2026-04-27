@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -29,7 +30,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
+    flashinfer_trtllm_fp8_per_channel_scale_routed_moe,
     has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe,
 )
 
 logger = init_logger(__name__)
@@ -168,15 +171,22 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 ]
                 and p.is_device_capability(90)
             )
-            # nvfp4, wmxfp4amxfp8, fp8 per-token/per-channel on 10.0+
+            # nvfp4, wmxfp4amxfp8 on 10.0+
             or (
                 scheme
                 in [
                     (kMxfp4Static, kMxfp8Dynamic),
                     (kNvfp4Static, kNvfp4Dynamic),
-                    (kFp8StaticChannelSym, kFp8DynamicTokenSym),
                 ]
                 and p.has_device_capability(100)
+            )
+            # FP8 per-token/per-channel uses FlashInfer's TRTLLM-gen routed
+            # API, not generic cutlass_fused_moe. FlashInfer's TRTLLM-gen MoE
+            # launcher requires Blackwell-family GPUs.
+            or (
+                scheme == (kFp8StaticChannelSym, kFp8DynamicTokenSym)
+                and p.has_device_capability(100)
+                and has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe()
             )
         )
 
@@ -298,12 +308,32 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 "a1q_scale must not be None for FlashInfer FP8 "
                 "per-token/per-channel MoE"
             )
-            quant_scales = [
-                self.w1_scale,
-                self.w2_scale,
-            ]
-            fc1_expert_weights = w1
-            fc2_expert_weights = w2
+            packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+            result = flashinfer_trtllm_fp8_per_channel_scale_routed_moe(
+                topk_ids=packed_topk_ids,
+                routing_bias=None,
+                hidden_states=hidden_states,
+                hidden_states_scale=a1q_scale.contiguous(),
+                gemm1_weights=w1.view(torch.float8_e4m3fn),
+                gemm1_per_channel_weight_scale=self.w1_scale,
+                gemm1_per_channel_gate_weight_scale=self.w1_scale,
+                gemm2_weights=w2.view(torch.float8_e4m3fn),
+                gemm2_per_channel_weight_scale=self.w2_scale,
+                num_experts=global_num_experts,
+                top_k=topk_ids.shape[1],
+                n_group=None,
+                topk_group=None,
+                intermediate_size=self.moe_config.intermediate_size_per_partition,
+                local_expert_offset=self.ep_rank * self.num_experts,
+                local_num_experts=self.num_experts,
+                routed_scaling_factor=None,
+                use_routing_scales_on_input=False,
+                routing_method_type=1,
+                activation_type=activation_str_to_value_map[activation],
+                tune_max_num_tokens=max(self.max_capture_size, 1),
+            )
+            output.copy_(result)
+            return
         elif (
             self.quant_dtype == torch.float8_e4m3fn
             and not self.use_deepseek_fp8_block_scale
