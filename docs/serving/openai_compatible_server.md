@@ -60,7 +60,7 @@ We currently support the following OpenAI APIs:
 - [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Realtime API](#realtime-api) (`/v1/realtime`)
-    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#realtime-transcription).
 
 In addition, we have the following custom APIs:
 

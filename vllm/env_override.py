@@ -100,10 +100,9 @@ logger = init_logger(__name__)
 # it avoids unintentional cuda initialization from torch.cuda.is_available()
 os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 
-# see https://github.com/vllm-project/vllm/issues/10480
+# see https://github.com/vllm-project/vllm/issues/10480 and
+# https://github.com/vllm-project/vllm/issues/10619.
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-# see https://github.com/vllm-project/vllm/issues/10619
-torch._inductor.config.compile_threads = 1
 
 # Enable Triton autotuning result caching to disk by default.
 # Without this, Triton re-runs autotuning on every process restart,
@@ -554,7 +553,7 @@ def _apply_constrain_to_fx_strides_patch():
     _lowering.constrain_to_fx_strides = _patched
 
 
-if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
+if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0.dev"):
     import builtins as _builtins
     import pickle
 

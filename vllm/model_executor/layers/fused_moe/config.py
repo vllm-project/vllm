@@ -7,6 +7,7 @@ from typing import Union
 import torch
 
 from vllm.config import ParallelConfig, SchedulerConfig
+from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -762,6 +763,25 @@ def nvfp4_moe_quant_config(
     )
 
 
+def mxfp4_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for MXFP4 x MXFP4 MoE.
+    MXFP4 uses block scaling only (E8M0 scales, 32-element groups), with no
+    separate alphas / global activation scales in this config.
+    """
+    return FusedMoEQuantConfig.make(
+        "mxfp4",
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=None,
+    )
+
+
 def nvfp4_w4a16_moe_quant_config(
     g1_alphas: torch.Tensor,
     g2_alphas: torch.Tensor,
@@ -971,7 +991,11 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels
+        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+
+    @property
+    def needs_round_robin_routing_tables(self):
+        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
     @property
     def use_ag_rs_all2all_kernels(self):
@@ -1173,7 +1197,7 @@ class FusedMoEConfig:
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
 
-    moe_backend: str = "auto"
+    moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_act_and_mul: bool = True
@@ -1274,3 +1298,7 @@ class FusedMoEConfig:
     @property
     def use_nixl_ep_kernels(self):
         return self.moe_parallel_config.use_nixl_ep_kernels
+
+    @property
+    def needs_round_robin_routing_tables(self):
+        return self.moe_parallel_config.needs_round_robin_routing_tables

@@ -300,12 +300,12 @@ Full example: [examples/offline_inference/audio_language.py](../../examples/offl
 Speech-to-text models like Whisper have a maximum audio length they can process (typically 30 seconds). For longer audio files, vLLM provides a utility to intelligently split audio into chunks at quiet points to minimize cutting through speech.
 
 ```python
-import librosa
 from vllm import LLM, SamplingParams
 from vllm.multimodal.audio import split_audio
+from vllm.multimodal.media.audio import load_audio
 
 # Load long audio file
-audio, sr = librosa.load("long_audio.wav", sr=16000)
+audio, sr = load_audio("long_audio.wav", sr=16000)
 
 # Split into chunks at low-energy (quiet) regions
 chunks = split_audio(
@@ -780,6 +780,70 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### Pre-extracted Frame Sequences with `media_io_kwargs`
+
+When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.
+
+**Supported Parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `fps` | float | Frame rate of the original video |
+| `frames_indices` | list[int] | Indices of the actually sampled frames |
+| `total_num_frames` | int | Total frame count of the original video |
+| `duration` | float | Duration of the original video in seconds |
+| `do_sample_frames` | bool | Whether to perform frame sampling |
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+    # Client-side frame extraction
+    frames = extract_frames(video_path, num_frames=32)
+    frames_b64 = ",".join([encode_image(f) for f in frames])
+    video_url = f"data:video/jpeg;base64,{frames_b64}"
+
+    # Pass video metadata via media_io_kwargs
+    response = client.chat.completions.create(
+        model="your-multimodal-model",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": video_url}},
+                {"type": "text", "text": "Describe what happens in this video."}
+            ]
+        }],
+        extra_body={
+            "media_io_kwargs": {
+                "video": {
+                    "fps": 30.0,
+                    "frames_indices": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90,
+                                       100, 110, 120, 130, 140, 150, 160, 170,
+                                       180, 190, 200, 210, 220, 230, 240, 250,
+                                       260, 270, 280, 290, 300, 310],
+                    "total_num_frames": 900,
+                    "duration": 30.0,
+                }
+            }
+        },
+    )
+
+    print(response.choices[0].message.content)
+    ```
+
+**Why use `media_io_kwargs`?**
+
+When extracting frames client-side, the server loses important context about the original video:
+
+- **Temporal information**: Which frames were sampled and their positions in the original timeline
+- **Video duration**: How long the original video was
+- **Frame rate**: The original playback speed
+
+By passing this metadata, the model can better understand the temporal distribution of the sampled frames and whether important moments might have been skipped.
+
 #### Custom RGBA Background Color
 
 To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
@@ -832,7 +896,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    # Any format supported by librosa is supported
+    # Any format supported by soundfile/PyAV is supported
     audio_url = AudioAsset("winning_call").url
     audio_base64 = encode_base64_content_from_url(audio_url)
 

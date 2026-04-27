@@ -56,8 +56,12 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 
-def to_keys(int_ids: list[int]) -> list[OffloadKey]:
-    return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+def to_key(int_hash: int) -> OffloadKey:
+    return make_offload_key(str(int_hash).encode(), 0)
+
+
+def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
+    return [to_key(i) for i in int_hashes]
 
 
 class MockLoadStoreSpec(LoadStoreSpec):
@@ -115,7 +119,8 @@ class MockOffloadingSpec(OffloadingSpec):
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda keys: MockLoadStoreSpec(keys)
+        self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
+        self.manager.lookup.return_value = False
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
@@ -228,14 +233,14 @@ class RequestRunner:
         self.scheduler_connector: OffloadingConnector = scheduler_connector
 
         # extract mocked OffloadingManager of scheduler connector
-        connector_scheduler = scheduler_connector.connector_scheduler
-        assert connector_scheduler is not None
-        manager = connector_scheduler.manager
+        self.connector_scheduler = scheduler_connector.connector_scheduler
+        assert self.connector_scheduler is not None
+        manager = self.connector_scheduler.manager
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert len(connector_scheduler.config.kv_group_configs) == 1
-        kv_group_config = connector_scheduler.config.kv_group_configs[0]
+        assert len(self.connector_scheduler.config.kv_group_configs) == 1
+        kv_group_config = self.connector_scheduler.config.kv_group_configs[0]
         assert kv_group_config.gpu_block_size == gpu_block_size
         assert kv_group_config.offloaded_block_size == offloaded_block_size
 
