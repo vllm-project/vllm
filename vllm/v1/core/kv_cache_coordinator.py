@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.request import Request
 
@@ -56,6 +57,10 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
             kv_cache_spec_kinds=[
                 get_kv_cache_spec_kind(group.kv_cache_spec).value
+                for group in kv_cache_config.kv_cache_groups
+            ],
+            kv_cache_spec_sliding_windows=[
+                get_kv_cache_spec_sliding_window(group.kv_cache_spec)
                 for group in kv_cache_config.kv_cache_groups
             ],
         )

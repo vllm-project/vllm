@@ -52,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
@@ -1947,6 +1948,69 @@ def test_get_kv_cache_spec_kind_unknown_for_mixed_uniform_type_specs():
         },
     )
     assert get_kv_cache_spec_kind(uniform_mixed_spec) == KVCacheSpecKind.UNKNOWN
+
+
+def test_get_kv_cache_spec_sliding_window_reads_windowed_specs():
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+
+    assert get_kv_cache_spec_sliding_window(full_attention_spec) is None
+    assert get_kv_cache_spec_sliding_window(sliding_window_spec) == 128
+
+
+def test_get_kv_cache_spec_sliding_window_unwraps_uniform_type_specs():
+    uniform_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    mixed_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=256,
+            ),
+        },
+    )
+
+    assert get_kv_cache_spec_sliding_window(uniform_window_spec) == 128
+    assert get_kv_cache_spec_sliding_window(mixed_window_spec) is None
 
 
 def test_merge_mla_spec():
