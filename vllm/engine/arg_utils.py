@@ -335,6 +335,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             kwargs[name]["type"] = parse_dataclass
             kwargs[name]["help"] += _maybe_add_docs_url(dataclass_cls)
             kwargs[name]["help"] += f"\n\n{json_tip}"
+        elif type_hints == {bool, str, type(None)}:
+            # Optional-valued flag: bare flag -> True, value -> str.
+            kwargs[name]["type"] = str
+            kwargs[name]["nargs"] = "?"
+            kwargs[name]["const"] = True
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -801,16 +806,7 @@ class EngineArgs:
             "--served-model-name", **model_kwargs["served_model_name"]
         )
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
-        # This one is a special case because it can bool
-        # or str. TODO: Handle this in get_kwargs
-        model_group.add_argument(
-            "--hf-token",
-            type=str,
-            nargs="?",
-            const=True,
-            default=model_kwargs["hf_token"]["default"],
-            help=model_kwargs["hf_token"]["help"],
-        )
+        model_group.add_argument("--hf-token", **model_kwargs["hf_token"])
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
