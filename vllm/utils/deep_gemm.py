@@ -597,6 +597,7 @@ def get_paged_mqa_logits_metadata(
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
+    context_lens = context_lens.contiguous()
     next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
     num_slots = _paged_mqa_logits_schedule_slots(num_sms, next_n)
     kwargs = {} if indices is None else {"indices": indices}
