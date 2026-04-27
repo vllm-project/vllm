@@ -21,7 +21,7 @@ and N_QUANT_BLOCKS ue8m0 bytes.
 
 from vllm.triton_utils import tl, triton
 
-from .fused_indexer_q import _e2m1_nibble
+from .fused_indexer_q import _fp32x2_to_fp4x2
 
 
 # =============================================================================
@@ -575,9 +575,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
 
     inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
-    lo_nib = _e2m1_nibble(even_2d * inv_scale_col)  # (N_BLOCKS, HALF_BLOCK) uint8
-    hi_nib = _e2m1_nibble(odd_2d * inv_scale_col)
-    packed = lo_nib | (hi_nib << 4)
+    packed = _fp32x2_to_fp4x2(
+        even_2d * inv_scale_col, odd_2d * inv_scale_col
+    )  # (N_BLOCKS, HALF_BLOCK) uint8
     packed_flat = tl.reshape(packed, (TOKEN_STRIDE,))
 
     tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)

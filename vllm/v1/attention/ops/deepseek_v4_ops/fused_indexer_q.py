@@ -24,36 +24,22 @@ def _get_cos_sin(
 
 
 @triton.jit
-def _e2m1_nibble(x):
-    """Quantize fp32 x (already scale-divided) to E2M1 4-bit nibble in uint8.
-    Matches torch.bucketize with boundaries
-    [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0] and right=False (each boundary
-    belongs to the lower bucket), plus sign bit."""
-    abs_x = tl.minimum(tl.abs(x), 6.0)
-    code = tl.where(
-        abs_x <= 0.25,
-        0.0,
-        tl.where(
-            abs_x <= 0.75,
-            1.0,
-            tl.where(
-                abs_x <= 1.25,
-                2.0,
-                tl.where(
-                    abs_x <= 1.75,
-                    3.0,
-                    tl.where(
-                        abs_x <= 2.5,
-                        4.0,
-                        tl.where(abs_x <= 3.5, 5.0, tl.where(abs_x <= 5.0, 6.0, 7.0)),
-                    ),
-                ),
-            ),
-        ),
-    )
-    code_u8 = code.to(tl.uint8)
-    sign = ((x < 0) & (code_u8 != 0)).to(tl.uint8)
-    return code_u8 | (sign << 3)
+def _fp32x2_to_fp4x2(x_lo, x_hi):
+    asm = """
+{
+    .reg .b8 tmp;
+    cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;  // $1 is high nibble, $2 is low nibble
+    cvt.u32.u8 $0, tmp;
+}
+"""
+    return tl.inline_asm_elementwise(
+        asm,
+        constraints="=r,f,f",
+        args=[x_hi, x_lo],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    ).to(tl.uint8)
 
 
 @triton.jit
@@ -73,9 +59,7 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
     ue8m0 = (log2_ratio + 127.0).to(tl.uint8)
 
     inv_scale = 1.0 / scale
-    lo_nib = _e2m1_nibble(x_lo * inv_scale)
-    hi_nib = _e2m1_nibble(x_hi * inv_scale)
-    packed = lo_nib | (hi_nib << 4)
+    packed = _fp32x2_to_fp4x2(x_lo * inv_scale, x_hi * inv_scale)
     return packed, ue8m0
 
 
