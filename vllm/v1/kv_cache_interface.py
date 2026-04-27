@@ -357,7 +357,7 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_model_len, max_num_batched_tokens
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
         return max_blocks * self.page_size_bytes
 
@@ -409,7 +409,7 @@ class SlidingWindowSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_model_len, max_num_batched_tokens
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
         return max_blocks * self.page_size_bytes
 

@@ -1159,7 +1159,8 @@ def get_manager_for_kv_cache_spec(
     if isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
-                max_num_batched_tokens, max_model_len
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
             )
         )
     manager = manager_class(kv_cache_spec, **kwargs)
