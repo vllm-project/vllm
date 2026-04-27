@@ -32,6 +32,11 @@ class IPCTrainerSendWeightsArgs:
     """Ray ObjectRef to LLM handle (required for 'ray' mode)."""
     url: str | None = None
     """Base URL for HTTP endpoint (required for 'http' mode)."""
+    moe_routed_expert_global_ids: dict[str, list[int]] | None = None
+    """EP-sharded MoE routed weights: full_weight_name -> list of global routed
+    expert ids, one per leading-dim slice of the tensor. If set, the sender
+    will validate shape/length consistency before creating IPC handles and
+    forward the map to the receiver via ``WeightTransferUpdateInfo``."""
 
     def __post_init__(self):
         """Validate that required arguments are provided for the selected mode."""
@@ -252,10 +257,32 @@ class IPCWeightTransferEngine(
         shapes = []
         ipc_handles = []
 
+        ids_map = args.moe_routed_expert_global_ids
+
         for name, tensor in iterator:
             names.append(name)
             dtype_names.append(str(tensor.dtype).split(".")[-1])
             shapes.append(list(tensor.shape))
+
+            # Validate EP-sharded metadata before spending memory on IPC handles
+            # so shape/length mismatches fail fast at the sender.
+            if ids_map is not None and name in ids_map:
+                expected = ids_map[name]
+                if tensor.dim() == 3:
+                    if len(expected) != tensor.shape[0]:
+                        raise ValueError(
+                            f"trainer_send_weights: "
+                            f"moe_routed_expert_global_ids['{name}'] has length "
+                            f"{len(expected)} but tensor shape[0] is "
+                            f"{tensor.shape[0]}."
+                        )
+                else:
+                    if len(expected) != 1:
+                        raise ValueError(
+                            f"trainer_send_weights: non-3D tensor '{name}' "
+                            f"requires exactly 1 entry in "
+                            f"moe_routed_expert_global_ids, got {len(expected)}."
+                        )
 
             # Create IPC handle for this weight tensor
             # The tensor must remain in memory for IPC to work
@@ -274,6 +301,7 @@ class IPCWeightTransferEngine(
                     dtype_names=dtype_names,
                     shapes=shapes,
                     ipc_handles=ipc_handles,
+                    moe_routed_expert_global_ids=ids_map,
                 )
             )
             ray.get(
@@ -292,6 +320,7 @@ class IPCWeightTransferEngine(
                     "names": names,
                     "dtype_names": dtype_names,
                     "shapes": shapes,
+                    "moe_routed_expert_global_ids": ids_map,
                     "ipc_handles_pickled": pickled_handles,
                 }
             }

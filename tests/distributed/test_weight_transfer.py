@@ -814,3 +814,104 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     with pytest.raises(ValueError, match="IPC handle not found"):
         engine.receive_weights(update_info, lambda x: None)
+
+
+# --- Unit tests for EP-sharded routing fields (added for routed sharded load) ---
+
+
+class TestRoutedExpertGlobalIdsField:
+    """Tests for the new ``moe_routed_expert_global_ids`` field."""
+
+    def test_default_none_on_nccl(self):
+        info = NCCLWeightTransferUpdateInfo(
+            names=["w"], dtype_names=["float32"], shapes=[[4, 4]]
+        )
+        assert info.moe_routed_expert_global_ids is None
+
+    def test_default_none_on_ipc(self):
+        info = IPCWeightTransferUpdateInfo(
+            names=["w"],
+            dtype_names=["float32"],
+            shapes=[[4, 4]],
+            ipc_handles=[{"uuid": (lambda: None, ())}],
+        )
+        assert info.moe_routed_expert_global_ids is None
+
+    def test_ipc_serializes_with_asdict(self):
+        """asdict must preserve the new field for HTTP/Ray transport."""
+        from dataclasses import asdict
+
+        info = IPCWeightTransferUpdateInfo(
+            names=["w"],
+            dtype_names=["float32"],
+            shapes=[[2, 4, 4]],
+            ipc_handles=[{"uuid": (lambda: None, ())}],
+            moe_routed_expert_global_ids={"w": [3, 7]},
+        )
+        d = asdict(info)
+        assert d["moe_routed_expert_global_ids"] == {"w": [3, 7]}
+
+
+class TestNCCLRejectsRoutedSharded:
+    """NCCL backend does not support EP-sharded routed experts."""
+
+    def test_receive_weights_raises_not_implemented(self):
+        config = WeightTransferConfig(backend="nccl")
+        parallel_config = create_mock_parallel_config()
+        engine = NCCLWeightTransferEngine(config, parallel_config)
+        # Set model_update_group to bypass the "not initialized" guard.
+        engine.model_update_group = MagicMock()
+
+        info = NCCLWeightTransferUpdateInfo(
+            names=["w"],
+            dtype_names=["float32"],
+            shapes=[[4, 4]],
+            moe_routed_expert_global_ids={"w": [0]},
+        )
+
+        with pytest.raises(NotImplementedError, match="EP-sharded"):
+            engine.receive_weights(info, lambda ws: None)
+
+
+class TestIPCSenderValidation:
+    """trainer_send_weights fails fast on bad moe_routed_expert_global_ids."""
+
+    def _iter_tensor(self, *shape, device="cuda:0"):
+        t = torch.zeros(*shape, device=device)
+        return iter([("w", t)])
+
+    @pytest.mark.skipif(
+        torch.accelerator.device_count() < 1,
+        reason="Need at least 1 GPU for reduce_tensor.",
+    )
+    def test_shape_mismatch_3d_raises(self):
+        from vllm.distributed.weight_transfer.ipc_engine import (
+            IPCTrainerSendWeightsArgs,
+        )
+
+        args = IPCTrainerSendWeightsArgs(
+            mode="http",
+            url="http://unused",
+            moe_routed_expert_global_ids={"w": [0, 1, 2]},  # 3 ids, tensor has 2
+        )
+        with pytest.raises(ValueError, match="shape\\[0\\] is 2"):
+            IPCWeightTransferEngine.trainer_send_weights(
+                self._iter_tensor(2, 4, 4), args
+            )
+
+    @pytest.mark.skipif(
+        torch.accelerator.device_count() < 1,
+        reason="Need at least 1 GPU for reduce_tensor.",
+    )
+    def test_non_3d_requires_single_id(self):
+        from vllm.distributed.weight_transfer.ipc_engine import (
+            IPCTrainerSendWeightsArgs,
+        )
+
+        args = IPCTrainerSendWeightsArgs(
+            mode="http",
+            url="http://unused",
+            moe_routed_expert_global_ids={"w": [0, 1]},  # non-3D + 2 ids
+        )
+        with pytest.raises(ValueError, match="requires exactly 1 entry"):
+            IPCWeightTransferEngine.trainer_send_weights(self._iter_tensor(4, 4), args)

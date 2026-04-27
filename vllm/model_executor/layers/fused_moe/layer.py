@@ -1377,6 +1377,37 @@ class FusedMoE(PluggableLayer):
 
         return False if return_success else None
 
+    def _dispatch_one_expert(
+        self,
+        *,
+        param: torch.nn.Parameter,
+        loaded_expert: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        global_expert_id: int,
+        param_name_for_log: str,
+    ) -> bool:
+        """Load a single expert slice; shared by load_weights and
+        load_routed_expert_weights so quantization and TP handling stay in sync.
+        """
+        success = self.weight_loader(
+            param=param,
+            loaded_weight=loaded_expert,
+            weight_name=weight_name,
+            shard_id=shard_id,
+            expert_id=global_expert_id,
+            return_success=True,
+        )
+        if success:
+            logger.debug(
+                "Loaded expert %d of shard %s into %s for layer %s",
+                global_expert_id,
+                shard_id,
+                param_name_for_log,
+                self.layer_name,
+            )
+        return success
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
@@ -1411,23 +1442,110 @@ class FusedMoE(PluggableLayer):
                 # Unified loading logic for fused and non-fused experts
                 loaded_experts = experts_shard.unbind()
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
-                    success = self.weight_loader(
+                    if self._dispatch_one_expert(
                         param=param,
-                        loaded_weight=loaded_expert,
+                        loaded_expert=loaded_expert,
                         weight_name=weight_name,
                         shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        logger.debug(
-                            "Loaded expert %d of shard %s into %s for layer %s",
-                            expert_id,
-                            shard_id,
-                            param_name,
-                            self.layer_name,
-                        )
+                        global_expert_id=expert_id,
+                        param_name_for_log=param_name,
+                    ):
                         yield param_name
+
+    def load_routed_expert_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+        expert_ids_map: dict[str, list[int]],
+    ) -> Iterable[str]:
+        """Load EP-sharded routed expert weights using an explicit global-id map.
+
+        Unlike ``load_weights`` which assumes a 3D tensor stacks
+        ``global_num_experts`` experts in index order, this method accepts a 3D
+        tensor whose leading dimension is the local (EP-sharded) expert count.
+        The caller supplies ``expert_ids_map[expert_name]`` with the global
+        routed expert id for each leading-dim slice. The mapping is verified
+        explicitly against ``tensor.shape[0]``; no heuristic shape comparison
+        is used.
+
+        This method only handles **routed** experts. Shared experts
+        (DP-replicated) and MoE auxiliary tensors such as global scales / 1D
+        ``input_scale`` must be sent via the regular ``load_weights``
+        passthrough.
+
+        Args:
+            weights: Stream of ``(expert_name, loaded_weight)``. ``loaded_weight``
+                is either 3D ``[local_N, ...]`` (fused) or non-3D for a single
+                expert.
+            expert_ids_map: ``expert_name -> [global_id_0, ..., global_id_{N-1}]``.
+                A 3D tensor requires ``len == shape[0]``; non-3D requires
+                ``len == 1``.
+        """
+        if (expert_mapping := self.expert_mapping) is None:
+            raise ValueError(
+                "`self.expert_mapping` must be provided to use "
+                "`self.load_routed_expert_weights`."
+            )
+        for expert_name, loaded_weight in weights:
+            if expert_name not in expert_ids_map:
+                raise ValueError(
+                    f"load_routed_expert_weights: `{expert_name}` is missing "
+                    f"from expert_ids_map (available keys: "
+                    f"{list(expert_ids_map)[:5]}"
+                    f"{'...' if len(expert_ids_map) > 5 else ''})."
+                )
+            expert_ids = expert_ids_map[expert_name]
+            qual_name = f"{self.layer_name}.{expert_name}"
+            # Match weight_name as a trailing dotted-component suffix of
+            # qual_name to avoid the substring false-positives that
+            # ``weight_name in qual_name`` is prone to (e.g. matching
+            # ``experts.gate_up_proj`` against
+            # ``experts.gate_up_proj.weight_scale``).
+            parts = qual_name.split(".")
+            qual_suffixes = {".".join(parts[i:]) for i in range(len(parts))}
+            for param_name, weight_name, expert_id, shard_id in expert_mapping:
+                if weight_name not in qual_suffixes:
+                    continue
+                weight_name_r = qual_name.replace(weight_name, param_name)
+                param_name_r = weight_name_r.removeprefix(f"{self.layer_name}.")
+                param = getattr(self, param_name_r)
+
+                if loaded_weight.dim() == 3:
+                    # Existing protocol: for w1/w3 the ``expert_id`` slot
+                    # carries the shard index used to split the fused
+                    # gate/up tensor.
+                    if shard_id in {"w1", "w3"}:
+                        experts_shard = loaded_weight.chunk(2, dim=1)[expert_id]
+                    else:
+                        experts_shard = loaded_weight
+                    if experts_shard.shape[0] != len(expert_ids):
+                        raise ValueError(
+                            f"load_routed_expert_weights: shape mismatch for "
+                            f"{expert_name} (shard={shard_id}): tensor has "
+                            f"{experts_shard.shape[0]} experts but expert_ids "
+                            f"has {len(expert_ids)}."
+                        )
+                    slices = experts_shard.unbind()
+                else:
+                    if len(expert_ids) != 1:
+                        raise ValueError(
+                            f"load_routed_expert_weights: non-3D input for "
+                            f"{expert_name} requires exactly 1 expert_id, "
+                            f"got {len(expert_ids)}. Auxiliary tensors such "
+                            f"as global scales must be sent via load_weights "
+                            f"(passthrough), not the sharded path."
+                        )
+                    slices = (loaded_weight,)
+
+                for global_id, loaded_expert in zip(expert_ids, slices):
+                    if self._dispatch_one_expert(
+                        param=param,
+                        loaded_expert=loaded_expert,
+                        weight_name=weight_name_r,
+                        shard_id=shard_id,
+                        global_expert_id=global_id,
+                        param_name_for_log=param_name_r,
+                    ):
+                        yield param_name_r
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         def _maybe_make_contiguous(

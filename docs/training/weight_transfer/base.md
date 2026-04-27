@@ -53,6 +53,36 @@ class WeightTransferUpdateInfo(ABC):
 
 When `is_checkpoint_format=True` (the default), vLLM applies layerwise weight processing (repacking, renaming, etc.) on the received weights before loading them. Set to `False` if the trainer has already converted weights to the kernel format expected by the model.
 
+### `moe_routed_expert_global_ids` (EP-sharded MoE)
+
+For RL workflows where the trainer wants to send only the local-EP-rank's slice of routed experts (instead of the full expert list), set the optional `moe_routed_expert_global_ids` field on `WeightTransferUpdateInfo`:
+
+```python
+@dataclass
+class WeightTransferUpdateInfo(ABC):
+    is_checkpoint_format: bool = True
+    moe_routed_expert_global_ids: dict[str, list[int]] | None = None
+```
+
+Semantics:
+
+- Keys are full weight names (matching what the trainer ships) of MoE routed-expert tensors only — typically `model.layers.<i>.mlp.experts.gate_up_proj` and `.down_proj`.
+- Values are `list[int]` of *global* routed-expert ids, one per leading-dim slice of the tensor. For a 3D tensor `[N, ...]`, `len(ids) == N`. For a non-3D single-expert tensor, `len(ids) == 1`.
+- Weights present in this map are dispatched through `FusedMoE.load_routed_expert_weights`, which writes only the local-rank's expert slots and silently skips experts mapped elsewhere.
+- Weights not present in this map (shared experts, global scales, attention, embeddings, etc.) fall through to `model.load_weights` unchanged.
+
+The trainer side queries the routed-expert layout once at startup:
+
+```python
+# Trainer: query layout per FusedMoE layer
+layout = llm.collective_rpc("get_moe_routed_ep_layout")[rank]
+# layout = {layer_name: {"ep_rank", "ep_size", "local_to_global_routed", ...}}
+```
+
+and uses `local_to_global_routed` to decide which global expert ids each rollout rank should receive, packing them into 3D `[local_routed_E, ...]` tensors.
+
+This path is supported on the IPC backend (per-tensor application semantics required); the NCCL backend raises `NotImplementedError` if `moe_routed_expert_global_ids` is non-`None` because packed broadcast cannot dispatch per-tensor routing.
+
 ## Implementing a Custom Engine
 
 To create a custom weight transfer backend:

@@ -64,6 +64,7 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+logger.warning("[R3-PROOF] gpu_worker.py module imported at runtime")
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -516,6 +517,13 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        logger.warning(
+            "[R3-PROOF] Worker.initialize_from_config ENTERED; class=%s "
+            "enable_return_routed_experts=%s model_config_id=%s",
+            type(self).__name__,
+            self.model_config.enable_return_routed_experts,
+            id(self.model_config),
+        )
 
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
@@ -537,6 +545,11 @@ class Worker(WorkerBase):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+        logger.warning(
+            "[R3-PROOF] gpu_worker.initialize_from_config gate reached: "
+            "enable_return_routed_experts=%s",
+            self.model_config.enable_return_routed_experts,
+        )
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
 
@@ -972,6 +985,11 @@ class Worker(WorkerBase):
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
 
         model = self.model_runner.model
+        ids_map = typed_update_info.moe_routed_expert_global_ids
+
+        # Aggregate param names loaded by either path; used for an end-of-call
+        # missing-weights warning that matches vLLM's AutoWeightsLoader semantics.
+        loaded_names: set[str] = set()
 
         if typed_update_info.is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
@@ -979,15 +997,23 @@ class Worker(WorkerBase):
                 initialize_layerwise_reload,
             )
 
-            # Use layerwise reload pattern for checkpoint format weights
             with torch.device(self.device):
                 initialize_layerwise_reload(model)
+                load_cb = self._make_routed_load_callback(
+                    model, ids_map, loaded_names_out=loaded_names
+                )
                 self.weight_transfer_engine.receive_weights(
                     typed_update_info,
-                    load_weights=model.load_weights,
+                    load_weights=load_cb,
                 )
                 finalize_layerwise_reload(model, self.model_config)
         else:
+            if ids_map is not None:
+                raise NotImplementedError(
+                    "update_weights: moe_routed_expert_global_ids is only "
+                    "supported when is_checkpoint_format=True."
+                )
+
             # Weights are already in kernel format, copy directly
             def load_weights_direct(
                 weights: list[tuple[str, torch.Tensor]],
@@ -995,15 +1021,131 @@ class Worker(WorkerBase):
                 for name, weight in weights:
                     param = model.get_parameter(name)
                     param.copy_(weight)
+                    loaded_names.add(name)
 
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
                 load_weights=load_weights_direct,
             )
 
+        expected = set(getattr(typed_update_info, "names", []) or [])
+        missing = expected - loaded_names
+        if missing:
+            sample = sorted(missing)[:5]
+            logger.warning(
+                "update_weights: %d tensors not loaded into any parameter "
+                "(sample: %s%s). Possible causes: name did not match any "
+                "FusedMoE layer, the model load_weights path skipped it, or "
+                "the sharded routing misclassified the weight.",
+                len(missing),
+                sample,
+                "..." if len(missing) > 5 else "",
+            )
+
         # NCCL broadcast/packed path are asynchronous.
         # Sync here so the next step uses the new weights.
         torch.accelerator.synchronize()
+
+    def _make_routed_load_callback(
+        self,
+        model: nn.Module,
+        ids_map: dict[str, list[int]] | None,
+        loaded_names_out: set[str],
+    ) -> Callable[[list[tuple[str, torch.Tensor]]], None]:
+        """Build the load-weights callback for ``update_weights``.
+
+        When ``ids_map`` is None the callback is equivalent to
+        ``model.load_weights`` and the return value is collected into
+        ``loaded_names_out``.
+
+        When ``ids_map`` is not None the callback preserves arrival order
+        (one weight at a time, no batching) so order-sensitive flows such as
+        GGUF ``is_gguf_weight_type`` setting before data materialization still
+        work. Each weight whose name is in ``ids_map`` is dispatched through
+        ``FusedMoE.load_routed_expert_weights`` for the matching layer
+        (longest-prefix match); everything else falls back to
+        ``model.load_weights``.
+        """
+        from collections.abc import Iterable as IterableABC
+
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+
+        def _collect(ret: Any) -> None:
+            # Handle set / Iterable / None return shapes. Use isinstance rather
+            # than a bare except to avoid swallowing real TypeErrors from
+            # generators.
+            if ret is None:
+                return
+            if isinstance(ret, IterableABC):
+                loaded_names_out.update(ret)
+            # Non-iterable return means the loader wrote synchronously and
+            # reported nothing; leave loaded_names_out unchanged.
+
+        if ids_map is None:
+
+            def cb_passthrough(
+                weights: list[tuple[str, torch.Tensor]],
+            ) -> None:
+                _collect(model.load_weights(weights))  # type: ignore[operator]
+
+            return cb_passthrough
+
+        moes: list[tuple[str, FusedMoE]] = [
+            (m.layer_name, m) for m in model.modules() if isinstance(m, FusedMoE)
+        ]
+        # Longest-prefix match guards against nested MTP / speculation layers.
+        moes.sort(key=lambda kv: -len(kv[0]))
+
+        def cb_routed(weights: list[tuple[str, torch.Tensor]]) -> None:
+            for name, tensor in weights:
+                matched_moe: FusedMoE | None = None
+                matched_expert_name: str | None = None
+                for layer_name, moe in moes:
+                    if name.startswith(layer_name + "."):
+                        if name in ids_map:
+                            matched_moe = moe
+                            matched_expert_name = name[len(layer_name) + 1 :]
+                        break  # stop at the first (longest) prefix match
+                if matched_moe is not None and matched_expert_name is not None:
+                    _collect(
+                        matched_moe.load_routed_expert_weights(
+                            [(matched_expert_name, tensor)],
+                            {matched_expert_name: ids_map[name]},
+                        )
+                    )
+                else:
+                    _collect(model.load_weights([(name, tensor)]))  # type: ignore[operator]
+
+        return cb_routed
+
+    def get_moe_routed_ep_layout(self) -> dict[str, dict[str, Any]]:
+        """Return per-FusedMoE-layer routed-expert EP layout.
+
+        Used by the trainer side (e.g. mbridge) to decide which routed experts
+        each rollout rank should receive. Shared experts and
+        ``local_num_experts`` (which can be inflated by fused shared experts)
+        are deliberately omitted.
+        """
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+
+        layout: dict[str, dict[str, Any]] = {}
+        for m in self.model_runner.model.modules():
+            if not isinstance(m, FusedMoE):
+                continue
+            if m._expert_map is not None:
+                local_to_global = (m._expert_map != -1).nonzero().flatten().tolist()
+            else:
+                # EP=1: all routed experts are local in global order.
+                local_to_global = list(range(m.global_num_experts))
+            layout[m.layer_name] = {
+                "ep_rank": m.ep_rank,
+                "ep_size": m.ep_size,
+                "local_num_routed_experts": len(local_to_global),
+                "global_num_routed_experts": m.global_num_experts,
+                "num_fused_shared_experts": m.num_fused_shared_experts,
+                "local_to_global_routed": local_to_global,
+            }
+        return layout
 
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
