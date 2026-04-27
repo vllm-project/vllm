@@ -209,6 +209,48 @@ def test_expert_cache_keeps_requested_wave_resident_when_reusing_slots():
     assert cache.resident_expert_ids() == {0, 3}
 
 
+def test_expert_cache_can_keep_prefetched_experts_resident():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=3,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+    )
+
+    cache.ensure_experts_resident(
+        {0: 0, 1: 0},
+        evict_unrequested=False,
+    )
+    cache.ensure_experts_resident(
+        {2: 5},
+        evict_unrequested=False,
+    )
+
+    assert cache.resident_expert_ids() == {0, 1, 2}
+
+
+def test_expert_cache_protects_current_prefetch_wave_from_eviction():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+    )
+
+    cache.ensure_experts_resident(
+        {0: 100, 1: 100},
+        evict_unrequested=False,
+    )
+    cache.ensure_experts_resident(
+        {2: 1, 3: 2},
+        evict_unrequested=False,
+    )
+
+    assert cache.resident_expert_ids() == {2, 3}
+
+
 def test_expert_cache_retires_loaded_experts():
     layer = _MockMoELayer()
     cache = ExpertCache.from_cpu_sources(

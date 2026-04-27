@@ -10,20 +10,36 @@ stages can consume it behind the --moe-cpu-offload master flag.
 
 from __future__ import annotations
 
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
+from math import ceil
 from typing import Any
 
 from vllm.config import MoEOffloadConfig
 from vllm.logger import init_logger
 
 _PATCHED_ATTR = "_moe_offload_cli_patched"
-_ACTIVE_EXPERT_FETCH_METHOD = "passive"
+_CASE_1_TRANSFER_METHOD = "passive"
+_CASE_2_MODE = "prefetch"
+_LOW_MEMORY_PREFETCH_GPU_UTILIZATION = 0.5
+_LOW_MEMORY_PREFETCH_MAX_MODEL_LEN = 196_608
 
 logger = init_logger(__name__)
 
 
 def _parser_has_option(parser: ArgumentParser, option: str) -> bool:
     return any(option in action.option_strings for action in parser._actions)
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ArgumentTypeError(
+            "--moe-gpu-prefetch must be a positive integer"
+        ) from exc
+    if parsed <= 0:
+        raise ArgumentTypeError("--moe-gpu-prefetch must be a positive integer")
+    return parsed
 
 
 def _add_moe_offload_args(parser: ArgumentParser) -> ArgumentParser:
@@ -43,13 +59,42 @@ def _add_moe_offload_args(parser: ArgumentParser) -> ArgumentParser:
             "Default: disabled."
         ),
     )
+    group.add_argument(
+        "--moe-gpu-prefetch",
+        type=_positive_int,
+        default=MoEOffloadConfig.gpu_prefetch,
+        metavar="N",
+        help=(
+            "Enable sparse-MoE Case 2 GPU active expert prefetch mode and "
+            "keep up to N active experts resident on GPU. Case 2 takes "
+            "precedence over --moe-cpu-offload. Default: disabled."
+        ),
+    )
     return parser
 
 
 def _make_config_from_args(args_obj: Any) -> MoEOffloadConfig:
+    gpu_prefetch = getattr(args_obj, "moe_gpu_prefetch", None)
+    if gpu_prefetch is not None:
+        return MoEOffloadConfig(
+            enabled=True,
+            mode=_CASE_2_MODE,
+            gpu_prefetch=int(gpu_prefetch),
+            effective_gpu_prefetch=int(gpu_prefetch),
+        )
     return MoEOffloadConfig(
         enabled=bool(getattr(args_obj, "moe_cpu_offload", False)),
+        mode="passive" if getattr(args_obj, "moe_cpu_offload", False) else "disabled",
     )
+
+
+def _effective_gpu_prefetch(
+    requested: int,
+    active_experts: int | None,
+) -> int:
+    if active_experts is None or requested >= active_experts:
+        return requested
+    return ceil(active_experts * 1.5)
 
 
 def _get_num_experts(model_config: Any) -> int | None:
@@ -90,6 +135,27 @@ def _get_active_expert_count(model_config: Any) -> int | None:
     return None
 
 
+def _maybe_cap_low_memory_prefetch_max_model_len(
+    vllm_config: Any,
+    explicit_max_model_len: int | None,
+) -> tuple[int, int] | None:
+    if explicit_max_model_len is not None:
+        return None
+
+    cache_config = getattr(vllm_config, "cache_config", None)
+    gpu_memory_utilization = getattr(cache_config, "gpu_memory_utilization", 1.0)
+    if float(gpu_memory_utilization) > _LOW_MEMORY_PREFETCH_GPU_UTILIZATION:
+        return None
+
+    model_config = getattr(vllm_config, "model_config", None)
+    max_model_len = getattr(model_config, "max_model_len", None)
+    if max_model_len is None or max_model_len <= _LOW_MEMORY_PREFETCH_MAX_MODEL_LEN:
+        return None
+
+    model_config.max_model_len = _LOW_MEMORY_PREFETCH_MAX_MODEL_LEN
+    return int(max_model_len), _LOW_MEMORY_PREFETCH_MAX_MODEL_LEN
+
+
 def patch_engine_args() -> None:
     """Patch EngineArgs with Stage-1 MoE offload CLI/config plumbing."""
     from vllm.engine.arg_utils import EngineArgs
@@ -111,6 +177,11 @@ def patch_engine_args() -> None:
         engine_args.moe_cpu_offload = bool(
             getattr(args, "moe_cpu_offload", MoEOffloadConfig.enabled)
         )
+        engine_args.moe_gpu_prefetch = getattr(
+            args,
+            "moe_gpu_prefetch",
+            MoEOffloadConfig.gpu_prefetch,
+        )
         engine_args.moe_offload_config = _make_config_from_args(engine_args)
         return engine_args
 
@@ -120,13 +191,56 @@ def patch_engine_args() -> None:
         model_config = getattr(vllm_config, "model_config", None)
         is_moe_model = bool(getattr(model_config, "is_moe", False))
         if moe_offload_config.enabled and not is_moe_model:
+            requested_case = moe_offload_config.mode
+            moe_offload_config = MoEOffloadConfig(enabled=False)
+            logger.info(
+                "MoE offload ignored: %s was requested, but the model is not "
+                "a MoE model.",
+                requested_case,
+            )
+        elif moe_offload_config.enabled and moe_offload_config.mode == "prefetch":
+            self.enforce_eager = True
+            if model_config is not None:
+                model_config.enforce_eager = True
+            num_experts = _get_num_experts(model_config)
+            active_experts = _get_active_expert_count(model_config)
+            requested_prefetch = int(moe_offload_config.gpu_prefetch or 1)
+            effective_prefetch = _effective_gpu_prefetch(
+                requested_prefetch,
+                active_experts,
+            )
             moe_offload_config = MoEOffloadConfig(
-                enabled=False,
+                enabled=True,
+                mode="prefetch",
+                gpu_prefetch=requested_prefetch,
+                effective_gpu_prefetch=effective_prefetch,
+            )
+            max_model_len_cap = _maybe_cap_low_memory_prefetch_max_model_len(
+                vllm_config,
+                getattr(self, "max_model_len", None),
             )
             logger.info(
-                "MoE CPU offload ignored: --moe-cpu-offload was set, "
-                "but the model is not a MoE model."
+                "MoE GPU prefetch enabled: total experts=%s, active experts=%s, "
+                "requested prefetch=%s, effective prefetch=%s.",
+                num_experts if num_experts is not None else "unknown",
+                active_experts if active_experts is not None else "unknown",
+                requested_prefetch,
+                effective_prefetch,
             )
+            if max_model_len_cap is not None:
+                original_max_model_len, capped_max_model_len = max_model_len_cap
+                logger.info(
+                    "MoE GPU prefetch capped max model length from %s to %s "
+                    "because gpu_memory_utilization is <= %.2f.",
+                    original_max_model_len,
+                    capped_max_model_len,
+                    _LOW_MEMORY_PREFETCH_GPU_UTILIZATION,
+                )
+            if getattr(self, "moe_cpu_offload", False):
+                logger.info(
+                    "MoE CPU offload ignored: --moe-gpu-prefetch takes "
+                    "precedence over --moe-cpu-offload."
+                )
         elif moe_offload_config.enabled:
             self.enforce_eager = True
             if model_config is not None:
@@ -135,13 +249,14 @@ def patch_engine_args() -> None:
             active_experts = _get_active_expert_count(model_config)
             moe_offload_config = MoEOffloadConfig(
                 enabled=True,
+                mode="passive",
             )
             logger.info(
                 "MoE CPU offload enabled: total experts=%s, active experts=%s, "
                 "active expert transfer=%s.",
                 num_experts if num_experts is not None else "unknown",
                 active_experts if active_experts is not None else "unknown",
-                _ACTIVE_EXPERT_FETCH_METHOD,
+                _CASE_1_TRANSFER_METHOD,
             )
         vllm_config.moe_offload_config = moe_offload_config
         return vllm_config

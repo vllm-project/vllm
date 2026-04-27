@@ -9,9 +9,15 @@ from typing import Literal
 
 import torch
 
+from vllm.logger import init_logger
+
 ExpertState = Literal["loading", "resident", "executing", "evicting"]
 GPU_MEMORY_RETRY_SECONDS = 5
 GPU_MEMORY_RETRY_LIMIT = 10
+PAGER_LOG_INTERVAL_SECONDS = 5.0
+MAX_LOGGED_EXPERT_IDS = 16
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -73,6 +79,7 @@ class ExpertCache:
         self._free_slots = list(range(self._slot_count))
         self._bytes_by_expert = self._compute_bytes_by_expert()
         self._target_device = self.expert_tensors[0].target.device
+        self._last_pager_summary_time = 0.0
 
     @classmethod
     def from_layer(
@@ -256,11 +263,15 @@ class ExpertCache:
             raise RuntimeError("No free MoE offload GPU expert slots are available")
         return self._free_slots.pop(0)
 
-    def _evict_one(self) -> None:
+    def _evict_one(self, protected_expert_ids: set[int] | None = None) -> None:
+        protected_expert_ids = protected_expert_ids or set()
         candidates = [
             entry
             for entry in self.active_experts.values()
-            if entry.state != "executing"
+            if (
+                entry.state != "executing"
+                and entry.expert_id not in protected_expert_ids
+            )
         ]
         if not candidates:
             raise RuntimeError("No evictable MoE experts are available")
@@ -283,15 +294,67 @@ class ExpertCache:
             self._free_slots.sort()
         del self.active_experts[expert_id]
 
-    def _ensure_capacity_for(self, expert_id: int) -> None:
+    def _ensure_capacity_for(
+        self,
+        expert_id: int,
+        protected_expert_ids: set[int] | None = None,
+    ) -> None:
         if expert_id in self.active_experts:
             return
         while len(self.active_experts) >= self.active_expert_budget:
-            self._evict_one()
+            self._evict_one(protected_expert_ids)
+
+    @staticmethod
+    def _format_expert_ids(expert_ids: set[int]) -> str:
+        sorted_ids = sorted(expert_ids)
+        visible_ids = sorted_ids[:MAX_LOGGED_EXPERT_IDS]
+        suffix = (
+            f", ...(+{len(sorted_ids) - MAX_LOGGED_EXPERT_IDS})"
+            if len(sorted_ids) > MAX_LOGGED_EXPERT_IDS
+            else ""
+        )
+        return f"[{', '.join(str(expert_id) for expert_id in visible_ids)}{suffix}]"
+
+    def _log_pager_state(
+        self,
+        *,
+        event: str,
+        working_experts: set[int],
+        missing_experts: set[int],
+        force: bool = False,
+    ) -> None:
+        if self.use_identity_slots:
+            return
+
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_pager_summary_time < PAGER_LOG_INTERVAL_SECONDS
+        ):
+            return
+        self._last_pager_summary_time = now
+
+        active_experts = set(self.active_experts)
+        logger.info(
+            "MoE expert pager layer=%d event=%s active_model_list=%s "
+            "working_model_list=%s missing_model_list=%s resident=%d/%d "
+            "free_slots=%d step=%d",
+            self.layer_id,
+            event,
+            self._format_expert_ids(active_experts),
+            self._format_expert_ids(working_experts),
+            self._format_expert_ids(missing_experts),
+            len(active_experts),
+            self.active_expert_budget,
+            len(self._free_slots),
+            self.step,
+        )
 
     def ensure_experts_resident(
         self,
         expert_token_counts: dict[int, int],
+        *,
+        evict_unrequested: bool = True,
     ) -> None:
         """Load demanded experts synchronously and update LRU/hotness stats."""
         if not expert_token_counts:
@@ -307,8 +370,16 @@ class ExpertCache:
                 f"active_expert_staging_slots={self.active_expert_budget}. "
                 "Use smaller routed waves or reduce batch size."
             )
-        if not self.use_identity_slots:
-            required_experts = set(expert_token_counts)
+        required_experts = set(expert_token_counts)
+        missing_experts = required_experts - set(self.active_experts)
+        if missing_experts:
+            self._log_pager_state(
+                event="miss",
+                working_experts=required_experts,
+                missing_experts=missing_experts,
+                force=True,
+            )
+        if not self.use_identity_slots and evict_unrequested:
             for expert_id in list(self.active_experts):
                 if expert_id not in required_experts:
                     self._evict_expert(expert_id)
@@ -317,7 +388,7 @@ class ExpertCache:
         for expert_id, token_count in sorted(
             expert_token_counts.items(), key=lambda item: (-item[1], item[0])
         ):
-            self._ensure_capacity_for(expert_id)
+            self._ensure_capacity_for(expert_id, required_experts)
             entry = self.active_experts.get(expert_id)
             if entry is None:
                 slot_id = self._allocate_slot(expert_id)
@@ -337,6 +408,11 @@ class ExpertCache:
                 entry.state = "resident"
                 entry.last_used_step = self.step
                 entry.recent_token_count = token_count
+        self._log_pager_state(
+            event="summary",
+            working_experts=required_experts,
+            missing_experts=set(),
+        )
 
     def resident_expert_ids(self) -> set[int]:
         return set(self.active_experts)

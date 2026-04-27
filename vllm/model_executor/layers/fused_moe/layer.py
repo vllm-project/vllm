@@ -613,9 +613,45 @@ class FusedMoE(PluggableLayer):
         )
 
     @property
-    def moe_cpu_offload_enabled(self) -> bool:
+    def moe_offload_mode(self) -> str:
         moe_config = getattr(self.vllm_config, "moe_offload_config", None)
-        return bool(moe_config is not None and moe_config.enabled)
+        if moe_config is None or not moe_config.enabled:
+            return "disabled"
+        return getattr(moe_config, "mode", "passive")
+
+    @property
+    def moe_cpu_offload_enabled(self) -> bool:
+        return self.moe_offload_mode in {"passive", "prefetch"}
+
+    @property
+    def moe_passive_offload_enabled(self) -> bool:
+        return self.moe_offload_mode == "passive"
+
+    @property
+    def moe_gpu_prefetch_enabled(self) -> bool:
+        return self.moe_offload_mode == "prefetch"
+
+    @property
+    def moe_gpu_prefetch_budget(self) -> int | None:
+        if not self.moe_gpu_prefetch_enabled:
+            return None
+        moe_config = getattr(self.vllm_config, "moe_offload_config", None)
+        budget = getattr(moe_config, "effective_gpu_prefetch", None)
+        if budget is None:
+            return None
+        return max(1, min(int(budget), int(self.local_num_experts)))
+
+    @property
+    def moe_gpu_startup_prefetch_enabled(self) -> bool:
+        if not self.moe_gpu_prefetch_enabled:
+            return False
+        cache_config = getattr(self.vllm_config, "cache_config", None)
+        gpu_memory_utilization = getattr(
+            cache_config,
+            "gpu_memory_utilization",
+            1.0,
+        )
+        return float(gpu_memory_utilization) > 0.5
 
     def maybe_init_moe_offload_cache(self) -> None:
         if not self.moe_cpu_offload_enabled or self.moe_offload_cache is not None:
@@ -641,10 +677,16 @@ class FusedMoE(PluggableLayer):
             device = torch.device("cuda", torch.cuda.current_device())
         self.moe_offload_cache = ExpertCache.from_cpu_sources(
             layer_id=self.layer_id,
-            active_expert_budget=None,
+            active_expert_budget=self.moe_gpu_prefetch_budget,
             sources=sources,
             device=device,
         )
+        if self.moe_gpu_startup_prefetch_enabled:
+            prefetch_count = self.moe_gpu_prefetch_budget or 1
+            self.moe_offload_cache.ensure_experts_resident(
+                {expert_id: 0 for expert_id in range(prefetch_count)},
+                evict_unrequested=False,
+            )
         for name in sources:
             if name in ("w13_weight", "w2_weight", "w13_bias", "w2_bias"):
                 replace_parameter(self, name, self.moe_offload_cache.target_for(name))
