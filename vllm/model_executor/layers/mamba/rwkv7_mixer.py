@@ -688,6 +688,24 @@ class RWKV7Attention(nn.Module, MambaBase):
             # chunk_rwkv7 takes (a=-kk, b=kk*a_gate) — fla's parameterization
             a_chunk = -kk_4d
             b_chunk = kk_4d * a_4d
+            # In prefix-cache ('all') mode the chunk size must align with
+            # ``mamba_block_size`` so each cache block corresponds to exactly
+            # one chunk's end-state — ``scatter_intermediate_recurrent_blocks``
+            # samples ``varlen_states`` at stride
+            # ``block_size // chunk_size`` and would silently drop writes
+            # if that stride collapses to <1. The DPLR chunk kernel only has
+            # tuned configs for chunk_size 16 and 64, so the cache spec
+            # validates ``mamba_block_size`` against that set above.
+            if is_all:
+                assert m.mamba_block_size is not None
+                chunk_size: int = m.mamba_block_size
+            else:
+                chunk_size = 64
+            assert chunk_size in (16, 64), (
+                f"mamba_block_size must be 16 or 64 for RWKV-7 prefix caching "
+                f"(the only sizes the chunk kernel is tuned for); got "
+                f"{chunk_size}."
+            )
             core_out, final_state, varlen_states = chunk_rwkv7(
                 r=r_4d,
                 w=w_4d,
@@ -702,7 +720,7 @@ class RWKV7Attention(nn.Module, MambaBase):
                 # Our log-decay is `-0.6065 * sigmoid(...)`, which sits in
                 # (-0.607, 0] — well inside the safe-gate range.
                 safe_gate=True,
-                chunk_size=64,
+                chunk_size=chunk_size,
                 return_varlen_states=is_all,
             )
         # Write per-sequence final state to the last_scheduled cache slot.
@@ -720,7 +738,8 @@ class RWKV7Attention(nn.Module, MambaBase):
             # cu_seqlens for the prefill subset:
             cu_seqlens_p = cu_seqlens[num_decodes:] - cu_seqlens[num_decodes]
             cu_seqlens_p = cu_seqlens_p.to(torch.long)
-            chunk_size = 64
+            # ``chunk_size`` was bound above to either ``mamba_block_size``
+            # (so chunk_stride == 1 in scatter) or 64 for the non-prefix path.
             # Number of chunks per sequence = cdiv(seq_len, chunk_size).
             # varlen_states is laid out over the whole packed batch, including
             # decode chunks before the prefill region.
