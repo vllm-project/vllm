@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
+    "mimo_v2_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
@@ -63,7 +64,8 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
+RejectionSampleMethod = Literal["standard", "synthetic"]
+DraftSampleMethod = Literal["greedy", "gumbel"]
 
 
 @config
@@ -183,11 +185,11 @@ class SpeculativeConfig:
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
 
-    rejection_sample_method: RejectionSampleMethod = "strict"
-    """Whether to use strict (target and draft sampled tokens match exactly)
-    or probabilistic rejection sampling. Both respect the target model
-    distribution, but the latter yields a higher acceptance rate at the cost
-    of more memory to cache draft logits."""
+    rejection_sample_method: RejectionSampleMethod = "standard"
+    """The rejection sampling method to use. 'standard' uses probabilistic
+    rejection sampling (with or without cached draft logits, controlled by
+    draft_sample_method). 'synthetic' accepts draft tokens with a decaying
+    probability calibrated to synthetic_acceptance_rate."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -248,6 +250,14 @@ class SpeculativeConfig:
             )
         return SpeculativeConfig._acceptance_length_to_rates(length, n)
 
+    draft_sample_method: DraftSampleMethod = "greedy"
+    """How the draft model samples tokens. 'greedy' always picks the argmax
+    token, and the draft probabilities are treated as one-hot during rejection
+    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
+    draft logits are used for the probability ratio test during rejection
+    sampling. This comes at the cost of additional GPU memory usage. This
+    parameter currently only applies to Model Runner V2."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -287,12 +297,22 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "glm_moe_dsa"):
+        if hf_config.model_type in (
+            "deepseek_v3",
+            "deepseek_v32",
+            "glm_moe_dsa",
+        ):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+            )
+        if hf_config.model_type == "deepseek_v4":
+            hf_config.model_type = "deepseek_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["DeepSeekV4MTPModel"]}
             )
         if hf_config.model_type in ("pangu_ultra_moe"):
             hf_config.model_type = "pangu_ultra_moe_mtp"
@@ -310,6 +330,48 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["MiMoMTPModel"],
+                }
+            )
+
+        if (arch := hf_config.architectures[0]) in (
+            "MiMoV2ProForCausalLM",
+            "MiMoV2OmniForCausalLM",
+        ):
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS,
+            )
+
+            mtp_arch_maps = {
+                "MiMoV2ProForCausalLM": "MiMoV2MTPModel",
+                "MiMoV2OmniForCausalLM": "MiMoV2OmniMTPModel",
+            }
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": [mtp_arch_maps[arch]],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
                 }
             )
 

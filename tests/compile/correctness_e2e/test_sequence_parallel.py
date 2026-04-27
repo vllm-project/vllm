@@ -261,6 +261,8 @@ def _compare_sp(
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
+    if not use_inductor_graph_partition:
+        compilation_config["splitting_ops"] = []
 
     tp_sp_args = [
         *common_args,
