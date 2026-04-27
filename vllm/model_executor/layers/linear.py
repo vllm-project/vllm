@@ -371,26 +371,22 @@ class ReplicatedLinear(LinearBase):
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
-
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        # GGUF stores a single-output nn.Linear weight (e.g. an MoE
-        # shared_expert_gate of shape [1, hidden]) as a 1-D tensor of
-        # length hidden. Add the leading 1 so the shapes match.
-        # Gated on is_gguf_weight: HF safetensors store these as 2-D, so
-        # any non-GGUF caller hitting a 1-D vs [1, hidden] mismatch is a
-        # real bug and should still fall through to the assert below.
+        # GGUF omits the leading 1 on single-output weights; unsqueeze before
+        # materialize so UninitializedParameter gets shape [1, hidden], not [hidden].
         if (
             is_gguf_weight
-            and param.dim() == loaded_weight.dim() + 1
-            and param.size(0) == 1
-            and param.shape[1:] == loaded_weight.shape
+            and self.output_size == 1
+            and loaded_weight.dim() == 1
+            and loaded_weight.size(0) == self.input_size
         ):
             loaded_weight = loaded_weight.unsqueeze(0)
+
+        # Materialize GGUF UninitializedParameter
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
+            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
 
         assert param.size() == loaded_weight.size(), (
             f"Tried to load weights of size {loaded_weight.size()}"
@@ -719,16 +715,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if isinstance(loaded_shard_id, tuple) and (
             is_gguf_weight or is_gguf_weight_type
         ):
-            # GGUF can pack what the framework loads as separate slots into
-            # a single on-disk tensor (we hit this with Qwen3.5 GDN's
-            # attn_qkv carrying Q/K/V together). The fused tensor already
-            # concatenates the listed slots, so split it along output_dim
-            # by per-slot output_sizes and recurse with single-int ids.
-            # That way the rest of the GGUF path (data_container,
-            # shard_id_map, dequant) sees ordinary per-slot shards.
+            # GGUF can fuse multiple framework slots into one on-disk tensor.
+            # Split along output_dim by per-slot sizes and recurse.
             if is_gguf_weight_type:
-                # One weight-type scalar covers every slot of the fused
-                # tensor; just recurse with the same scalar per slot.
                 for slot in loaded_shard_id:
                     self.weight_loader(param, loaded_weight, slot)
                 return
@@ -742,16 +731,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 f"{loaded_weight.size(output_dim)} but slots "
                 f"{loaded_shard_id} sum to {sum(slot_sizes)}."
             )
-            # Each slot is independently TP-sharded by the recursive call's
-            # is_gguf_weight branch, so its size has to be divisible by
-            # tp_size. Catching it here gives a clear message instead of a
-            # silent narrow() truncation later.
-            if self.tp_size > 1:
-                for slot, size in zip(loaded_shard_id, slot_sizes):
-                    assert size % self.tp_size == 0, (
-                        f"GGUF fused slot {slot} has output size {size} "
-                        f"which is not divisible by tp_size {self.tp_size}."
-                    )
             offset = 0
             for slot, size in zip(loaded_shard_id, slot_sizes):
                 slice_ = loaded_weight.narrow(output_dim, offset, size)

@@ -164,7 +164,24 @@ def test_replicated_linear_unsqueezes_1d_gguf_weight_for_single_output():
     param = torch.nn.Parameter(torch.zeros(1, hidden), requires_grad=False)
     param.is_gguf_weight = True
     loaded_weight = torch.arange(hidden, dtype=torch.float32)
-    fake_self = SimpleNamespace()  # weight_loader uses no instance state.
+    fake_self = SimpleNamespace(output_size=1, input_size=hidden)
+
+    ReplicatedLinear.weight_loader(fake_self, param, loaded_weight)
+
+    assert param.shape == (1, hidden)
+    assert torch.equal(param.data.flatten(), loaded_weight)
+
+
+def test_replicated_linear_unsqueezes_before_materialize():
+    """An UninitializedParameter must end up at [1, hidden], not [hidden].
+    Reshaping after materialize would leave it 1-D forever."""
+    from torch.nn.parameter import UninitializedParameter
+
+    hidden = 16
+    param = UninitializedParameter()
+    param.is_gguf_weight = True
+    loaded_weight = torch.arange(hidden, dtype=torch.float32)
+    fake_self = SimpleNamespace(output_size=1, input_size=hidden)
 
     ReplicatedLinear.weight_loader(fake_self, param, loaded_weight)
 
@@ -178,7 +195,7 @@ def test_replicated_linear_does_not_unsqueeze_non_gguf_weight():
     hidden = 8
     param = torch.nn.Parameter(torch.zeros(1, hidden), requires_grad=False)
     loaded_weight = torch.arange(hidden, dtype=torch.float32)
-    fake_self = SimpleNamespace()
+    fake_self = SimpleNamespace(output_size=1, input_size=hidden)
 
     with pytest.raises(AssertionError):
         ReplicatedLinear.weight_loader(fake_self, param, loaded_weight)
