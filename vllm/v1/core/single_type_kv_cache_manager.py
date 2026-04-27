@@ -40,6 +40,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        max_admission_blocks_per_request: int | None = None,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -47,6 +48,12 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
             kv_cache_group_id: The id of the kv cache group of this manager.
+            max_admission_blocks_per_request: Recycling-aware per-request
+                block cap used by `get_num_blocks_to_allocate`. Only set for
+                spec types that recycle blocks across chunks (SWA,
+                chunked-local); `None` (the default) means no cap, which is
+                correct for full-attention-style specs that hold every
+                block until the request finishes.
         """
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
@@ -56,6 +63,7 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
+        self._max_admission_blocks_per_request = max_admission_blocks_per_request
         self.new_block_ids: list[int] = []
 
         # Mapping from request ID to blocks to track the blocks allocated
@@ -104,6 +112,19 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
+        if self._max_admission_blocks_per_request is not None:
+            # Recycling-aware specs (SWA, chunked-local) cap the per-request
+            # reservation here so admission matches the startup pool sizer
+            # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
+            # chunked-local counterpart). `remove_skipped_blocks` runs from
+            # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
+            # so per-request peak real-held blocks <= this cap, which keeps
+            # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
+            # Drift between the two would re-introduce the deadlock from
+            # issue #39734 or, worse, mid-prefill OOM.
+            num_required_blocks = min(
+                num_required_blocks, self._max_admission_blocks_per_request
+            )
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
         if request_id in self.num_cached_block:
@@ -479,55 +500,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
-    def __init__(
-        self,
-        kv_cache_spec: SlidingWindowSpec,
-        *,
-        max_admission_blocks_per_request: int,
-        **kwargs,
-    ) -> None:
+    def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._max_admission_blocks_per_request = max_admission_blocks_per_request
-
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
-        num_tokens_main_model: int,
-    ) -> int:
-        """Return the admission *reservation* (not lifetime block touches).
-
-        For a fresh, request the base implementation asks for
-        ``cdiv(num_tokens, block_size)`` blocks because
-        ``get_num_skipped_tokens(0) == 0``. That over-counts: chunked prefill
-        invokes `remove_skipped_blocks` between chunks, which swaps
-        out-of-window blocks for ``null_block`` and returns their slots to
-        the pool, so per-request real-held blocks plateau at roughly one
-        window's worth.
-
-        We cap demand at the same recycling-aware bound that
-        `SlidingWindowSpec.max_memory_usage_bytes` used to size the pool at
-        startup; both call `SlidingWindowSpec.max_admission_blocks_per_request`,
-        the single source of truth -- drift would re-introduce the deadlock
-        from issue #39734 or, worse, mid-prefill OOM.
-
-        Safety: per-request peak <= reservation (held by
-        `remove_skipped_blocks`), and the admission gate ensures
-        ``sum(reservations) <= pool``, so ``sum(peak_real_held) <= pool``.
-        """
-        capped_num_tokens = min(
-            num_tokens, self._max_admission_blocks_per_request * self.block_size
-        )
-        return super().get_num_blocks_to_allocate(
-            request_id,
-            capped_num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_tokens_main_model,
-        )
 
     @classmethod
     def find_longest_cache_hit(
@@ -664,44 +639,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
-    def __init__(
-        self,
-        kv_cache_spec: ChunkedLocalAttentionSpec,
-        *,
-        max_admission_blocks_per_request: int,
-        **kwargs,
-    ) -> None:
+    def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
-        self._max_admission_blocks_per_request = max_admission_blocks_per_request
-
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
-        num_tokens_main_model: int,
-    ) -> int:
-        """Return the admission *reservation* (not lifetime block touches).
-
-        Caps demand at the recycling-aware bound from
-        `ChunkedLocalAttentionSpec.max_admission_blocks_per_request`, which
-        the startup pool sizer (`max_memory_usage_bytes`) also uses. See
-        `SlidingWindowManager.get_num_blocks_to_allocate` for the
-        recycling-vs-reservation safety argument; the same invariant holds
-        here via `remove_skipped_blocks`.
-        """
-        capped_num_tokens = min(
-            num_tokens, self._max_admission_blocks_per_request * self.block_size
-        )
-        return super().get_num_blocks_to_allocate(
-            request_id,
-            capped_num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_tokens_main_model,
-        )
 
     @classmethod
     def find_longest_cache_hit(
