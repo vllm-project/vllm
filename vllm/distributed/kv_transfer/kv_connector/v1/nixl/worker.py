@@ -1951,10 +1951,14 @@ class NixlConnectorWorker:
         # Skip mamba groups — their blocks represent full state (conv+ssm),
         # not per-token data, so trimming would corrupt the transfer.
         remote_block_ids = list(remote_block_ids)
+        group_specs = self.kv_cache_config.kv_cache_groups
         for i, remote_group in enumerate(remote_block_ids):
+            num_remote_blocks = len(remote_group)
             num_local_blocks = len(local_block_ids[i])
-            assert num_local_blocks <= len(remote_group)
-            if num_local_blocks < len(remote_group):
+            is_mamba = isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            if not is_mamba:
+                assert num_local_blocks <= num_remote_blocks
+            if num_local_blocks < num_remote_blocks and not is_mamba:
                 remote_block_ids[i] = remote_group[-num_local_blocks:]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
