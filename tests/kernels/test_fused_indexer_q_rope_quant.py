@@ -36,23 +36,24 @@ def quantize_to_mxfp4(
     """Reference MXFP4 quantization.
 
     Args:
-        x: [..., HEAD_DIM] bfloat16
+        x: [..., head_dim] where head_dim is divisible by 32
     Returns:
-        packed: [..., HEAD_DIM//2] uint8   2 E2M1 nibbles/byte, low nibble = even index
-        scales: [...]              int32   4 ue8m0 bytes packed into one int32
+        packed: [..., head_dim//2]  uint8   2 E2M1 nibbles/byte, low nibble = even index
+        scales: [..., head_dim//32] uint8   1 ue8m0 byte
     """
     MXFP4_BLOCK_SIZE = 32
     orig_shape = x.shape
-    n_blocks = HEAD_DIM // MXFP4_BLOCK_SIZE  # 4 for HEAD_DIM=128
+    head_dim = orig_shape[-1]
+    n_blocks = head_dim // MXFP4_BLOCK_SIZE
 
-    x_f32 = x.float().reshape(-1, n_blocks, MXFP4_BLOCK_SIZE)  # [*, 4, 32]
+    x_f32 = x.float().reshape(-1, n_blocks, MXFP4_BLOCK_SIZE)
 
     # Per-block ue8m0 scale: 2^ceil(log2(amax / 6.0)), stored as byte = exp + 127
     # 6 * 2^-126 is from https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/kernel.py#L163
     amax = x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=6 * (2**-126))
     log2_ratio = (amax * (1.0 / 6.0)).log2().ceil().clamp(-127.0, 127.0)
     scale = log2_ratio.exp2()
-    ue8m0 = (log2_ratio + 127.0).to(torch.uint8)  # [*, 4, 1]
+    ue8m0 = (log2_ratio + 127.0).to(torch.uint8)  # [*, n_blocks]
 
     # E2M1 round-to-nearest-even: midpoints round to the even code.
     # E2M1 values: [0.00, 0.50, 1.00, 1.50, 2.00, 3.00, 4.00, 6.00]
@@ -71,15 +72,12 @@ def quantize_to_mxfp4(
     nibble = code.to(torch.uint8) | (sign << 3)
 
     # Pack: even-index element → low nibble, odd-index → high nibble
-    nibble_flat = nibble.reshape(-1, HEAD_DIM)
+    nibble_flat = nibble.reshape(-1, head_dim)
     packed = (nibble_flat[:, 0::2] | (nibble_flat[:, 1::2] << 4)).contiguous()
-    packed = packed.reshape(*orig_shape[:-1], HEAD_DIM // 2)
+    packed = packed.reshape(*orig_shape[:-1], head_dim // 2)
 
-    # Pack 4 ue8m0 bytes into 1 int32 (matches fused kernel's .view(int32).squeeze(-1))
-    scales = ue8m0.squeeze(-1).reshape(*orig_shape[:-1], n_blocks)  # [*, 4] uint8
-    scales_int32 = scales.view(torch.int32).squeeze(-1)  # [*] int32
-
-    return packed, scales_int32
+    scales = ue8m0.view(*orig_shape[:-1], n_blocks)
+    return packed, scales
 
 
 def _reference(
@@ -104,7 +102,9 @@ def _reference(
     )
 
     if use_fp4:
-        q_packed, q_scale = quantize_to_mxfp4(q_rot.view(-1, N_HEAD, HEAD_DIM))
+        q_packed, ue8m0 = quantize_to_mxfp4(q_rot.view(-1, N_HEAD, HEAD_DIM))
+        # Pack 4 ue8m0 bytes into 1 int32
+        q_scale = ue8m0.view(torch.int32).squeeze(-1)
         # FP4 path: q_scale stays separate (cannot be folded into a per-token scalar)
         weights_out = weights.to(torch.float32) * softmax_scale * head_scale
         return (q_packed, q_scale), weights_out
@@ -164,6 +164,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(num_tokens, cache_dtype, use
         f"{(ref_bits != fused_bits).sum().item()} / {ref_bits.numel()} bytes differ"
     )
 
+    assert weights_fused.dtype == torch.float32
     assert torch.equal(weights_ref, weights_fused), (
         f"weights mismatch: max abs diff "
         f"{(weights_ref - weights_fused).abs().max().item()}"
