@@ -935,10 +935,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
-            mat = torch.bmm(
-                x, self.W_UV
-            )  # (N, B, V) and contiguous because W_UV is contiguous
-            out.copy_(mat.transpose(0, 1).reshape_as(out))
+            mat = torch.bmm(x, self.W_UV)  # (N, B, V) contiguous
+            out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1).copy_(mat)
 
     def _v_up_proj_functional(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -1335,7 +1333,7 @@ def mla_attention_decode(
         )
 
     if lse is None:
-        lse = ql_nope.new_zeros(num_decode_tokens, num_heads, dtype=torch.float32)
+        lse = ql_nope.new_empty(num_decode_tokens, num_heads, dtype=torch.float32)
 
     return attn_out, lse
 
