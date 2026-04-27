@@ -32,9 +32,14 @@ def vocab(tokenizer):
 
 
 def _make_parser(tokenizer):
-    _WrappedParser.reasoning_parser_cls = Gemma4ReasoningParser
-    _WrappedParser.tool_parser_cls = Gemma4ToolParser
-    return _WrappedParser(tokenizer)
+    """Create a DelegatingParser with Gemma4 parsers using a local subclass
+    to avoid polluting _WrappedParser class attributes across tests."""
+
+    class _Gemma4TestParser(_WrappedParser):
+        reasoning_parser_cls = Gemma4ReasoningParser
+        tool_parser_cls = Gemma4ToolParser
+
+    return _Gemma4TestParser(tokenizer)
 
 
 def _encode(tokenizer, text: str) -> list[int]:
@@ -56,9 +61,11 @@ class TestReasoningToToolTransition:
         """
         Regression test for #40911.
 
-        Simulates: reasoning ends with <channel|>, then partial "<|"
-        arrives before the full "<|tool_call>" token. The partial "<|"
-        must not appear as content.
+        Simulates the actual failure mode: the reasoning end token and
+        tool-call start token arrive in the same delta, but delta_text
+        contains only a partial prefix of the tool marker (e.g. "<|")
+        due to incremental detokenization.  The partial prefix must not
+        appear as content.
         """
         parser = _make_parser(tokenizer)
         request = _request()
@@ -69,42 +76,43 @@ class TestReasoningToToolTransition:
         if tool_call_start_id is None:
             pytest.skip("<|tool_call> not in vocab")
 
-        # Phase 1: start reasoning
+        # Phase 1: feed reasoning tokens one by one
         reasoning_tokens = _encode(tokenizer, "thinking about tools")
-        previous_text = ""
-        previous_token_ids: list[int] = []
-
         for tid in [channel_start_id] + reasoning_tokens:
             delta_text = tokenizer.decode([tid], skip_special_tokens=False)
-            current_text = previous_text + delta_text
-            current_token_ids = previous_token_ids + [tid]
             parser.parse_delta(
                 delta_text=delta_text,
                 delta_token_ids=[tid],
                 request=request,
             )
-            previous_text = current_text
-            previous_token_ids = current_token_ids
 
-        # Phase 2: reasoning end + tool call start in same delta
+        # Phase 2: reasoning end + tool call start in same delta.
+        # Construct delta_text with a partial prefix of the tool token
+        # to simulate the actual failure mode (incremental detokenization
+        # can produce a prefix-diff that splits the special token text).
+        channel_end_text = tokenizer.decode([channel_end_id], skip_special_tokens=False)
+        tool_token_text = tokenizer.decode(
+            [tool_call_start_id], skip_special_tokens=False
+        )
+        partial_prefix = tool_token_text[:2]  # e.g. "<|"
         combined_ids = [channel_end_id, tool_call_start_id]
-        combined_text = tokenizer.decode(combined_ids, skip_special_tokens=False)
+        combined_text = channel_end_text + partial_prefix
+
         msg = parser.parse_delta(
             delta_text=combined_text,
             delta_token_ids=combined_ids,
             request=request,
         )
 
-        # The partial marker must not appear as content
         if msg is not None and msg.content is not None:
-            assert "<|" not in msg.content, (
+            assert partial_prefix not in msg.content, (
                 f"Partial tool-call marker leaked as content: {msg.content!r}"
             )
 
-    def test_full_marker_passes_to_tool_parser(self, tokenizer, vocab):
+    def test_separate_deltas_no_leak(self, tokenizer, vocab):
         """
-        When reasoning ends and a complete tool-call token follows,
-        the tool parser should receive it (no leak, no suppression).
+        When reasoning end and tool-call start arrive in separate deltas,
+        the tool marker must not leak as content.
         """
         parser = _make_parser(tokenizer)
         request = _request()
@@ -115,17 +123,14 @@ class TestReasoningToToolTransition:
         if tool_call_start_id is None:
             pytest.skip("<|tool_call> not in vocab")
 
-        # Send reasoning start
+        # Reasoning start + content
         delta_text = tokenizer.decode([channel_start_id], skip_special_tokens=False)
         parser.parse_delta(
             delta_text=delta_text,
             delta_token_ids=[channel_start_id],
             request=request,
         )
-
-        # Send reasoning content
-        content_ids = _encode(tokenizer, "reasoning")
-        for tid in content_ids:
+        for tid in _encode(tokenizer, "reasoning"):
             delta_text = tokenizer.decode([tid], skip_special_tokens=False)
             parser.parse_delta(
                 delta_text=delta_text,
@@ -133,7 +138,7 @@ class TestReasoningToToolTransition:
                 request=request,
             )
 
-        # Send reasoning end
+        # Reasoning end (separate delta)
         delta_text = tokenizer.decode([channel_end_id], skip_special_tokens=False)
         parser.parse_delta(
             delta_text=delta_text,
@@ -141,7 +146,7 @@ class TestReasoningToToolTransition:
             request=request,
         )
 
-        # Send tool call start — now in tool phase
+        # Tool call start (separate delta) — should not leak as content
         delta_text = tokenizer.decode([tool_call_start_id], skip_special_tokens=False)
         msg = parser.parse_delta(
             delta_text=delta_text,
@@ -149,9 +154,10 @@ class TestReasoningToToolTransition:
             request=request,
         )
 
-        # Should not leak tool marker as content
         if msg is not None and msg.content is not None:
-            assert "<|tool_call>" not in msg.content
+            assert "<|tool_call>" not in msg.content, (
+                f"Tool marker leaked as content: {msg.content!r}"
+            )
 
     def test_reasoning_end_only_no_leak(self, tokenizer, vocab):
         """
@@ -189,7 +195,6 @@ class TestReasoningToToolTransition:
             request=request,
         )
 
-        # No content should leak from the transition
         if msg is not None and msg.content is not None:
             assert msg.content.strip() == "", (
                 f"Unexpected content at reasoning end: {msg.content!r}"
