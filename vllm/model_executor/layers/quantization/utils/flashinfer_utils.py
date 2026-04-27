@@ -519,19 +519,20 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
-        scale_intermediate = w13_scale.shape[1] // (2 if is_gated else 1)
         w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
             w13,
             w2,
             layer.moe_config.is_act_and_mul,
             min_alignment,
         )
-        if is_per_channel_weight and new_intermediate != scale_intermediate:
-            w13_scale = _pad_w13_intermediate_dim(
-                w13_scale,
-                new_intermediate,
-                layer.moe_config.is_act_and_mul,
-            )
+        if is_per_channel_weight:
+            scale_intermediate = w13_scale.shape[1] // (2 if is_gated else 1)
+            if new_intermediate != scale_intermediate:
+                w13_scale = _pad_w13_intermediate_dim(
+                    w13_scale,
+                    new_intermediate,
+                    layer.moe_config.is_act_and_mul,
+                )
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
