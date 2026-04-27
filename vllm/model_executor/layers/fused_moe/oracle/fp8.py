@@ -417,6 +417,7 @@ def convert_to_fp8_moe_kernel_format(
     w2_scale: torch.Tensor,
     w13_input_scale: torch.Tensor | None,
     w2_input_scale: torch.Tensor | None,
+    per_out_ch_quant: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
@@ -464,6 +465,7 @@ def convert_to_fp8_moe_kernel_format(
             w13_input_scale=w13_input_scale,
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
+            per_out_ch_quant=per_out_ch_quant,
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
     elif fp8_backend == Fp8MoeBackend.XPU:

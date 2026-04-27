@@ -471,6 +471,7 @@ def prepare_fp8_moe_layer_for_fi(
     w13_input_scale: torch.Tensor | None,
     w2_scale: torch.Tensor,
     w2_input_scale: torch.Tensor | None,
+    per_out_ch_quant: bool,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -490,9 +491,7 @@ def prepare_fp8_moe_layer_for_fi(
     is_mxfp8 = block_quant and w13_scale.dtype == torch.uint8
     is_deepseek_fp8 = block_quant and not is_mxfp8
     is_gated = layer.activation.is_gated
-    is_per_channel_weight = (
-        not block_quant and w13_scale.ndim == 3 and w13_scale.shape[1] == w13.shape[1]
-    )
+    is_per_channel_weight = not block_quant and per_out_ch_quant
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:

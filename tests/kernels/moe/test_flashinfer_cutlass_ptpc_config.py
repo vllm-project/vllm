@@ -158,6 +158,7 @@ def test_flashinfer_cutlass_prepare_pads_and_swaps_per_channel_w13_scales():
         w13_input_scale=None,
         w2_scale=w2_scale,
         w2_input_scale=None,
+        per_out_ch_quant=True,
     )
 
     expected_w13_scale = torch.zeros(
@@ -174,3 +175,38 @@ def test_flashinfer_cutlass_prepare_pads_and_swaps_per_channel_w13_scales():
     assert torch.equal(padded_w13_scale, expected_w13_scale)
     assert padded_w2_scale is w2_scale
     assert layer.moe_config.intermediate_size_per_partition == padded_intermediate
+
+
+def test_flashinfer_cutlass_prepare_uses_quant_flag_not_scale_shape():
+    intermediate = 3
+    hidden_size = 5
+    layer = types.SimpleNamespace(
+        moe_config=types.SimpleNamespace(
+            is_act_and_mul=True,
+            intermediate_size_per_partition=intermediate,
+        ),
+        activation=MoEActivation.SILU,
+    )
+
+    w13 = torch.arange(
+        1,
+        1 + 2 * intermediate * hidden_size,
+        dtype=torch.uint8,
+    ).reshape(1, 2 * intermediate, hidden_size)
+    w2 = torch.ones((1, hidden_size, intermediate), dtype=torch.uint8)
+    w13_scale = torch.ones((1, 2 * intermediate, 1), dtype=torch.float32)
+    w2_scale = torch.ones((1, hidden_size, 1), dtype=torch.float32)
+
+    _, _, out_w13_scale, out_w2_scale = prepare_fp8_moe_layer_for_fi(
+        layer=layer,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w13_input_scale=None,
+        w2_scale=w2_scale,
+        w2_input_scale=None,
+        per_out_ch_quant=False,
+    )
+
+    assert out_w13_scale is w13_scale
+    assert out_w2_scale is w2_scale

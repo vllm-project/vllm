@@ -315,6 +315,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            per_out_ch_quant=self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -351,6 +352,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+        is_per_channel = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
         return make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
             w1_scale=layer.w13_weight_scale,
@@ -358,7 +360,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             per_act_token_quant=is_per_token,
-            per_out_ch_quant=is_per_token,
+            per_out_ch_quant=is_per_channel,
             block_shape=self.weight_block_size,
         )
 
