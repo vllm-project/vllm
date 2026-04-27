@@ -266,7 +266,7 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        self.max_workspace_size = max_workspace_size * MiB
+        self.max_workspace_size = int(max_workspace_size * MiB)
         self.max_num_tokens = 0
         self.disabled = False
 
