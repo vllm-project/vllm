@@ -462,6 +462,54 @@ def test_mixfp4_create_weights_rejects_odd_group_count():
         )
 
 
+def test_mixfp4_process_weights_rejects_mismatched_global_scales(monkeypatch):
+    scheme = CompressedTensorsW4A16MixFP4()
+    layer = torch.nn.Module()
+    layer.weight_packed = torch.nn.Parameter(
+        torch.empty((2, 16), dtype=torch.uint8), requires_grad=False
+    )
+    layer.weight_global_scale = torch.nn.Parameter(
+        torch.tensor([1.0, 2.0], dtype=torch.float32), requires_grad=False
+    )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a16_mixfp4.prepare_mixfp4_layer_for_marlin",
+        lambda layer: None,
+    )
+
+    with pytest.raises(ValueError, match="identical weight_global_scale"):
+        scheme.process_weights_after_loading(layer)
+
+
+def test_mixfp4_process_weights_accepts_identical_global_scales(monkeypatch):
+    scheme = CompressedTensorsW4A16MixFP4()
+    layer = torch.nn.Module()
+    layer.weight_packed = torch.nn.Parameter(
+        torch.empty((2, 16), dtype=torch.uint8), requires_grad=False
+    )
+    layer.weight_global_scale = torch.nn.Parameter(
+        torch.tensor([2.0, 2.0], dtype=torch.float32), requires_grad=False
+    )
+
+    called = False
+
+    def mock_prepare(layer):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a16_mixfp4.prepare_mixfp4_layer_for_marlin",
+        mock_prepare,
+    )
+
+    scheme.process_weights_after_loading(layer)
+
+    assert called
+    assert torch.equal(layer.weight_global_scale, torch.tensor(0.5))
+
+
 @pytest.mark.parametrize(
     "args",
     [

@@ -82,8 +82,22 @@ class CompressedTensorsW4A16MixFP4(CompressedTensorsScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
+
+        weight_global_scale = layer.weight_global_scale.to(torch.float32)
+        if weight_global_scale.numel() > 1:
+            first_global_scale = weight_global_scale.flatten()[0]
+            if not torch.allclose(
+                weight_global_scale,
+                first_global_scale.expand_as(weight_global_scale),
+                rtol=0,
+                atol=0,
+            ):
+                raise ValueError(
+                    "MixFP4 Marlin requires identical weight_global_scale values "
+                    "across fused output partitions."
+                )
         layer.weight_global_scale = Parameter(
-            1.0 / layer.weight_global_scale.max().to(torch.float32),
+            1.0 / weight_global_scale.max(),
             requires_grad=False,
         )
         prepare_mixfp4_layer_for_marlin(layer)

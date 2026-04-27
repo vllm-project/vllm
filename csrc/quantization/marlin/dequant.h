@@ -582,6 +582,11 @@ dequant_fp8_scales_mixed_bake_x4<nv_bfloat162>(int q, nv_bfloat162* frag_b,
   frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
   frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
 
+  // MixFP4 keeps the scale bytes in FP8 E4M3 layout so the sign bit can carry
+  // the FP4/INT4 selector. The bit expansion above intentionally leaves the
+  // BF16 exponent un-biased; multiplying by 2^127 restores the BF16 bias after
+  // the INT4 x4 exponent bake. The remaining FP4 exponent compensation is
+  // folded into the Python-side global scale preprocessing.
   constexpr uint32_t BITS_2_127 = 254u << 23;
   const float f_2_127 = *reinterpret_cast<const float*>(&BITS_2_127);
   const nv_bfloat162 v_2_127 = __float2bfloat162_rn(f_2_127);
