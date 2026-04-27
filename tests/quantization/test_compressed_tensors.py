@@ -462,34 +462,23 @@ def test_mixfp4_create_weights_rejects_odd_group_count():
         )
 
 
-def test_mixfp4_process_weights_rejects_mismatched_global_scales(monkeypatch):
+def test_mixfp4_process_weights_folds_partition_global_scales(monkeypatch):
     scheme = CompressedTensorsW4A16MixFP4()
     layer = torch.nn.Module()
+    layer.logical_widths = [1, 1]
     layer.weight_packed = torch.nn.Parameter(
         torch.empty((2, 16), dtype=torch.uint8), requires_grad=False
+    )
+    raw_scale = torch.tensor([[2.0], [4.0]], dtype=torch.float32).to(
+        torch.float8_e4m3fn
+    )
+    raw_scale_bytes = raw_scale.view(torch.uint8).clone()
+    raw_scale_bytes[1, 0] |= 0x80
+    layer.weight_scale = torch.nn.Parameter(
+        raw_scale_bytes.view(torch.float8_e4m3fn), requires_grad=False
     )
     layer.weight_global_scale = torch.nn.Parameter(
         torch.tensor([1.0, 2.0], dtype=torch.float32), requires_grad=False
-    )
-
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
-        "compressed_tensors_w4a16_mixfp4.prepare_mixfp4_layer_for_marlin",
-        lambda layer: None,
-    )
-
-    with pytest.raises(ValueError, match="identical weight_global_scale"):
-        scheme.process_weights_after_loading(layer)
-
-
-def test_mixfp4_process_weights_accepts_identical_global_scales(monkeypatch):
-    scheme = CompressedTensorsW4A16MixFP4()
-    layer = torch.nn.Module()
-    layer.weight_packed = torch.nn.Parameter(
-        torch.empty((2, 16), dtype=torch.uint8), requires_grad=False
-    )
-    layer.weight_global_scale = torch.nn.Parameter(
-        torch.tensor([2.0, 2.0], dtype=torch.float32), requires_grad=False
     )
 
     called = False
@@ -507,7 +496,13 @@ def test_mixfp4_process_weights_accepts_identical_global_scales(monkeypatch):
     scheme.process_weights_after_loading(layer)
 
     assert called
-    assert torch.equal(layer.weight_global_scale, torch.tensor(0.5))
+    assert torch.equal(layer.weight_global_scale, torch.tensor(1.0))
+    folded_raw = layer.weight_scale.view(torch.uint8)
+    assert torch.equal(
+        (folded_raw & 0x7F).view(torch.float8_e4m3fn).float(),
+        torch.full((2, 1), 2.0),
+    )
+    assert (folded_raw[1, 0] & 0x80) != 0
 
 
 @pytest.mark.parametrize(

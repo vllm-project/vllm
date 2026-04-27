@@ -83,21 +83,23 @@ class CompressedTensorsW4A16MixFP4(CompressedTensorsScheme):
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
 
-        weight_global_scale = layer.weight_global_scale.to(torch.float32)
+        weight_global_scale = layer.weight_global_scale.to(torch.float32).flatten()
         if weight_global_scale.numel() > 1:
-            first_global_scale = weight_global_scale.flatten()[0]
-            if not torch.allclose(
-                weight_global_scale,
-                first_global_scale.expand_as(weight_global_scale),
-                rtol=0,
-                atol=0,
-            ):
-                raise ValueError(
-                    "MixFP4 Marlin requires identical weight_global_scale values "
-                    "across fused output partitions."
-                )
+            common_global_scale = weight_global_scale.min()
+            layer.weight_scale = Parameter(
+                _fold_global_scales_into_weight_scale(
+                    weight_scale=layer.weight_scale,
+                    global_scales=weight_global_scale,
+                    common_global_scale=common_global_scale,
+                    logical_widths=layer.logical_widths,
+                ),
+                requires_grad=False,
+            )
+        else:
+            common_global_scale = weight_global_scale[0]
+
         layer.weight_global_scale = Parameter(
-            1.0 / weight_global_scale.max(),
+            1.0 / common_global_scale,
             requires_grad=False,
         )
         prepare_mixfp4_layer_for_marlin(layer)
@@ -118,3 +120,39 @@ class CompressedTensorsW4A16MixFP4(CompressedTensorsScheme):
             size_k=layer.input_size_per_partition,
             bias=bias,
         )
+
+
+def _fold_global_scales_into_weight_scale(
+    weight_scale: torch.Tensor,
+    global_scales: torch.Tensor,
+    common_global_scale: torch.Tensor,
+    logical_widths: list[int],
+) -> torch.Tensor:
+    if len(logical_widths) != global_scales.numel():
+        raise ValueError(
+            "MixFP4 expected one weight_global_scale per fused output partition, "
+            f"got {global_scales.numel()} scales for {len(logical_widths)} partitions."
+        )
+    if not torch.isfinite(global_scales).all() or not (global_scales > 0).all():
+        raise ValueError(
+            "MixFP4 weight_global_scale values must be finite and positive."
+        )
+
+    raw = weight_scale.detach().contiguous().view(torch.uint8)
+    flags = raw & 0x80
+    magnitudes = (raw & 0x7F).view(torch.float8_e4m3fn).to(torch.float32)
+
+    row_start = 0
+    for width, global_scale in zip(logical_widths, global_scales):
+        row_end = row_start + width
+        magnitudes[row_start:row_end] *= common_global_scale / global_scale
+        row_start = row_end
+    if row_start != weight_scale.size(0):
+        raise ValueError(
+            "MixFP4 fused output partition widths do not match weight_scale rows."
+        )
+
+    magnitude_raw = magnitudes.to(torch.float8_e4m3fn).contiguous().view(torch.uint8)
+    magnitude_raw &= 0x7F
+    flags = torch.where(magnitude_raw != 0, flags, torch.zeros_like(flags))
+    return (magnitude_raw | flags).view(torch.float8_e4m3fn)
