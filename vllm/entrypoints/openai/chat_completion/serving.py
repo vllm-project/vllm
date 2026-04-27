@@ -1195,6 +1195,16 @@ class OpenAIServingChat(OpenAIServing):
                         choices=[choice_data],
                         model=model_name,
                     )
+                    # Stamp the fingerprint on terminal chunks only (those with
+                    # finish_reason set). When ``include_usage`` is on, the
+                    # trailing usage chunk below overrides this as the true
+                    # final message.
+                    if (
+                        not include_usage
+                        and self.system_fingerprint is not None
+                        and choice_data.finish_reason is not None
+                    ):
+                        chunk.system_fingerprint = self.system_fingerprint
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
@@ -1229,6 +1239,7 @@ class OpenAIServingChat(OpenAIServing):
                     choices=[],
                     model=model_name,
                     usage=final_usage,
+                    system_fingerprint=self.system_fingerprint,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -1637,6 +1648,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            system_fingerprint=self.system_fingerprint,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
