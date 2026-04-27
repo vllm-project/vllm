@@ -566,10 +566,10 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
         tl.max(tl.abs(even_2d), axis=1),
         tl.max(tl.abs(odd_2d), axis=1),
     )
-    amax = tl.maximum(amax, 1e-4)
+    amax = tl.maximum(amax, 6.0 * (2**-126))
 
     # ue8m0 block scale: 2^ceil(log2(amax / 6.0)), stored as (exp + 127) byte.
-    log2_ratio = tl.ceil(tl.log2(amax / 6.0))
+    log2_ratio = tl.ceil(tl.log2(amax * (1.0 / 6.0)))
     log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
     inv_scale = tl.exp2(-log2_ratio)
     ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
