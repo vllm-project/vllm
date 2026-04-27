@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 
 from .utils import make_dummy_moe_config, shuffle_weight
@@ -207,7 +208,7 @@ def oai_triton_moe_impl(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(), reason="Requires CUDA-alike platform."
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("m,n,k", MNK)
@@ -226,6 +227,15 @@ def test_oai_triton_moe(
 ):
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
     set_random_seed(0)
+
+    # The CDNA4 mxfp4 scale layout requires SCALE_K (= K / 32) to be a
+    # multiple of 8, i.e. K and N rounded up to a multiple of 256. Production
+    # achieves this via mxfp4_round_up_hidden_size_and_intermediate_size; mirror
+    # it here so the test exercises the same shapes the kernel ever sees.
+    if current_platform.is_rocm():
+        n = round_up(n, 256)
+        k = round_up(k, 256)
+
     (
         w1,
         w2,

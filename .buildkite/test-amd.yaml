@@ -97,9 +97,45 @@
 #                                                   LoRA yet.                                                                       #
 #   * [Distributed Tests (NxGPUs)(HW-TAG)]: Don't test llama model here, it seems hf implementation is buggy. See:                  #
 #                                           https://github.com/vllm-project/vllm/pull/5689                                          #
-#   * [Distributed Tests (NxGPUs)(HW-TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293     #
+#   * [Distributed Tests (NxGPUs)(HW-TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293      #
 #                                           in favor of new tests in fusions_e2e. We avoid replicating the new jobs in              #
 #                                           this file as it's deprecated.                                                           #
+#   * [Kernels MoE Test %N]: Excludes tests already covered elsewhere to avoid overlap:                                             #
+#     - test_gpt_oss_triton_kernels.py, test_moe.py, test_block_int8.py, test_triton_moe_no_act_mul.py,                             #
+#       test_triton_moe_ptpc_fp8.py are covered by [Kernels FP8 MoE Test].                                                          #
+#     - test_deepep_moe.py is covered by [Kernels FP8 MoE Test (2 MI325)] on MI325, and by                                          #
+#       [Kernels FP8 MoE Test] on MI355.                                                                                            #
+#     - test_modular_oai_triton_moe.py runs as a separate step (isolated from the main kernels/moe run                              #
+#       to avoid interference) and is also kept as an exception: it additionally runs in [Kernels FP8 MoE Test].                    #
+#   * [Kernels AITER MoE (MI325X)]: Dedicated group for AITER-specific MoE tests. Runs                                              #
+#     tests/kernels/moe/test_rocm_aiter_moe.py. Previously embedded in [Kernels FP8 MoE Test].                                      #
+#   * [Kernels AITER Quantization (MI325X)]: Dedicated group for AITER-specific quantization tests.                                 #
+#     Runs tests/kernels/quantization/rocm/aiter/ (test_grouped_quant.py, test_mla_fp8_support_check.py).                           #
+#     Excluded from [Kernels Quantization Test %N] via --ignore to avoid overlap.                                                   #
+#   * [Kernels ROCm MLA Test]: Dedicated group for ROCm AITER MLA coverage on MI325 and MI355.                                      #
+#     Runs dense MLA, sparse MLA, and MLA variant tests together to keep MLA-specific ownership clear.                              #
+#     Removed from the generic attention and core-operation groups to avoid mixing responsibilities.                                #
+#   * [Kernels Core Operation Test] on MI355: Trimmed to ROCm-specific files only to avoid redundancy:                              #
+#     - kernels/core, test_top_k_per_row.py, test_concat_mla_q.py are covered by [Kernels Core Operation Test]                      #
+#       on MI325 (no gfx942 vs gfx950 branching in those tests).                                                                    #
+#     - Kept on MI355: test_rocm_misc_ops.py (gfx950-branching assertions) and                                                      #
+#       test_rocm_aiter_ops.py under tests/kernels/core/.                                                                           #
+#   * B200/MI355 equivalents: MI355 mirror groups exist for most B200 kernel/quant/distributed groups.                              #
+#     - [Kernels (MI355X)] mirrors [Kernels (B200)]: amd-smi sanity, chat.py smoke, attention_selector, rocm FP4/quark.             #
+#     - [Kernels FP4 MoE Test (MI355)] mirrors [Kernels Fp4 MoE Test (B200)] with ROCm AITER FP4                                    #
+#       kernel coverage in tests/kernels/quantization/test_rocm_aiter_fp4.py plus cross-platform                                    #
+#       OCP-MX MoE coverage in test_ocp_mx_moe.py (test_cutedsl_moe.py, test_flashinfer_moe.py,                                     #
+#       test_nvfp4_moe.py are NVIDIA-only).                                                                                         #
+#     - [Kernels FusedMoE Layer Test (2 MI355s)] mirrors [Kernels FusedMoE Layer Test (2 B200s)]: test_moe_layer.py.                #
+#     - [Quantized MoE Test (MI355)] mirrors [Quantized MoE Test (B200)] with a ROCm-specific                                       #
+#       backend/init matrix in test_mi3xx_moe.py. Heavier Quark accuracy coverage stays in the                                      #
+#       dedicated Quark eval lanes.                                                                                                 #
+#     - [V1 attention (B200-MI355)] mirrors [V1 attention (B200)]: same v1/attention test dir.                                      #
+#     - [Distributed Tests (2 GPUs)(H100-MI355)] mirrors [Distributed Tests (2 GPUs)(B200)] + Quick Reduce:                         #
+#       test_context_parallel.py, test_dbo.py, test_rocm_quick_reduce{,_ray}.py. test_nccl_symm_mem_allreduce.py                    #
+#       has no ROCm equivalent (NCCL-only; ROCm uses RCCL).                                                                         #
+#   * [Kernels MoE Test %N] on MI355: also excludes test_ocp_mx_moe.py (now in [Kernels FP4 MoE Test (MI355)])                      #
+#     and test_moe_layer.py (now in [Kernels FusedMoE Layer Test (2 MI355s)]) to avoid overlap.                                     #
 #                                                                                                                                   #
 #####################################################################################################################################
 
@@ -2948,7 +2984,7 @@ steps:
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
-- label: Kernels (B200-MI355) # TBD
+- label: Kernels (2xB200-1xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -2956,8 +2992,6 @@ steps:
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
-  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
   - vllm/v1/attention/backends/rocm_aiter_fa.py
@@ -2968,9 +3002,101 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/_aiter_ops.py
   commands:
-  - rocm-smi
+  - amd-smi
   - python3 examples/basic/offline_inference/chat.py
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
+  - pytest -v -s tests/kernels/quantization/test_rocm_aiter_fp4.py
+  - pytest -v -s tests/kernels/quantization/test_rocm_skinny_gemms.py
+
+- label: Kernels FP4 MoE Test (2xB200-1xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/moe/
+  - csrc/rocm/
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/moe/test_rocm_aiter_moe.py
+  - tests/kernels/moe/test_modular_oai_triton_moe.py
+  - tests/kernels/moe/test_gpt_oss_triton_kernels.py
+  - tests/kernels/utils.py
+  commands:
+  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k "mxfp4"
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+  - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+  - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py -k "not tp2_qwen15_moe_mxfp4 and not tp4_llama31_mxfp6 and not tp8_deepseek_r1_3_layers_mxfp4"
+
+- label: Kernels Fp4 MoE Test (2xB200-2xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/backends/rocm_attn.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  commands:
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[tp2_qwen15_moe_mxfp4]
+
+- label: Kernels Fp4 MoE Test (4xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/backends/rocm_attn.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  commands:
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[tp4_llama31_mxfp6]
+
+- label: Kernels Fp4 MoE Test (8xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_8
+  num_gpus: 8
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/backends/rocm_attn.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  commands:
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[tp8_deepseek_r1_3_layers_mxfp4]
 
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
@@ -3007,7 +3133,16 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
+      --ignore=kernels/moe/test_gpt_oss_triton_kernels.py
+      --ignore=kernels/moe/test_moe.py
+      --ignore=kernels/moe/test_block_int8.py
+      --ignore=kernels/moe/test_triton_moe_no_act_mul.py
+      --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py
+      --ignore=kernels/moe/test_deepep_moe.py
+      --ignore=kernels/moe/test_rocm_aiter_moe.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels Quantization Test %N # TBD
@@ -3028,7 +3163,10 @@ steps:
   - tests/kernels/quantization/
   - tests/kernels/quant_utils.py
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization
+      --ignore=kernels/quantization/test_rocm_aiter_fp4.py
+      --ignore=kernels/quantization/test_rocm_skinny_gemms.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels FP8 MoE Test (2xH100-2xMI355) # TBD
   timeout_in_minutes: 180
