@@ -433,7 +433,7 @@ class INCConfig(QuantizationConfig):
             )
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            is_ark_available, ark_error, _ = _get_auto_round_ark_state()
+            is_ark_available, ark_error, _, _ = _get_auto_round_ark_state()
             if is_ark_available:
                 return INCARKLinearMethod(
                     weight_bits=weight_bits,
@@ -473,7 +473,7 @@ class INCConfig(QuantizationConfig):
                 "INC W4A16 on CPU only supports symmetric quantization for now."
             )
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            is_ark_available, ark_error, _ = _get_auto_round_ark_state()
+            is_ark_available, ark_error, _, _ = _get_auto_round_ark_state()
             if is_ark_available:
                 return INCARKLinearMethod(
                     weight_bits=weight_bits,
@@ -621,29 +621,33 @@ class _INCXPULinearBase(LinearMethodBase):
 
 
 @lru_cache(maxsize=1)
-def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None]:
+def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
     """Return ARK availability, error details, and cached instance."""
     try:
         import auto_round_kernel
+        from auto_round_extension.ark import QuantLinear  # noqa: F401
+
     except ImportError as error:
-        return False, str(error), None
+        return False, str(error), None, None
 
     ark_loader = getattr(auto_round_kernel, "_ark_instance", None)
     if not callable(ark_loader):
-        return False, "auto_round_kernel does not expose _ark_instance().", None
+        return False, "auto_round_kernel does not expose _ark_instance().", None, None
 
     try:
-        return True, None, ark_loader()
+        return True, None, ark_loader(), QuantLinear
     except Exception as error:
-        return False, str(error), None
+        return False, str(error), None, None
 
 
 def _get_auto_round_ark_instance() -> Any:
-    is_available, error_str, ark_instance = _get_auto_round_ark_state()
+    is_available, error_str, ark_instance, quant_linear_class = (
+        _get_auto_round_ark_state()
+    )
     if not is_available or ark_instance is None:
         reason = error_str or "unknown error"
         raise ImportError(f"Failed to import auto_round_kernel. {reason}")
-    return ark_instance
+    return quant_linear_class
 
 
 def _get_ark_type_str(dtype: torch.dtype) -> str:
@@ -656,175 +660,6 @@ def _get_ark_type_str(dtype: torch.dtype) -> str:
         return "fp32"
     else:
         raise ValueError(f"Unsupported dtype for ARK: {dtype}")
-
-
-class INCARKLinearMethod(_INCXPULinearBase):
-    """XPU & CPU w4a16 linear method for INC quantization utilizing the ARK backend.
-
-    Repacks GPTQ/INC weights into ARK's layout.
-    """
-
-    def __init__(self, weight_bits: int, group_size: int, sym: bool):
-        super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
-
-        self.weight_type = f"int{weight_bits}"
-
-        self.ark = _get_auto_round_ark_instance()
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        super().create_weights(
-            layer=layer,
-            input_size_per_partition=input_size_per_partition,
-            output_partition_sizes=output_partition_sizes,
-            input_size=input_size,
-            output_size=output_size,
-            params_dtype=params_dtype,
-            **extra_weight_attrs,
-        )
-        layer.in_features = input_size_per_partition
-        layer.out_features = sum(output_partition_sizes)
-        layer.params_dtype = params_dtype
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        device = layer.qweight.device
-        is_cpu = device.type == "cpu"
-
-        compute_type = _get_ark_type_str(layer.params_dtype)
-        scale_type = _get_ark_type_str(layer.scales.dtype)
-        bits = self.weight_bits
-
-        # ==========================================
-        # Core logic: unpack vLLM int32-packed weights into the full int8
-        # tensor layout expected by ARK.
-        # ==========================================
-        qw = layer.qweight.data  # Shape: [K // pack_factor, N]
-        K_packed, N = qw.shape
-
-        # Precompute bit shifts, e.g. int4 -> [0, 4, 8, 12, 16, 20, 24, 28].
-        # int8 -> [0, 8, 16, 24]
-        shifts = torch.arange(0, 32, bits, device=device)
-
-        # 1. Broadcast shifts and apply bit masking to extract values in
-        # the range [0, (1 << bits) - 1].
-        # Shape change: [K_packed, N, 1] -> [K_packed, N, pack_factor]
-        unpacked_w = (qw.unsqueeze(-1) >> shifts) & ((1 << bits) - 1)
-
-        # 2. Convert into an int8 container.
-        unpacked_w = unpacked_w.to(torch.int8)
-
-        # 3. Restore the sign bits.
-        # For symmetric quantization, the real int4 range is [-8, 7].
-        if self.sym:
-            # INC/GPTQ symmetric quantization stores values with a default
-            # offset of 2**(bits - 1). For INT4, stored_value = real_value + 8,
-            # so decoding must subtract 8.
-            offset = 1 << (bits - 1)  # For bits=4, offset = 8.
-            unpacked_w = unpacked_w - offset
-
-        # 4. Reorder dimensions to restore the real [K, N] layout.
-        # transpose(1, 2) keeps values from the same packed group contiguous
-        # along the K dimension.
-        unpacked_w = unpacked_w.transpose(1, 2).reshape(-1, N).contiguous()
-
-        if is_cpu:
-            scale = layer.scales.data.float().contiguous()
-            scale_type = "fp32"
-        else:
-            scale = layer.scales.data.contiguous()
-
-        if self.sym:
-            # Per the ARK C++ implementation, symmetric quantization passes
-            # an empty tensor here.
-            zp = torch.empty(0, dtype=torch.int8, device=device)
-        else:
-            qz = layer.qzeros.data  # [groups, N // pack_factor]
-            groups, N_packed = qz.shape
-            unpacked_z = (qz.unsqueeze(-1) >> shifts) & ((1 << bits) - 1)
-            zp = unpacked_z.view(groups, -1).to(torch.int8).contiguous()
-
-        assert self.ark is not None
-        packw = self.ark.repack_quantized_weight(
-            unpacked_w,
-            scale,
-            zp,
-            self.group_size,
-            compute_type,
-            self.weight_type,
-            scale_type,
-            not self.sym,
-        )
-
-        # Wrap as a Parameter and disable gradients.
-        layer.packed_weight = Parameter(packw, requires_grad=False)
-
-        bias = getattr(layer, "bias", None)
-        if bias is not None:
-            if is_cpu:
-                layer.safe_bias = bias.data.float().reshape(1, -1).contiguous()
-            else:
-                layer.safe_bias = bias.data.detach().contiguous()
-        else:
-            if is_cpu:
-                layer.safe_bias = torch.zeros(
-                    (1, layer.out_features), dtype=torch.float32, device=device
-                )
-            else:
-                layer.safe_bias = torch.empty(
-                    0, dtype=layer.params_dtype, device=device
-                )
-
-        layer.compute_type = compute_type
-        layer.scale_type = scale_type
-
-        # Release the original temporary tensors loaded by vLLM.
-        del layer.qweight
-        del layer.scales
-        del layer.qzeros
-        if hasattr(layer, "g_idx"):
-            del layer.g_idx
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # Preserve the original shape and flatten the input to a 2D matrix
-        # of shape [batch * seq_len, K].
-        out_shape = x.shape[:-1] + (layer.out_features,)
-        reshaped_x = x.reshape(-1, x.shape[-1]).contiguous()
-
-        is_cpu = x.device.type == "cpu"
-        if is_cpu:
-            reshaped_x = reshaped_x.float()
-
-        assert self.ark is not None
-        out = self.ark.woqgemm(
-            reshaped_x,  # Input activations [M, K]
-            layer.packed_weight,  # Repacked low-level weight buffer
-            layer.safe_bias,  # Bias [1, N] or empty
-            layer.out_features,  # N
-            layer.in_features,  # K
-            self.group_size,  # Block size
-            layer.compute_type,  # fp16 / bf16
-            self.weight_type,  # int4
-            layer.scale_type,  # fp16 / bf16
-            not self.sym,
-        )
-
-        if is_cpu:
-            out = out.to(x.dtype)
-
-        return out.reshape(out_shape)
 
 
 class INCXPULinearMethod(_INCXPULinearBase):
@@ -883,3 +718,96 @@ class INCXPULinearMethod(_INCXPULinearBase):
             None,  # g_idx not needed: desc_act is always False for INC models
         )
         return out.reshape(out_shape)
+
+
+class INCARKLinearMethod(_INCXPULinearBase):
+    """XPU & CPU w4a16 linear method for INC quantization utilizing the ARK backend.
+
+    Repacks GPTQ/INC weights into ARK's layout.
+    """
+
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
+
+        self.weight_type = f"int{weight_bits}"
+
+        self.QuantLinear = _get_auto_round_ark_instance()
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+        layer.in_features = input_size_per_partition
+        layer.out_features = sum(output_partition_sizes)
+        layer.params_dtype = params_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(layer, "input_size_per_partition"):
+            in_features = layer.input_size_per_partition
+        elif hasattr(layer, "input_size"):
+            in_features = layer.input_size
+        else:
+            raise AttributeError("Cannot determine in_features for layer.")
+
+        if hasattr(layer, "output_partition_sizes"):
+            out_features = sum(layer.output_partition_sizes)
+        elif hasattr(layer, "output_size_per_partition"):
+            out_features = layer.output_size_per_partition
+        elif hasattr(layer, "output_size"):
+            out_features = layer.output_size
+        else:
+            out_features = layer.scales.shape[-1]
+
+        ark_module = self.QuantLinear(
+            bits=self.weight_bits,
+            group_size=self.group_size,
+            sym=self.sym,
+            in_features=in_features,
+            out_features=out_features,
+            bias=layer.bias is not None,
+            weight_dtype=layer.params_dtype,
+        )
+
+        ark_module.qweight = layer.qweight.data
+
+        if hasattr(layer, "qzeros") and layer.qzeros is not None:
+            ark_module.qzeros = layer.qzeros.data
+        else:
+            ark_module.qzeros = None
+
+        ark_module.scales = layer.scales.data
+
+        if hasattr(layer, "bias") and layer.bias is not None:
+            ark_module.bias = layer.bias.data
+
+        ark_module.post_init()
+
+        layer.ark_engine = ark_module
+
+        del layer.qweight
+        if hasattr(layer, "qzeros"):
+            del layer.qzeros
+        del layer.scales
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return layer.ark_engine.forward(x)
