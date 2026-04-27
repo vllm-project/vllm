@@ -517,6 +517,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.kernel_backend == "Flashinfer"
         return flashinfer_trtllm_mxint4_moe(
