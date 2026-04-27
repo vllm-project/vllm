@@ -483,7 +483,6 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^examples/disaggregated/
-      - files~=^examples/others/lmcache/
       - files~=^tests/v1/kv_connector/
       - files~=^vllm/distributed/kv_transfer/
       - title~=(?i)\bP/?D\b
