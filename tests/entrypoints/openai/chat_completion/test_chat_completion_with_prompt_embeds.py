@@ -201,20 +201,55 @@ async def test_streaming(
     assert "".join(chunks) == expected
 
 
+@pytest.fixture(scope="module")
+def aligned_content_and_embeds_b64(hf_runner) -> tuple[str, str]:
+    """Return `(content, base64_embeds)` where the embeddings are the model's
+    embedding of `content` tokenized WITHOUT special tokens.
+    """
+    content = "Hello, my name is"
+    with hf_runner(MODEL_NAME) as hf_model:
+        ids = hf_model.tokenizer(
+            content, add_special_tokens=False, return_tensors="pt"
+        ).input_ids
+        ids = hf_model.wrap_device({"input_ids": ids})["input_ids"]
+        embed_layer = hf_model.model.get_input_embeddings()
+        embeds = embed_layer(ids).squeeze(0).to(SERVER_DTYPE).cpu()
+    return content, _encode_embeds(embeds)
+
+
 @pytest.mark.asyncio
-async def test_text_only_still_works(
+async def test_text_content_and_prompt_embeds_match(
     client: openai.AsyncOpenAI,
+    aligned_content_and_embeds_b64: tuple[str, str],
 ):
-    """Sanity check: plain text chat (no embeds) still works when
-    --enable-prompt-embeds is set."""
-    chat = await client.chat.completions.create(
+    """Equal content in text and `prompt_embeds` should yield identical
+    Chat Completions output under greedy decoding.
+    """
+    content, encoded_embeds = aligned_content_and_embeds_b64
+
+    text_resp = await client.chat.completions.create(
         model=MODEL_NAME,
-        max_tokens=5,
+        max_tokens=10,
         temperature=0.0,
-        messages=[{"role": "user", "content": "Hello World!"}],
+        messages=[{"role": "user", "content": content}],
     )
-    assert chat.choices[0].message.content is not None
-    assert len(chat.choices[0].message.content) > 0
+    embeds_resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "prompt_embeds", "data": encoded_embeds}],
+            }
+        ],
+    )
+
+    text_out = text_resp.choices[0].message.content
+    embeds_out = embeds_resp.choices[0].message.content
+    assert text_out is not None and len(text_out) > 0
+    assert embeds_out is not None and len(embeds_out) > 0
+    assert text_out == embeds_out
 
 
 @pytest.mark.asyncio
