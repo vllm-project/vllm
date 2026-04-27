@@ -1749,6 +1749,28 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
+- label: Kernels AITER MLA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/attention/mla/
+  - csrc/rocm/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
+  - tests/kernels/rocm/utils.py
+  commands:
+  - pytest -v -s kernels/rocm/aiter/test_rocm_aiter_mla.py
+      kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py
+      kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
+
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
 - label: LoRA TP (Distributed) # TBD
@@ -3039,6 +3061,27 @@ steps:
   - vllm/envs.py
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
+
+- label: Kernels AITER MLA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/attention/mla/
+  - csrc/rocm/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
+  - tests/kernels/rocm/utils.py
+  commands:
+  - pytest -v -s kernels/rocm/aiter/test_rocm_aiter_mla.py kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
 
 #----------------------------------------------------------  mi355 · models  -----------------------------------------------------------#
 
