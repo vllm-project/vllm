@@ -331,7 +331,7 @@ class Sampler(nn.Module):
         # of the compiled batched_count_greater_than. mark_unbacked makes
         # the size fully symbolic so dynamo doesn't specialize when
         # batch_size transitions from 1 to >=2.
-        with gpu_sync_allowed(1):
+        with gpu_sync_allowed(first_only=True):
             torch._dynamo.decorators.mark_unbacked(logprobs, 0)
             torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
             token_ranks = batched_count_greater_than(logprobs, token_logprobs)

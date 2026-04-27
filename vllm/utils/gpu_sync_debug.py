@@ -9,7 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.platforms import current_platform
 
-_GPU_SYNC_ALLOWED_COUNTS: dict[tuple[str, int], int] = {}
+_GPU_SYNC_ALLOWED_FIRST_SEEN: set[tuple[str, int]] = set()
 
 # Global sync-check gate. Off during engine setup (model load, KV cache
 # init, warmup/compile) so first-compile and lazy-init syncs pass through;
@@ -106,28 +106,27 @@ def _noop_cm():
 
 if current_platform.is_cuda_alike():
 
-    def gpu_sync_allowed(count: int | None = None):
+    def gpu_sync_allowed(first_only: bool = False):
         """Context manager that suppresses `torch.cuda.set_sync_debug_mode` for the
         duration of the `with` block.
 
-        If `count` is given, only the first `count` entries from this call site
-        suppress the sync check; subsequent entries from the same site are no-ops
-        so any further GPU syncs will be reported. The "site" is the caller's
-        (filename, lineno), so different `with gpu_sync_allowed(count=N):` lines
-        track independent counters automatically.
+        If `first_only` is True, only the first entry from this call site
+        suppresses the sync check; subsequent entries from the same site are
+        no-ops so any further GPU syncs will be reported. The "site" is the
+        caller's (filename, lineno), so different
+        `with gpu_sync_allowed(first_only=True):` lines track independently.
         """
         if torch.compiler.is_compiling():
             return _noop_cm()
         prev_mode = torch.cuda.get_sync_debug_mode()
         if not prev_mode:
             return _noop_cm()
-        if count is not None:
+        if first_only:
             frame = sys._getframe(1)
             key = (frame.f_code.co_filename, frame.f_lineno)
-            used = _GPU_SYNC_ALLOWED_COUNTS.get(key, 0)
-            if used >= count:
+            if key in _GPU_SYNC_ALLOWED_FIRST_SEEN:
                 return _noop_cm()
-            _GPU_SYNC_ALLOWED_COUNTS[key] = used + 1
+            _GPU_SYNC_ALLOWED_FIRST_SEEN.add(key)
         return _suppress_gpu_sync_check(prev_mode)
 
     def with_gpu_sync_check(fn):
@@ -158,7 +157,7 @@ if current_platform.is_cuda_alike():
 
 else:
 
-    def gpu_sync_allowed(count: int | None = None):
+    def gpu_sync_allowed(first_only: bool = False):
         return _noop_cm()
 
     def with_gpu_sync_check(fn):

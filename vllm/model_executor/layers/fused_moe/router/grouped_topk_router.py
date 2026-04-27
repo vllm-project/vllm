@@ -196,7 +196,7 @@ class GroupedTopk(CustomOp):
         gating_output: torch.Tensor,
         e_score_correction_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        with gpu_sync_allowed(1):
+        with gpu_sync_allowed(first_only=True):
             return self.native_impl(
                 hidden_states,
                 gating_output,
@@ -340,7 +340,7 @@ class GroupedTopKRouter(BaseRouter):
         else:
             grouped_topk_impl = grouped_topk
 
-        with gpu_sync_allowed(1):
+        with gpu_sync_allowed(first_only=True):
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
