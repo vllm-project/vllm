@@ -389,11 +389,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
       - files=docs/features/tool_calling.md
-      - files~=^examples/tool_chat_*
-      - files=examples/offline_inference/chat_with_tools.py
-      - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
-      - files=examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py
-      - files=examples/online_serving/openai_chat_completion_client_with_tools.py
+      - files~=^examples/tool_calling/
   actions:
     label:
       add:
