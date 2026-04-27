@@ -320,6 +320,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
+  // MixFP4 W4A16 Marlin GEMM.
+  ops.def(
+      "mixfp4_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor? b_bias_or_none,Tensor b_scales, "
+      "Tensor? global_scale, Tensor? b_zeros_or_none, Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_q_type, "
+      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
+      "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
+  // conditionally compiled so impl registration is in source file
+
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "

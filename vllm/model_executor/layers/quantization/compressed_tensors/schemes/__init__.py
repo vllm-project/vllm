@@ -5,6 +5,7 @@ from .compressed_tensors_scheme import CompressedTensorsScheme
 from .compressed_tensors_w4a4_nvfp4 import CompressedTensorsW4A4Fp4
 from .compressed_tensors_w4a8_fp8 import CompressedTensorsW4A8Fp8
 from .compressed_tensors_w4a8_int import CompressedTensorsW4A8Int
+from .compressed_tensors_w4a16_mixfp4 import CompressedTensorsW4A16MixFP4
 from .compressed_tensors_w4a16_mxfp4 import CompressedTensorsW4A16Mxfp4
 from .compressed_tensors_w4a16_nvfp4 import CompressedTensorsW4A16Fp4
 from .compressed_tensors_w8a8_fp8 import CompressedTensorsW8A8Fp8
@@ -26,6 +27,7 @@ __all__ = [
     "CompressedTensors24",
     "CompressedTensorsW4A16Fp4",
     "CompressedTensorsW4A16Mxfp4",
+    "CompressedTensorsW4A16MixFP4",
     "CompressedTensorsW4A4Fp4",
     "CompressedTensorsW4A8Int",
     "CompressedTensorsW4A8Fp8",

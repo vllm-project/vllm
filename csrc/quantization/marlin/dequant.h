@@ -547,6 +547,66 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
   frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
 }
 
+
+
+// MixFP4 reuses NVFP4 storage and treats each FP8 E4M3 scale sign bit as a
+// per-block FP4/INT4 selector. The INT4 path bakes the required x4 correction
+// directly into the decoded BF16 scale by adding 2 to the BF16 exponent field.
+template <typename scalar_t2>
+__device__ inline void dequant_fp8_scales_mixed_bake_x4(int q,
+                                                        scalar_t2* frag_b,
+                                                        int& flag_mask) {
+  flag_mask = 0;
+  dequant_fp8_scales<scalar_t2, vllm::kFE4M3fn.id()>(q, frag_b);
+}
+
+template <>
+__device__ inline void
+dequant_fp8_scales_mixed_bake_x4<nv_bfloat162>(int q, nv_bfloat162* frag_b,
+                                                int& flag_mask) {
+  flag_mask = (((q >> 7) & 0x01)) | (((q >> 15) & 0x01) << 1) |
+              (((q >> 23) & 0x01) << 2) | (((q >> 31) & 0x01) << 3);
+
+  constexpr int MASK = 0x7F007F00;
+  constexpr int RIGHT_SHIFT = 4;
+  int q_clean = q & 0x7F7F7F7F;
+  int Out1 = (q_clean & MASK) >> RIGHT_SHIFT;
+  int q_shifted = q_clean << 8;
+  int Out2 = (q_shifted & MASK) >> RIGHT_SHIFT;
+
+  int bake_1 = (q & 0x80008000) >> 7;
+  int bake_2 = (q & 0x00800080) << 1;
+  Out1 += bake_1;
+  Out2 += bake_2;
+
+  frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
+  frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
+
+  constexpr uint32_t BITS_2_127 = 254u << 23;
+  const float f_2_127 = *reinterpret_cast<const float*>(&BITS_2_127);
+  const nv_bfloat162 v_2_127 = __float2bfloat162_rn(f_2_127);
+  frag_b[0] = __hmul2(frag_b[0], v_2_127);
+  frag_b[1] = __hmul2(frag_b[1], v_2_127);
+}
+
+template <typename scalar_t2>
+__device__ inline void dequant_mixed_fp4_or_int4(int q, bool is_int4,
+                                                 scalar_t2* frag_b) {
+  dequant<scalar_t2, vllm::kFE2M1f.id(), true>(q, frag_b);
+}
+
+template <>
+__device__ inline void dequant_mixed_fp4_or_int4<nv_bfloat162>(
+    int q, bool is_int4, nv_bfloat162* frag_b) {
+  constexpr int MASK = 0x70007000;
+  int shift = is_int4 ? 7 : 6;
+  int Out1 = (q & 0x80008000) | ((q & MASK) >> shift);
+  q <<= 4;
+  int Out2 = (q & 0x80008000) | ((q & MASK) >> shift);
+  frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
+  frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
+}
+
 template <>
 __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE8M0fnu.id()>(
     int q, nv_bfloat162* frag_b) {

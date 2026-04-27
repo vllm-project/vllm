@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16MixFP4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -33,6 +34,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.marlin_utils_mixfp4 import (
+    mixfp4_marlin_process_scales,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
 )
@@ -367,6 +371,95 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     with vllm_runner(model_path, attention_config={"backend": "FLASH_ATTN"}) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
         assert output
+
+
+def _make_w4a16_fp4_args(observer: str | None = None) -> QuantizationArgs:
+    kwargs = {
+        "num_bits": 4,
+        "type": QuantizationType.FLOAT,
+        "strategy": QuantizationStrategy.TENSOR_GROUP,
+        "symmetric": True,
+        "dynamic": False,
+        "group_size": 16,
+    }
+    if observer is not None:
+        kwargs["observer"] = observer
+    return QuantizationArgs(**kwargs)
+
+
+def test_mixfp4_marlin_process_scales_rejects_odd_group_rows():
+    raw = torch.zeros((3, 8), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="even number"):
+        mixfp4_marlin_process_scales(raw.view(torch.float8_e4m3fn))
+
+
+def test_mixfp4_marlin_process_scales_preserves_even_shape():
+    raw = torch.arange(4 * 16, dtype=torch.uint8).reshape(4, 16)
+
+    processed = mixfp4_marlin_process_scales(raw.view(torch.float8_e4m3fn))
+
+    assert processed.shape == raw.shape
+    assert processed.dtype is torch.float8_e4m3fn
+
+
+@pytest.mark.parametrize(
+    ("format", "observer"),
+    [
+        ("mixfp4-pack-quantized", None),
+        ("mixed-fp4-int4-pack-quantized", None),
+        ("nvfp4-pack-quantized", "mixfp4"),
+        ("nvfp4-pack-quantized", "mixed_fp4_int4"),
+    ],
+)
+def test_compressed_tensors_mixfp4_scheme_selection(format, observer):
+    config = CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format=format,
+        sparsity_scheme_map={},
+        sparsity_ignore_list=[],
+    )
+
+    scheme = config._get_scheme_from_parts(
+        weight_quant=_make_w4a16_fp4_args(observer=observer),
+        input_quant=None,
+        format=format,
+    )
+
+    assert isinstance(scheme, CompressedTensorsW4A16MixFP4)
+
+
+def test_compressed_tensors_nvfp4_is_not_routed_to_mixfp4():
+    config = CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format="nvfp4-pack-quantized",
+        sparsity_scheme_map={},
+        sparsity_ignore_list=[],
+    )
+
+    scheme = config._get_scheme_from_parts(
+        weight_quant=_make_w4a16_fp4_args(),
+        input_quant=None,
+        format="nvfp4-pack-quantized",
+    )
+
+    assert isinstance(scheme, CompressedTensorsW4A16Fp4)
+
+
+def test_mixfp4_create_weights_rejects_odd_group_count():
+    scheme = CompressedTensorsW4A16MixFP4()
+    layer = torch.nn.Module()
+
+    with pytest.raises(ValueError, match="divisible by 32"):
+        scheme.create_weights(
+            layer=layer,
+            output_partition_sizes=[64],
+            input_size_per_partition=48,
+            params_dtype=torch.bfloat16,
+            weight_loader=lambda *_args, **_kwargs: None,
+        )
 
 
 @pytest.mark.parametrize(

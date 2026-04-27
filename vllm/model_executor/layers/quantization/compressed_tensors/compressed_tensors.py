@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16MixFP4,
     CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
@@ -386,6 +387,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_mixfp4_format(format: str | None) -> bool:
+        return format in {
+            "mixfp4-pack-quantized",
+            "mixed-fp4-int4-pack-quantized",
+        }
+
+    @staticmethod
+    def _is_mixfp4_observer(quant_args: QuantizationArgs | None) -> bool:
+        if quant_args is None:
+            return False
+        return getattr(quant_args, "observer", None) in {"mixfp4", "mixed_fp4_int4"}
+
+    @staticmethod
     def _is_mxfp4(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
             return False
@@ -623,6 +637,10 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Detect If Mixed Precision
         if self._is_nvfp4_format(weight_quant) and input_quant is None:
+            if self._is_mixfp4_format(format) or self._is_mixfp4_observer(
+                weight_quant
+            ):
+                return CompressedTensorsW4A16MixFP4()
             return CompressedTensorsW4A16Fp4()
 
         if self._is_mxfp4(weight_quant):

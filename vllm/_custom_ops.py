@@ -1415,6 +1415,78 @@ def marlin_gemm(
     )
 
 
+def mixfp4_marlin_gemm(
+    a: torch.Tensor,
+    c: torch.Tensor | None,
+    b_q_weight: torch.Tensor,
+    b_bias: torch.Tensor | None,
+    b_scales: torch.Tensor,
+    global_scale: torch.Tensor | None,
+    b_zeros: torch.Tensor | None,
+    g_idx: torch.Tensor | None,
+    perm: torch.Tensor | None,
+    workspace: torch.Tensor,
+    b_q_type: ScalarType,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+    is_k_full: bool = True,
+    use_atomic_add: bool = False,
+    use_fp32_reduce: bool = False,
+    is_zp_float: bool = False,
+) -> torch.Tensor:
+    return torch.ops._C.mixfp4_marlin_gemm(
+        a,
+        c,
+        b_q_weight,
+        b_bias,
+        b_scales,
+        global_scale,
+        b_zeros,
+        g_idx,
+        perm,
+        workspace,
+        b_q_type.id,
+        size_m,
+        size_n,
+        size_k,
+        is_k_full,
+        use_atomic_add,
+        use_fp32_reduce,
+        is_zp_float,
+    )
+
+
+if hasattr(torch.ops._C, "mixfp4_marlin_gemm"):
+
+    @register_fake("_C::mixfp4_marlin_gemm")
+    def _mixfp4_marlin_gemm_fake(
+        a: torch.Tensor,
+        c: torch.Tensor | None,
+        b_q_weight: torch.Tensor,
+        b_bias: torch.Tensor | None,
+        b_scales: torch.Tensor,
+        global_scale: torch.Tensor | None,
+        b_zeros: torch.Tensor | None,
+        g_idx: torch.Tensor | None,
+        perm: torch.Tensor | None,
+        workspace: torch.Tensor,
+        b_q_type_id: int,
+        size_m: torch.SymInt,
+        size_n: torch.SymInt,
+        size_k: torch.SymInt,
+        is_k_full: bool = True,
+        use_atomic_add: bool = False,
+        use_fp32_reduce: bool = False,
+        is_zp_float: bool = False,
+    ) -> torch.Tensor:
+        if a.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "MixFP4 Marlin currently supports bfloat16 models only."
+            )
+        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
+
+
 if hasattr(torch.ops._C, "marlin_gemm"):
 
     @register_fake("_C::marlin_gemm")

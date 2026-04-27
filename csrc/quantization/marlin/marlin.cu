@@ -50,6 +50,8 @@ torch::Tensor marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& a_scales_or_none,
+    std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
@@ -58,6 +60,22 @@ torch::Tensor marlin_gemm(
     bool is_zp_float) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 7.5");
+  return torch::empty({1, 1});
+}
+
+torch::Tensor mixfp4_marlin_gemm(
+    torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
+    std::optional<torch::Tensor> const& b_zeros_or_none,
+    std::optional<torch::Tensor> const& g_idx_or_none,
+    std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
+    vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
+    int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
+    bool is_zp_float) {
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
+                              "mixfp4_marlin_gemm(..) requires CUDA_ARCH >= 7.5");
   return torch::empty({1, 1});
 }
 
@@ -321,7 +339,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k_init,
                int thread_n_init, int sms, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               bool use_fp32_reduce, bool is_zp_float, bool is_mixfp4) {
   bool is_a_8bit = a_type.size_bits() == 8;
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
               ", ", prob_n, ", ", prob_k, "]");
@@ -515,7 +533,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr,
         g_idx_ptr, num_groups,
         prob_m_split, prob_n, prob_k, lda, locks, has_bias, part_use_atomic_add,
-        use_fp32_reduce, max_shared_mem_new);
+        use_fp32_reduce, max_shared_mem_new, is_mixfp4);
     // clang-format on
 
     bool is_a_8bit = a_type.size_bits() == 8;
@@ -528,7 +546,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
 }  // namespace marlin
 
-torch::Tensor marlin_gemm(
+static torch::Tensor marlin_gemm_impl(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
@@ -539,7 +557,7 @@ torch::Tensor marlin_gemm(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, bool is_mixfp4) {
   vllm::ScalarTypeId a_type_id, c_type_id, s_type_id;
 
   auto c_dtype = a.dtype();
@@ -613,6 +631,12 @@ torch::Tensor marlin_gemm(
   TORCH_CHECK(
       size_k % MARLIN_NAMESPACE_NAME::tile_size == 0, "size_k = ", size_k,
       " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
+  if (is_mixfp4) {
+    TORCH_CHECK(
+        size_k % (2 * MARLIN_NAMESPACE_NAME::tile_size) == 0, "size_k = ",
+        size_k, " is not divisible by ", 2 * MARLIN_NAMESPACE_NAME::tile_size,
+        "; MixFP4 scale layout packs pairs of group-16 rows");
+  }
   TORCH_CHECK((size_k / MARLIN_NAMESPACE_NAME::tile_size) == b_q_weight.size(0),
               "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
               ", size_k = ", size_k,
@@ -752,11 +776,23 @@ torch::Tensor marlin_gemm(
   if (global_scale_or_none.has_value()) {
     global_scale = global_scale_or_none.value();
     TORCH_CHECK(b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn,
-                "global_scale can only be used for nvfp4 format.");
+                "global_scale can only be used for NVFP4/MixFP4 format.");
   } else {
     global_scale = torch::empty({0}, options_fp32);
     TORCH_CHECK(!(b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn),
-                "the global_scale parameter must be passed for nvfp4 format.");
+                "the global_scale parameter must be passed for NVFP4/MixFP4 format.");
+  }
+
+  if (is_mixfp4) {
+    TORCH_CHECK(a.scalar_type() == at::ScalarType::BFloat16,
+                "MixFP4 Marlin currently supports bfloat16 models only.");
+    TORCH_CHECK(b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn,
+                "MixFP4 Marlin only supports float4_e2m1f weights with "
+                "float8_e4m3fn scales. Got weight type = ", b_type.str(),
+                ", scale type = ", s_type.str());
+    TORCH_CHECK(group_size == 16,
+                "MixFP4 Marlin only supports group_size == 16, got ",
+                group_size);
   }
 
   bool has_bias = b_bias_or_none.has_value();
@@ -780,6 +816,9 @@ torch::Tensor marlin_gemm(
     b_zeros = torch::empty({0}, options);
   }
   bool has_zp = b_zeros.size(-1) > 0;
+  if (is_mixfp4) {
+    TORCH_CHECK(!has_zp, "MixFP4 Marlin does not support zero points.");
+  }
   if (has_zp) {
     TORCH_CHECK(
         b_type == vllm::kU4 || b_type == vllm::kU8,
@@ -851,13 +890,54 @@ torch::Tensor marlin_gemm(
       workspace.data_ptr(), a_type, b_type, c_type, s_type, has_bias,
       has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
       at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
-      use_atomic_add, use_fp32_reduce, is_zp_float);
+      use_atomic_add, use_fp32_reduce, is_zp_float, is_mixfp4);
 
   return c;
+}
+
+torch::Tensor marlin_gemm(
+    torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& a_scales_or_none,
+    std::optional<torch::Tensor> const& global_scale_or_none,
+    std::optional<torch::Tensor> const& b_zeros_or_none,
+    std::optional<torch::Tensor> const& g_idx_or_none,
+    std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
+    vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
+    int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
+    bool is_zp_float) {
+  return marlin_gemm_impl(a, c_or_none, b_q_weight, b_bias_or_none, b_scales,
+                          a_scales_or_none, global_scale_or_none,
+                          b_zeros_or_none, g_idx_or_none, perm_or_none,
+                          workspace, b_type_id, size_m, size_n, size_k,
+                          is_k_full, use_atomic_add, use_fp32_reduce,
+                          is_zp_float, false);
+}
+
+torch::Tensor mixfp4_marlin_gemm(
+    torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
+    std::optional<torch::Tensor> const& b_zeros_or_none,
+    std::optional<torch::Tensor> const& g_idx_or_none,
+    std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
+    vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
+    int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
+    bool is_zp_float) {
+  std::optional<torch::Tensor> a_scales_or_none = std::nullopt;
+  return marlin_gemm_impl(a, c_or_none, b_q_weight, b_bias_or_none, b_scales,
+                          a_scales_or_none, global_scale_or_none,
+                          b_zeros_or_none, g_idx_or_none, perm_or_none,
+                          workspace, b_type_id, size_m, size_n, size_k,
+                          is_k_full, use_atomic_add, use_fp32_reduce,
+                          is_zp_float, true);
 }
 
 #endif
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("marlin_gemm", &marlin_gemm);
+  m.impl("mixfp4_marlin_gemm", &mixfp4_marlin_gemm);
 }
