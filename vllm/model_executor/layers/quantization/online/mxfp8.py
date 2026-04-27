@@ -177,6 +177,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=w13,
             w2=w2,
@@ -214,6 +215,9 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
+        if self.moe.has_bias:
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
 
         quant_config = make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
@@ -221,10 +225,11 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            w1_bias=w13_bias,
+            w2_bias=w2_bias,
             block_shape=self.weight_block_size,
         )
 
-        self._maybe_inject_biases(quant_config, layer)
         return quant_config
 
     def process_weights_after_loading(self, layer: Module) -> None:
