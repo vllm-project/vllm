@@ -144,6 +144,7 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
+        kv_cache_spec_kinds: Optional per-group KV cache spec kind labels.
     """
 
     def __init__(
@@ -153,6 +154,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        kv_cache_spec_kinds: Sequence[str | None] | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -177,9 +179,17 @@ class BlockPool:
         self.null_block.is_null = True
 
         self.enable_kv_cache_events = enable_kv_cache_events
+        self.kv_cache_spec_kinds = tuple(kv_cache_spec_kinds or ())
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+
+    def _get_kv_cache_spec_kind(self, kv_cache_group_id: int) -> str | None:
+        if not self.kv_cache_spec_kinds:
+            return None
+        if kv_cache_group_id < len(self.kv_cache_spec_kinds):
+            return self.kv_cache_spec_kinds[kv_cache_group_id]
+        return "unknown"
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -316,6 +326,7 @@ class BlockPool:
                     else None,
                     extra_keys=extra_keys_list if extra_keys_list else None,
                     group_idx=kv_cache_group_id,
+                    kv_cache_spec_kind=self._get_kv_cache_spec_kind(kv_cache_group_id),
                 )
             )
 
@@ -379,11 +390,13 @@ class BlockPool:
         block.reset_hash()
 
         if self.enable_kv_cache_events:
+            group_id = get_group_id(block_hash)
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
                     medium=MEDIUM_GPU,
-                    group_idx=get_group_id(block_hash),
+                    group_idx=group_id,
+                    kv_cache_spec_kind=self._get_kv_cache_spec_kind(group_id),
                 )
             )
         return True

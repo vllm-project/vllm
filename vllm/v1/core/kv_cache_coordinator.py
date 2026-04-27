@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    get_kv_cache_spec_kind,
 )
 from vllm.v1.request import Request
 
@@ -48,11 +49,15 @@ class KVCacheCoordinator(ABC):
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks,
-            enable_caching,
-            hash_block_size,
-            enable_kv_cache_events,
-            metrics_collector,
+            num_gpu_blocks=kv_cache_config.num_blocks,
+            enable_caching=enable_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
+            kv_cache_spec_kinds=[
+                get_kv_cache_spec_kind(group.kv_cache_spec).value
+                for group in kv_cache_config.kv_cache_groups
+            ],
         )
 
         # KV cache group indices that get the EAGLE last-block drop.

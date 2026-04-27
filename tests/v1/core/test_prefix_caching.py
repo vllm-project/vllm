@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpecKind,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -1933,6 +1934,7 @@ def test_kv_cache_events(blocks_to_cache: int):
         == len(manager.block_pool.cached_block_hash_to_block)
     )
     assert len(block.token_ids) == block.block_size * len(block.block_hashes)
+    assert block.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert len(manager.block_pool.kv_event_queue) == 0
 
     stored_block_hash = block.block_hashes
@@ -1947,6 +1949,7 @@ def test_kv_cache_events(blocks_to_cache: int):
 
     for blocks in events[:-1]:
         assert blocks.block_hashes[0] in stored_block_hash
+        assert blocks.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
     assert (
@@ -1976,6 +1979,7 @@ def test_null_parent_block_hash():
         enable_caching=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
+        kv_cache_spec_kinds=[KVCacheSpecKind.FULL_ATTENTION.value],
     )
 
     req = make_request(
@@ -2022,6 +2026,7 @@ def test_null_parent_block_hash():
     ]
     assert event.block_hashes == expected_new_hashes
     assert event.group_idx == kv_cache_group_id
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
 
     # Ensure we didn't accidentally assign a hash to the null block.
     assert pool.null_block.block_hash is None
@@ -2100,6 +2105,11 @@ def test_block_stored_event_group_idx(group_id: int):
         enable_caching=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
+        kv_cache_spec_kinds=[
+            KVCacheSpecKind.FULL_ATTENTION.value,
+            KVCacheSpecKind.SLIDING_WINDOW.value,
+            KVCacheSpecKind.MAMBA.value,
+        ],
     )
 
     req = make_request(
@@ -2123,6 +2133,14 @@ def test_block_stored_event_group_idx(group_id: int):
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == group_id
+    assert (
+        events[0].kv_cache_spec_kind
+        == [
+            KVCacheSpecKind.FULL_ATTENTION.value,
+            KVCacheSpecKind.SLIDING_WINDOW.value,
+            KVCacheSpecKind.MAMBA.value,
+        ][group_id]
+    )
 
 
 def test_block_stored_event_group_idx_multiple_groups():
@@ -2143,6 +2161,10 @@ def test_block_stored_event_group_idx_multiple_groups():
         enable_caching=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
+        kv_cache_spec_kinds=[
+            KVCacheSpecKind.FULL_ATTENTION.value,
+            KVCacheSpecKind.SLIDING_WINDOW.value,
+        ],
     )
 
     req = make_request(
@@ -2178,8 +2200,10 @@ def test_block_stored_event_group_idx_multiple_groups():
     assert len(events) == 2
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == 0
+    assert events[0].kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert isinstance(events[1], BlockStored)
     assert events[1].group_idx == 1
+    assert events[1].kv_cache_spec_kind == KVCacheSpecKind.SLIDING_WINDOW.value
 
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
@@ -2198,6 +2222,11 @@ def test_block_removed_event_group_idx(group_id: int):
         enable_caching=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
+        kv_cache_spec_kinds=[
+            KVCacheSpecKind.FULL_ATTENTION.value,
+            KVCacheSpecKind.SLIDING_WINDOW.value,
+            KVCacheSpecKind.MAMBA.value,
+        ],
     )
 
     req = make_request(
@@ -2233,6 +2262,14 @@ def test_block_removed_event_group_idx(group_id: int):
     assert len(removed_events) == 2
     for event in removed_events:
         assert event.group_idx == group_id
+        assert (
+            event.kv_cache_spec_kind
+            == [
+                KVCacheSpecKind.FULL_ATTENTION.value,
+                KVCacheSpecKind.SLIDING_WINDOW.value,
+                KVCacheSpecKind.MAMBA.value,
+            ][group_id]
+        )
 
 
 def test_eagle_enabled_removes_last_block():

@@ -43,11 +43,15 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheSpecKind,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
@@ -1863,6 +1867,86 @@ def new_mla_spec(cache_dtype_str=None):
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
+    assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
+
+    sliding_window_mla_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    assert (
+        get_kv_cache_spec_kind(sliding_window_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+    sink_full_attention_spec = SinkFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sink_len=4,
+    )
+    assert (
+        get_kv_cache_spec_kind(sink_full_attention_spec)
+        == KVCacheSpecKind.SINK_FULL_ATTENTION
+    )
+
+
+def test_get_kv_cache_spec_kind_unwraps_uniform_type_specs():
+    uniform_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": new_mla_spec(cache_dtype_str="fp8"),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mla_spec) == KVCacheSpecKind.MLA_ATTENTION
+
+    uniform_swa_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1024,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert (
+        get_kv_cache_spec_kind(uniform_swa_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+
+def test_get_kv_cache_spec_kind_unknown_for_mixed_uniform_type_specs():
+    uniform_mixed_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mixed_spec) == KVCacheSpecKind.UNKNOWN
 
 
 def test_merge_mla_spec():
