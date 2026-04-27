@@ -1130,10 +1130,9 @@ class MiMoOmniProcessor(ProcessorMixin):
         Returns:
             :class:`BatchFeature` with keys:
             - ``input_ids``
-            - ``pixel_values`` + ``image_grid_thw`` (if images present)
+            - ``pixel_values`` + ``image_grid_thw``
             - ``pixel_values_videos`` + ``video_grid_thw`` + ``second_per_grid_ts``
-              (if videos present)
-            - ``audio_features`` (if audio present)
+            - ``audio_features``
         """
         if isinstance(text, list):
             text = text[0] if len(text) == 1 else "\n".join(text)
