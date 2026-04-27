@@ -221,6 +221,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
         quant_config = make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
