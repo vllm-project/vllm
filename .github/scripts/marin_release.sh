@@ -155,6 +155,13 @@ upsert_release() {
   wait_for_release "$repo" "$tag"
 
   if [[ $# -gt 0 ]]; then
+    gh api "repos/$repo/releases/tags/$tag" \
+      | jq -r '.assets[].id // empty' \
+      | while read -r asset_id; do
+          [[ -n "$asset_id" ]] || continue
+          gh api --method DELETE "repos/$repo/releases/assets/$asset_id" >/dev/null
+        done
+
     gh release upload "$tag" -R "$repo" --clobber "$@"
   fi
 }
