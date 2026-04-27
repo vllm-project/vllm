@@ -122,7 +122,23 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # so max_num_pages_per_req = max_model_len regardless of
         # kernel_block_size.
         max_num_pages_per_req = vllm_config.model_config.max_model_len
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        # Persistent AITER-MLA scheduling buffers (work_info_set,
+        # reduce_indptr, reduce_final_map, reduce_partial_map, and under
+        # full cudagraphs paged_kv_indptr / qo_indptr) must accommodate the
+        # largest batch the kernel will ever be invoked with. Cudagraphs
+        # are captured up to compilation_config.max_cudagraph_capture_size,
+        # which can exceed max_num_seqs (chunked prefill / mixed batches).
+        max_num_reqs = max(
+            int(vllm_config.scheduler_config.max_num_seqs),
+            int(
+                getattr(
+                    vllm_config.compilation_config,
+                    "max_cudagraph_capture_size",
+                    0,
+                )
+                or 0
+            ),
+        )
         max_num_pages = max_num_reqs * max_num_pages_per_req
 
         # Preparing persistent buffers
