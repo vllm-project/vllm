@@ -6,15 +6,16 @@ import os
 import platform
 import subprocess
 import sys
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import psutil
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.ompmultiprocessing import OMPProcessManager
+from vllm.utils.cpu_resource_utils import (
+    DEVICE_CONTROL_ENV_VAR,
+    get_memory_node_info,
+)
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -38,49 +39,13 @@ def get_max_threads(pid=0):
         raise NotImplementedError("Unsupported OS")
 
 
-@dataclass
-class LogicalCPUInfo:
-    id: int = -1
-    physical_core: int = -1
-    numa_node: int = -1
-
-    @classmethod
-    def _int(cls, value: str) -> int:
-        try:
-            int_value = int(value)
-        except Exception:
-            int_value = -1
-        return int_value
-
-    @staticmethod
-    def json_decoder(obj_dict: dict):
-        id = obj_dict.get("cpu")
-        physical_core = obj_dict.get("core")
-        numa_node = obj_dict.get("node")
-
-        if not (id is None or physical_core is None or numa_node is None):
-            return LogicalCPUInfo(
-                id=LogicalCPUInfo._int(id),
-                physical_core=LogicalCPUInfo._int(physical_core),
-                numa_node=LogicalCPUInfo._int(numa_node),
-            )
-        else:
-            return obj_dict
-
-
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
-    device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
-    omp_process_manager = None
-    # Simultaneous Multithreading (SMT) level for OpenMP:
-    # 4 on PowerPC, 1 on non-PowerPC architectures
-    smt = 1
-    global_cpu_mask = None
-    simulate_numa = int(os.environ.get("_SIM_MULTI_NUMA", 0))
+    device_control_env_var = DEVICE_CONTROL_ENV_VAR
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -123,29 +88,9 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        from vllm.utils.mem_constants import GiB_bytes
-        from vllm.utils.mem_utils import format_gib
+        meminfo = get_memory_node_info(device_id)
 
-        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
-        node_dir = "/sys/devices/system/node"
-        if kv_cache_space is None:
-            nodes = (
-                [d for d in os.listdir(node_dir) if d.startswith("node")]
-                if os.path.exists(node_dir)
-                else []
-            )
-            num_numa_nodes = len(nodes) or 1
-            free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
-            DEFAULT_CPU_MEM_UTILIZATION = 0.5
-            kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
-            logger.warning_once(
-                "VLLM_CPU_KVCACHE_SPACE not set. Using %s GiB for KV cache.",
-                format_gib(kv_cache_space),
-            )
-        else:
-            kv_cache_space *= GiB_bytes
-
-        return kv_cache_space
+        return meminfo.total_memory
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -180,6 +125,12 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
+        # Lagecy setting
+        env_key = "VLLM_CPU_KVCACHE_SPACE"
+        if env_key in os.environ and os.environ[env_key] != "":
+            kv_cache_space = int(os.environ[env_key])
+            cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
+
         scheduler_config = vllm_config.scheduler_config
         # async scheduling is not required on CPU
         scheduler_config.async_scheduling = False
@@ -197,8 +148,6 @@ class CpuPlatform(Platform):
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
             cache_config.cache_dtype = "auto"
-
-        cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 
         parallel_config = vllm_config.parallel_config
         # OMP requires the MP executor to function correctly, UniProc is not
@@ -278,20 +227,44 @@ class CpuPlatform(Platform):
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
-
-        # Intel and CLANG OpenMP setting
-        if "libiomp5.so" in ld_preload_str or "libomp5" in ld_preload_str:
-            # The time(milliseconds) that a thread should wait after
-            # completing the execution of a parallel region, before sleeping.
-            os.environ["KMP_BLOCKTIME"] = "1"
-            # Prevents the CPU to run into low performance state
-            os.environ["KMP_TPAUSE"] = "0"
-            # Provides fine granularity parallelism
-            os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-            os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-            os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
-
         cpu_architecture = Platform.get_cpu_architecture()
+
+        if (
+            platform.system() == "Linux"
+            and cpu_architecture
+            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC, CpuArchEnum.X86)
+            and not (
+                "libomp" in ld_preload_str
+                or "libgomp" in ld_preload_str
+                or "libiomp" in ld_preload_str
+            )
+        ):
+            # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
+            # one core will be properly utilized when we thread-bind
+            # See: https://github.com/vllm-project/vllm/issues/27369
+            # TODO: Remove once:
+            # https://github.com/pytorch/pytorch/issues/166087 is fixed
+
+            # We need to find the location of PyTorch's libgomp
+            torch_pkg = os.path.dirname(torch.__file__)
+            site_root = os.path.dirname(torch_pkg)
+            # Search both torch.libs and torch/lib - See:
+            # https://github.com/vllm-project/vllm/issues/30470
+            torch_libs_paths = [
+                os.path.join(site_root, "torch.libs"),
+                os.path.join(torch_pkg, "lib"),
+            ]
+            pytorch_libgomp_so_candidates = []
+            for torch_libs in torch_libs_paths:
+                pytorch_libgomp_so_candidates.extend(
+                    glob.glob(os.path.join(torch_libs, "libgomp*.so*"))
+                )
+            if pytorch_libgomp_so_candidates:
+                pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
+                if ld_preload_str:
+                    ld_preload_str += ":"
+                ld_preload_str += pytorch_libgomp_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
 
         # LD_PRELOAD libtcmalloc, bundled under vllm/libs to reduce
         # memory allocation overhead
@@ -331,91 +304,12 @@ class CpuPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
-        # CI specific "quick" NUMA simulation - split all available CPUs
-        # into a fake NUMA topology
-        if os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", None) is not None:
-            os.environ["_SIM_MULTI_NUMA"] = str(
-                vllm_config.parallel_config.world_size
-                * vllm_config.parallel_config._api_process_count
-            )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         # TODO: CPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         pass
-
-    @classmethod
-    def get_omp_manager(cls) -> OMPProcessManager:
-        # initialise the OMP resource management if need be and return the manager
-        if cls.omp_process_manager is None:
-            if cls.get_cpu_architecture() == CpuArchEnum.POWERPC:
-                cls.smt = 4
-            cls.omp_process_manager = OMPProcessManager(
-                affinity=cls.get_global_cpu_mask(), smt=cls.smt
-            )
-            # we need to fix up the topology returned by the OMP Manager for
-            # simulated NUMA environments in CI
-            if cls.simulate_numa > 0:
-                logger.info(
-                    "Adjusting numa topology to resemble at least %d nodes",
-                    int(cls.simulate_numa),
-                )
-                om = cls.omp_process_manager
-                while len(om.omp_places) < cls.simulate_numa:
-                    new_omp_places = []
-                    touched = False
-                    for omp_place in om.omp_places:
-                        if len(omp_place["mask"]) > 1:
-                            touched = True
-                            cpu_list = sorted(list(omp_place["mask"]))
-                            new_omp_places.append(
-                                {
-                                    "mask": set(cpu_list[0 : int(len(cpu_list) / 2)]),
-                                    "available": True,
-                                }
-                            )
-                            new_omp_places.append(
-                                {
-                                    "mask": set(cpu_list[int(len(cpu_list) / 2) :]),
-                                    "available": True,
-                                }
-                            )
-                    if touched:
-                        om.omp_places = new_omp_places
-                    else:
-                        raise ValueError(
-                            "Cannot split the existing NUMA topology to match "
-                            "simulation requirements"
-                        )
-
-        return cls.omp_process_manager
-
-    @classmethod
-    def get_global_cpu_mask(cls) -> set[int]:
-        # get global cpu mask
-        if cls.global_cpu_mask is None:
-            if hasattr(os, "sched_getaffinity"):
-                cls.global_cpu_mask = os.sched_getaffinity(0)
-            else:
-                # macOS does not support sched_getaffinity
-                cpu_count = os.cpu_count() or 1
-                cls.global_cpu_mask = set(range(cpu_count))
-        return cls.global_cpu_mask
-
-    @classmethod
-    def reserve_cpus(cls, reserve: set[int]) -> bool:
-        # remove CPUs from global mask, for now there is no "release" mechanism
-        if cls.omp_process_manager is not None:
-            for place in cls.omp_process_manager.omp_places:
-                if not place["available"]:
-                    return False
-        cls.global_cpu_mask = cls.get_global_cpu_mask() - reserve
-        # reinitialize OMP resource management
-        cls.omp_process_manager = OMPProcessManager(
-            affinity=cls.global_cpu_mask, smt=cls.smt
-        )
-        return True
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:

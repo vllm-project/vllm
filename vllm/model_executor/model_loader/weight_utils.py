@@ -1562,6 +1562,11 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
         # .mixer.attn.{k,v}_scale
         (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
+        # HYV3 format: .self_attn.q.scale -> .self_attn.attn.q_scale
+        (r"\.self_attn\.q\.scale$", r".self_attn.attn.q_scale"),
+        # HYV3 format: .self_attn.{k,v}_cache.scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.([kv])_cache\.scale$", r".self_attn.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
         (r"\.([qkv])_scale$", r".attn.\1_scale"),
         (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
@@ -1576,6 +1581,9 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             ".k_zero_point",
             ".v_zero_point",
             ".q_zero_point",
+            ".q.scale",
+            ".k_cache.scale",
+            ".v_cache.scale",
         )
     ):
         import regex as re

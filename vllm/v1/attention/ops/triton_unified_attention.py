@@ -346,6 +346,8 @@ def kernel_unified_attention_2d(
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     kv_head_idx = tl.program_id(0)
     q_block_global_idx = tl.program_id(1)
@@ -478,7 +480,11 @@ def kernel_unified_attention_2d(
         # where q_abs = context_len + q
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+        q_abs = context_len + qpos_lo
+        if CHUNK_LOOKBACK > -1:
+            first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
+        else:
+            first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
@@ -586,9 +592,19 @@ def kernel_unified_attention_2d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # Apply sliding window to base mask BEFORE mm_prefix OR.
-        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
-        if SLIDING_WINDOW > 0:
+        # Apply sliding window / chunked attention to base mask
+        # BEFORE mm_prefix OR.
+        # Order must match FlexAttention:
+        #   (causal AND sliding_window) OR mm_prefix
+        if CHUNK_LOOKBACK > -1:
+            seq_mask = seq_mask & (
+                (
+                    (context_len + query_pos[:, None]) // CHUNK_SIZE
+                    - (seq_offset[None, :] // CHUNK_SIZE)
+                )
+                <= CHUNK_LOOKBACK
+            )
+        elif SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
@@ -782,6 +798,8 @@ def kernel_unified_attention_3d(
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -919,7 +937,11 @@ def kernel_unified_attention_3d(
         # where q_abs = context_len + q
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+        q_abs = context_len + qpos_lo
+        if CHUNK_LOOKBACK > -1:
+            first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
+        else:
+            first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
@@ -1029,9 +1051,19 @@ def kernel_unified_attention_3d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # Apply sliding window to base mask BEFORE mm_prefix OR.
-        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
-        if SLIDING_WINDOW > 0:
+        # Apply sliding window / chunked attention to base mask
+        # BEFORE mm_prefix OR.
+        # Order must match FlexAttention:
+        #   (causal AND sliding_window) OR mm_prefix
+        if CHUNK_LOOKBACK > -1:
+            seq_mask = seq_mask & (
+                (
+                    (context_len + query_pos[:, None]) // CHUNK_SIZE
+                    - (seq_offset[None, :] // CHUNK_SIZE)
+                )
+                <= CHUNK_LOOKBACK
+            )
+        elif SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
@@ -1322,6 +1354,8 @@ def unified_attention(
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    # Chunked attention: restrict attention to aligned blocks with lookback.
+    chunk_lookback=-1,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -1366,6 +1400,15 @@ def unified_attention(
     #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+
+    # Compute chunked block size from sliding window if needed.
+    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    chunk_size = -1
+    if sliding_window_val > 0 and chunk_lookback > -1:
+        chunk_size = sliding_window_val // (chunk_lookback + 1)
+        assert chunk_size > 0, "sliding_window must be > chunk_lookback+1"
+    elif sliding_window_val <= 0:
+        chunk_lookback = -1
 
     # 3D kernel launch configs (used when running decode-only and the caller
     # provided segmented softmax buffers).
@@ -1470,6 +1513,8 @@ def unified_attention(
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
+            CHUNK_LOOKBACK=chunk_lookback,
+            CHUNK_SIZE=chunk_size,
             **config,
         )
     else:
@@ -1539,6 +1584,8 @@ def unified_attention(
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
+            CHUNK_LOOKBACK=chunk_lookback,
+            CHUNK_SIZE=chunk_size,
             **attn_config_3d,
         )
         reduce_segments[(q.shape[0], num_query_heads)](

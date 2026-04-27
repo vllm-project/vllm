@@ -515,14 +515,6 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         initialize_online_processing(layer)
 
-        # TODO: remove this check once the following RFC is resolved.
-        # https://github.com/vllm-project/vllm/issues/33314
-        # Subclasses (e.g. Mxfp8OnlineLinearMethod) only need the weight
-        # registration above and manage their own kernel, so skip fp8_linear
-        # kernel creation for them.
-        if type(self) is not Fp8OnlineLinearMethod:
-            return
-
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
@@ -1026,10 +1018,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
-
-        if current_platform.is_xpu():
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
