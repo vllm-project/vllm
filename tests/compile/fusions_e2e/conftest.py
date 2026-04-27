@@ -125,7 +125,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # engine warmup dummy run, so reduce the warmup token budget
             # further without affecting the rest of the suite.
             model_kwargs["max_num_batched_tokens"] = min(
-                model_kwargs["max_num_batched_tokens"], 4096
+                model_kwargs["max_num_batched_tokens"], 2048
             )
 
         # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
