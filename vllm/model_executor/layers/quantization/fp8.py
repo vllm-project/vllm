@@ -267,6 +267,50 @@ def _copy_missing_attrs(old: torch.Tensor, new: torch.Tensor) -> None:
     set_weight_attrs(new, attrs_to_set)
 
 
+
+def _make_lm_head_block_scale_loader(layer, block_size):
+    """Per-parameter weight_loader for FP8 block scale_inv on ParallelLMHead.
+
+    The default VocabParallelEmbedding.weight_loader assumes vocab-shaped
+    tensors and rejects companion params with a different leading dim
+    (e.g., weight_scale_inv has shape [vocab/block_out, hidden/block_in]).
+    This loader shards the scale tensor along the block-aligned vocab dim
+    using the layer's existing shard_indices, and zero-fills any padding
+    rows the param was sized for.
+    """
+    block_out = block_size[0]
+
+    def load(param, loaded_weight):
+        start = layer.shard_indices.org_vocab_start_index
+        assert start % block_out == 0, (
+            f"FP8 lm_head requires the vocab-parallel shard start "
+            f"({start}) to be divisible by weight_block_size[0] "
+            f"({block_out})"
+        )
+        start_idx = start // block_out
+        local_rows = param.shape[0]
+        assert loaded_weight.shape[0] >= start_idx + local_rows, (
+            f"loaded scale has {loaded_weight.shape[0]} rows, "
+            f"need at least {start_idx + local_rows} "
+            f"(start_idx={start_idx}, local_rows={local_rows})"
+        )
+        chunk = loaded_weight.narrow(0, start_idx, local_rows)
+        param.data.copy_(chunk)
+
+    return load
+
+
+def _make_lm_head_scalar_scale_loader():
+    """Per-parameter weight_loader for FP8 per-tensor / input scale on
+    ParallelLMHead. Per-tensor scales are not vocab-parallel; just copy.
+    """
+
+    def load(param, loaded_weight):
+        param.data.copy_(loaded_weight.reshape(param.data.shape))
+
+    return load
+
+
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -357,6 +401,25 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
+        # WEIGHT / INPUT SCALES
+        # When this method is dispatched to a ParallelLMHead (opt-in via
+        # Fp8Config.lm_head_quantized), companion params can't share the
+        # default VocabParallelEmbedding.weight_loader (which assumes
+        # vocab-shaped tensors). Pick the right scale loader up front so
+        # we don't have to override it post-hoc -- set_weight_attrs() asserts
+        # against double-assignment of `weight_loader`.
+        if isinstance(layer, ParallelLMHead):
+            if self.block_quant:
+                scale_weight_loader = _make_lm_head_block_scale_loader(
+                    layer, self.weight_block_size
+                )
+            else:
+                scale_weight_loader = _make_lm_head_scalar_scale_loader()
+            input_scale_weight_loader = _make_lm_head_scalar_scale_loader()
+        else:
+            scale_weight_loader = weight_loader
+            input_scale_weight_loader = weight_loader
+
         # WEIGHT SCALE
         if not self.block_quant:
             scale = create_fp8_scale_parameter(
@@ -364,7 +427,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_partition_sizes,
                 input_size_per_partition,
                 None,
-                weight_loader,
+                scale_weight_loader,
             )
             layer.register_parameter("weight_scale", scale)
         else:
@@ -375,7 +438,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_partition_sizes,
                 input_size_per_partition,
                 self.weight_block_size,
-                weight_loader,
+                scale_weight_loader,
                 scale_dtype=(torch.float8_e8m0fnu if self.is_scale_e8m0 else None),
             )
             # The weight_scale_inv name is intentional for deepseekv3
@@ -383,7 +446,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # INPUT ACTIVATION SCALE
         if self.act_q_static:
-            scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
+            scale = create_fp8_input_scale(
+                output_partition_sizes, input_scale_weight_loader
+            )
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
 
