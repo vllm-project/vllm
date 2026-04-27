@@ -9,9 +9,20 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServing
-from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
-from vllm.entrypoints.pooling.embed.protocol import (
+from vllm.logger import init_logger
+from vllm.outputs import PoolingRequestOutput
+from vllm.utils.serial_utils import EmbedDType, Endianness
+
+from ..base.serving import PoolingServing
+from ..typing import PoolingServeContext
+from ..utils import (
+    encode_pooling_bytes,
+    encode_pooling_output_base64,
+    encode_pooling_output_float,
+    get_json_response_cls,
+)
+from .io_processor import EmbedIOProcessor
+from .protocol import (
     CohereBilledUnits,
     CohereEmbedRequest,
     CohereEmbedResponse,
@@ -22,16 +33,6 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponseData,
     build_typed_embeddings,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
-from vllm.entrypoints.pooling.utils import (
-    encode_pooling_bytes,
-    encode_pooling_output_base64,
-    encode_pooling_output_float,
-    get_json_response_cls,
-)
-from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
-from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
 

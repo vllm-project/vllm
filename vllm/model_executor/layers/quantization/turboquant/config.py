@@ -36,10 +36,22 @@ TQ_PRESETS: dict[str, dict] = {
 class TurboQuantConfig:
     """Configuration for TurboQuant KV-cache quantization.
 
-    Uses PolarQuant (WHT rotation + Lloyd-Max scalar quantization) for keys
-    and uniform quantization for values. QJL is intentionally omitted —
-    community consensus (5+ independent groups) found it hurts attention
-    quality by amplifying variance through softmax.
+    Applies Hadamard rotation followed by per-coordinate Lloyd-Max scalar
+    quantization for keys, and uniform quantization for values.
+
+    Historical note: this is the scalar case of the HIGGS quantization
+    method (Malinovskii et al., "Pushing the Limits of Large Language Model
+    Quantization via the Linearity Theorem", NAACL 2025; preprint
+    arXiv:2411.17525): rotation + optimized grid + optional re-normalization,
+    applied to KV cache compression. A first application of this approach to
+    KV-cache compression is in "Cache Me If You Must: Adaptive Key-Value
+    Quantization for Large Language Models" (Shutova et al., ICML 2025;
+    preprint arXiv:2501.19392). Both these references pre-date the
+    TurboQuant paper.
+
+    QJL is intentionally omitted — community consensus (5+ independent
+    groups) found it hurts attention quality by amplifying variance through
+    softmax.
 
     Named presets (use via --kv-cache-dtype):
         turboquant_k8v4:   FP8 keys + 4-bit values, 2.6x, +1.17% PPL
@@ -53,8 +65,6 @@ class TurboQuantConfig:
             rotation/MSE). 3-4 = Lloyd-Max MSE quantized keys.
         value_quant_bits: Bits per value dimension for uniform quantization.
             3 = 8 levels, 4 = 16 levels (default).
-        seed: Base seed for deterministic random matrix generation.
-            Actual seed per layer = seed + layer_idx * 1337.
         norm_correction: Re-normalize centroid vectors to unit norm before
             inverse rotation during dequant. Fixes quantization-induced norm
             distortion, improving PPL by ~0.8% at 4-bit.
@@ -63,7 +73,7 @@ class TurboQuantConfig:
     head_dim: int = 128
     key_quant_bits: int = 3  # 3-4 = MSE keys, 8 = FP8 keys
     value_quant_bits: int = 4  # 3-4 = uniform quantized values
-    seed: int = 42
+    seed: int = 42  # kept for backward compatibility; no longer used internally
     norm_correction: bool = False
 
     @property

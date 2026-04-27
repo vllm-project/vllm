@@ -389,6 +389,7 @@ def flash_attn_varlen_func(
             num_splits=num_splits,
             return_lse=return_softmax_lse,
             out=out,
+            learnable_sink=s_aux,
             gather_kv_indices=gather_kv_indices,
         )
     else:

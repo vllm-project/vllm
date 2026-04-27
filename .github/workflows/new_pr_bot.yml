@@ -62,14 +62,14 @@ jobs:
             const prAuthor = context.payload.pull_request.user.login;
 
             const { data: searchResults } = await github.rest.search.issuesAndPullRequests({
-              q: `repo:${owner}/${repo} type:pr author:${prAuthor}`,
+              q: `repo:${owner}/${repo} type:pr is:merged author:${prAuthor}`,
               per_page: 1,
             });
 
-            const authorPRCount = searchResults.total_count;
-            console.log(`Found ${authorPRCount} PRs by ${prAuthor}`);
+            const mergedPRCount = searchResults.total_count;
+            console.log(`Found ${mergedPRCount} merged PRs by ${prAuthor}`);
 
-            if (authorPRCount === 1) {
+            if (mergedPRCount === 0) {
               console.log(`Posting welcome comment for first-time contributor: ${prAuthor}`);
               await github.rest.issues.createComment({
                 owner,
@@ -98,5 +98,5 @@ jobs:
                 ].join('\n'),
               });
             } else {
-              console.log(`Skipping comment for ${prAuthor} - not their first PR (${authorPRCount} PRs found)`);
+              console.log(`Skipping comment for ${prAuthor} - not a first-time contributor (${mergedPRCount} merged PRs)`);
             }

@@ -160,7 +160,11 @@ class WorkerLoRAManager:
                         lora_request.lora_path,
                         ", ".join(sorted(expected_lora_modules_lst)),
                     )
-                elif not is_in_target_modules(module_name, target_modules):
+                elif not is_in_target_modules(
+                    module_name,
+                    target_modules,
+                    packed_modules_mapping,
+                ):
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
                         "deployment-time target_modules restriction [%s]."
@@ -196,6 +200,9 @@ class WorkerLoRAManager:
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
+
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        return self._adapter_manager.get_dummy_lora_warmup_rank(default_rank)
 
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
