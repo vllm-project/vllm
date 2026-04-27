@@ -2184,6 +2184,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            positions=self.positions[:num_tokens_padded],
         )
 
         if self.dcp_world_size > 1:
@@ -4671,6 +4672,16 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). Safe to
+            # rebind here: hidden_states was already consumed for sampling
+            # above and is not used again in this branch.
+            alt = getattr(
+                self.get_model(), "get_mtp_target_hidden_states", lambda: None
+            )()
+            if alt is not None:
+                hidden_states = alt
+
             num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
@@ -5886,6 +5897,20 @@ class GPUModelRunner(
                 gc.unfreeze()
                 gc.collect()
 
+    def shutdown(self) -> None:
+        """Release GPU tensors (model weights, KV caches, workspace) so that
+        memory is reclaimable when running in the same process."""
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.v1.worker.workspace import reset_workspace_manager
+
+        # Calls torch.accelerator.synchronize()
+        self._cleanup_profiling_kv_cache()
+        self.compilation_config.static_forward_context.clear()
+        self.model = None  # type: ignore[assignment]
+        _ROPE_DICT.clear()
+
+        reset_workspace_manager()
+
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:
@@ -6573,9 +6598,15 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
+                    # For MLA with compression, storage_block_size != block_size
+                    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                        shape_block_size = kv_cache_spec.storage_block_size
+                    else:
+                        shape_block_size = kernel_block_size
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
-                        kernel_block_size,
+                        shape_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
@@ -6599,12 +6630,31 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+
+                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    if kv_cache_spec.page_size_padded is not None:
+                        # Use strided view to handle page_size_bytes that
+                        # include padding. This follows
+                        # the same pattern as MambaSpec handling below.
+                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                        # (i.e. the first physical dimension is the block
+                        # index), which holds for MLA backends but NOT for
+                        # standard attention backends whose shape starts with
+                        # a K/V dimension of size 2.
+                        dtype_size = get_dtype_size(dtype)
+                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                        strides = list(torch.empty(kv_cache_shape).stride())
+                        strides[inv_order[0]] = page_stride
+                        kv_cache = torch.as_strided(
+                            raw_tensor,
+                            size=kv_cache_shape,
+                            stride=tuple(strides),
+                        )
+                    else:
+                        # No padding — safe to use a contiguous view.
+                        kv_cache = raw_tensor.view(kv_cache_shape)
+                    kv_caches[layer_name] = kv_cache.permute(*inv_order)
+
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
