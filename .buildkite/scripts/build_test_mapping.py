@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Build source→test mapping from static import analysis.
 
 Resolves three layers of dependencies:
@@ -14,15 +16,15 @@ Usage:
     python build_test_mapping.py --output map.md # write to file
 
     # Pre-filtered file-level lookup (only candidates for changed files)
-    python build_test_mapping.py --files "vllm/config/model_config.py,vllm/utils/misc.py"
+    python build_test_mapping.py \&&
+        --files "vllm/config/model_config.py,vllm/utils/misc.py"
 """
 
-import ast
 import argparse
+import ast
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 TESTS_ROOT = Path("tests")
 
@@ -33,6 +35,7 @@ MAX_TRANSITIVE_DEPTH = 10
 # ---------------------------------------------------------------------------
 # Import extraction
 # ---------------------------------------------------------------------------
+
 
 def get_all_imports(filepath: Path) -> tuple[set[str], set[str]]:
     """Extract all imports from a Python file.
@@ -69,7 +72,7 @@ def get_all_imports(filepath: Path) -> tuple[set[str], set[str]]:
     return vllm_imports, other_imports
 
 
-def _resolve_import(node: ast.ImportFrom, filepath: Path) -> Optional[str]:
+def _resolve_import(node: ast.ImportFrom, filepath: Path) -> str | None:
     """Resolve an ImportFrom node to an absolute module path.
 
     Handles:
@@ -112,6 +115,7 @@ def get_vllm_imports(filepath: Path) -> set[str]:
 # ---------------------------------------------------------------------------
 # Transitive import resolution through tests/ helper modules
 # ---------------------------------------------------------------------------
+
 
 def build_helper_module_index() -> dict[str, Path]:
     """Build an index of module_name → file_path for all non-test Python
@@ -187,7 +191,7 @@ def resolve_transitive_vllm_imports(
 def _find_helper_module(
     module_name: str,
     helper_index: dict[str, Path],
-) -> Optional[Path]:
+) -> Path | None:
     """Find the file for a tests.* module name.
 
     Handles both:
@@ -212,6 +216,7 @@ def _find_helper_module(
 # ---------------------------------------------------------------------------
 # Conftest / fixture resolution
 # ---------------------------------------------------------------------------
+
 
 def get_conftest_chain(test_file: Path) -> list[Path]:
     """Find all conftest.py files in scope for a test file.
@@ -253,16 +258,17 @@ def get_fixture_names(conftest_path: Path) -> set[str]:
 def _is_pytest_fixture(decorator) -> bool:
     """Check if a decorator is @pytest.fixture or @pytest.fixture(...)."""
     if isinstance(decorator, ast.Attribute):
-        return (isinstance(decorator.value, ast.Name)
-                and decorator.value.id == "pytest"
-                and decorator.attr == "fixture")
+        return (
+            isinstance(decorator.value, ast.Name)
+            and decorator.value.id == "pytest"
+            and decorator.attr == "fixture"
+        )
     elif isinstance(decorator, ast.Call):
         return _is_pytest_fixture(decorator.func)
     return False
 
 
-def get_used_fixtures(test_file: Path,
-                      available_fixtures: set[str]) -> set[str]:
+def get_used_fixtures(test_file: Path, available_fixtures: set[str]) -> set[str]:
     """Find which fixtures a test file actually uses (via function params)."""
     try:
         tree = ast.parse(test_file.read_text())
@@ -281,6 +287,7 @@ def get_used_fixtures(test_file: Path,
 # ---------------------------------------------------------------------------
 # Main dependency builder
 # ---------------------------------------------------------------------------
+
 
 def build_test_dependencies(
     detail: bool = False,
@@ -344,8 +351,7 @@ def build_test_dependencies(
 
                 if detail and (c_imports or c_transitive):
                     inherited_from_conftest.append(
-                        f"conftest {conftest} "
-                        f"(fixtures: {', '.join(sorted(overlap))})"
+                        f"conftest {conftest} (fixtures: {', '.join(sorted(overlap))})"
                     )
 
         # Layer 3: Transitive imports through tests/ helpers
@@ -358,14 +364,15 @@ def build_test_dependencies(
         if detail and all_imports:
             print(f"\n{test_file}:", file=sys.stderr)
             if direct_imports:
-                print(f"  direct: {', '.join(sorted(direct_imports))}",
-                      file=sys.stderr)
+                print(f"  direct: {', '.join(sorted(direct_imports))}", file=sys.stderr)
             for line in inherited_from_conftest:
                 print(f"  via {line}", file=sys.stderr)
             transitive_only = transitive_imports - direct_imports - conftest_imports
             if transitive_only:
-                print(f"  transitive: {', '.join(sorted(transitive_only))}",
-                      file=sys.stderr)
+                print(
+                    f"  transitive: {', '.join(sorted(transitive_only))}",
+                    file=sys.stderr,
+                )
 
         if all_imports:
             dependencies[str(test_file)] = all_imports
@@ -376,6 +383,7 @@ def build_test_dependencies(
 # ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
+
 
 def invert_mapping(
     deps: dict[str, set[str]],
@@ -453,9 +461,11 @@ def lookup_changed_files(
             # other.  The "." check avoids false positives where one name
             # is a prefix of an unrelated module (e.g. "vllm.config" must
             # not match "vllm.config_helper").
-            if (source_module == module
-                    or source_module.startswith(module + ".")
-                    or module.startswith(source_module + ".")):
+            if (
+                source_module == module
+                or source_module.startswith(module + ".")
+                or module.startswith(source_module + ".")
+            ):
                 candidate_tests |= tests
 
         if candidate_tests:
@@ -496,10 +506,15 @@ def print_stats(
 
     print("\n--- Statistics ---", file=sys.stderr)
     print(f"Total test files:  {total_test_files}", file=sys.stderr)
-    print(f"Mapped test files: {mapped_test_files} "
-          f"({mapped_test_files / total_test_files:.0%})", file=sys.stderr)
-    print(f"Unmapped (no vllm imports): "
-          f"{total_test_files - mapped_test_files}", file=sys.stderr)
+    print(
+        f"Mapped test files: {mapped_test_files} "
+        f"({mapped_test_files / total_test_files:.0%})",
+        file=sys.stderr,
+    )
+    print(
+        f"Unmapped (no vllm imports): {total_test_files - mapped_test_files}",
+        file=sys.stderr,
+    )
     print(f"Source directories: {len(mapping)}", file=sys.stderr)
 
     # Find unmapped test files
@@ -510,8 +525,7 @@ def print_stats(
             unmapped.append(str(test_file))
 
     if unmapped:
-        print(f"\nUnmapped test files ({len(unmapped)} total):",
-              file=sys.stderr)
+        print(f"\nUnmapped test files ({len(unmapped)} total):", file=sys.stderr)
         for f in unmapped[:20]:
             print(f"  {f}", file=sys.stderr)
         if len(unmapped) > 20:
@@ -523,17 +537,22 @@ def main():
         description="Build source→test mapping from static import analysis"
     )
     parser.add_argument(
-        "--detail", action="store_true",
-        help="Show per-file breakdown of imports and conftest inheritance"
+        "--detail",
+        action="store_true",
+        help="Show per-file breakdown of imports and conftest inheritance",
     )
     parser.add_argument(
-        "--output", type=str, default=None,
-        help="Write markdown table to a file instead of stdout"
+        "--output",
+        type=str,
+        default=None,
+        help="Write markdown table to a file instead of stdout",
     )
     parser.add_argument(
-        "--files", type=str, default=None,
+        "--files",
+        type=str,
+        default=None,
         help="Comma-separated list of changed files. Outputs a pre-filtered "
-             "file-level mapping containing only candidate tests for these files."
+        "file-level mapping containing only candidate tests for these files.",
     )
     args = parser.parse_args()
 
@@ -550,8 +569,11 @@ def main():
         total_tests = set()
         for tests in candidates.values():
             total_tests |= tests
-        print(f"Changed vllm files: {len(candidates)}, "
-              f"candidate tests: {len(total_tests)}", file=sys.stderr)
+        print(
+            f"Changed vllm files: {len(candidates)}, "
+            f"candidate tests: {len(total_tests)}",
+            file=sys.stderr,
+        )
 
         table = format_candidate_table(candidates)
 
