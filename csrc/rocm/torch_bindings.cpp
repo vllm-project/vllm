@@ -48,6 +48,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
+  // Fused MoE wrapper around wvSplitK_int4_g: iterates expert runs in C++
+  rocm_ops.def(
+      "fused_moe_wvSplitK_int4_gemm(Tensor a, Tensor w, Tensor scales, "
+      "Tensor c, Tensor expert_ids, int block_size_m, int CuCount, "
+      "int group_size, Tensor zero_points, Tensor sorted_token_ids, "
+      "int top_k) -> ()");
+  rocm_ops.impl("fused_moe_wvSplitK_int4_gemm", torch::kCUDA,
+                &fused_moe_wvSplitK_int4_gemm);
+
 #ifdef VLLM_SKINNY_GEMM_SWEEP
   rocm_ops.def(
       "wvSplitK_int8_sweep(Tensor in_a, Tensor in_b, Tensor in_scale, "

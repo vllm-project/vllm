@@ -2713,6 +2713,38 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
         return torch.empty((N, M), dtype=in_b.dtype, device=in_b.device)
 
 
+def fused_moe_wvSplitK_int4_gemm(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    c: torch.Tensor,
+    expert_ids: torch.Tensor,
+    block_size_m: int,
+    cu_count: int,
+    group_size: int,
+    zero_points: torch.Tensor | None = None,
+    sorted_token_ids: torch.Tensor | None = None,
+    top_k: int = 1,
+) -> None:
+    if zero_points is None:
+        zero_points = torch.empty(0, dtype=scales.dtype, device=a.device)
+    if sorted_token_ids is None:
+        sorted_token_ids = torch.empty(0, dtype=torch.int32, device=a.device)
+    torch.ops._rocm_C.fused_moe_wvSplitK_int4_gemm(
+        a,
+        w,
+        scales,
+        c,
+        expert_ids,
+        block_size_m,
+        cu_count,
+        group_size,
+        zero_points,
+        sorted_token_ids,
+        top_k,
+    )
+
+
 def wvSplitK_int4g_sweep(
     a: torch.Tensor,
     b: torch.Tensor,

@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MOE_AWQ_GEMV_HIP: bool = False
     VLLM_MOE_GPTQ_EXLLAMA: bool = False
+    VLLM_MOE_HYBRID_W4A16: bool = False
     VLLM_ROCM_USE_MOE_WNA16_CUDA_KERNEL: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -1002,6 +1003,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use AWQ GEMV HIP kernel for MoE decode on ROCm (RDNA3/3.5).
     "VLLM_MOE_AWQ_GEMV_HIP": lambda: (
         os.getenv("VLLM_MOE_AWQ_GEMV_HIP", "false").lower() in ("true", "1")
+    ),
+    # Use hybrid W4A16 (HIP skinny + Triton) kernel for MoE on ROCm.
+    # Converts weights to skinny layout [E, N, K//8] int32 (ExLlama shuffle).
+    "VLLM_MOE_HYBRID_W4A16": lambda: (
+        os.getenv("VLLM_MOE_HYBRID_W4A16", "true").lower() in ("true", "1")
     ),
     # Use exllama 4-bit kernel for MoE GPTQ instead of Triton.
     # Requires exllama-native weight format [E, K/8, N] int32.
