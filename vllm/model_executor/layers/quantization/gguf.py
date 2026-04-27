@@ -429,6 +429,31 @@ except AttributeError as error:
     raise error
 
 
+def _canonical_shard_order(shard_id):
+    """Return shard ids in the canonical layout order regardless of the order
+    they were loaded from the GGUF file.
+
+    The two slot-id schemes that reach this code are mutually exclusive:
+    QKVParallelLinear uses the strings q/k/v, MergedColumnParallelLinear uses
+    integers (0, 1, ...). Sorting the integers gives the declared slot order.
+    """
+    has_str = any(isinstance(s, str) for s in shard_id)
+    has_int = any(isinstance(s, int) for s in shard_id)
+    assert not (has_str and has_int), (
+        f"shard_id {shard_id} mixes string and integer slot ids; "
+        "QKV (q/k/v) and MergedColumn (int) schemes must not be combined."
+    )
+    if has_str:
+        canonical = [s for s in ("q", "k", "v") if s in shard_id]
+    else:
+        canonical = sorted(shard_id)
+    assert len(canonical) == len(shard_id), (
+        f"shard_id {shard_id} contains slot ids outside the canonical set; "
+        f"got {canonical} after canonicalization."
+    )
+    return canonical
+
+
 class GGUFLinearMethod(LinearMethodBase):
     """Linear method for GGUF.
 
@@ -517,13 +542,22 @@ class GGUFLinearMethod(LinearMethodBase):
             )
             # (dim0_start, dim0_end, dim1_size)
             shard_offset_map = dict[str, tuple[int, int, int]]()
-            for idx in shard_id:
+            # Place each slot at the offset its declared index implies, not
+            # the offset its position in the GGUF stream implies. The old
+            # code summed sizes of data_container[:id_in_container], which
+            # is stream order; that's wrong whenever the GGUF file emits
+            # slots out of declared order (we hit this with slot 3 before
+            # slots 0/1/2 on a Qwen3.5 GDN attn_qkv).
+            cur = 0
+            for idx in _canonical_shard_order(shard_id):
                 id_in_container = shard_id_map[idx]
-                start = sum(x.size(0) for x in data_container[:id_in_container])
-                end = start + data_container[id_in_container].size(0)
-                size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+                shard = data_container[id_in_container]
+                start = cur
+                end = cur + shard.size(0)
+                size = shard.size(1)
+                padded_data[start:end, :size] = shard
                 shard_offset_map[idx] = (start, end, size)
+                cur = end
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
@@ -539,8 +573,10 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = layer.qweight.shard_id
 
         if shard_id:
-            # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            # Match the layout that _create_padded_weight_param produced so
+            # the concatenated output keeps the slot order the layer
+            # declared, not whatever order the GGUF file streamed.
+            shard_id = _canonical_shard_order(shard_id)
             qweight = layer.qweight
             result = []
             for idx in shard_id:
