@@ -8,9 +8,13 @@ Resolves three layers of dependencies:
      (e.g., test_chat.py → tests.utils → vllm.entrypoints)
 
 Usage:
+    # Full directory-level mapping (all source dirs → all test dirs)
     python build_test_mapping.py
     python build_test_mapping.py --detail       # per-file breakdown
     python build_test_mapping.py --output map.md # write to file
+
+    # Pre-filtered file-level lookup (only candidates for changed files)
+    python build_test_mapping.py --files "vllm/config/model_config.py,vllm/utils/misc.py"
 """
 
 import ast
@@ -398,6 +402,84 @@ def invert_mapping(
     return source_to_tests
 
 
+def invert_mapping_file_level(
+    deps: dict[str, set[str]],
+) -> dict[str, set[str]]:
+    """Invert test→source into source_module→test_files (file-level).
+
+    Unlike invert_mapping(), this preserves full granularity on both sides:
+      - Source key is the dotted module path (e.g., "vllm.config.model_config")
+      - Test value is the individual test file path (e.g., "tests/test_config.py")
+    """
+    source_to_tests: dict[str, set[str]] = defaultdict(set)
+
+    for test_file, modules in deps.items():
+        for module in modules:
+            source_to_tests[module].add(test_file)
+
+    return source_to_tests
+
+
+def lookup_changed_files(
+    file_level_mapping: dict[str, set[str]],
+    changed_files: list[str],
+) -> dict[str, set[str]]:
+    """Look up candidate tests for a set of changed files.
+
+    For each changed Python file under vllm/, converts the file path to a
+    module path and finds all test files that depend on it (at any level
+    of the module hierarchy).
+
+    Returns: changed_file → set of test files
+    """
+    results: dict[str, set[str]] = {}
+
+    for filepath in changed_files:
+        if not filepath.endswith(".py"):
+            continue
+        if not filepath.startswith("vllm/"):
+            continue
+
+        # Convert file path to module name:
+        #   vllm/config/model_config.py → vllm.config.model_config
+        #   vllm/utils/__init__.py      → vllm.utils
+        module = filepath.replace("/", ".").removesuffix(".py")
+        if module.endswith(".__init__"):
+            module = module.removesuffix(".__init__")
+
+        # Collect tests that import this exact module OR any parent package.
+        # e.g., changing vllm/config/model_config.py should match tests that
+        # import "vllm.config.model_config" or "vllm.config" (package-level).
+        candidate_tests: set[str] = set()
+
+        for source_module, tests in file_level_mapping.items():
+            # Match if the changed module is a prefix of the import or
+            # the import is a prefix of the changed module.
+            # "vllm.config.model_config" matches import "vllm.config"
+            #   (test imports the package, we changed a file in it)
+            # "vllm.config" matches import "vllm.config.model_config"
+            #   (test imports the specific file we changed)
+            if (source_module.startswith(module)
+                    or module.startswith(source_module)):
+                candidate_tests |= tests
+
+        if candidate_tests:
+            results[filepath] = candidate_tests
+
+    return results
+
+
+def format_candidate_table(candidates: dict[str, set[str]]) -> str:
+    """Format pre-filtered candidates as a markdown table."""
+    lines = []
+    lines.append("| Changed source file | Candidate test files |")
+    lines.append("|---|---|")
+    for source_file in sorted(candidates):
+        tests = ", ".join(f"`{t}`" for t in sorted(candidates[source_file]))
+        lines.append(f"| `{source_file}` | {tests} |")
+    return "\n".join(lines)
+
+
 def format_markdown_table(mapping: dict[str, set[str]]) -> str:
     """Format the mapping as a markdown table."""
     lines = []
@@ -453,22 +535,49 @@ def main():
         "--output", type=str, default=None,
         help="Write markdown table to a file instead of stdout"
     )
+    parser.add_argument(
+        "--files", type=str, default=None,
+        help="Comma-separated list of changed files. Outputs a pre-filtered "
+             "file-level mapping containing only candidate tests for these files."
+    )
     args = parser.parse_args()
 
     print("Analyzing test dependencies...\n", file=sys.stderr)
 
     deps = build_test_dependencies(detail=args.detail)
-    mapping = invert_mapping(deps)
 
-    table = format_markdown_table(mapping)
+    if args.files:
+        # File-level pre-filtered mode: look up only the changed files
+        changed = [f.strip() for f in args.files.split(",") if f.strip()]
+        file_mapping = invert_mapping_file_level(deps)
+        candidates = lookup_changed_files(file_mapping, changed)
 
-    if args.output:
-        Path(args.output).write_text(table + "\n")
-        print(f"\nMapping written to {args.output}", file=sys.stderr)
+        total_tests = set()
+        for tests in candidates.values():
+            total_tests |= tests
+        print(f"Changed vllm files: {len(candidates)}, "
+              f"candidate tests: {len(total_tests)}", file=sys.stderr)
+
+        table = format_candidate_table(candidates)
+
+        if args.output:
+            Path(args.output).write_text(table + "\n")
+            print(f"\nMapping written to {args.output}", file=sys.stderr)
+        else:
+            print(table)
     else:
-        print(table)
+        # Full directory-level mapping mode (legacy)
+        mapping = invert_mapping(deps)
 
-    print_stats(deps, mapping)
+        table = format_markdown_table(mapping)
+
+        if args.output:
+            Path(args.output).write_text(table + "\n")
+            print(f"\nMapping written to {args.output}", file=sys.stderr)
+        else:
+            print(table)
+
+        print_stats(deps, mapping)
 
 
 if __name__ == "__main__":

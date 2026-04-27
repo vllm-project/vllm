@@ -36,7 +36,7 @@ if [ -n "${2:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 1: Get changed files
+# Step 1: Get changed files and diff content
 # ---------------------------------------------------------------------------
 CHANGED_FILES=$(git diff "${BASE_BRANCH}...HEAD" --name-only)
 
@@ -48,11 +48,30 @@ fi
 FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
 echo "Found $FILE_COUNT changed files" >&2
 
+# Capture full diff for Python files (LLM uses this to narrow test selection).
+# Truncate at 50KB to control prompt size. Files beyond the cutoff still
+# appear in the changed files list — the LLM falls back to mapping for them.
+MAX_DIFF_BYTES=51200
+FULL_DIFF=$(git diff "${BASE_BRANCH}...HEAD" -- '*.py')
+DIFF_BYTES=$(printf '%s' "$FULL_DIFF" | wc -c | tr -d ' ')
+
+if [ "$DIFF_BYTES" -gt "$MAX_DIFF_BYTES" ]; then
+    DIFF_CONTENT=$(printf '%s' "$FULL_DIFF" | head -c "$MAX_DIFF_BYTES")
+    DIFF_CONTENT="${DIFF_CONTENT}
+
+... (diff truncated at 50KB out of ${DIFF_BYTES} bytes — remaining files use mapping only)"
+    echo "Diff truncated from ${DIFF_BYTES} to 50KB" >&2
+else
+    DIFF_CONTENT="$FULL_DIFF"
+fi
+
 # ---------------------------------------------------------------------------
-# Step 2: Generate fresh mapping from current code
+# Step 2: Generate pre-filtered mapping for changed files
 # ---------------------------------------------------------------------------
-echo "Generating import mapping..." >&2
-MAPPING=$(python3 "$SCRIPT_DIR/build_test_mapping.py" 2>/dev/null)
+# Convert newline-separated file list to comma-separated for --files flag
+FILES_CSV=$(echo "$CHANGED_FILES" | paste -sd ',' -)
+echo "Generating pre-filtered import mapping..." >&2
+MAPPING=$(python3 "$SCRIPT_DIR/build_test_mapping.py" --files "$FILES_CSV" 2>/dev/null)
 
 # ---------------------------------------------------------------------------
 # Step 3: Read static instructions
@@ -71,7 +90,7 @@ You are selecting tests for a CI pipeline. Follow the instructions exactly.
 
 ${INSTRUCTIONS}
 
-## Source-to-Test Mapping (auto-generated from import analysis)
+## Candidate Tests (pre-filtered from import analysis for changed files only)
 
 ${MAPPING}
 
@@ -79,10 +98,15 @@ ${MAPPING}
 
 ${CHANGED_FILES}
 
+## Diff Content
+
+${DIFF_CONTENT}
+
 ## Your Task
 
-Based on the instructions, the mapping table, and the changed files above,
-output the test directories/files to run. Follow ALL rules in the instructions.
+Based on the instructions, the candidate tests, the changed files, and the
+diff content above, output the test directories/files to run.
+Follow ALL rules in the instructions.
 Use the output format specified in the instructions.
 PROMPTEOF
 )"
@@ -94,12 +118,28 @@ if [ -z "$SELECTION" ]; then
     exit 1
 fi
 
+# Estimate cost (Haiku pricing: $0.25/M input tokens, $1.25/M output tokens)
+# Rough estimate: ~4 characters per token
+INPUT_CHARS=$(printf '%s' "$PROMPT" | wc -c | tr -d ' ')
+OUTPUT_CHARS=$(printf '%s' "$SELECTION" | wc -c | tr -d ' ')
+INPUT_TOKENS=$((INPUT_CHARS / 4))
+OUTPUT_TOKENS=$((OUTPUT_CHARS / 4))
+# Cost in microdollars to avoid floating point
+COST_MICROS=$(( (INPUT_TOKENS * 25 + OUTPUT_TOKENS * 125) / 100000 ))
+COST_CENTS=$((COST_MICROS / 10))
+COST_FRAC=$((COST_MICROS % 10))
+echo "Estimated cost: ~\$0.${COST_CENTS}${COST_FRAC} (${INPUT_TOKENS} input + ${OUTPUT_TOKENS} output tokens)" >&2
+
 # ---------------------------------------------------------------------------
-# Step 5: Build the PR comment
+# Step 5: Parse reasoning and test list, build the PR comment
 # ---------------------------------------------------------------------------
 
-# Filter to only valid "path | reason" lines
-CLEAN_SELECTION=$(echo "$SELECTION" | grep -E '^[a-zA-Z_/.]+ *\|' || true)
+# Split output on "---" separator into reasoning and test list
+REASONING=$(echo "$SELECTION" | sed -n '1,/^---$/p' | sed '$d')
+TEST_LIST=$(echo "$SELECTION" | sed -n '/^---$/,$ p' | sed '1d')
+
+# Filter test list to valid "path | reason" lines
+CLEAN_SELECTION=$(echo "$TEST_LIST" | grep -E '^[a-zA-Z_/.]+ *\|' || true)
 
 if [ -z "$CLEAN_SELECTION" ]; then
     echo "Warning: Could not parse Claude's output. Raw output:" >&2
@@ -125,7 +165,11 @@ COMMENT_BODY="## Suggested Test Selection
 if [ "$IS_NONE" -gt 0 ]; then
     COMMENT_BODY="${COMMENT_BODY}, no tests selected.**
 
-**Reason:** ${NONE_REASON}
+### Reasoning
+
+${REASONING}
+
+**Result:** ${NONE_REASON}
 
 <details><summary>Changed files</summary>
 
@@ -136,6 +180,10 @@ ${CHANGED_FILES}
 </details>"
 else
     COMMENT_BODY="${COMMENT_BODY}, ${TARGET_COUNT} test targets selected.**
+
+### Reasoning
+
+${REASONING}
 
 ### Selected tests
 
