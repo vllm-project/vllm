@@ -11,7 +11,7 @@ import copy
 import io
 import logging
 import math
-import re
+import regex as re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -241,7 +241,7 @@ def _fetch_image(src: Any) -> Image.Image:
         if src.startswith("file://"):
             return _to_rgb(Image.open(src[7:]))
         if src.startswith("data:image"):
-            import base64 as _b64
+            import pybase64 as _b64
 
             _, b64 = src.split("base64,", 1)
             return _to_rgb(copy.deepcopy(Image.open(BytesIO(_b64.b64decode(b64)))))
@@ -464,7 +464,7 @@ class MiMoVLProcessor:
                 file_obj: Any = io.BytesIO(audio)
             elif isinstance(audio, str):
                 if audio.startswith("data:"):
-                    import base64 as _b64
+                    import pybase64 as _b64
 
                     file_obj = io.BytesIO(_b64.b64decode(audio.split(",")[1]))
                 elif audio.startswith(("http://", "https://")):
