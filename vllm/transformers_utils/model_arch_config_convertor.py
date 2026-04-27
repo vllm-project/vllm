@@ -460,6 +460,11 @@ class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
         super().__init__(hf_config, hf_text_config)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
+    
+    def get_architectures(self):
+        if getattr(self.hf_config, "vision_config", None):
+            return ["MiMoV2OmniForCausalLM"]
+        return super().get_architectures()
 
 
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
