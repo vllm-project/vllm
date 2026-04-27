@@ -21,6 +21,7 @@ from vllm.config.multimodal import (
     MultiModalConfig,
 )
 from vllm.config.pooler import PoolerConfig
+from vllm.config.quantization import OnlineQuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -82,7 +83,7 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -133,6 +134,7 @@ class ModelConfig:
     - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
+    - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
@@ -199,6 +201,10 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None = None
+    """Arguments for online quantization.
+    Auto-created when `quantization` equals to one of the string values of
+    the `OnlineQuantScheme` enum."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
@@ -560,6 +566,8 @@ class ModelConfig:
                 self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
+            elif arch == "DeepseekV4ForCausalLM":
+                self.tokenizer_mode = "deepseek_v4"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -943,13 +951,18 @@ class ModelConfig:
                 "modelopt_fp4",
                 "modelopt_mxfp8",
                 "modelopt_mixed",
-                "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
+                "gpt_oss_mxfp4",
+                "deepseek_v4_fp8",
                 "cpu_awq",
+                "humming",
                 "gguf",
             ]
+            # if the user specifies humming, we should always use humming
+            if self.quantization == "humming":
+                overrides = ["humming"] + overrides
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]
@@ -962,7 +975,7 @@ class ModelConfig:
             for name in quantization_methods:
                 method = me_quant.get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
-                    quant_cfg, self.quantization
+                    quant_cfg, self.quantization, hf_config=self.hf_config
                 )
                 if quantization_override is not None:
                     # Raise error if the override is not custom (custom would
@@ -1192,21 +1205,9 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @cached_property
+    @property
     def is_mm_prefix_lm(self) -> bool:
-        """Whether to use bidirectional attention for mm positions."""
-        if hasattr(self.hf_config, "is_mm_prefix_lm"):
-            return bool(self.hf_config.is_mm_prefix_lm)
-        # fallback to list of known models
-        MM_PREFIX_LM_MODELS = (
-            "bagel",
-            "gemma3",
-            "molmo2",
-            "paligemma",
-        )
-        if not hasattr(self.hf_config, "model_type"):
-            return False
-        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
+        return self.model_arch_config.is_mm_prefix_lm
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size

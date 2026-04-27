@@ -46,7 +46,10 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE, ZeroExpertFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -292,17 +295,14 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        assert config.zero_expert_num is not None
         assert config.zero_expert_type is not None
-        self.experts = ZeroExpertFusedMoE(
-            zero_expert_num=config.zero_expert_num,
+        self.experts = FusedMoE(
             zero_expert_type=config.zero_expert_type,
-            router=self.router,
+            e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=True,
             params_dtype=params_dtype,
             renormalize=False,
             quant_config=quant_config,
@@ -332,7 +332,7 @@ class LongcatMoe(nn.Module):
             hidden_states_padded.to(self.router_params_dtype)
         )
 
-        # ZeroExpertFusedMoE handles routing memoization and zero expert computation
+        # FusedMoE handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that
         # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(
@@ -625,7 +625,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

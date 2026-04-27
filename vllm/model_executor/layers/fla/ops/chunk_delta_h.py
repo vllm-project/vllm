@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp
-from .utils import use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 
@@ -129,22 +129,42 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # main recurrence
     for i_t in range(NT):
         p_h1 = tl.make_block_ptr(
-            h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0)
+            h + i_t.to(tl.int64) * stride_h,
+            (V, K),
+            (K, 1),
+            (i_v * BV, 0),
+            (BV, 64),
+            (1, 0),
         )
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
             p_h2 = tl.make_block_ptr(
-                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+                h + i_t.to(tl.int64) * stride_h,
+                (V, K),
+                (K, 1),
+                (i_v * BV, 64),
+                (BV, 64),
+                (1, 0),
             )
             tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
             p_h3 = tl.make_block_ptr(
-                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+                h + i_t.to(tl.int64) * stride_h,
+                (V, K),
+                (K, 1),
+                (i_v * BV, 128),
+                (BV, 64),
+                (1, 0),
             )
             tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
             p_h4 = tl.make_block_ptr(
-                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
+                h + i_t.to(tl.int64) * stride_h,
+                (V, K),
+                (K, 1),
+                (i_v * BV, 192),
+                (BV, 64),
+                (1, 0),
             )
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
@@ -182,9 +202,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             )
             tl.store(p_v, b_v.to(p_v.dtype.element_ty), boundary_check=(0, 1))
 
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1
         if USE_G:
-            m_t = (i_t * BT + tl.arange(0, BT)) < T
+            m_t = (i_t.to(tl.int64) * BT + tl.arange(0, BT)) < T
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
@@ -286,9 +306,11 @@ def chunk_gated_delta_rule_fwd_h(
     gk: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = FLA_CHUNK_SIZE,
     save_new_value: bool = True,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -296,20 +318,15 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = chunk_size
 
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = (
-            len(cu_seqlens) - 1,
-            len(chunk_indices),
-            prepare_chunk_offsets(cu_seqlens, BT),
-        )
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, V, K)

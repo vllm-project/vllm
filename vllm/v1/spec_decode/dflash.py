@@ -11,7 +11,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
 
 logger = init_logger(__name__)
@@ -151,6 +151,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
+        # Skip num_rejected_tokens (GPU-only); overestimating is fine here.
+        new_seq_lens_cpu_upper_bound = (
+            cad.seq_lens_cpu_upper_bound + num_query_per_req
+            if cad.seq_lens_cpu_upper_bound is not None
+            else None
+        )
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             seq_lens=effective_seq_lens + num_query_per_req,
@@ -160,6 +166,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             ),
             _seq_lens_cpu=None,
             _num_computed_tokens_cpu=None,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu_upper_bound,
             num_reqs=cad.num_reqs,
             num_actual_tokens=num_query_total,
             max_query_len=num_query_per_req,

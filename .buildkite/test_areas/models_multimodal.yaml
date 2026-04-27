@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2"
   timeout_in_minutes: 45
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -19,6 +20,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 2: qwen3 + gemma"
   timeout_in_minutes: 45
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -26,6 +28,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   mirror:
     amd:
       device: mi325_1
@@ -54,7 +57,8 @@ steps:
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+    - pytest models/multimodal/generation/test_memory_leak.py -m core_model
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
@@ -77,6 +81,7 @@ steps:
 
 - label: Multi-Modal Processor # 44min
   timeout_in_minutes: 60
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -131,6 +136,7 @@ steps:
 
 - label: Multi-Modal Models (Extended Pooling)
   optional: true
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal/pooling

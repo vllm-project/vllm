@@ -47,6 +47,9 @@ class ModelArchConfigConvertorBase:
 
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
+            # special case for deepseek_v4
+            if hasattr(self.hf_text_config, "compress_ratios"):
+                return self.hf_text_config.head_dim
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
             if not envs.VLLM_MLA_DISABLE:
                 return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
@@ -77,6 +80,8 @@ class ModelArchConfigConvertorBase:
             "num_key_value_heads",
             # For ChatGLM:
             "multi_query_group_num",
+            # For Step3p5:
+            "num_attention_groups",
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
@@ -220,6 +225,7 @@ class ModelArchConfigConvertorBase:
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
+            "deepseek_v4",
             "deepseek_mtp",
             "glm_moe_dsa",
             "glm4_moe_lite",
@@ -231,7 +237,11 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+            # check is deepseek_v4 model
+            if hasattr(self.hf_text_config, "compress_ratios"):
+                return getattr(self.hf_text_config, "head_dim", None) is not None
+            else:
+                return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -247,6 +257,22 @@ class ModelArchConfigConvertorBase:
                 and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
+
+    def is_mm_prefix_lm(self) -> bool:
+        """Whether to use bidirectional attention for mm positions."""
+        if hasattr(self.hf_config, "is_mm_prefix_lm"):
+            return bool(self.hf_config.is_mm_prefix_lm)
+        # fallback to list of known models
+        MM_PREFIX_LM_MODELS = (
+            "bagel",
+            "gemma3",
+            "molmo2",
+            "paligemma",
+            "umm",
+        )
+        if not hasattr(self.hf_config, "model_type"):
+            return False
+        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
     def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
         derived_max_model_len = float("inf")
@@ -297,6 +323,7 @@ class ModelArchConfigConvertorBase:
             num_experts=self.get_num_experts(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
+            is_mm_prefix_lm=self.is_mm_prefix_lm(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
 
@@ -448,6 +475,22 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
+class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def is_mm_prefix_lm(self) -> bool:
+        return (
+            getattr(self.hf_text_config, "use_bidirectional_attention", None)
+            == "vision"
+        )
+
+    def get_head_size(self) -> int:
+        # Gemma4 uses dual head dimensions: head_dim (sliding attention)
+        # and global_head_dim (full attention).  Return the largest so
+        # that attention backends allocate buffers large enough for both.
+        head_dim = getattr(self.hf_text_config, "head_dim", 0)
+        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
+        return max(head_dim, global_head_dim) or super().get_head_size()
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
@@ -459,6 +502,8 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
+    "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_text": Gemma4ModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,

@@ -39,7 +39,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 29210221863736a08f71a866459e368ad1ac4a95
+          GIT_TAG f5bc33cfc02c744d24a2e9d50e6db656de40611c
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
@@ -87,18 +87,30 @@ endforeach()
 #
 add_custom_target(_vllm_fa4_cutedsl_C)
 
-# Copy flash_attn/cute directory (needed for FA4) and transform imports
-# The cute directory uses flash_attn.cute imports internally, which we replace
-# with vllm.vllm_flash_attn.cute to match our package structure.
-install(CODE "
-  file(GLOB_RECURSE CUTE_PY_FILES \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute/*.py\")
-  foreach(SRC_FILE \${CUTE_PY_FILES})
-    file(RELATIVE_PATH REL_PATH \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute\" \${SRC_FILE})
-    set(DST_FILE \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn/cute/\${REL_PATH}\")
-    get_filename_component(DST_DIR \${DST_FILE} DIRECTORY)
-    file(MAKE_DIRECTORY \${DST_DIR})
-    file(READ \${SRC_FILE} FILE_CONTENTS)
-    string(REPLACE \"flash_attn.cute\" \"vllm.vllm_flash_attn.cute\" FILE_CONTENTS \"\${FILE_CONTENTS}\")
-    file(WRITE \${DST_FILE} \"\${FILE_CONTENTS}\")
-  endforeach()
-" COMPONENT _vllm_fa4_cutedsl_C)
+# Install flash_attn/cute directory (needed for FA4).
+# When using a local source dir (VLLM_FLASH_ATTN_SRC_DIR), create a symlink
+# so edits to cute-dsl Python files take effect immediately without rebuilding.
+# Otherwise, copy files and transform flash_attn.cute imports to
+# vllm.vllm_flash_attn.cute to match our package structure.
+if(VLLM_FLASH_ATTN_SRC_DIR)
+  install(CODE "
+    set(LINK_TARGET \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute\")
+    set(LINK_NAME \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn/cute\")
+    file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn\")
+    file(REMOVE_RECURSE \"\${LINK_NAME}\")
+    file(CREATE_LINK \"\${LINK_TARGET}\" \"\${LINK_NAME}\" SYMBOLIC)
+  " COMPONENT _vllm_fa4_cutedsl_C)
+else()
+  install(CODE "
+    file(GLOB_RECURSE CUTE_PY_FILES \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute/*.py\")
+    foreach(SRC_FILE \${CUTE_PY_FILES})
+      file(RELATIVE_PATH REL_PATH \"${vllm-flash-attn_SOURCE_DIR}/flash_attn/cute\" \${SRC_FILE})
+      set(DST_FILE \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn/cute/\${REL_PATH}\")
+      get_filename_component(DST_DIR \${DST_FILE} DIRECTORY)
+      file(MAKE_DIRECTORY \${DST_DIR})
+      file(READ \${SRC_FILE} FILE_CONTENTS)
+      string(REPLACE \"flash_attn.cute\" \"vllm.vllm_flash_attn.cute\" FILE_CONTENTS \"\${FILE_CONTENTS}\")
+      file(WRITE \${DST_FILE} \"\${FILE_CONTENTS}\")
+    endforeach()
+  " COMPONENT _vllm_fa4_cutedsl_C)
+endif()
