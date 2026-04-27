@@ -379,6 +379,20 @@ class cmake_build_ext(build_ext):
                 dirs_exist_ok=True,
             )
 
+        if _is_cuda():
+            # copy vendored deep_gemm package from build_lib to source tree
+            # for editable installs
+            deep_gemm_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "deep_gemm"
+            )
+            if os.path.exists(deep_gemm_build):
+                print(f"Copying {deep_gemm_build} to vllm/third_party/deep_gemm")
+                shutil.copytree(
+                    deep_gemm_build,
+                    "vllm/third_party/deep_gemm",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -679,17 +693,29 @@ class precompiled_wheel_utils:
                 flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # __init__.py and flash_attn_interface.py are source-controlled
+                # in vllm and should not be overwritten (matches cmake exclusions)
+                flash_attn_files_to_skip = {
+                    "vllm/vllm_flash_attn/__init__.py",
+                    "vllm/vllm_flash_attn/flash_attn_interface.py",
+                }
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
                 flashmla_regex = re.compile(
                     r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
+                deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
                 file_members += list(
-                    filter(lambda x: flash_attn_regex.match(x.filename), wheel.filelist)
+                    filter(
+                        lambda x: flash_attn_regex.match(x.filename)
+                        and x.filename not in flash_attn_files_to_skip,
+                        wheel.filelist,
+                    )
                 )
                 file_members += list(
                     filter(
@@ -698,6 +724,9 @@ class precompiled_wheel_utils:
                 )
                 file_members += list(
                     filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
+                )
+                file_members += list(
+                    filter(lambda x: deep_gemm_regex.match(x.filename), wheel.filelist)
                 )
 
                 for file in file_members:
@@ -898,7 +927,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
+        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+        if VLLM_TARGET_DEVICE == "cpu":
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
@@ -987,6 +1018,12 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    ):
+        # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
+        # Optional since it won't build on unsupported architectures
+        ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
 
 if _is_cpu():
     import platform
@@ -1014,6 +1051,10 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        # DeepGEMM JIT include headers (vendored via cmake)
+        "third_party/deep_gemm/include/**/*.cuh",
+        "third_party/deep_gemm/include/**/*.h",
+        "third_party/deep_gemm/include/**/*.hpp",
     ]
 }
 
@@ -1046,7 +1087,9 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch"],
+        "zen": [
+            "zentorch-weekly==5.2.1.dev20260408"
+        ],  # Zentorch has weekly releases. This pulls the known-good version.
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
@@ -1054,7 +1097,6 @@ setup(
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
-            "resampy",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
@@ -1065,9 +1107,9 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==0.3.3"],
+        "helion": ["helion==1.0.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

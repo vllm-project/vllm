@@ -116,6 +116,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
 
+  // cutlass mxfp4 block scaled group GEMM (MXFP4 x MXFP4 MoE)
+  ops.def(
+      "cutlass_mxfp4_group_mm(Tensor! out, Tensor a, Tensor b,"
+      " Tensor a_blockscale, Tensor b_blockscales,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
+
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor input,"
@@ -148,6 +154,19 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "output_scale,"
       "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
       "Tensor output_scale_offset_by_experts) -> ()");
+
+  // Compute MXFP4 experts quantization (32-element blocks, E8M0 SFs).
+  ops.def(
+      "mxfp4_experts_quant(Tensor! output, Tensor! output_scale,"
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
+
+  // Fused SiLU+Mul+MXFP4 experts quantization.
+  ops.def(
+      "silu_and_mul_mxfp4_experts_quant(Tensor! output, Tensor! "
+      "output_scale,"
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
 
   // Fused SiLU+Mul+NVFP4 quantization.
   ops.def(
@@ -233,9 +252,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("silu_and_mul_scaled_fp4_experts_quant",
            TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
   ops.impl("silu_and_mul_nvfp4_quant", TORCH_BOX(&silu_and_mul_nvfp4_quant));
-
-  // W4A8 ops: impl registrations are in the source files
-  // (w4a8_mm_entry.cu and w4a8_grouped_mm_entry.cu)
+  // mxfp4_experts_quant: registered in mxfp4_experts_quant.cu (SM100 only).
+  // W4A8 ops: registered in w4a8_mm_entry.cu / w4a8_grouped_mm_entry.cu.
 #endif
 }
 

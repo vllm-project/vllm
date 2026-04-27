@@ -56,8 +56,12 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionMetadata
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 logger = init_logger(__name__)
@@ -116,9 +120,9 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        backend_cfg = get_current_vllm_config().additional_config.get(
-            "gdn_prefill_backend", "auto"
-        )
+        additional_config = get_current_vllm_config().additional_config
+        assert isinstance(additional_config, dict)
+        backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
 
         supports_flashinfer = (
@@ -139,15 +143,14 @@ class ChunkGatedDeltaRule(CustomOp):
             use_flashinfer = supports_flashinfer
 
         if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel", scope="local")
+            logger.info_once("Using FlashInfer GDN prefill kernel")
             logger.info_once(
                 "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
                 "take a while to compile. Set `--gdn-prefill-backend triton` to "
                 "avoid JIT compile time.",
-                scope="local",
             )
         else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel", scope="local")
+            logger.info_once("Using Triton/FLA GDN prefill kernel")
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -352,11 +355,19 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
+        output_gate_type = getattr(config, "output_gate_type", "silu")
+        if output_gate_type == "swish":
+            output_gate_type = "silu"
+        assert output_gate_type in ["silu", "swish", "sigmoid"], (
+            f"unsupported {output_gate_type=}"
+        )
+
         self.norm = RMSNormGated(
             self.head_v_dim,
             eps=self.layer_norm_epsilon,
             group_size=None,
             norm_before_gate=True,
+            activation=output_gate_type,
             device=current_platform.current_device(),
         )
 
@@ -568,7 +579,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             b,
             a,
             core_attn_out,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # ============================================================
@@ -607,53 +618,20 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 2: Core Attention
         # ============================================================
-        forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
         z = torch.empty_like(core_attn_out)
-        if attn_metadata is not None:
-            attn_metadata = attn_metadata[self.prefix]
 
-            # TODO: xpu does not support this param yet
-            spec_sequence_masks = attn_metadata.spec_sequence_masks
-            assert spec_sequence_masks is None
-
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-            )
-
-            conv_state = self.kv_cache[0]
-            ssm_state = self.kv_cache[1]
-
-            torch.ops._xpu_C.gdn_attention(
-                core_attn_out,
-                z,
-                projected_states_qkvz,
-                projected_states_ba,
-                self.num_k_heads,
-                self.num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
-                conv_weights=conv_weights,
-                conv_bias=self.conv1d.bias,
-                activation=self.activation,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_prefills=attn_metadata.num_prefills,
-                num_decodes=attn_metadata.num_decodes,
-                has_initial_state=attn_metadata.has_initial_state,
-                non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
-                non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
-                num_actual_tokens=attn_metadata.num_actual_tokens,
-                tp_size=self.tp_size,
-                reorder_input=not self.gqa_interleaved_layout,
-            )
+        torch.ops.vllm.gdn_attention_core_xpu(
+            core_attn_out,
+            z,
+            projected_states_qkvz,
+            projected_states_ba,
+            self.prefix,
+        )
 
         # ============================================================
         # Part 3: Output Projection
@@ -702,19 +680,33 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # All kernels use BT = chunk_size (FLA_CHUNK_SIZE4), so a single pass with
-        # T = chunk_size is sufficient to populate every autotuner cache.
+        # All kernels use BT = chunk_size, so a single pass with T = chunk_size
+        # is sufficient to populate every autotuner cache. Mirror the real
+        # prefill path here: build q/k/v/g/beta via fused_post_conv_prep and
+        # then run chunk_gated_delta_rule with in-kernel L2 norm disabled.
         T = FLA_CHUNK_SIZE
-        q = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
-        k = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
-        v = torch.randn(1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype)
-        # NOTE: g and beta must have the same dtypes as during
-        # inference, so we construct them with the same function
-        # (fused_gdn_gating). dummy_a and dummy_b are throwaway
-        # inputs required by that function.
+        dummy_mixed_qkv = torch.randn(
+            T, mixed_qkv.shape[-1], device=device, dtype=dtype
+        )
         dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
-        g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
+        q, k, v, g, beta = fused_post_conv_prep(
+            conv_output=dummy_mixed_qkv,
+            a=dummy_a,
+            b=dummy_b,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            num_k_heads=num_k_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            apply_l2norm=True,
+            output_g_exp=False,
+        )
+        q = q.unsqueeze(0)
+        k = k.unsqueeze(0)
+        v = v.unsqueeze(0)
+        g = g.unsqueeze(0)
+        beta = beta.unsqueeze(0)
         state = torch.zeros(
             1,
             num_v_heads,
@@ -735,7 +727,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 initial_state=state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=False,
             )
         except Exception:
             logger.warning(
@@ -753,7 +745,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 self.prefix,
             )
         finally:
-            del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
+            del dummy_mixed_qkv, q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
 
         torch.accelerator.empty_cache()
 
@@ -765,16 +757,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         core_attn_out: torch.Tensor,
     ):
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata is None:
+        if attn_metadata_raw is None:
             # V1 profile run — warm up prefill kernels so that
             # autotuning completes before KV cache allocation.
             self._warmup_prefill_kernels(mixed_qkv)
             return
 
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata_raw, dict)
+        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
@@ -833,14 +825,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            # spec_state_indices_tensor is always set when spec_sequence_masks is set
+            assert spec_state_indices_tensor is not None
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][
-                    : attn_metadata.num_spec_decodes
+                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
                 ],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
@@ -873,8 +867,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_actual_tokens
+                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                    : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
                 validate_data=True,
             )
@@ -938,8 +932,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                     v=value_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc[
-                        : attn_metadata.num_spec_decodes + 1
+                    cu_seqlens=spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_spec_decodes
+                        + 1  # type: ignore[attr-defined]
                     ],
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
@@ -951,8 +946,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
+            assert non_spec_state_indices_tensor is not None
+            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()  # type: ignore[index]
+            assert has_initial_state is not None
+            initial_state[~has_initial_state, ...] = 0  # type: ignore[operator]
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -985,8 +982,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                     v=value_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_decodes
+                        + 1  # type: ignore[attr-defined]
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
@@ -1046,7 +1044,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             conv_weights,
             self.conv1d.bias,
             self.activation,
-            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
@@ -1059,7 +1057,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             scale=self.head_k_dim**-0.5,
             initial_state=ssm_state,
             out=out_buf,
-            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             use_qk_l2norm_in_kernel=True,
         )
         return
@@ -1070,13 +1068,14 @@ def gdn_attention_core(
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     """
     Custom op for the core attention computation.
     Only handles the convolution + recurrent attention part.
     Input/output projections are handled outside this op.
     """
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self._forward_core(
@@ -1092,7 +1091,7 @@ def gdn_attention_core_fake(
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     """Fake implementation for torch.compile."""
     return

@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from importlib.metadata import version
 
 import pytest
 import regex as re
+from packaging.version import Version
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm.logprobs import SampleLogprobs
@@ -18,6 +20,15 @@ from ....conftest import (
 )
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
+
+pytestmark = pytest.mark.skipif(
+    Version("5.0") <= Version(version("transformers")),
+    reason=(
+        "vllm upgraded transformers above v5.4 where HF model custom code uses siglip2 "
+        "internals (filter_out_non_signature_kwargs) removed by "
+        "huggingface/transformers#43514"
+    ),
+)
 
 MODEL_ID = "microsoft/Phi-4-reasoning-vision-15B"
 

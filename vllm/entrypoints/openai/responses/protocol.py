@@ -106,7 +106,7 @@ def serialize_message(msg):
         return msg.to_dict()
     else:
         # fallback to pydantic dump
-        return msg.model_dump_json(by_alias=True)
+        return msg.model_dump(mode="json", by_alias=True)
 
 
 def serialize_messages(msgs):
@@ -490,6 +490,46 @@ class ResponsesRequest(OpenAIBaseModel):
                 processed_input.append(item)
 
         data["input"] = processed_input
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_usage(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        tools = data.get("tools")
+        tool_choice = data.get("tool_choice", "auto")
+        has_tools = tools is not None and len(tools) > 0
+        is_named_tool_choice = (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+        )
+
+        if not has_tools:
+            if tool_choice in ("auto", "none"):
+                data["tool_choice"] = "none"
+            elif tool_choice == "required":
+                raise VLLMValidationError(
+                    "Tool choice 'required' must be specified with 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            elif is_named_tool_choice:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+        elif is_named_tool_choice and tools is not None:
+            tool_name = tool_choice.get("name")
+            tool_names = {
+                t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+                for t in tools
+            }
+            if not tool_name or tool_name not in tool_names:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+
         return data
 
 

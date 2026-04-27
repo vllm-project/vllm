@@ -741,9 +741,9 @@ def test_set_inputs_first_pass_parallel_drafting():
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @pytest.mark.parametrize("use_distinct_lm_head", [True, False])
-@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.eagle.get_model")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_load_model(
     mock_get_model,
     mock_get_layers,
@@ -755,12 +755,6 @@ def test_load_model(
     use_distinct_lm_head,
     monkeypatch,
 ):
-    if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
-        pytest.skip(
-            "TRITON_ATTN does not support "
-            "multi-token eagle spec decode on current platform"
-        )
-
     if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 

@@ -66,6 +66,13 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+if Version(version("transformers")) < Version("5.0.0"):
+    logger.warning(
+        "Support for Transformers v4 is deprecated. The Transformers v4 codepath will "
+        "become unmaintained in vLLM v0.22.0 and will be removed in vLLM v0.24.0. "
+        "Please upgrade to Transformers v5: pip install --upgrade transformers"
+    )
+
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -82,16 +89,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
-    colmodernvbert="ColModernVBertConfig",
+    modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    deepseek_v4="DeepseekV4Config",
     flex_olmo="FlexOlmoConfig",
+    fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
+    granite4_vision="Granite4VisionConfig",
     hunyuan_vl="HunYuanVLConfig",
+    hy_v3="HYV3Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
@@ -209,6 +220,16 @@ class HFConfigParser(ConfigParserBase):
                 config_class = _CONFIG_REGISTRY[model_type]
                 config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
+                # If the on-disk model_type differs from the overridden
+                # one, register under both so AutoConfig.from_pretrained
+                # returns the correct class regardless of what the
+                # checkpoint says
+                if (
+                    config_model_type := config_dict.get("model_type")
+                ) and config_model_type != model_type:
+                    config_class.model_type = config_model_type
+                    AutoConfig.register(config_model_type, config_class, exist_ok=True)
+                    config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
             try:
