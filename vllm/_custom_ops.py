@@ -404,10 +404,24 @@ def rotary_embedding(
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    rope_dim_offset: int = 0,
+    inverse: bool = False,
 ) -> None:
-    torch.ops._C.rotary_embedding(
-        positions, query, key, head_size, cos_sin_cache, is_neox
-    )
+    if rope_dim_offset == 0 and not inverse:
+        torch.ops._C.rotary_embedding(
+            positions, query, key, head_size, cos_sin_cache, is_neox
+        )
+    else:
+        torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox,
+            rope_dim_offset,
+            inverse,
+        )
 
 
 # layer norm ops
@@ -2500,6 +2514,30 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+    )
+
+
+def topk_hash_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        input_tokens,
+        hash_indices_table,
     )
 
 
