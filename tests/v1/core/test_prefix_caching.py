@@ -1980,7 +1980,6 @@ def test_null_parent_block_hash():
         hash_block_size=block_size,
         enable_kv_cache_events=True,
         kv_cache_spec_kinds=[KVCacheSpecKind.FULL_ATTENTION.value],
-        kv_cache_spec_sliding_windows=[None],
     )
 
     req = make_request(
@@ -2028,7 +2027,6 @@ def test_null_parent_block_hash():
     assert event.block_hashes == expected_new_hashes
     assert event.group_idx == kv_cache_group_id
     assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
-    assert event.kv_cache_spec_sliding_window is None
 
     # Ensure we didn't accidentally assign a hash to the null block.
     assert pool.null_block.block_hash is None
@@ -2112,7 +2110,6 @@ def test_block_stored_event_group_idx(group_id: int):
             KVCacheSpecKind.SLIDING_WINDOW.value,
             KVCacheSpecKind.MAMBA.value,
         ],
-        kv_cache_spec_sliding_windows=[None, 128, None],
     )
 
     req = make_request(
@@ -2144,7 +2141,6 @@ def test_block_stored_event_group_idx(group_id: int):
             KVCacheSpecKind.MAMBA.value,
         ][group_id]
     )
-    assert events[0].kv_cache_spec_sliding_window == [None, 128, None][group_id]
 
 
 def test_block_stored_event_group_idx_multiple_groups():
@@ -2169,7 +2165,6 @@ def test_block_stored_event_group_idx_multiple_groups():
             KVCacheSpecKind.FULL_ATTENTION.value,
             KVCacheSpecKind.SLIDING_WINDOW.value,
         ],
-        kv_cache_spec_sliding_windows=[None, 128],
     )
 
     req = make_request(
@@ -2206,11 +2201,9 @@ def test_block_stored_event_group_idx_multiple_groups():
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == 0
     assert events[0].kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
-    assert events[0].kv_cache_spec_sliding_window is None
     assert isinstance(events[1], BlockStored)
     assert events[1].group_idx == 1
     assert events[1].kv_cache_spec_kind == KVCacheSpecKind.SLIDING_WINDOW.value
-    assert events[1].kv_cache_spec_sliding_window == 128
 
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
@@ -2234,7 +2227,6 @@ def test_block_removed_event_group_idx(group_id: int):
             KVCacheSpecKind.SLIDING_WINDOW.value,
             KVCacheSpecKind.MAMBA.value,
         ],
-        kv_cache_spec_sliding_windows=[None, 128, None],
     )
 
     req = make_request(
@@ -2278,7 +2270,6 @@ def test_block_removed_event_group_idx(group_id: int):
                 KVCacheSpecKind.MAMBA.value,
             ][group_id]
         )
-        assert event.kv_cache_spec_sliding_window == [None, 128, None][group_id]
 
 
 def test_eagle_enabled_removes_last_block():
