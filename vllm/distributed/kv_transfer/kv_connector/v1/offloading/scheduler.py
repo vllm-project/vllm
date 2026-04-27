@@ -41,11 +41,11 @@ class TransferJobStatus:
     # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
-    # Offload keys this job covers; passed to manager.complete_*().
+    # Offload keys this job coverstor; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
-    # GPU blocks this job touches (store src / load dst).
-    gpu_block_ids: set[int]
+    # GPU blocks the fence tracks. Store src blocks; None for loads.
+    gpu_block_ids: list[int] | None = None
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -168,8 +168,6 @@ class OffloadingConnectorScheduler:
 
         # GPU block_id -> in-flight job_ids that touch it.
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
-        # Fence hits from update_state_after_alloc, drained at build time.
-        self._pending_load_flushes: set[int] = set()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -398,13 +396,6 @@ class OffloadingConnectorScheduler:
                 # entire KV cache so a remote decode node can consume it.
                 group_state.next_stored_block_idx = num_blocks
 
-        # Fence newly-allocated dst blocks against in-flight stores.
-        self._pending_load_flushes.update(
-            jid
-            for bid in dst_block_ids
-            for jid in self._block_id_to_pending_jobs.get(bid, ())
-        )
-
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
@@ -423,10 +414,7 @@ class OffloadingConnectorScheduler:
             pending_count=self.config.num_workers,
             keys=set(offload_keys),
             is_store=False,
-            gpu_block_ids={bid for bid in dst_block_ids if bid},
         )
-        for bid in self._jobs[load_job_id].gpu_block_ids:
-            self._block_id_to_pending_jobs.setdefault(bid, set()).add(load_job_id)
 
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(offload_keys)
@@ -561,7 +549,7 @@ class OffloadingConnectorScheduler:
                 pending_count=self.config.num_workers,
                 keys=set(keys_to_store),
                 is_store=True,
-                gpu_block_ids=set(src_block_ids),
+                gpu_block_ids=src_block_ids,
             )
             for bid in src_block_ids:
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
@@ -583,8 +571,7 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        jobs_to_flush: set[int] = self._pending_load_flushes
-        self._pending_load_flushes = set()
+        jobs_to_flush: set[int] = set()
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
             if req_status is None or not req_status.transfer_jobs:
@@ -628,7 +615,7 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            for bid in job_status.gpu_block_ids:
+            for bid in job_status.gpu_block_ids or ():
                 pending = self._block_id_to_pending_jobs[bid]
                 pending.remove(job_id)
                 if not pending:
