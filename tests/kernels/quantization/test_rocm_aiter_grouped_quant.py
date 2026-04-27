@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""AITER grouped FP8 quantization tests for ROCm.
-
-This file checks that the ROCm AITER grouped FP8 quant op:
-1. exposes a correct fake implementation
-2. works through torch.compile in cudagraph mode
-3. preserves expected shapes and dtypes across representative inputs
-"""
+# This is a test for the AITER group_fp8_quant op.
+# It tests if the AITER op is
+# 1. correctly defined the relationship between
+#    implementation and fake function
+# 2. can be used with torch.compile
+# 3. can be used with CUDA graphs
+# This file will be skipped if AITER is not installed
+# and the platform is not ROCm.
 
 import importlib.util
 
@@ -27,14 +28,17 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_rocm_aiter_group_fp8_quant_fake_implementation():
-    """Test that the fake implementation is correctly defined."""
-    m = 128
-    n = 4096
+    """Test that the fake implementation is correctly
+    defined for torch.ops.vllm.rocm_aiter_group_fp8_quant."""
+    # Create test tensors
+    M = 128
+    N = 4096
     group_size = 128
 
-    input_tensor = torch.randn((m, n), dtype=torch.bfloat16, device="cuda")
+    input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
-    # Verify that the fake function returns tensors with the right metadata.
+    # Verify the op's fake implementation using torch.library.opcheck
+    # This checks that the fake function returns tensors with correct shapes and dtypes
     torch.library.opcheck(
         torch.ops.vllm.rocm_aiter_group_fp8_quant,
         (input_tensor, group_size),
@@ -43,17 +47,21 @@ def test_rocm_aiter_group_fp8_quant_fake_implementation():
 
 
 def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
-    """Test that the op works with torch.compile in cudagraph mode."""
-    m = 128
-    n = 4096
+    """Test that rocm_aiter_ops.group_fp8_quant
+    with group size 128 can be used with
+    torch.compile in cudagraph mode."""
+    # Create test tensors
+    M = 128
+    N = 4096
     group_size = 128
 
-    input_tensor = torch.randn((m, n), dtype=torch.bfloat16, device="cuda")
+    input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
+    # Define a function that uses the op
     def group_fp8_quant_fn(x):
         return rocm_aiter_ops.group_fp8_quant(x, group_size)
 
-    # Compile the op in the same low-overhead mode we care about for runtime use.
+    # Compile with cudagraph mode
     compiled_fn = torch.compile(
         group_fp8_quant_fn,
         fullgraph=True,
@@ -62,15 +70,22 @@ def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
         dynamic=False,
     )
 
-    # First run triggers compilation; later runs should reuse the compiled path.
+    # Run eager mode
     x_fp8_eager, scales_eager = group_fp8_quant_fn(input_tensor)
+
+    # Run compiled version (first run will trigger compilation)
     x_fp8_compiled, scales_compiled = compiled_fn(input_tensor)
 
+    # Verify shapes match
     assert x_fp8_compiled.shape == x_fp8_eager.shape
     assert scales_compiled.shape == scales_eager.shape
-    assert x_fp8_compiled.shape == (m, n)
-    assert scales_compiled.shape == (m, (n + group_size - 1) // group_size)
 
+    # Verify expected shapes
+    assert x_fp8_compiled.shape == (M, N)
+    expected_scale_cols = (N + group_size - 1) // group_size
+    assert scales_compiled.shape == (M, expected_scale_cols)
+
+    # Verify results match
     assert torch.allclose(
         x_fp8_compiled.to(torch.float32),
         x_fp8_eager.to(torch.float32),
@@ -79,10 +94,12 @@ def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
     )
     assert torch.allclose(scales_compiled, scales_eager, rtol=1e-3, atol=1e-3)
 
-    input_tensor_2 = torch.randn((m, n), dtype=torch.bfloat16, device="cuda")
+    # Test with different input (reusing compiled graph)
+    input_tensor_2 = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
     x_fp8_eager_2, scales_eager_2 = group_fp8_quant_fn(input_tensor_2)
     x_fp8_compiled_2, scales_compiled_2 = compiled_fn(input_tensor_2)
 
+    # Verify second run also produces correct results
     assert torch.allclose(
         x_fp8_compiled_2.to(torch.float32),
         x_fp8_eager_2.to(torch.float32),
@@ -93,8 +110,9 @@ def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
 
 
 def test_rocm_aiter_group_fp8_quant_different_shapes():
-    """Test the op with different input shapes."""
+    """Test rocm_aiter_ops.group_fp8_quant with different input shapes."""
     group_size = 128
+
     test_shapes = [
         (64, 2048),
         (256, 8192),
@@ -102,15 +120,17 @@ def test_rocm_aiter_group_fp8_quant_different_shapes():
         (512, 4096),
     ]
 
-    for m, n in test_shapes:
-        input_tensor = torch.randn((m, n), dtype=torch.bfloat16, device="cuda")
+    for M, N in test_shapes:
+        input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
         x_fp8, scales = rocm_aiter_ops.group_fp8_quant(input_tensor, group_size)
 
-        # Each row gets one scale per 128-column group.
-        assert x_fp8.shape == (m, n)
-        assert scales.shape == (m, (n + group_size - 1) // group_size)
+        # Verify shapes
+        assert x_fp8.shape == (M, N)
+        expected_scale_cols = (N + group_size - 1) // group_size
+        assert scales.shape == (M, expected_scale_cols)
 
+        # Verify dtypes
         from aiter import dtypes
 
         assert x_fp8.dtype == dtypes.fp8
