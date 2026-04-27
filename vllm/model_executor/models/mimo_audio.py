@@ -1239,7 +1239,7 @@ class MimoAudioEncoder(nn.Module):
         if model_path:
             audio_tokenizer_path = os.path.join(model_path, "audio_tokenizer")
             if os.path.exists(audio_tokenizer_path):
-                dev = torch.device(f"cuda:{torch.cuda.current_device()}")
+                dev = torch.get_default_device()
                 self.audio_tokenizer = self._load_audio_tokenizer(
                     audio_tokenizer_path, dev
                 )

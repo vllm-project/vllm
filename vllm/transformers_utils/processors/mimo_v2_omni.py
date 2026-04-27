@@ -11,7 +11,6 @@ import copy
 import io
 import logging
 import math
-import regex as re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -19,6 +18,7 @@ from io import BytesIO
 from typing import Any, Literal
 
 import numpy as np
+import regex as re
 import requests
 import torch
 import torch.nn.functional as F
