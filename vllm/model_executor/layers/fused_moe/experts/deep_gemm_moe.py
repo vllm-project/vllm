@@ -355,9 +355,9 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     def _supports_current_device() -> bool:
         from vllm.platforms import current_platform
 
-        return (
-            is_deep_gemm_supported()
-            and current_platform.is_device_capability_family(100)
+        return is_deep_gemm_supported() and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
         )
 
     @staticmethod
