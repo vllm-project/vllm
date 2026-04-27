@@ -17,7 +17,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -166,12 +168,13 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 ]
                 and p.is_device_capability(90)
             )
-            # nvfp4, wmxfp4amxfp8 on 10.0+
+            # nvfp4, wmxfp4amxfp8, fp8 per-token/per-channel on 10.0+
             or (
                 scheme
                 in [
                     (kMxfp4Static, kMxfp8Dynamic),
                     (kNvfp4Static, kNvfp4Dynamic),
+                    (kFp8StaticChannelSym, kFp8DynamicTokenSym),
                 ]
                 and p.has_device_capability(100)
             )
@@ -282,6 +285,26 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         use_w4_group_scaling = False
         # Select quantization metadata based on FP8 format/path
         if (
+            self.quant_dtype == torch.float8_e4m3fn
+            and not self.use_deepseek_fp8_block_scale
+            and self.quant_config.per_act_token_quant
+            and self.quant_config.per_out_ch_quant
+        ):
+            assert self.w1_scale is not None and self.w2_scale is not None, (
+                "w1_scale and w2_scale must not be None for FlashInfer "
+                "FP8 per-token/per-channel MoE"
+            )
+            assert a1q_scale is not None, (
+                "a1q_scale must not be None for FlashInfer FP8 "
+                "per-token/per-channel MoE"
+            )
+            quant_scales = [
+                self.w1_scale,
+                self.w2_scale,
+            ]
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+        elif (
             self.quant_dtype == torch.float8_e4m3fn
             and not self.use_deepseek_fp8_block_scale
         ):

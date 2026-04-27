@@ -47,6 +47,22 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _pad_w13_intermediate_dim(
+    x: torch.Tensor, padded_intermediate: int, is_act_and_mul: bool
+) -> torch.Tensor:
+    up_mult = 2 if is_act_and_mul else 1
+    intermediate = x.shape[1] // up_mult
+    padded_x = x.new_zeros((x.shape[0], up_mult * padded_intermediate, *x.shape[2:]))
+    if is_act_and_mul:
+        padded_x[:, :intermediate, ...] = x[:, :intermediate, ...]
+        padded_x[
+            :, padded_intermediate : padded_intermediate + intermediate, ...
+        ] = x[:, intermediate:, ...]
+    else:
+        padded_x[:, :intermediate, ...] = x
+    return padded_x
+
+
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
@@ -330,12 +346,8 @@ def align_fp8_moe_weights_for_fi(
         padded_intermediate,
     )
 
-    up_mult = 2 if is_act_and_mul else 1
-    padded_gate_up_dim = up_mult * padded_intermediate
-
-    # Pad w13 and w2 along its intermediate dimension.
-    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-    padded_w13[:, : w13.shape[1], :] = w13
+    # Pad w13 and w2 along the intermediate dimension.
+    padded_w13 = _pad_w13_intermediate_dim(w13, padded_intermediate, is_act_and_mul)
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
@@ -481,6 +493,9 @@ def prepare_fp8_moe_layer_for_fi(
     is_mxfp8 = block_quant and w13_scale.dtype == torch.uint8
     is_deepseek_fp8 = block_quant and not is_mxfp8
     is_gated = layer.activation.is_gated
+    is_per_channel_weight = (
+        not block_quant and w13_scale.ndim == 3 and w13_scale.shape[1] == w13.shape[1]
+    )
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:
@@ -508,18 +523,25 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
+        scale_intermediate = w13_scale.shape[1] // (2 if is_gated else 1)
         w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
             w13,
             w2,
             layer.moe_config.is_act_and_mul,
             min_alignment,
         )
+        if is_per_channel_weight and new_intermediate != scale_intermediate:
+            w13_scale = _pad_w13_intermediate_dim(
+                w13_scale,
+                new_intermediate,
+                layer.moe_config.is_act_and_mul,
+            )
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
     if layer.moe_config.is_act_and_mul:
         w13 = swap_w13_to_w31(w13)
-        if block_quant:
+        if block_quant or is_per_channel_weight:
             w13_scale = swap_w13_to_w31(w13_scale)
 
     # DeepSeekFp8 TRT-LLM: shuffle weights into BlockMajorK layout.
