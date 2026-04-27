@@ -261,8 +261,10 @@ class FlashInferAllReduce:
             # Use the same threshold as the allreduce-rms fusion pass
             # TODO: tune the threshold
             MiB = 1024 * 1024
-            max_workspace_size = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
-                self.world_size, None
+            max_workspace_size = (
+                PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
+                    self.world_size, None
+                )
             )
             if not max_workspace_size:
                 logger.warning(
