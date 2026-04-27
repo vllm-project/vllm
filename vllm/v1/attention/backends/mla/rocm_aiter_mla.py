@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Final
 
 import torch
 
@@ -389,6 +389,53 @@ def _expand_page_indices_kernel(
         )
 
 
+class AiterMLAHelper:
+    """
+    AITER MLA implementation requires num_heads >= 16. If num_heads < 16 and
+    16 % num_heads == 0, we can pad q to 16 heads; otherwise AITER has to fail.
+    """
+
+    _AITER_MIN_MLA_HEADS: Final = 16
+
+    @staticmethod
+    def check_num_heads_validity(num_heads: int):
+        assert AiterMLAHelper.is_valid_num_heads(num_heads), (
+            f"Aiter MLA requires that num_heads be multiples or divisors of 16, "
+            f"but provided {num_heads} number of heads.\n"
+            f"Try adjusting tensor_parallel_size value."
+        )
+
+    @staticmethod
+    def is_valid_num_heads(num_heads: int) -> bool:
+        return (
+            num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
+            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+            else AiterMLAHelper._AITER_MIN_MLA_HEADS % num_heads == 0
+        )
+
+    @staticmethod
+    def get_actual_mla_num_heads(num_heads: int) -> int:
+        return max(num_heads, AiterMLAHelper._AITER_MIN_MLA_HEADS)
+
+    @staticmethod
+    def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
+        return (
+            q
+            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+            else q.repeat_interleave(
+                AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, dim=1
+            )
+        )
+
+    @staticmethod
+    def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
+        return (
+            o
+            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+            else o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
+        )
+
+
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def __init__(
         self,
@@ -418,17 +465,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_sharing_target_layer_name,
             **mla_args,
         )
-        _valid_heads = num_heads in (4, 8) or (
-            num_heads % 16 == 0 and 16 <= num_heads <= 128
-        )
-        assert _valid_heads, (
-            f"Aiter MLA supports num_heads of 4, 8, or multiples of 16 "
-            f"in [16, 128].\n"
-            f"Provided {num_heads} number of heads.\n"
-            "Try adjusting tensor_parallel_size value."
-        )
-        self._needs_head_repeat = num_heads < 16
-        self._head_repeat_factor = 16 // num_heads if num_heads < 16 else 1
+        AiterMLAHelper.check_num_heads_validity(num_heads)
+
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -471,15 +509,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
 
-        if self._needs_head_repeat:
-            q = q.repeat_interleave(self._head_repeat_factor, dim=1)
-            kernel_num_heads = 16
-        else:
-            kernel_num_heads = self.num_heads
-
+        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
+        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         o = torch.empty(
             B,
-            kernel_num_heads,
+            mla_num_heads,
             self.kv_lora_rank,
             dtype=attn_metadata.decode.attn_out_dtype,
             device=q.device,
@@ -506,7 +540,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             )
 
         rocm_aiter_ops.mla_decode_fwd(
-            q,
+            mla_padded_q,
             kv_buffer,
             o,
             self.scale,
@@ -518,7 +552,4 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_kwargs,
         )
 
-        if self._needs_head_repeat:
-            o = o[:, :: self._head_repeat_factor, :]
-
-        return o, None
+        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, o), None
