@@ -139,7 +139,7 @@ REASONING=$(echo "$SELECTION" | sed -n '1,/^---$/p' | sed '$d')
 TEST_LIST=$(echo "$SELECTION" | sed -n '/^---$/,$ p' | sed '1d')
 
 # Filter test list to valid "path | reason" lines
-CLEAN_SELECTION=$(echo "$TEST_LIST" | grep -E '^[a-zA-Z_/.]+ *\|' || true)
+CLEAN_SELECTION=$(echo "$TEST_LIST" | grep -E '^[[:space:]]*[a-zA-Z0-9_/.-]+ *\|' || true)
 
 if [ -z "$CLEAN_SELECTION" ]; then
     echo "Warning: Could not parse Claude's output. Raw output:" >&2
@@ -148,7 +148,7 @@ if [ -z "$CLEAN_SELECTION" ]; then
 fi
 
 # Check for NONE case
-IS_NONE=$(echo "$CLEAN_SELECTION" | grep -c '^NONE ' || true)
+IS_NONE=$(echo "$CLEAN_SELECTION" | grep -ic '^[[:space:]]*NONE ' || true)
 
 if [ "$IS_NONE" -gt 0 ]; then
     NONE_REASON=$(echo "$CLEAN_SELECTION" | head -1 | cut -d'|' -f2 | xargs)

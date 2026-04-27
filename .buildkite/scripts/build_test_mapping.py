@@ -384,11 +384,7 @@ def invert_mapping(
     source_to_tests: dict[str, set[str]] = defaultdict(set)
 
     for test_file, modules in deps.items():
-        parts = Path(test_file).parts
-        if len(parts) >= 3:
-            test_dir = "/".join(parts[:3]) + "/"
-        else:
-            test_dir = "/".join(parts[:2]) + "/"
+        test_dir = str(Path(test_file).parent) + "/"
 
         for module in modules:
             source_parts = module.replace(".", "/").split("/")
@@ -453,14 +449,13 @@ def lookup_changed_files(
         candidate_tests: set[str] = set()
 
         for source_module, tests in file_level_mapping.items():
-            # Match if the changed module is a prefix of the import or
-            # the import is a prefix of the changed module.
-            # "vllm.config.model_config" matches import "vllm.config"
-            #   (test imports the package, we changed a file in it)
-            # "vllm.config" matches import "vllm.config.model_config"
-            #   (test imports the specific file we changed)
-            if (source_module.startswith(module)
-                    or module.startswith(source_module)):
+            # Match if one module is equal to or a sub-package of the
+            # other.  The "." check avoids false positives where one name
+            # is a prefix of an unrelated module (e.g. "vllm.config" must
+            # not match "vllm.config_helper").
+            if (source_module == module
+                    or source_module.startswith(module + ".")
+                    or module.startswith(source_module + ".")):
                 candidate_tests |= tests
 
         if candidate_tests:
