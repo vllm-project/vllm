@@ -266,7 +266,8 @@ def _verify_source_unchanged(
     for source in source_info.inlined_sources:
         module = sys.modules[source.module]
         file = inspect.getfile(module)
-        vllm_config.compilation_config.traced_files.add(Path(file))
+        if file != "<string>":
+            vllm_config.compilation_config.traced_files.add(Path(file))
         file_contents[file] = source.content
     expected_checksum = _compute_code_hash_with_content(file_contents)
     actual_checksum = _compute_code_hash(set(file_contents.keys()))

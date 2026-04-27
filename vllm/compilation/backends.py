@@ -1008,7 +1008,7 @@ class VllmBackend:
         # Compute config/compiler/code hashes once and reuse
         config_hash = vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = sorted(self.compilation_config.traced_files)
+        forward_code_files = sorted(self.compilation_config.traced_files, key=str)
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
