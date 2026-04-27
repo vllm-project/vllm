@@ -125,11 +125,11 @@ class Gemma4ImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
         torch.Tensor,
-        TensorShape("bn", "np", "pp"),
+        TensorShape("bn", "np", "pp", dynamic_dims={"np"}),
     ]
     pixel_position_ids: Annotated[
         torch.Tensor,
-        TensorShape("bn", "np", 2),
+        TensorShape("bn", "np", 2, dynamic_dims={"np"}),
     ]
 
 
@@ -1120,23 +1120,28 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
 
-        # TODO: Move this per-image loop into the input processor to
-        # reduce dynamism at the model runner / engine core. This
-        # requires spatially padding all images to uniform (H_max,
-        # W_max) in _call_hf_processor() so they arrive as a single
-        # stacked tensor, tracking padded regions via image_sizes
-        # metadata, and validating numerical equivalence with the
-        # current per-image path.
-        #
+        # When concurrent requests have different image resolutions,
+        # reduce_data returns a list of per-image tensors instead of
+        # a single stacked tensor. Normalize to a list either way.
+        # TODO(optimization): Spatially pad images to uniform
+        # (H_max, W_max) in the input processor so the vision tower
+        # can process them in a single batched call.
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = [pixel_values[i] for i in range(pixel_values.shape[0])]
+        if isinstance(pixel_position_ids, torch.Tensor):
+            pixel_position_ids = [
+                pixel_position_ids[i] for i in range(pixel_position_ids.shape[0])
+            ]
+
         # Process each image individually through the vision tower.
         # The vision tower's forward() strips padding and returns a
         # flat tensor of valid tokens. We process per-image to get
         # variable-length outputs matching the dynamic token count
         # from get_image_repl.
         per_image_features = []
-        for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
-            pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
+        for pv, pp in zip(pixel_values, pixel_position_ids, strict=True):
+            pv = pv.unsqueeze(0)  # (1, max_patches, patch_pixels)
+            pp = pp.unsqueeze(0)  # (1, max_patches, 2)
 
             # Derive the pooler's output_length from the total patch
             # count (including padding).  The vision tower encoder
