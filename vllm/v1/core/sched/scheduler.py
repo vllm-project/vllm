@@ -1491,7 +1491,7 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
-            
+
         if failed_kv_load_req_ids:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
@@ -2232,11 +2232,11 @@ class Scheduler(SchedulerInterface):
         """
         
         # handle async KV loads (not cached yet, evict_blocks=False)
-        async_load_reqs = [
+        async_load_reqs = (
             req
             for req in self.skipped_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        ]
+        )
         async_failed_req_ids, _, _ = (
             self._update_requests_with_invalid_blocks(
                 async_load_reqs,
@@ -2260,17 +2260,13 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        # evict invalid blocks and downstream dependent blocks from cache
-        # only when not using recompute policy (where blocks will be recomputed
-        # and reused by other requests sharing them)
         if sync_blocks_to_evict:
             self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
         all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
         logger.error(
-            "Failing %d request(s) due to KV load failure Request IDs: %s",
+            "Failing %d request(s) due to KV load failure. Request IDs: %s",
             total_failed_requests,
             all_failed_req_ids,
         )
         return all_failed_req_ids
-
