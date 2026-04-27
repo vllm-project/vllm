@@ -203,6 +203,11 @@ class SupportsHash(Protocol):
     def compute_hash(self) -> str: ...
 
 
+@runtime_checkable
+class SupportsCompileFactors(Protocol):
+    def compile_factors(self) -> dict[str, object]: ...
+
+
 class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
@@ -232,6 +237,9 @@ def normalize_value(x):
     Order: primitives, special types (Enum, callable, torch.dtype, Path), then
     generic containers (Mapping/Set/Sequence) with recursion.
     """
+    if isinstance(x, SupportsCompileFactors):
+        return normalize_value(x.compile_factors())
+
     # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
         return x

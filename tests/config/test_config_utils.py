@@ -154,6 +154,26 @@ def test_enum_vs_int_disambiguation():
     assert isinstance(h_enum, str) and len(h_enum) == 64
 
 
+def test_get_hash_factors_uses_nested_compile_factors():
+    class CompileFactorsConfig:
+        def compile_factors(self):
+            return {"z": 3, "a": [2, 1]}
+
+    factors = get_hash_factors(SimpleConfig(CompileFactorsConfig()), set())
+
+    assert factors["a"] == (("a", (2, 1)), ("z", 3))
+
+
+def test_normalize_value_uses_compile_factors_recursively():
+    class CompileFactorsConfig:
+        def compile_factors(self):
+            return {"z": 3, "a": [2, 1]}
+
+    value = {"nested": [CompileFactorsConfig()]}
+
+    assert normalize_value(value) == (("nested", ((("a", (2, 1)), ("z", 3)),)),)
+
+
 def test_classes_are_types():
     """Types normalize to FQNs; include real vLLM types."""
     # Only classes allowed; functions/lambdas are rejected.
