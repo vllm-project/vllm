@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
+    "mimo_v2_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
@@ -329,6 +330,48 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["MiMoMTPModel"],
+                }
+            )
+
+        if (arch := hf_config.architectures[0]) in (
+            "MiMoV2ProForCausalLM",
+            "MiMoV2OmniForCausalLM",
+        ):
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS,
+            )
+
+            mtp_arch_maps = {
+                "MiMoV2ProForCausalLM": "MiMoV2MTPModel",
+                "MiMoV2OmniForCausalLM": "MiMoV2OmniMTPModel",
+            }
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": [mtp_arch_maps[arch]],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
                 }
             )
 
