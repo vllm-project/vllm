@@ -2930,10 +2930,10 @@ steps:
   - python3 basic/offline_inference/embed.py
   - python3 basic/offline_inference/score.py
   # Multi-modal models
-  - python3 offline_inference/audio_language_offline.py --seed 0
-  - python3 offline_inference/vision_language_offline.py --seed 0
-  - python3 offline_inference/vision_language_multi_image_offline.py --seed 0
-  - python3 offline_inference/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
+  - python3 multimodal/audio_language_offline.py --seed 0
+  - python3 multimodal/vision_language_offline.py --seed 0
+  - python3 multimodal/vision_language_multi_image_offline.py --seed 0
+  - python3 multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
   # Pooling models
   - python3 pooling/embed/vision_embedding_offline.py --seed 0
   # Features demo
