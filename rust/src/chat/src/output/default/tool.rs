@@ -9,12 +9,12 @@ use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use thiserror_ext::AsReport;
 use tracing::warn;
-use uuid::Uuid;
 
 use super::{AssistantEvent, ContentEvent, ContentEventStream};
 use crate::Result;
 use crate::error::Error;
 use crate::event::AssistantBlockKind;
+use crate::output::generate_tool_call_id;
 use crate::parser::tool::{ToolCallDelta, ToolParseResult, ToolParser};
 
 /// Per-stream tool parsing state.
@@ -180,13 +180,6 @@ fn push_text_delta(events: &mut Vec<AssistantEvent>, kind: AssistantBlockKind, d
         return;
     }
     events.push(AssistantEvent::TextDelta { kind, delta });
-}
-
-/// Generate the northbound tool-call ID using the OpenAI-style `call_<id>` format.
-///
-/// TODO: support other ID scheme like Kimi-K2's `functions.{name}:{global_index}`.
-fn generate_tool_call_id() -> String {
-    format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
 }
 
 /// Tool parsing when `intermediate=false` (`FinalOnly` mode).

@@ -10,6 +10,7 @@ futures.workspace = true
 futures-async-stream.workspace = true
 minijinja.workspace = true
 minijinja-contrib.workspace = true
+openai-harmony.workspace = true
 openai-protocol.workspace = true # TODO: currently only serve as the input format for `tool-parser`
 regex.workspace = true
 serde.workspace = true

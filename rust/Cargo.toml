@@ -41,6 +41,7 @@ minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builti
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.16.1", features = ["serde"] }
+openai-harmony = "0.0.8"
 openai-protocol = "1.6.0"
 parking_lot = "0.12.5"
 prometheus-client = "0.24.0"

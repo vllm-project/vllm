@@ -36,6 +36,18 @@ pub enum Error {
         error: BoxedError,
     },
     #[error(
+        "gpt_oss uses native Harmony output parsing; generic {kind} parser override `{selection}` is not supported"
+    )]
+    HarmonyParserOverrideUnsupported {
+        kind: &'static str,
+        selection: String,
+    },
+    #[error("harmony output parsing failed")]
+    HarmonyOutputParsing {
+        #[source]
+        error: BoxedError,
+    },
+    #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
     )]

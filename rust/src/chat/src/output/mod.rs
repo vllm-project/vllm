@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use futures::Stream;
 use subenum::subenum;
+use uuid::Uuid;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use crate::FinishReason;
@@ -10,9 +11,12 @@ use crate::error::Result;
 use crate::event::{AssistantBlockKind, ChatEvent};
 
 mod default;
+mod harmony;
 mod structured;
 
 pub use default::DefaultChatOutputProcessor;
+pub use harmony::HarmonyChatOutputProcessor;
+pub(crate) use harmony::validate_harmony_parser_overrides;
 
 /// Internal assistant event before final assembly.
 ///
@@ -110,6 +114,15 @@ pub trait ChatOutputProcessor: Send {
 /// Trait-object form of [`ChatOutputProcessor`].
 pub type DynChatOutputProcessor = Box<dyn ChatOutputProcessor>;
 
+/// Boxed-stream constraint for decoded text updates.
 pub(crate) trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
+/// Boxed-stream constraint for internal assistant events.
 pub(crate) trait AssistantEventStream = Stream<Item = Result<AssistantEvent>> + Send + 'static;
+/// Boxed-stream constraint for public chat events.
 pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
+
+/// Generate the northbound tool-call ID using the OpenAI-style `call_<id>` format.
+// TODO: support other ID scheme like Kimi-K2's `functions.{name}:{global_index}`.
+pub(crate) fn generate_tool_call_id() -> String {
+    format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
+}

@@ -9,7 +9,9 @@ use crate::backend::{
     NewChatOutputProcessorOptions,
 };
 use crate::error::Result;
-use crate::output::DefaultChatOutputProcessor;
+use crate::output::{
+    DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
+};
 use crate::renderer::hf::HfChatRenderer;
 use crate::renderer::{DeepSeekV32ChatRenderer, DynChatRenderer};
 use crate::request::ChatRequest;
@@ -70,8 +72,10 @@ impl ChatBackend for HfChatBackend {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<DynChatOutputProcessor> {
-        // TODO: use model_type to select different output processor implementations if needed
-        let _ = self.model_type;
+        if self.model_type == "gpt_oss" {
+            validate_harmony_parser_overrides(options.tool_call_parser, options.reasoning_parser)?;
+            return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
+        }
 
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
