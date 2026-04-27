@@ -21,6 +21,7 @@ import torch.nn as nn
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
 
@@ -53,7 +54,7 @@ class ParamInfo:
         numel = 1
         for dim in self.shape:
             numel *= dim
-        return numel * torch.finfo(self.dtype).bits // 8
+        return numel * get_dtype_size(self.dtype)
 
 
 class StaticBufferPool:
