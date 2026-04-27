@@ -67,6 +67,45 @@ In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `
 
 See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/ipc_engine.py) for the full list of configurable fields.
 
+## EP-sharded MoE routed-expert load
+
+For large MoE models (where a single fused `gate_up_proj` weight can reach 8–21 GB and force `cuda_ipc_buffer_size ≥ max_weight_size`), the trainer can ship only the local-EP-rank's slice of routed experts:
+
+```python
+# Trainer: query the rollout layout once at startup
+layouts = llm.collective_rpc("get_moe_routed_ep_layout")
+# layouts[rank][layer_name] = {
+#   "ep_rank", "ep_size",
+#   "local_num_routed_experts", "global_num_routed_experts",
+#   "num_fused_shared_experts",
+#   "local_to_global_routed": [<global_id>, ...],   # length local_num_routed_experts
+# }
+
+# Trainer: stack only this rank's routed experts in ascending global-id order
+# w13_local has shape [local_num_routed_experts, 2 * intermediate_per_partition, hidden]
+
+trainer_args = IPCTrainerSendWeightsArgs(
+    mode="ray",
+    llm_handle=llm_actor_handle,
+    moe_routed_expert_global_ids={
+        "model.layers.0.mlp.experts.gate_up_proj":
+            layouts[rank]["model.layers.0.mlp.experts"]["local_to_global_routed"],
+        "model.layers.0.mlp.experts.down_proj":
+            layouts[rank]["model.layers.0.mlp.experts"]["local_to_global_routed"],
+        # ... per layer ...
+    },
+)
+
+IPCWeightTransferEngine.trainer_send_weights(
+    iterator=trainer_iter_routed_sharded(),  # yields (name, [local_routed_E, ...])
+    trainer_args=trainer_args,
+)
+```
+
+The sender validates `len(ids) == tensor.shape[0]` before creating IPC handles. The receiver dispatches each routed weight through `FusedMoE.load_routed_expert_weights`, which uses the global-id list (not heuristic shape comparisons) to write into the correct local expert slots; this works under both contiguous and round-robin EP partitions and is unaffected by `num_fused_shared_experts` inflation of `local_num_experts`.
+
+Weights not in `moe_routed_expert_global_ids` (shared experts, global scales, attention, etc.) fall through to `model.load_weights` unchanged. `Worker.update_weights` preserves the original arrival order so order-sensitive flows such as GGUF `is_gguf_weight_type`-before-data still work.
+
 ## Examples
 
 - [RLHF with IPC weight syncing (offline, Ray)](../../examples/rl/rlhf_ipc.md) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles

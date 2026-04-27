@@ -175,6 +175,13 @@ class NCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
+        if update_info.moe_routed_expert_global_ids is not None:
+            raise NotImplementedError(
+                "NCCL weight transfer backend does not support EP-sharded "
+                "MoE routed-expert loading. Use the IPC backend with "
+                "`moe_routed_expert_global_ids`, or send MoE weights in full."
+            )
+
         if update_info.packed:
             # Build iterator of (name, (shape, dtype)) from update_info
             def state_dict_info_iterator():

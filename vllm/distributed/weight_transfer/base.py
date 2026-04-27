@@ -33,6 +33,14 @@ class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Set to True if weights are in checkpoint/original model format and need
     layerwise processing. Set to False if weights have already been processed
     into kernel format (repacking, renaming, etc.)."""
+    moe_routed_expert_global_ids: dict[str, list[int]] | None = None
+    """EP-sharded MoE routed weights: full_weight_name -> list of global routed
+    expert ids, one per leading-dim slice of the tensor. Only weights whose
+    name appears here are dispatched through
+    ``FusedMoE.load_routed_expert_weights``; everything else (shared experts,
+    global scales, non-MoE params) goes through the regular
+    ``model.load_weights`` path. ``None`` means no weight in this update is
+    EP-sharded (the default)."""
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)
