@@ -20,28 +20,40 @@ _AITER_MQA_SMALL_HEADS_WARNED = False
 
 _cached_paged_logits: torch.Tensor | None = None
 
+# Over-allocate each logits row by this many float32 columns to absorb
+# out-of-bounds stores from the AITER preshuffle kernel's unmasked
+# buffer_store (up to ~190 elements past context_length).  The downstream
+# top_k_per_row_decode op takes stride(0)/stride(1) explicitly, so the
+# widened stride is transparent.  Credit: maeehart (vllm-project/vllm#40643).
+_PAGED_LOGITS_COL_PADDING = 256
+
 
 def _get_paged_logits_buffer(
     rows: int, cols: int, device: torch.device
 ) -> torch.Tensor:
-    """Return a (rows, cols) float32 buffer pre-filled with -inf.
+    """Return a (rows, cols) float32 view pre-filled with -inf.
 
     Within a decode step every layer sees the same (batch*next_n,
     actual_max_seq_len) shape, so the expensive torch.full call only
-    happens once per step (or when the shape changes).
+    happens once per step (or when the shape changes).  The backing
+    storage is wider by _PAGED_LOGITS_COL_PADDING columns to guard
+    against preshuffle kernel OOB writes.
     """
     global _cached_paged_logits
+    padded_cols = cols + _PAGED_LOGITS_COL_PADDING
     if (
         _cached_paged_logits is not None
-        and _cached_paged_logits.shape[0] == rows
-        and _cached_paged_logits.shape[1] == cols
+        and _cached_paged_logits.shape[0] >= rows
+        and _cached_paged_logits.shape[1] >= padded_cols
         and _cached_paged_logits.device == device
     ):
-        return _cached_paged_logits
+        buf = _cached_paged_logits[:rows, :cols]
+        buf.fill_(float("-inf"))
+        return buf
     _cached_paged_logits = torch.full(
-        (rows, cols), float("-inf"), device=device, dtype=torch.float32
+        (rows, padded_cols), float("-inf"), device=device, dtype=torch.float32
     )
-    return _cached_paged_logits
+    return _cached_paged_logits[:rows, :cols]
 
 
 if current_platform.is_cuda_alike():

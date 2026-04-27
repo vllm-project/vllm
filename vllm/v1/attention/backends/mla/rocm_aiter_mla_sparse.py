@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,7 +32,6 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
-from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -327,12 +327,11 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         attn_out_dtype = q.dtype
-
-        fp8_dtype = current_platform.fp8_dtype()
         mla_kwargs: dict = {}
 
         if self.kv_cache_dtype in ("fp8_e4m3", "fp8_e5m2",
                                    "fp8_e4m3fnuz", "fp8_e5m2fnuz"):
+            fp8_dtype = current_platform.fp8_dtype()
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(fp8_dtype)
             mla_kwargs["k_scale"] = layer._k_scale
             mla_kwargs["v_scale"] = layer._v_scale
