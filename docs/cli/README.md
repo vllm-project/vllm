@@ -64,7 +64,8 @@ vllm launch render meta-llama/Llama-3.2-1B-Instruct
 vllm launch render --help=all
 ```
 
-See [vllm launch](./launch.md) for the currently available launch components.
+See [vllm launch render](./launch/render.md) for the current launch
+component reference.
 
 ## chat
 

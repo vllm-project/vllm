@@ -1,7 +1,8 @@
 nav:
   - README.md
   - serve.md
-  - launch.md
+  - vllm launch:
+    - launch/**/*.md
   - chat.md
   - complete.md
   - run-batch.md
