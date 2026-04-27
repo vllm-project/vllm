@@ -1532,13 +1532,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="meituan-longcat/LongCat-Flash-Chat",
     ),
-    "MiMoV2MTP": _HfExamplesInfo(
+    "MiMoMTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-7B-RL",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-7B-RL",
+    ),
+    "MiMoV2MTPModel": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Pro",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Pro",
         is_available_online=False,
     ),
-    "MiMoV2OmniMTP": _HfExamplesInfo(
+    "MiMoV2OmniMTPModel": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Omni",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
