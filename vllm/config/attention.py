@@ -51,6 +51,9 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
+    use_fp4_indexer_cache: bool = False
+    """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs

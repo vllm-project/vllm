@@ -299,6 +299,13 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
+def cublas_gemm_bf16_bf16_fp32(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+):
+    return ops.router_gemm_bf16_fp32(x, weight)
+
+
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm

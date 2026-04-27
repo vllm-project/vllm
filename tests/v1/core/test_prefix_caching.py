@@ -557,19 +557,19 @@ def test_prefill_hybrid_model_eagle():
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == num_full_blocks
     assert computed_blocks.get_block_ids() == (
-        [1, 2, 3, 4],
-        [0, 9, 10, 11],
-        [0, 16, 17, 18],
+        [1, 2, 3, 4, 5],
+        [0, 0, 10, 11, 12],
+        [0, 0, 17, 18, 19],
     )
-    assert num_computed_tokens == 4 * block_size
+    assert num_computed_tokens == 5 * block_size
     num_new_tokens = len(all_token_ids) - num_computed_tokens
     blocks = manager.allocate_slots(
         req1, num_new_tokens, num_computed_tokens, computed_blocks
     )
     assert blocks is not None and blocks.get_block_ids() == (
-        [22, 23, 24],
-        [25, 26, 27],
-        [28, 29, 30],
+        [22, 23],
+        [24, 25],
+        [26, 27],
     )
     for block_per_group in computed_blocks.blocks:
         for block in block_per_group:
@@ -591,7 +591,7 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
         ],
-        4,
+        5,
     )
 
     # Evict the first block of full attention, makes total cache miss.
@@ -605,7 +605,7 @@ def test_prefill_hybrid_model_eagle():
         0,
     )
 
-    # Evict the last block of all layers, reduces the hit length to 3.
+    # Evict the last block of all layers, reduces the hit length to 4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -617,10 +617,10 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[-1], 1),
             make_block_hash_with_group_id(block_hashes[-1], 2),
         ],
-        3,
+        4,
     )
 
-    # Evict the last block of full attention, reduces the hit length to 3.
+    # Evict the last block of full attention, reduces the hit length to 4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -628,7 +628,7 @@ def test_prefill_hybrid_model_eagle():
         "5",
         all_token_ids,
         [make_block_hash_with_group_id(block_hashes[-1], 0)],
-        3,
+        4,
     )
 
     # Since the last block of full attention is dropped for eagle, evict
@@ -655,12 +655,11 @@ def test_prefill_hybrid_model_eagle():
         3,
     )
 
-    # Evict different set of blocks for full attention and sliding window makes
-    # total cache miss.
-    # The cache hit length of full attention is 4 * block_size.
-    # The cache hit length of sliding window is 3 * block_size.
-    # Then it is cache miss as the two type of layers
-    # have different hit length.
+    # Evict different set of blocks for full attention and sliding window.
+    # Full loses its last block so it drops to 4 full blocks after the eagle
+    # pop; SWA lost block 0 (outside the sliding window of the final hit),
+    # which is not required for the K+1 anchor at position 4. Coordinated
+    # single-drop aligns both groups at hit=4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -672,7 +671,7 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
         ],
-        0,
+        4,
     )
 
 
@@ -893,7 +892,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 # - 2 groups: 1 full + 1 other
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
-    pytest.param(["full", "sliding_window"], 2, id="2g-full+sw"),
+    pytest.param(["full", "sliding_window"], 3, id="2g-full+sw"),
 ]
 
 

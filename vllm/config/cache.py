@@ -51,6 +51,18 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
+    hash_block_size: SkipValidation[int] | None = None  # type: ignore
+    """Block size (in tokens) used for computing Request's block_hashes.
+
+    This can be set to a finer granularity than the physical KV cache block
+    sizes (e.g. 8) as long as every KV cache group's `block_size` is divisible
+    by it. This enables prefix-caching keys to be computed at the finest common
+    granularity and then merged for larger physical block sizes.
+
+    This config is not static default. If left unspecified, vLLM will choose a
+    default based on the resolved KV cache groups (typically the smallest KV
+    cache block size when there are multiple groups).
+    """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -182,6 +194,8 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            # Prefix-caching implementation detail (doesn't affect compiled graph).
+            "hash_block_size",
             "mamba_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
