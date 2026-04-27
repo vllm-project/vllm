@@ -109,6 +109,7 @@ class KVCacheManager:
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         hash_block_size: int,
+        max_num_batched_tokens: int = 0,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -118,6 +119,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
+        self.max_num_batched_tokens = max_num_batched_tokens
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -131,6 +133,7 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -374,7 +377,7 @@ class KVCacheManager:
             request.request_id, total_computed_tokens
         )
 
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+        block_allocation_kwargs = dict(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -384,8 +387,22 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
 
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        num_blocks_to_allocate = (
+            self.coordinator.get_num_blocks_needed_for_admission(
+                **block_allocation_kwargs))
+
+        num_free_blocks = self.block_pool.get_num_free_blocks()
+        if num_blocks_to_allocate > num_free_blocks:
             # Cannot allocate new blocks
+            return None
+
+        # The SWA-capped admission estimate can be lower than the actual
+        # allocator demand when a request already owns some blocks. Re-check
+        # with the uncapped token count so we fail cleanly instead of throwing
+        # out of BlockPool.get_new_blocks().
+        actual_num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+            **block_allocation_kwargs)
+        if actual_num_blocks_to_allocate > num_free_blocks:
             return None
 
         if (
