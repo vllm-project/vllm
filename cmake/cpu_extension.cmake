@@ -125,7 +125,8 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mavx512bf16"
         "-mavx512vnni")
     list(APPEND CXX_COMPILE_FLAGS_AVX2
-        "-mavx2")
+        "-mavx2"
+        "-mfma")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
     if (POWER9_FOUND)
@@ -343,6 +344,19 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     target_link_libraries(dnnl_ext dnnl torch)
     target_compile_options(dnnl_ext PRIVATE ${DNNL_COMPILE_FLAGS} -fPIC)
     list(APPEND LIBS dnnl_ext)
+
+    if (ENABLE_X86_ISA)
+        add_library(dnnl_ext_avx2 OBJECT "csrc/cpu/dnnl_helper.cpp")
+        target_include_directories(
+            dnnl_ext_avx2
+            PUBLIC ${oneDNN_SOURCE_DIR}/include
+            PUBLIC ${oneDNN_BINARY_DIR}/include
+            PRIVATE ${oneDNN_SOURCE_DIR}/src
+        )
+        target_link_libraries(dnnl_ext_avx2 dnnl torch)
+        target_compile_options(dnnl_ext_avx2 PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
+    endif()
+
     set(USE_ONEDNN ON)
 else()
     set(USE_ONEDNN OFF)
@@ -430,17 +444,18 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-    set(VLLM_EXT_SRC_AVX2 
+    set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
         "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
         "csrc/cpu/pos_encoding.cpp"
-        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp")
 
     message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
     message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
@@ -448,7 +463,7 @@ if (ENABLE_X86_ISA)
 
     set(_C_LIBS numa dnnl_ext)
     set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa)
+    set(_C_AVX2_LIBS numa dnnl_ext_avx2)
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
