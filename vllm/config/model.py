@@ -83,7 +83,7 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -134,6 +134,7 @@ class ModelConfig:
     - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
+    - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
@@ -325,6 +326,10 @@ class ModelConfig:
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
+    mm_encoder_attn_dtype: InitVar[str | None] = None
+    mm_encoder_fp8_scale_path: InitVar[str | None] = None
+    mm_encoder_fp8_scale_save_path: InitVar[str | None] = None
+    mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -446,6 +451,10 @@ class ModelConfig:
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
+        mm_encoder_attn_dtype: str | None,
+        mm_encoder_fp8_scale_path: str | None,
+        mm_encoder_fp8_scale_save_path: str | None,
+        mm_encoder_fp8_scale_save_margin: float | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -565,6 +574,8 @@ class ModelConfig:
                 self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
+            elif arch == "DeepseekV4ForCausalLM":
+                self.tokenizer_mode = "deepseek_v4"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -640,6 +651,10 @@ class ModelConfig:
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
+                mm_encoder_attn_dtype=mm_encoder_attn_dtype,
+                mm_encoder_fp8_scale_path=mm_encoder_fp8_scale_path,
+                mm_encoder_fp8_scale_save_path=mm_encoder_fp8_scale_save_path,
+                mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
@@ -952,9 +967,14 @@ class ModelConfig:
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "gpt_oss_mxfp4",
+                "deepseek_v4_fp8",
                 "cpu_awq",
+                "humming",
                 "gguf",
             ]
+            # if the user specifies humming, we should always use humming
+            if self.quantization == "humming":
+                overrides = ["humming"] + overrides
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]
