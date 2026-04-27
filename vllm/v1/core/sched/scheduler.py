@@ -71,6 +71,7 @@ class Scheduler(SchedulerInterface):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -222,6 +223,8 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
+        if hash_block_size is None:
+            hash_block_size = block_size
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -231,7 +234,7 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
-            hash_block_size=self.block_size,
+            hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
         )
         # Bind GPU block pool to the KV connector. This must happen after
@@ -2018,7 +2021,7 @@ class Scheduler(SchedulerInterface):
         # the connector.
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
-            total_computed_tokens=request.num_tokens,
+            total_computed_tokens=request.num_computed_tokens,
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)

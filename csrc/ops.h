@@ -100,6 +100,11 @@ void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
                         bool is_neox, torch::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
 
+void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    torch::Tensor& q, torch::Tensor const& kv, torch::Tensor& k_cache,
+    torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
+    torch::Tensor const& cos_sin_cache, double eps, int64_t cache_block_size);
+
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,
@@ -153,7 +158,8 @@ void silu_and_mul_per_block_quant(torch::Tensor& out,
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
-                      torch::Tensor& cos_sin_cache, bool is_neox);
+                      torch::Tensor& cos_sin_cache, bool is_neox,
+                      int64_t rope_dim_offset, bool inverse);
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
