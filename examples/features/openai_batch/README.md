@@ -8,7 +8,7 @@ This is a guide to performing batch inference using the OpenAI batch file format
 
 The OpenAI batch file format consists of a series of json objects on new lines.
 
-[See here for an example file.](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl)
+[See here for an example file.](https://github.com/vllm-project/vllm/blob/main/examples/features/openai_batch/openai_example_batch.jsonl)
 
 Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
 
@@ -30,7 +30,7 @@ We currently support `/v1/chat/completions`, `/v1/embeddings`, and `/v1/score` e
 To follow along with this example, you can download the example batch, or create your own batch file in your working directory.
 
 ```bash
-wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl
+wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl
 ```
 
 Once you've created your batch file it should look like this
@@ -77,11 +77,11 @@ cat results.jsonl
 
 The batch runner supports remote input and output urls that are accessible via http/https.
 
-For example, to run against our example input file located at `https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl`, you can run
+For example, to run against our example input file located at `https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl`, you can run
 
 ```bash
 python -m vllm.entrypoints.openai.run_batch \
-    -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl \
+    -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -90,7 +90,7 @@ or use command-line:
 
 ```bash
 vllm run-batch \
-    -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl \
+    -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -113,7 +113,7 @@ To integrate with cloud blob storage, we recommend using presigned urls.
 To follow along with this example, you can download the example batch, or create your own batch file in your working directory.
 
 ```bash
-wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl
+wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/openai_batch/openai_example_batch.jsonl
 ```
 
 Once you've created your batch file it should look like this

@@ -20,7 +20,7 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
 If you want to run this script standalone with `uv`, you can use the following:
 
 ```bash
-uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_outputs \
+uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/features/structured_outputs \
     structured-outputs
 ```
 
