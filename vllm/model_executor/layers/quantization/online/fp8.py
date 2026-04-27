@@ -163,7 +163,7 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
                 shard_scales.append(s)
                 offset += width
             weight_scale = convert_to_channelwise(
-                torch.cat(shard_scales), layer.logical_widths)
+                torch.stack(shard_scales), layer.logical_widths)
         else:
             qweight, weight_scale = ops.scaled_fp8_quant(
                 layer.weight, scale=None)
