@@ -55,9 +55,9 @@ def _pad_w13_intermediate_dim(
     padded_x = x.new_zeros((x.shape[0], up_mult * padded_intermediate, *x.shape[2:]))
     if is_act_and_mul:
         padded_x[:, :intermediate, ...] = x[:, :intermediate, ...]
-        padded_x[
-            :, padded_intermediate : padded_intermediate + intermediate, ...
-        ] = x[:, intermediate:, ...]
+        padded_x[:, padded_intermediate : padded_intermediate + intermediate, ...] = x[
+            :, intermediate:, ...
+        ]
     else:
         padded_x[:, :intermediate, ...] = x
     return padded_x

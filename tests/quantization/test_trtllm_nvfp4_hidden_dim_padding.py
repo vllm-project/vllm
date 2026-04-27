@@ -95,9 +95,9 @@ def test_align_fp4_moe_weights_pads_gated_w13_halves_for_two_half_layout():
         1, 2 * padded_intermediate, hidden_dim // 2, dtype=torch.uint8
     )
     expected_w13[:, :intermediate, :] = w13[:, :intermediate, :]
-    expected_w13[
-        :, padded_intermediate : padded_intermediate + intermediate, :
-    ] = w13[:, intermediate:, :]
+    expected_w13[:, padded_intermediate : padded_intermediate + intermediate, :] = w13[
+        :, intermediate:, :
+    ]
 
     expected_w13_scale = torch.zeros(
         1, 2 * padded_intermediate, hidden_dim // 16, dtype=torch.uint8

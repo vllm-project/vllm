@@ -53,11 +53,11 @@ def test_flashinfer_cutlass_ptpc_apply_passes_activation_and_weight_scales(
         Swiglu = "swiglu"
         Relu2 = "relu2"
 
-    core_module.ActivationType = ActivationType
+    core_module.ActivationType = ActivationType  # type: ignore[attr-defined]
     fused_moe_module = types.ModuleType("flashinfer.fused_moe")
-    fused_moe_module.core = core_module
+    fused_moe_module.core = core_module  # type: ignore[attr-defined]
     flashinfer_module = types.ModuleType("flashinfer")
-    flashinfer_module.fused_moe = fused_moe_module
+    flashinfer_module.fused_moe = fused_moe_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "flashinfer", flashinfer_module)
     monkeypatch.setitem(sys.modules, "flashinfer.fused_moe", fused_moe_module)
     monkeypatch.setitem(sys.modules, "flashinfer.fused_moe.core", core_module)
