@@ -818,7 +818,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if not hasattr(self, "_cu_2_q"):
                 self._cu_2_q = torch.zeros(2, device=device, dtype=torch.int32)
                 self._cu_2_k = torch.zeros(2, device=device, dtype=torch.int32)
-            # Assigning to slice uses _fill which avoids cpu/gpu sync.
+            # Assigning to slice uses fill_ which avoids cpu/gpu sync.
             self._cu_2_q[1:2] = q_len
             self._cu_2_k[1:2] = seq_len
             cu_seqlens_q = self._cu_2_q
