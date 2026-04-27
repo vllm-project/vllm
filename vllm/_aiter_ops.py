@@ -44,14 +44,16 @@ class AiterCustomAllreduceProto(Protocol):
     @contextmanager
     def capture(self): ...
     def close(self) -> None: ...
-    def custom_fused_ar_rms(
+    def fused_ar_rms(
         self,
-        input: torch.Tensor,
-        residual_inp: torch.Tensor,
-        weight: torch.Tensor,
+        inp: torch.Tensor,
+        res_inp: torch.Tensor,
+        *,
+        w: torch.Tensor,
         eps: float,
-        use_1stage: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None: ...
+        registered: bool = False,
+        use_1stage: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def should_custom_ar(self, inp: torch.Tensor) -> bool: ...
 
 
@@ -706,7 +708,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
     token_num = input_.shape[0]
-    hidden_ok = hidden_dim in (512, 1024, 2048, 4096)
+    hidden_ok = hidden_dim in (512, 1024, 2048, 4096, 7168)
     token_ok = token_num <= 80
     world_size = aiter_ar.world_size
     full_nvlink = aiter_ar.fully_connected
@@ -714,14 +716,19 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     if world_size == 2:
         size_ok = True
     elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 160 * 1024
+        size_ok = total_bytes < 256 * 1024
     elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 80 * 1024
+        size_ok = total_bytes < 128 * 1024
     else:
         size_ok = False
 
     use_1stage = hidden_ok and token_ok and size_ok
-    result = aiter_ar.custom_fused_ar_rms(input_, residual, weight, epsilon, use_1stage)
+
+    result = aiter_ar.fused_ar_rms(
+        input_, residual,
+        w=weight, eps=epsilon,
+        registered=torch.cuda.is_current_stream_capturing(), use_1stage=use_1stage,
+    )
     assert result is not None
     return result[0], result[1]
 
