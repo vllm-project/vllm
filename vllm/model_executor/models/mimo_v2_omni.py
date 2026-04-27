@@ -22,6 +22,7 @@ from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -80,8 +81,50 @@ class MiMoVisionPatchEmbed(Qwen2_5_VisionPatchEmbed):
     pass
 
 
-class MiMoVisionPatchMerger(Qwen2_5_VisionPatchMerger):
-    pass
+class MiMoVisionPatchMerger(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        context_dim: int,
+        norm_layer: Callable[[int], nn.Module] | None = None,
+        spatial_merge_size: int = 2,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
+        self.hidden_size = context_dim * (spatial_merge_size**2)
+        if norm_layer is None:
+            norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        self.ln_q = norm_layer(context_dim)
+
+        self.mlp = nn.Sequential(
+            ColumnParallelLinear(
+                self.hidden_size,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp.0",
+                return_bias=False,
+                disable_tp=use_data_parallel,
+            ),
+            nn.GELU(),
+            RowParallelLinear(
+                self.hidden_size,
+                d_model,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp.2",
+                return_bias=False,
+                disable_tp=use_data_parallel,
+            ),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.ln_q(x)
+        x = x.view(-1, self.hidden_size)
+        out = self.mlp(x)
+        return out
 
 
 class MiMoVisionAttention(nn.Module):
