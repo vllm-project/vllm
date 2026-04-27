@@ -3,6 +3,7 @@
 import contextlib
 import importlib.metadata
 import os
+import platform
 import random
 import threading
 from collections.abc import Callable, Collection
@@ -17,7 +18,6 @@ from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -68,7 +68,9 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
-PIN_MEMORY = is_pin_memory_available()
+# Pin memory in non-WSL case.
+# Logic duplicated here for now to avoid circular import.
+PIN_MEMORY = "microsoft" not in " ".join(platform.uname()).lower()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
