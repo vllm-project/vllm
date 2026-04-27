@@ -74,10 +74,25 @@ class MtebEmbedMixin(mteb.EncoderProtocol):
         return sim
 
 
+class HfMtebEncoder(MtebEmbedMixin):
+    def __init__(self, model):
+        self.model = model
+
+    def encode(
+        self,
+        inputs: DataLoader[mteb.types.BatchedInput],
+        *args,
+        **kwargs,
+    ) -> np.ndarray:
+        sentences = [text for batch in inputs for text in batch["text"]]
+        return self.model.encode(sentences)
+
+
 class VllmMtebEncoder(MtebEmbedMixin):
-    def __init__(self, vllm_model):
+    def __init__(self, vllm_model, prompt_prefix: str | None = None):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
+        self.prompt_prefix = prompt_prefix
 
     def encode(
         self,
@@ -87,7 +102,11 @@ class VllmMtebEncoder(MtebEmbedMixin):
     ) -> np.ndarray:
         # Hoping to discover potential scheduling
         # issues by randomizing the order.
-        sentences = [text for batch in inputs for text in batch["text"]]
+        sentences = [
+            self.prompt_prefix + text if self.prompt_prefix else text
+            for batch in inputs
+            for text in batch["text"]
+        ]
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
         outputs = self.llm.embed(sentences, use_tqdm=False)
@@ -143,6 +162,7 @@ def mteb_test_embed_models(
     vllm_extra_kwargs=None,
     hf_model_callback=None,
     atol=MTEB_EMBED_TOL,
+    prompt_prefix: str | None = None,
 ):
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
@@ -182,7 +202,7 @@ def mteb_test_embed_models(
             )
 
         vllm_main_score = run_mteb_embed_task(
-            VllmMtebEncoder(vllm_model), MTEB_EMBED_TASKS
+            VllmMtebEncoder(vllm_model, prompt_prefix=prompt_prefix), MTEB_EMBED_TASKS
         )
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
         head_dtype = model_config.head_dtype
@@ -210,7 +230,9 @@ def mteb_test_embed_models(
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
 
-            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+            st_main_score = run_mteb_embed_task(
+                HfMtebEncoder(hf_model), MTEB_EMBED_TASKS
+            )
             st_dtype = next(hf_model.model.parameters()).dtype
 
             # Check embeddings close to hf outputs

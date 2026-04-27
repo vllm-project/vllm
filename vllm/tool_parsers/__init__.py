@@ -34,6 +34,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv32_tool_parser",
         "DeepSeekV32ToolParser",
     ),
+    "deepseek_v4": (
+        "deepseekv4_tool_parser",
+        "DeepSeekV4ToolParser",
+    ),
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
@@ -66,6 +70,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
     ),
+    "hy_v3": (
+        "hy_v3_tool_parser",
+        "HYV3ToolParser",
+    ),
     "internlm": (
         "internlm2_tool_parser",
         "Internlm2ToolParser",
@@ -93,6 +101,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "longcat": (
         "longcat_tool_parser",
         "LongcatFlashToolParser",
+    ),
+    "mimo": (
+        "qwen3xml_tool_parser",
+        "Qwen3XMLToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",

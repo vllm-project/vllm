@@ -4,7 +4,6 @@
 import os
 from collections.abc import Sequence
 
-import librosa
 import pytest
 import regex as re
 from huggingface_hub import snapshot_download
@@ -14,6 +13,7 @@ from vllm.assets.image import ImageAsset
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode, rescale_image_size
+from vllm.multimodal.media.audio import load_audio
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -290,7 +290,7 @@ def test_vision_speech_models(
     num_logprobs: int,
 ) -> None:
     # use the example speech question so that the model outputs are reasonable
-    audio = librosa.load(speech_question, sr=None)
+    audio = load_audio(speech_question, sr=None)
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
     inputs_vision_speech = [
