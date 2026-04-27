@@ -65,24 +65,9 @@ jobs:
           PUBLISHED_EPOCH=$(date -u -d "$PUBLISHED_AT" +%s)
           AGE=$((NOW - PUBLISHED_EPOCH))
 
-          bash .github/scripts/marin_release.sh download-release-assets \
-            "$GITHUB_REPOSITORY" \
-            "$LATEST_PRIMARY_TAG" \
-            latest-primary \
-            "marin-build.json"
-
           if [[ "$AGE" -lt 259200 ]]; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             echo "reason=Last immutable primary release is younger than 72 hours." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          CURRENT_SHA=$(jq -r '.sha' nightly/marin-build.json)
-          LAST_SHA=$(jq -r '.sha' latest-primary/marin-build.json)
-
-          if [[ "$CURRENT_SHA" == "$LAST_SHA" ]]; then
-            echo "eligible=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Latest nightly is already the current primary release." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
