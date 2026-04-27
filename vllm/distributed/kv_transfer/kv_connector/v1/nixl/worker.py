@@ -119,6 +119,10 @@ class NixlConnectorWorker:
         physical_blocks_per_logical: int,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
+        assert len(block_ids) == len(plan.group_spec_types), (
+            f"block_ids has {len(block_ids)} groups but plan has "
+            f"{len(plan.group_spec_types)} group_spec_types"
+        )
         num_fa_regions = len(plan.fa_regions)
         num_ssm_regions = len(plan.ssm_regions)
 

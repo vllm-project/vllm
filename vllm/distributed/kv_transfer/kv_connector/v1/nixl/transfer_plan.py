@@ -222,6 +222,10 @@ def _build_fa_regions(
     V bytes = local_block_len / num_attn_reads (no block_size_ratio).
     Offset = rank_offset_factor * remote_kv_block_len per layer.
     """
+    assert len(remote_block_lens) == len(block_len_per_layer), (
+        f"Layer count mismatch: remote has {len(remote_block_lens)} layers "
+        f"but local has {len(block_len_per_layer)}"
+    )
     fa_regions: list[RegionPlan] = []
     for i in range(len(remote_block_lens)):
         local_block_len = _get_kv_block_len(i, block_len_per_layer, is_blocks_first)
