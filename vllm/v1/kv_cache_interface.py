@@ -376,19 +376,28 @@ class MLAAttentionSpec(FullAttentionSpec):
 class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        """Per-request admission cap, in blocks.
 
-        # During chunked prefill, we allocate KV cache for at most
-        # `self.attention_chunk_size` computed tokens plus the newly scheduled
-        # tokens. And we won't allocate KV cache for more than `max_model_len`
-        # tokens.
+        Single source of truth for both startup pool sizing
+        (`max_memory_usage_bytes`) and the runtime admission gate, so requests
+        admitted by startup can also be admitted at runtime.
+        """
+        # During chunked prefill, we hold KV for at most one chunk window.
         num_tokens = min(
             self.attention_chunk_size + max_num_batched_tokens, max_model_len
         )
+        return cdiv(num_tokens, self.block_size)
 
-        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_blocks = self.max_admission_blocks_per_request(
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+        )
+        return max_blocks * self.page_size_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -409,26 +418,38 @@ class SlidingWindowSpec(AttentionSpec):
             * get_dtype_size(self.dtype)
         )
 
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        """Per-request admission cap, in blocks.
+
+        Single source of truth for both startup pool sizing
+        (`max_memory_usage_bytes`) and the runtime admission gate. Per-request
+        real-held blocks plateau at this bound because
+        `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
+        before each chunk's `get_num_blocks_to_allocate`.
+        """
+        # During chunked prefill, we hold KV for the last `sliding_window-1`
+        # computed tokens plus the newly scheduled tokens, and never more
+        # than `max_model_len`.
+        num_tokens = min(
+            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
+        )
+        # +1 because the sliding window may not start from the beginning of
+        # the block. E.g. block size 4 and num_token 4 needs two blocks
+        # [XXCD][EF] to store the 6-token window [CDEF].
+        return cdiv(num_tokens, self.block_size) + 1
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
-        # During chunked prefill, we allocate KV cache for the last
-        # `self.sliding_window-1` computed tokens plus the newly scheduled
-        # tokens. And we won't allocate KV cache for more than `max_model_len`
-        # tokens.
-        num_tokens = min(
-            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
+        max_blocks = self.max_admission_blocks_per_request(
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
-
-        # +1 here because the sliding window may not start from the beginning
-        # of the block. For example, if the block size is 4 and num_token
-        # is 4, we need two blocks [XXCD] [EF] to store the sliding
-        # window [CDEF] of 6 tokens.
-        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
+        return max_blocks * self.page_size_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
