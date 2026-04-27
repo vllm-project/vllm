@@ -1402,7 +1402,7 @@ def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
 # MiniCPM-V
 def run_minicpmv_base(questions: list[str], modality: str, model_name):
     assert modality in ["image", "video", "image+video"]
-    # If you want to use `MiniCPM-o-2_6` with audio inputs, check `audio_language.py` # noqa
+    # If you want to use `MiniCPM-o-2_6` with audio inputs, check `audio_language_offline.py` # noqa
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
