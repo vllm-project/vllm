@@ -341,8 +341,7 @@ def test_mla_rope_kvcache_cat_fusion(
         # note: FixFunctionalizationPass is required to correctly lower
         # the fused op to its inplace version with auto-functionalization v1.
         # Else, PyTorch's builtin decompose_auto_functionalized FX pass incorrectly
-        # lowers the non-contiguous q_pe input tensor without its storage offset of 128
-        # (e.g. q_pe, a slice with offset 128 and strides (3072,192,1)).
+        # lowers the non-contiguous q_pe input tensor without its storage offset of 128.
         # This is not an issue with auto-functionalization v2 since it actually
         # tracks the base storage tensors and their memory layouts.
         passes = [
