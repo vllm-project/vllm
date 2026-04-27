@@ -1855,10 +1855,11 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def new_mla_spec(cache_dtype_str=None):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=16,
-        num_kv_heads=16,
-        head_size=64,
+        num_kv_heads=1,
+        head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
