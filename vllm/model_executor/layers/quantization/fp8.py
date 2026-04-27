@@ -38,6 +38,10 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    UnquantizedEmbeddingMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -102,10 +106,12 @@ class Fp8Config(QuantizationConfig):
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
+        lm_head_quantized: bool = False,
     ) -> None:
         super().__init__()
 
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        self.lm_head_quantized = lm_head_quantized
 
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
@@ -162,22 +168,29 @@ class Fp8Config(QuantizationConfig):
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
             )
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         return cls(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
+            lm_head_quantized=lm_head_quantized,
         )
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, LinearBase):
+        is_parallel_lm_head = isinstance(layer, ParallelLMHead)
+        if isinstance(layer, LinearBase) or (
+            is_parallel_lm_head and self.lm_head_quantized
+        ):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
             ):
+                if is_parallel_lm_head:
+                    return UnquantizedEmbeddingMethod()
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
                 online_method = Fp8OnlineLinearMethod(self)
