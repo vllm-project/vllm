@@ -1289,7 +1289,7 @@ async def test_request_output_collector_keeps_routed_experts_from_final_delta():
     )
 
 
-def test_output_processor_slices_routed_experts_to_generated_tokens():
+def test_output_processor_keeps_full_routed_experts_in_final_only():
     output_processor = OutputProcessor(None, log_stats=False)
     sampling_params = SamplingParams(
         max_tokens=2,
@@ -1331,7 +1331,7 @@ def test_output_processor_slices_routed_experts_to_generated_tokens():
     assert output.outputs[0].token_ids == [10, 11]
     assert np.array_equal(
         output.outputs[0].routed_experts,
-        np.array([[[14, 15]], [[16, 17]]], dtype=np.int32),
+        routed_experts,
     )
 
 
