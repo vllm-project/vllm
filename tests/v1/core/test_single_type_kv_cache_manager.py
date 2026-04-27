@@ -22,11 +22,13 @@ pytestmark = pytest.mark.cpu_test
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
+    # Tests don't exercise admission gating; pass a large cap that is a no-op.
     return SlidingWindowManager(
         sliding_window_spec,
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
+        max_admission_blocks_per_request=10**9,
     )
 
 
@@ -38,6 +40,7 @@ def get_chunked_local_attention_manager(
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
+        max_admission_blocks_per_request=10**9,
     )
 
 

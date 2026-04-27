@@ -34,12 +34,20 @@ def _swigluoai_forward_native(
     return gated_output
 
 
+def _gelu_and_mul(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    return F.gelu(x[..., :d], approximate="none") * x[..., d:]
+
+
 # Map activation names to their native forward functions.
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
 _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
-    MoEActivation.SILU: SiluAndMul.forward_native,
+    MoEActivation.SILU: lambda x: SiluAndMul(compile_native=False).forward_native(x),
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
+    MoEActivation.GELU: _gelu_and_mul,
 }
 
 
