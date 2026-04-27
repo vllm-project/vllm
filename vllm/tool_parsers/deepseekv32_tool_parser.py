@@ -26,6 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import partial_tag_overlap
 
 logger = init_logger(__name__)
 
@@ -45,21 +46,24 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
+    tool_call_start_token: str = "<｜DSML｜function_calls>"
+    tool_call_end_token: str = "</｜DSML｜function_calls>"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
-        # Sentinel token
-        self.tool_call_start_token: str = "<｜DSML｜function_calls>"
-
         # Streaming state
-        self.is_tool_call_started: bool = False
         self.current_tool_index: int = 0
+        self._sent_content_idx: int = 0
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
-            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>", re.DOTALL
+            re.escape(self.tool_call_start_token)
+            + r"(.*?)"
+            + re.escape(self.tool_call_end_token),
+            re.DOTALL,
         )
         self.invoke_complete_regex = re.compile(
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>', re.DOTALL
@@ -85,7 +89,7 @@ class DeepSeekV32ToolParser(ToolParser):
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
-            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # (e.g. <｜DSML｜function_calls>, </｜DSML｜function_calls>)
             # are not skippedduring decoding.
             # Even though they are not marked as special tokens,
             # setting skip_special_tokens=False ensures proper handling in
@@ -219,7 +223,7 @@ class DeepSeekV32ToolParser(ToolParser):
     def _reset_streaming_state(self):
         """Reset all streaming state."""
         self.current_tool_index = 0
-        self.is_tool_call_started = False
+        self._sent_content_idx = 0
         self.prev_tool_call_arr.clear()
         self.streamed_args_for_tool.clear()
 
@@ -264,6 +268,24 @@ class DeepSeekV32ToolParser(ToolParser):
 
         return delta_tool_calls
 
+    def _extract_content(self, current_text: str) -> str | None:
+        """Return unsent non-tool-call text, or None.
+
+        Holds back any suffix that could be a partial start marker
+        so that split markers are never leaked as content.
+        """
+        if self.tool_call_start_token not in current_text:
+            overlap = partial_tag_overlap(current_text, self.tool_call_start_token)
+            sendable_idx = len(current_text) - overlap
+        else:
+            sendable_idx = current_text.index(self.tool_call_start_token)
+
+        if sendable_idx > self._sent_content_idx:
+            content = current_text[self._sent_content_idx : sendable_idx]
+            self._sent_content_idx = sendable_idx
+            return content
+        return None
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -285,29 +307,11 @@ class DeepSeekV32ToolParser(ToolParser):
         if not previous_text:
             self._reset_streaming_state()
 
-        # Detect whether we've entered the tool-call region.
-        # Use current_text (not delta_text) since the start token may
-        # be split across chunks.
-        content_before = None
-        if self.is_tool_call_started:
-            pass
-        elif self.tool_call_start_token in current_text:
-            # Tool-call region found, capture any plain text before it.
-            self.is_tool_call_started = True
-            start_idx = current_text.index(self.tool_call_start_token)
-            content_before = current_text[len(previous_text) : start_idx] or None
-        else:
-            # Still in plain-text region, forward as content.
-            return DeltaMessage(content=delta_text) if delta_text else None
-
-        # Inside tool-call region: emit any newly completed invokes.
+        content = self._extract_content(current_text)
         delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
 
-        if delta_tool_calls or content_before:
-            return DeltaMessage(
-                content=content_before,
-                tool_calls=delta_tool_calls,
-            )
+        if delta_tool_calls or content:
+            return DeltaMessage(content=content, tool_calls=delta_tool_calls)
 
         # Empty delta with token ids means EOS or closing tag; return
         # non-None so the serving framework can finalize finish_reason.

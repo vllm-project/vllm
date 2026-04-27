@@ -202,7 +202,7 @@ The reasoning content is also available when both tool calling and the reasoning
     print(f"Arguments: {tool_call.arguments}")
     ```
 
-For more examples, please refer to [examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py).
+For more examples, please refer to [examples/reasoning/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/reasoning/openai_chat_completion_tool_calls_with_reasoning.py).
 
 ## Server-Level Default Chat Template Kwargs
 
@@ -283,9 +283,7 @@ curl http://localhost:8000/v1/chat/completions \
     "messages": [
       { "role": "user", "content": "9.11 and 9.8, which is greater?" }
     ],
-    "extra_body": {
-      "thinking_token_budget": 10
-    }
+    "thinking_token_budget": 10
   }'
 ```
 
