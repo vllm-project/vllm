@@ -218,6 +218,18 @@ class TestStaticGroupQuantFP8:
             rtol=0.0,
         )
 
+        # When group_size == hidden_size, one group per token == per-token static quant
+        if group_size == hidden_size:
+            out_per_token = static_quant_fp8_native(
+                x, scale, FP8_DTYPE, num_token_padding
+            )
+            torch.testing.assert_close(
+                out.to(torch.float32),
+                out_per_token.to(torch.float32),
+                atol=0.0,
+                rtol=0.0,
+            )
+
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     @pytest.mark.parametrize(
         "provider", supported_providers(ir.ops.static_group_quant_fp8)
@@ -263,6 +275,18 @@ class TestStaticGroupQuantFP8:
         assert not torch.all(
             out_impl.to(torch.float32) == out_impl_diff.to(torch.float32)
         )
+
+        # When group_size == hidden_size, one group per token == per-token static quant
+        if group_size == hidden_size:
+            out_per_token = static_quant_fp8_native(
+                x, scale, FP8_DTYPE, num_token_padding
+            )
+            torch.testing.assert_close(
+                out_impl.to(torch.float32)[:n],
+                out_per_token.to(torch.float32)[:n],
+                atol=0.0,
+                rtol=0.0,
+            )
 
     @pytest.mark.parametrize(
         "provider", supported_providers(ir.ops.static_group_quant_fp8) + ["native"]
@@ -318,6 +342,16 @@ class TestDynamicQuantFP8:
         x_deq = out.to(torch.float32)[:n_tokens] * scale[:n_tokens]
         torch.testing.assert_close(x_deq, x.to(torch.float32), rtol=0.15, atol=0.01)
 
+        # static_quant with the dynamic scale should reproduce dynamic
+        # quant output exactly
+        x_q_static = static_quant_fp8_native(x, scale, FP8_DTYPE)
+        torch.testing.assert_close(
+            out.to(torch.float32)[:n_tokens],
+            x_q_static.to(torch.float32),
+            atol=0.0,
+            rtol=0.0,
+        )
+
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     @pytest.mark.parametrize("provider", supported_providers(ir.ops.dynamic_quant_fp8))
     def test_impls(
@@ -368,6 +402,15 @@ class TestDynamicQuantFP8:
         out_impl_diff, _ = impl.impl_fn(*args_diff)
         assert not torch.all(
             out_impl.to(torch.float32)[:n] == out_impl_diff.to(torch.float32)[:n]
+        )
+
+        # static_quant with the impl's dynamic scale should reproduce the impl's output
+        x_q_static = static_quant_fp8_native(x, scale_impl[:n], FP8_DTYPE)
+        torch.testing.assert_close(
+            out_impl.to(torch.float32)[:n],
+            x_q_static.to(torch.float32),
+            atol=0.0,
+            rtol=1e-1,
         )
 
     @pytest.mark.parametrize(
@@ -434,6 +477,19 @@ class TestDynamicGroupQuantFP8:
             group_size, dim=-1
         )
         torch.testing.assert_close(x_deq, x.to(torch.float32), rtol=0.15, atol=0.01)
+
+        # static_group_quant with the dynamic scale should reproduce dynamic
+        # group quant output. dynamic_group_quant uses true division
+        # (x/scale) while static_group_quant uses multiply-by-reciprocal
+        # (x * (1/scale)) which might cause some discrepancies and is why
+        # we need to use rtol=0.15.
+        x_q_static = static_group_quant_fp8_native(x, x_s.contiguous(), FP8_DTYPE)
+        torch.testing.assert_close(
+            x_q.to(torch.float32),
+            x_q_static.to(torch.float32),
+            atol=0.0,
+            rtol=0.15,
+        )
 
     @pytest.mark.parametrize(
         "provider", supported_providers(ir.ops.dynamic_group_quant_fp8)
@@ -506,6 +562,16 @@ class TestDynamicGroupQuantFP8:
         )
         assert not torch.all(
             x_q_impl.to(torch.float32) == x_q_impl_diff.to(torch.float32)
+        )
+
+        # static_group_quant with the impl's dynamic scale should reproduce
+        # the impl's output
+        x_q_static = static_group_quant_fp8_native(x, x_s_impl.contiguous(), FP8_DTYPE)
+        torch.testing.assert_close(
+            x_q_impl.to(torch.float32),
+            x_q_static.to(torch.float32),
+            atol=0.0,
+            rtol=1e-1,
         )
 
     @pytest.mark.parametrize(
