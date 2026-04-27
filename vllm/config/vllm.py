@@ -228,6 +228,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_minimax_qk_norm": True,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
