@@ -136,7 +136,7 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
-    enable_qk_norm_rope_fusion: bool = False
+    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
