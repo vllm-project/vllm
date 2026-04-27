@@ -4,7 +4,7 @@
 
 This is the canonical home for Quark tests that are not ROCm-only. Platform-
 specific MXFP4 utility coverage lives in
-``tests/kernels/quantization/rocm/test_rocm_quark.py``.
+``tests/kernels/quantization/rocm/test_quark.py``.
 """
 
 import importlib.metadata
