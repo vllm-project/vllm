@@ -1301,7 +1301,7 @@ class rocm_aiter_ops:
     def is_tgemm_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
-        return cls._AITER_ENABLED and on_gfx950()
+        return cls.is_linear_enabled() and on_gfx950()
 
     @staticmethod
     @if_aiter_supported
