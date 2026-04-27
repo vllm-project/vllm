@@ -561,12 +561,12 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.num_speculative_tokens is not None
+                and self.vllm_config.num_speculative_tokens > 0
             ):
                 max_num_queries_for_spec = (
                     1
                     + (2 if speculative_config.parallel_drafting else 1)
-                    * speculative_config.num_speculative_tokens
+                    * self.vllm_config.num_speculative_tokens
                 )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,

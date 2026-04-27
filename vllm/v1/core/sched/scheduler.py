@@ -215,12 +215,12 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
-            self.num_spec_tokens = speculative_config.num_speculative_tokens
+            self.num_spec_tokens = speculative_config.num_target_verify_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_lookahead_tokens = speculative_config.num_speculative_tokens
             if speculative_config.uses_draft_model():
-                self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_lookahead_tokens = speculative_config.num_speculative_tokens
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -529,6 +529,8 @@ class Scheduler(SchedulerInterface):
                 )
                 if num_scheduled_spec_tokens > 0:
                     spec_token_ids = request.spec_token_ids
+                    if len(spec_token_ids) > self.num_spec_tokens:
+                        spec_token_ids = spec_token_ids[: self.num_spec_tokens]
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
@@ -1676,6 +1678,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
+            if len(spec_token_ids) > self.num_spec_tokens:
+                spec_token_ids = spec_token_ids[: self.num_spec_tokens]
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]

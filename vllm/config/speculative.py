@@ -78,8 +78,12 @@ class SpeculativeConfig:
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
     num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
-    """The number of speculative tokens, if provided. It will default to the
-    number in the draft model config if present, otherwise, it is required."""
+    """The maximum number of draft tokens the drafter can propose in one step.
+    It will default to the number in the draft model config if present,
+    otherwise, it is required."""
+    num_target_verify_tokens: int | None = Field(default=None, gt=0)
+    """The maximum number of draft tokens the target model verifies in one
+    step. Defaults to num_speculative_tokens when unset."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
@@ -979,6 +983,7 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+<<<<<<< Updated upstream
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
             self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
@@ -994,6 +999,32 @@ class SpeculativeConfig:
             raise ValueError(
                 "synthetic_acceptance_rates / synthetic_acceptance_length "
                 "are only valid with rejection_sample_method='synthetic'."
+=======
+        if self.num_target_verify_tokens is None:
+            self.num_target_verify_tokens = self.num_speculative_tokens
+
+        if self.num_target_verify_tokens <= 0:
+            raise ValueError(
+                "Expected num_target_verify_tokens to be greater "
+                f"than zero ({self.num_target_verify_tokens})."
+            )
+
+        if self.num_target_verify_tokens > self.num_speculative_tokens:
+            raise ValueError(
+                "Expected num_target_verify_tokens to be less than or equal to "
+                "num_speculative_tokens "
+                f"({self.num_target_verify_tokens} > "
+                f"{self.num_speculative_tokens})."
+            )
+
+        if (
+            self.method != "dflash"
+            and self.num_target_verify_tokens != self.num_speculative_tokens
+        ):
+            raise ValueError(
+                "num_target_verify_tokens may differ from "
+                "num_speculative_tokens only when method == 'dflash'."
+>>>>>>> Stashed changes
             )
 
         if self.draft_model_config:
@@ -1074,4 +1105,9 @@ class SpeculativeConfig:
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
+        num_target_verify_tokens = self.num_target_verify_tokens
+        return (
+            "SpeculativeConfig("
+            f"{method=}, {model=}, {num_spec_tokens=}, "
+            f"{num_target_verify_tokens=})"
+        )

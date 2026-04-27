@@ -45,7 +45,7 @@ class RejectionSampler:
         device: torch.device,
     ):
         self.sampler = sampler
-        self.num_speculative_steps = spec_config.num_speculative_tokens
+        self.num_speculative_steps = spec_config.num_target_verify_tokens
         self.rejection_sample_method = spec_config.rejection_sample_method
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if self.rejection_sample_method == "synthetic":

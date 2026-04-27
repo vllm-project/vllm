@@ -1304,6 +1304,52 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def test_num_target_verify_tokens_defaults_to_num_speculative_tokens():
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=4,
+    )
+
+    assert speculative_config.num_target_verify_tokens == 4
+
+
+def test_num_target_verify_tokens_requires_dflash_for_mismatch():
+    with pytest.raises(ValueError, match="only when method == 'dflash'"):
+        SpeculativeConfig(
+            model="ngram",
+            num_speculative_tokens=4,
+            num_target_verify_tokens=2,
+        )
+
+
+def test_num_target_verify_tokens_allows_dflash_mismatch():
+    target_model_config = type(
+        "TargetModelConfig",
+        (),
+        {
+            "hf_text_config": type(
+                "HFTextConfig",
+                (),
+                {"model_type": "llama"},
+            )(),
+        },
+    )()
+    speculative_config = SpeculativeConfig.model_construct(
+        method="dflash",
+        num_speculative_tokens=4,
+        num_target_verify_tokens=2,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+        draft_model_config=None,
+        draft_parallel_config=None,
+    )
+
+    speculative_config._verify_args()
+
+    assert speculative_config.num_target_verify_tokens == 2
+
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig

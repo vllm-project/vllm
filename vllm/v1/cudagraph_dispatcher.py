@@ -37,7 +37,7 @@ class CudagraphDispatcher:
         self.uniform_decode_query_len = (
             1
             if not self.vllm_config.speculative_config
-            else 1 + self.vllm_config.speculative_config.num_speculative_tokens
+            else 1 + self.vllm_config.speculative_config.num_target_verify_tokens
         )
 
         # Dict to store valid cudagraph dispatching keys.
