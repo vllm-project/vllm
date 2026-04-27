@@ -123,7 +123,7 @@ class PassConfig:
     # Deferred() fields have no fallback: they must be set by the user or by
     # the optimization-level table (OPTIMIZATION_LEVEL_TO_CONFIG in vllm.py).
     # Deferred(False) is reserved for fields absent from the optimization-level
-    # tables; currently only fuse_minimax_qk_norm falls into that category.
+    # tables.
 
     fuse_norm_quant: bool = Deferred()
     """Fuse the custom RMSNorm + quant ops."""
@@ -131,8 +131,6 @@ class PassConfig:
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = Deferred()
     """Fuse the custom Attention and MLAAttention + quant ops."""
-    eliminate_noops: bool = Field(default=True)
-    """Eliminate no-op ops."""
     enable_sp: bool = Deferred()
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
@@ -158,6 +156,9 @@ class PassConfig:
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O1+ on ROCm for models
     with QK-norm (e.g. Qwen3-MoE)."""
+
+    eliminate_noops: bool = Field(default=True)
+    """Eliminate no-op ops."""
 
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
