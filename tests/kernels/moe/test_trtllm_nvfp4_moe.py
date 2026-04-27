@@ -8,10 +8,7 @@ Covers the activations the wrapper claims to support — SiLU, RELU^2 (non-gated
 and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
 intermediate_size 704) that exercises the non-256-aligned padding path.
 """
-try:
-    import pytest
-except ImportError:
-    pytest = None
+import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -163,7 +160,7 @@ def test_trtllm_fp4_moe_no_graph(
         # quant/dequant so the comparison isolates kernel/activation behavior
         # from quantization error.
         a_global_scale = (
-            (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a.flatten(), dim=-1)
+            (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / a.abs().max()
         ).to(torch.float32)
         a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
         a_in_dtype = dequantize_nvfp4_to_dtype(

@@ -190,7 +190,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL, MoEActivation.GELU]
+        assert self._supports_activation(activation)
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
@@ -310,7 +310,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> torch.Tensor:
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL, MoEActivation.GELU]
+        assert self._supports_activation(activation)
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
