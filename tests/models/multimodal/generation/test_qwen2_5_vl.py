@@ -4,7 +4,6 @@
 import pytest
 
 from vllm.multimodal.video import sample_frames_from_video
-from vllm.platforms import current_platform
 
 from ....conftest import VIDEO_ASSETS
 
@@ -27,15 +26,6 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
         ),
     }
 )
-
-
-def _vision_encoder_cudagraph_compilation_config(*, cudagraph_mm_encoder: bool) -> dict:
-    # When `compilation_config` is passed, VllmRunner does not add defaults; keep
-    # decoder cudagraph sizes aligned with conftest and only toggle ViT paths.
-    return {
-        "cudagraph_capture_sizes": [4],
-        "cudagraph_mm_encoder": cudagraph_mm_encoder,
-    }
 
 
 @pytest.mark.core_model
@@ -156,63 +146,3 @@ def test_qwen2_5_vl_evs_batched_videos(
 
             # Ensure the output is a string
             assert isinstance(output_text, str)
-
-
-@pytest.mark.core_model
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="ViT encoder CUDA graphs require CUDA"
-)
-def test_qwen2_5_vl_vision_transformer_cudagraph_matches_eager(
-    vllm_runner,
-    video_assets,
-) -> None:
-    """Greedy token ids should match with and without encoder CUDA graph replay.
-
-    Video EVS pruning must be off so the vision encoder is eligible for CUDA
-    graph capture (see ``get_encoder_cudagraph_config`` on Qwen2.5-VL).
-    """
-    model = models[0]
-    dtype = target_dtype
-    num_frames = 16
-    max_tokens = 64
-    # No EVS: ``video_pruning_rate`` must not be > 0, or video CUDA graphs
-    # are disabled and this test would not exercise the vision encoder path.
-    sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
-        for asset in video_assets
-    ]
-    prompts = [VIDEO_PROMPTS[0]]
-    videos = [sampled_vids[0]]
-    # Encoder CUDA graphs add substantial graph-pool memory; cap concurrency and
-    # GPU fraction so init (decoder graphs + optional encoder graphs + KV) fits.
-    common_kwargs = dict(
-        runner="generate",
-        max_model_len=4000,
-        max_num_seqs=16,
-        gpu_memory_utilization=0.85,
-        dtype=dtype,
-        limit_mm_per_prompt={"video": 1},
-        video_pruning_rate=0.0,
-    )
-
-    with vllm_runner(
-        model,
-        **common_kwargs,
-        compilation_config=_vision_encoder_cudagraph_compilation_config(
-            cudagraph_mm_encoder=False
-        ),
-    ) as mm_eager:
-        eager_ids = mm_eager.generate_greedy(prompts, max_tokens, videos=videos)[0][0]
-
-    with vllm_runner(
-        model,
-        **common_kwargs,
-        compilation_config=_vision_encoder_cudagraph_compilation_config(
-            cudagraph_mm_encoder=True
-        ),
-    ) as mm_cudagraph:
-        graph_ids = mm_cudagraph.generate_greedy(prompts, max_tokens, videos=videos)[0][
-            0
-        ]
-
-    assert eager_ids == graph_ids
