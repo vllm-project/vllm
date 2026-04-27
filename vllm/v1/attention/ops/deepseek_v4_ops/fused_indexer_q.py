@@ -25,15 +25,15 @@ def _get_cos_sin(
 
 @triton.jit
 def _fp32x2_to_fp4x2(x_lo, x_hi):
-    asm = """
-{
-    .reg .b8 tmp;
-    cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;  // $1 is high nibble, $2 is low nibble
-    cvt.u32.u8 $0, tmp;
-}
-"""
+    # NOTE: $1 is high nibble, $2 is low nibble
     return tl.inline_asm_elementwise(
-        asm,
+        """
+        {
+            .reg .b8 tmp;
+            cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
+            cvt.u32.u8 $0, tmp;
+        }
+        """,
         constraints="=r,f,f",
         args=[x_hi, x_lo],
         dtype=tl.uint32,
