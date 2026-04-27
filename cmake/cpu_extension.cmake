@@ -346,6 +346,9 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     list(APPEND LIBS dnnl_ext)
 
     if (ENABLE_X86_ISA)
+        # Separate target required: dnnl_helper.cpp must be compiled twice —
+        # once with AVX512 flags (dnnl_ext, linked into _C/_C_AVX512) and once
+        # with AVX2 flags (dnnl_ext_avx2, linked into _C_AVX2).
         add_library(dnnl_ext_avx2 OBJECT "csrc/cpu/dnnl_helper.cpp")
         target_include_directories(
             dnnl_ext_avx2
@@ -455,7 +458,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
         "csrc/cpu/pos_encoding.cpp"
-        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp")
+        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
     message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
     message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
