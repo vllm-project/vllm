@@ -1206,16 +1206,20 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             if isinstance(config.vision_config, dict)
             else config.vision_config
         )
-        self.visual = MiMoVisionTransformer(
-            vision_config,
-            norm_eps=getattr(vllm_config, "rms_norm_eps", 1e-6),
-            quant_config=None,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = MiMoVisionTransformer(
+                vision_config,
+                norm_eps=getattr(vllm_config, "rms_norm_eps", 1e-6),
+                quant_config=None,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
         audio_config = getattr(config, "audio_config", None)
         model_path = vllm_config.model_config.model
         if audio_config is not None:
-            self.audio_encoder = MimoAudioEncoder(audio_config, model_path=model_path)
+            with self._mark_tower_model(vllm_config, "audio"):
+                self.audio_encoder = MimoAudioEncoder(
+                    audio_config, model_path=model_path
+                )
         else:
             self.audio_encoder = None
         with self._mark_language_model(vllm_config):
