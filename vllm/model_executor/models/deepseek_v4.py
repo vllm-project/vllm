@@ -65,25 +65,6 @@ from .utils import (
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 
-def _get_deepseek_v4_expert_dtype() -> str:
-    """Read ``expert_dtype`` from the active vLLM config's hf_config.
-
-    Returns ``"fp4"`` when the field is missing so checkpoints predating
-    this knob keep their original behavior.
-    """
-    try:
-        hf_config = get_current_vllm_config().model_config.hf_config
-    except Exception:
-        return "fp4"
-    expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
-    if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
-        raise ValueError(
-            f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "
-            f"expected one of {_DEEPSEEK_V4_EXPERT_DTYPES}."
-        )
-    return expert_dtype
-
-
 class DeepseekV4FP8Config(Fp8Config):
     """FP8 config for DeepSeek V4 with expert-dtype-aware MoE dispatch.
 
@@ -97,14 +78,47 @@ class DeepseekV4FP8Config(Fp8Config):
     The dispatch and the linear scale dtype are both keyed off
     ``expert_dtype`` from the model's hf_config; missing values default
     to ``"fp4"`` so existing FP4 checkpoints stay unchanged.
+
+    NOTE: ``expert_dtype`` is resolved lazily because this config is
+    constructed during VllmConfig setup, before ``set_current_vllm_config``
+    is active. Reading hf_config eagerly in ``__init__`` would always see
+    the default ``"fp4"`` and silently misroute Flash-Base checkpoints.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.expert_dtype = _get_deepseek_v4_expert_dtype()
+        self._resolved_expert_dtype: str | None = None
+        # ``is_scale_e8m0`` is a property that resolves on first read,
+        # by which time the current vllm_config has been set.
+
+    @property
+    def expert_dtype(self) -> str:
+        if self._resolved_expert_dtype is None:
+            try:
+                hf_config = get_current_vllm_config().model_config.hf_config
+            except Exception:
+                # vllm_config not yet set; defer the decision until a
+                # later call lands inside set_current_vllm_config.
+                return "fp4"
+            expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
+            if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
+                raise ValueError(
+                    f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "
+                    f"expected one of {_DEEPSEEK_V4_EXPERT_DTYPES}."
+                )
+            self._resolved_expert_dtype = expert_dtype
+            from vllm.logger import init_logger
+
+            init_logger(__name__).info_once(
+                "DeepSeek V4 expert_dtype resolved to %r", expert_dtype
+            )
+        return self._resolved_expert_dtype
+
+    @property
+    def is_scale_e8m0(self) -> bool:
         # FP4 checkpoints store FP8 linear scales as e8m0fnu; FP8 expert
         # checkpoints (Flash-Base) store them as float32.
-        self.is_scale_e8m0: bool = self.expert_dtype == "fp4"
+        return self.expert_dtype == "fp4"
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
