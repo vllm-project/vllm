@@ -260,8 +260,12 @@ def kill_process_tree(pid: int):
     except psutil.NoSuchProcess:
         return
 
-    # Get all children recursively
-    children = parent.children(recursive=True)
+    # Get all children recursively. The process may exit after the Process
+    # object is created, especially on abort shutdown paths.
+    try:
+        children = parent.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return
 
     # Send SIGKILL to all children first
     for child in children:

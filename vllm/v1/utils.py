@@ -335,8 +335,10 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     if timeout is None:
         timeout = 0.0
 
-    # Allow at least 5 seconds for remaining procs to terminate.
-    timeout = max(timeout, 5.0)
+    # Allow at least 5 seconds for remaining procs to terminate unless
+    # the caller explicitly requested immediate abort.
+    if timeout > 0:
+        timeout = max(timeout, 5.0)
 
     # Shutdown the process.
     for proc in procs:
