@@ -408,6 +408,7 @@ def test_mla_rope_kvcache_cat_fusion(
         else:
             ATOL, RTOL = (1e-2, 1e-2)
 
+        torch.testing.assert_close(qkv_unfused, qkv_lora, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(kv_c_unfused, kv_c_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(k_pe_unfused, k_pe_fused, atol=ATOL, rtol=RTOL)
