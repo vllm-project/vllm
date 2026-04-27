@@ -684,7 +684,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
-        tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
@@ -693,7 +692,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 chat_template=params.chat_template,
                 tools=params.chat_template_kwargs.get("tools"),
                 given_format=params.chat_template_content_format,
-                tokenizer=tokenizer,
+                tokenizer=self.get_tokenizer(),
                 model_config=model_config,
             ),
             media_io_kwargs=params.media_io_kwargs,
@@ -702,7 +701,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         prompt_raw = await self._apply_chat_template_async(
             model_config,
-            tokenizer,
+            self.get_executor_tokenizer(),
             conversation,
             **params.get_apply_chat_template_kwargs(),
         )

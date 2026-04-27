@@ -33,7 +33,7 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
         )
 
     def _apply_chat_template(self, *args, **kwargs):
-        return self.get_tokenizer().apply_chat_template(*args, **kwargs)
+        return self.get_executor_tokenizer().apply_chat_template(*args, **kwargs)
 
     def render_messages(
         self,

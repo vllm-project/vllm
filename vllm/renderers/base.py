@@ -82,12 +82,13 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.tokenizer = tokenizer
 
-        # Shared thread pool executor for blocking tokenizer and
-        # multimodal preprocessing operations.  The multimodal processor
-        # receives a deep-copied tokenizer (see #36557) so it is safe to
-        # run tokenization and MM preprocessing concurrently.
-        pool_workers = config.model_config.renderer_num_workers
-        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        # Shared single-worker thread pool for blocking tokenizer and
+        # multimodal preprocessing operations.
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        # Tokenizer to be used in the executor thread
+        # Deep copy to avoid sharing the tokenizer leading to
+        # "already borrowed" errors (see #36557).
+        self.executor_tokenizer = copy.deepcopy(tokenizer)
 
         # Multimodal preprocessing is always offloaded to the thread pool
         # to keep the asyncio event loop responsive under concurrent load.
@@ -108,17 +109,10 @@ class BaseRenderer(ABC, Generic[_T]):
         if config.model_config.is_multimodal_model:
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
-            # Deep-copy the tokenizer so the multimodal processor gets its
-            # own Rust tokenizer backend.  Without this, concurrent access
-            # from AsyncMicrobatchTokenizer and call_hf_processor causes
-            # "RuntimeError: Already borrowed" from the Rust RefCell.
-            # See: https://github.com/huggingface/tokenizers/issues/537
-            mm_tokenizer = copy.deepcopy(tokenizer)
-
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=mm_tokenizer,
+                    tokenizer=self.get_executor_tokenizer(),
                     cache=mm_processor_cache,
                 )
 
@@ -130,11 +124,10 @@ class BaseRenderer(ABC, Generic[_T]):
             # requests don't pollute the sender cache.
             ro_cache = mm_registry.processor_only_cache_from_config(config)
             if ro_cache is not None:
-                ro_tokenizer = copy.deepcopy(tokenizer)
                 with set_default_torch_num_threads():
                     self._readonly_mm_processor = mm_registry.create_processor(
                         config.model_config,
-                        tokenizer=ro_tokenizer,
+                        tokenizer=self.get_executor_tokenizer(),
                         cache=ro_cache,
                     )
 
@@ -152,10 +145,19 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
+    def get_executor_tokenizer(self) -> _T:
+        tokenizer = self.executor_tokenizer
+        if tokenizer is None:
+            raise ValueError(
+                "Executor tokenizer not available when `skip_tokenizer_init=True`"
+            )
+
+        return tokenizer
+
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
             self._async_tokenizer = AsyncMicrobatchTokenizer(
-                self.get_tokenizer(), executor=self._executor
+                self.get_executor_tokenizer(), executor=self._executor
             )
 
         return self._async_tokenizer
