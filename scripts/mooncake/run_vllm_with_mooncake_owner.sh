@@ -192,13 +192,16 @@ print_owner_failure_hint() {
 }
 
 wait_for_owner_ready() {
-    if wait_for_tcp_port "$OWNER_RPC_PORT" "$OWNER_READY_TIMEOUT_S" "${OWNER_PID:-}"; then
+    # The mooncake_client owner exposes its RPC endpoint as an abstract Unix
+    # socket (@mooncake_client_<rpc_port>.sock), not a TCP port. The segment
+    # port is the real TCP listener that signals the owner is serving.
+    if wait_for_tcp_port "$OWNER_SEGMENT_PORT" "$OWNER_READY_TIMEOUT_S" "${OWNER_PID:-}"; then
         return 0
     fi
     if [[ -n "${OWNER_PID:-}" ]] && ! kill -0 "$OWNER_PID" 2>/dev/null; then
         echo "Mooncake owner exited before becoming ready." >&2
     else
-        echo "Timed out waiting for Mooncake owner RPC port ${OWNER_RPC_PORT}." >&2
+        echo "Timed out waiting for Mooncake owner segment port ${OWNER_SEGMENT_PORT}." >&2
     fi
     tail -n 50 "$OWNER_LOG_FILE" >&2 || true
     print_owner_failure_hint

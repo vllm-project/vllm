@@ -140,7 +140,9 @@ detect_owner_devices() {
 wait_for_owner_ready() {
     local pid=$1
     local timeout_s=${2:-30}
-    wait_for_tcp_port "$RPC_PORT" "$timeout_s" "$pid"
+    # The RPC port is exposed as an abstract Unix socket; the segment port
+    # is the real TCP listener that indicates the owner is up.
+    wait_for_tcp_port "$SEGMENT_PORT" "$timeout_s" "$pid"
 }
 
 stop_owner() {
@@ -193,8 +195,8 @@ if [[ -f "$PID_FILE" ]]; then
     rm -f "$PID_FILE"
 fi
 
-if tcp_port_is_listening "$RPC_PORT"; then
-    echo "Error: owner RPC port ${RPC_PORT} is already in use." >&2
+if tcp_port_is_listening "$SEGMENT_PORT"; then
+    echo "Error: owner segment port ${SEGMENT_PORT} is already in use." >&2
     exit 1
 fi
 
