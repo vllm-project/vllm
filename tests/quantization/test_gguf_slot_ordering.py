@@ -69,6 +69,9 @@ def test_padded_weight_param_uses_canonical_slot_order():
     # The actual buffer contents must reflect the canonical order too.
     assert torch.all(layer.qweight.data[0:4] == 0.0)
     assert torch.all(layer.qweight.data[4:10] == 1.0)
+    # The canonical iteration order is cached on the param so apply() can
+    # iterate without re-sorting on every forward pass.
+    assert layer.qweight.canonical_shard_id == [0, 1]
 
 
 def test_padded_weight_param_load_order_matches_canonical():
@@ -108,6 +111,7 @@ def test_qkv_string_keys_keep_qkv_order():
     assert layer.qweight.shard_offset_map["q"] == (0, 3, 8)
     assert layer.qweight.shard_offset_map["k"] == (3, 6, 8)
     assert layer.qweight.shard_offset_map["v"] == (6, 9, 8)
+    assert layer.qweight.canonical_shard_id == ["q", "k", "v"]
 
 
 def test_apply_concatenates_slots_in_canonical_order(monkeypatch):

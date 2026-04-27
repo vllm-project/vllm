@@ -429,31 +429,6 @@ except AttributeError as error:
     raise error
 
 
-def _canonical_shard_order(shard_id):
-    """Return shard ids in the canonical layout order regardless of the order
-    they were loaded from the GGUF file.
-
-    The two slot-id schemes that reach this code are mutually exclusive:
-    QKVParallelLinear uses the strings q/k/v, MergedColumnParallelLinear uses
-    integers (0, 1, ...). Sorting the integers gives the declared slot order.
-    """
-    has_str = any(isinstance(s, str) for s in shard_id)
-    has_int = any(isinstance(s, int) for s in shard_id)
-    assert not (has_str and has_int), (
-        f"shard_id {shard_id} mixes string and integer slot ids; "
-        "QKV (q/k/v) and MergedColumn (int) schemes must not be combined."
-    )
-    if has_str:
-        canonical = [s for s in ("q", "k", "v") if s in shard_id]
-    else:
-        canonical = sorted(shard_id)
-    assert len(canonical) == len(shard_id), (
-        f"shard_id {shard_id} contains slot ids outside the canonical set; "
-        f"got {canonical} after canonicalization."
-    )
-    return canonical
-
-
 class GGUFLinearMethod(LinearMethodBase):
     """Linear method for GGUF.
 
@@ -463,6 +438,24 @@ class GGUFLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
+
+    @staticmethod
+    def _canonical_shard_order(shard_id: list) -> list:
+        # Return shard ids in declared layout order, regardless of GGUF stream order.
+        has_str = any(isinstance(s, str) for s in shard_id)
+        has_int = any(isinstance(s, int) for s in shard_id)
+        assert not (has_str and has_int), (
+            f"shard_id {shard_id} mixes string and integer slot ids; "
+            "QKV (q/k/v) and MergedColumn (int) schemes must not be combined."
+        )
+        if has_str:
+            canonical = [s for s in ("q", "k", "v") if s in shard_id]
+            assert len(canonical) == len(shard_id), (
+                f"shard_id {shard_id} contains keys outside {{'q', 'k', 'v'}}."
+            )
+        else:
+            canonical = sorted(shard_id)
+        return canonical
 
     def create_weights(
         self,
@@ -549,7 +542,8 @@ class GGUFLinearMethod(LinearMethodBase):
             # slots out of declared order (we hit this with slot 3 before
             # slots 0/1/2 on a Qwen3.5 GDN attn_qkv).
             cur = 0
-            for idx in _canonical_shard_order(shard_id):
+            canonical_shard_id = GGUFLinearMethod._canonical_shard_order(shard_id)
+            for idx in canonical_shard_id:
                 id_in_container = shard_id_map[idx]
                 shard = data_container[id_in_container]
                 start = cur
@@ -561,7 +555,13 @@ class GGUFLinearMethod(LinearMethodBase):
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
-            set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
+            set_weight_attrs(
+                padded_param,
+                {
+                    "shard_offset_map": shard_offset_map,
+                    "canonical_shard_id": canonical_shard_id,
+                },
+            )
             layer.register_parameter("qweight", padded_param)
 
     def apply(
@@ -573,13 +573,13 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = layer.qweight.shard_id
 
         if shard_id:
-            # Match the layout that _create_padded_weight_param produced so
-            # the concatenated output keeps the slot order the layer
-            # declared, not whatever order the GGUF file streamed.
-            shard_id = _canonical_shard_order(shard_id)
+            # Iterate in canonical (declared) slot order, matching the
+            # layout _create_padded_weight_param produced. The order is
+            # computed once at load time and stashed on the param so the
+            # forward path stays free of per-call sorting.
             qweight = layer.qweight
             result = []
-            for idx in shard_id:
+            for idx in qweight.canonical_shard_id:
                 start, end, offset = layer.qweight.shard_offset_map[idx]
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
                 result.append(
