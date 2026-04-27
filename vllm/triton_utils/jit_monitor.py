@@ -93,30 +93,22 @@ def _setup_triton_jit_hook() -> None:
 
     existing_hook = knobs.runtime.jit_post_compile_hook
 
-    def _on_jit_compile(
-        *,
-        key,
-        repr,  # noqa: A002  (shadows builtin, but matches Triton's API)
-        fn,
-        compile,  # noqa: A002
-        is_manual_warmup,
-        already_compiled,
-    ):
+    def _on_jit_compile(**kwargs):
+        # `jit_post_compile_hook` is Triton internal API and its
+        # signature has changed across releases (kwargs added/renamed).
+        # Accept **kwargs so an upstream change cannot crash this hook
+        # with TypeError, and forward the full kwarg set to any
+        # pre-existing hook unchanged.
+        fn = kwargs.get("fn")
+        fn_name = getattr(fn, "name", "<unknown>")
         logger.warning(
             "Triton kernel JIT compilation during inference: %s. "
             "This causes a latency spike; consider extending warmup "
             "to cover this shape/config.",
-            fn.name,
+            fn_name,
         )
         if existing_hook is not None:
-            return existing_hook(
-                key=key,
-                repr=repr,
-                fn=fn,
-                compile=compile,
-                is_manual_warmup=is_manual_warmup,
-                already_compiled=already_compiled,
-            )
+            return existing_hook(**kwargs)
         return None
 
     knobs.runtime.jit_post_compile_hook = _on_jit_compile
