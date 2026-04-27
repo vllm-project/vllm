@@ -517,13 +517,24 @@ class GGUFLinearMethod(LinearMethodBase):
             )
             # (dim0_start, dim0_end, dim1_size)
             shard_offset_map = dict[str, tuple[int, int, int]]()
-            for idx in shard_id:
+            # The old code computed each slot's row offset by summing the
+            # row counts of slots that appeared *earlier in data_container*,
+            # i.e. earlier in the GGUF stream. That only works if the GGUF
+            # file happens to emit slots in declared order. When it doesn't
+            # (we hit this with slot 3 streaming in before slots 0/1/2),
+            # the buffer ends up shuffled and apply() reads it back wrong.
+            # Sort by slot index instead.
+            sorted_ids = ["q", "k", "v"] if "q" in shard_id else sorted(shard_id)
+            cur = 0
+            for idx in sorted_ids:
                 id_in_container = shard_id_map[idx]
-                start = sum(x.size(0) for x in data_container[:id_in_container])
-                end = start + data_container[id_in_container].size(0)
-                size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+                shard = data_container[id_in_container]
+                start = cur
+                end = cur + shard.size(0)
+                size = shard.size(1)
+                padded_data[start:end, :size] = shard
                 shard_offset_map[idx] = (start, end, size)
+                cur = end
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
@@ -539,8 +550,10 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = layer.qweight.shard_id
 
         if shard_id:
-            # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            # Match the layout produced by _create_padded_weight_param so
+            # the concatenated output keeps the slot order the layer
+            # declared (and not whatever order the GGUF file streamed).
+            shard_id = ["q", "k", "v"] if "q" in shard_id else sorted(shard_id)
             qweight = layer.qweight
             result = []
             for idx in shard_id:
