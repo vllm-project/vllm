@@ -4,6 +4,7 @@
 DeepseekV4 MLA Attention Layer
 """
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -16,7 +17,8 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.utils.deep_gemm import fp8_einsum
+from vllm.triton_utils import LOG2E, tl, triton
+from vllm.utils.deep_gemm import fp8_einsum, use_dsv4_reference_kernels
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,
@@ -69,6 +71,300 @@ from vllm.v1.attention.ops.flashmla import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
+
+
+@triton.jit
+def _dsv4_sm80_sparse_attn_split_kernel(
+    q_ptr,  # (B*S, H, D) bf16
+    kv_ptr,  # (B*S, T, D) bf16 — pre-gathered (zero rows for invalid)
+    invalid_mask_ptr,  # (B*S, T) uint8 (1 = invalid)
+    acc_split_ptr,  # (B*S, SPLIT_T, H, D_V) fp32
+    max_split_ptr,  # (B*S, SPLIT_T, H) fp32
+    sum_split_ptr,  # (B*S, SPLIT_T, H) fp32
+    n_tokens,
+    total_topk,
+    sm_scale_log2,  # scale * LOG2E
+    H: tl.constexpr,
+    D: tl.constexpr,
+    D_V: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+):
+    """Split-K sparse-attention decode pass 1 for V4 on SM80.
+
+    Each program processes one chunk of `total_topk` (sized `chunk =
+    ceil(total_topk / SPLIT_T)`) and emits unnormalised partial outputs:
+    `acc = sum_n exp2(qk_n - max_s) * v_n`, plus the per-split max and
+    sum. The combine kernel performs the cross-split LSE merge and sink
+    correction.
+
+    Splitting the topk axis lifts grid parallelism from
+    `(n_tokens, ceil(H/BLOCK_H))` to `(n_tokens, SPLIT_T, ceil(H/BLOCK_H))`,
+    which matters at batch=1 single-decode where only 1 SM was active.
+    """
+    pid_t = tl.program_id(0)
+    pid_split = tl.program_id(1)
+    pid_h = tl.program_id(2)
+
+    if pid_t >= n_tokens:
+        return
+
+    chunk_size = (total_topk + SPLIT_T - 1) // SPLIT_T
+    n_start_chunk = pid_split * chunk_size
+    n_end_chunk = tl.minimum(n_start_chunk + chunk_size, total_topk)
+
+    head_off = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    head_mask = head_off < H
+
+    d_off = tl.arange(0, BLOCK_D)
+    d_mask = d_off < D
+
+    # Hold q in bf16 — only used as bf16 in the inner-loop dot.
+    q = tl.load(
+        q_ptr + pid_t * H * D + head_off[:, None] * D + d_off[None, :],
+        mask=head_mask[:, None] & d_mask[None, :],
+        other=0.0,
+    )
+
+    e_max = tl.zeros((BLOCK_H,), dtype=tl.float32) - 1.0e30
+    e_sum = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_H, BLOCK_DV), dtype=tl.float32)
+
+    n_iter = (chunk_size + BLOCK_N - 1) // BLOCK_N
+    for n_block in range(n_iter):
+        n_start = n_start_chunk + n_block * BLOCK_N
+        n_off = n_start + tl.arange(0, BLOCK_N)
+        n_mask = n_off < n_end_chunk
+
+        invalid_u8 = tl.load(
+            invalid_mask_ptr + pid_t * total_topk + n_off,
+            mask=n_mask,
+            other=1,
+        )
+        valid = (invalid_u8 == 0) & n_mask
+
+        # Load kv directly as bf16; tl.dot accumulates to fp32.
+        kv = tl.load(
+            kv_ptr + pid_t * total_topk * D + n_off[:, None] * D + d_off[None, :],
+            mask=valid[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+
+        qk = tl.dot(q, tl.trans(kv))
+        qk *= sm_scale_log2
+        qk = tl.where(head_mask[:, None] & valid[None, :], qk, -1.0e30)
+
+        n_e_max = tl.maximum(tl.max(qk, axis=1), e_max)
+        re_scale = tl.exp2(e_max - n_e_max)
+        p = tl.exp2(qk - n_e_max[:, None])
+        # V == K for V4 — reuse the loaded kv tile for the pv dot.
+        acc *= re_scale[:, None]
+        acc += tl.dot(p.to(tl.bfloat16), kv)
+        e_sum = e_sum * re_scale + tl.sum(p, axis=1)
+        e_max = n_e_max
+
+    # Store partials. Layout: (B*S, SPLIT_T, H, D_V) for acc,
+    # (B*S, SPLIT_T, H) for max/sum — keeps the per-split stride contiguous
+    # so the combine kernel can issue coalesced loads.
+    dv_off = tl.arange(0, BLOCK_DV)
+    dv_mask = dv_off < D_V
+    base_acc = (
+        pid_t * SPLIT_T * H * D_V
+        + pid_split * H * D_V
+        + head_off[:, None] * D_V
+        + dv_off[None, :]
+    )
+    tl.store(
+        acc_split_ptr + base_acc,
+        acc,
+        mask=head_mask[:, None] & dv_mask[None, :],
+    )
+
+    base_ms = pid_t * SPLIT_T * H + pid_split * H + head_off
+    tl.store(max_split_ptr + base_ms, e_max, mask=head_mask)
+    tl.store(sum_split_ptr + base_ms, e_sum, mask=head_mask)
+
+
+@triton.jit
+def _dsv4_sm80_sparse_attn_combine_kernel(
+    acc_split_ptr,  # (B*S, SPLIT_T, H, D_V) fp32
+    max_split_ptr,  # (B*S, SPLIT_T, H) fp32
+    sum_split_ptr,  # (B*S, SPLIT_T, H) fp32
+    attn_sink_ptr,  # (H,) fp32
+    out_ptr,  # (B*S, H, D_V) bf16
+    n_tokens,
+    has_sink: tl.constexpr,
+    H: tl.constexpr,
+    D_V: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+):
+    """Cross-split LSE merge with sink correction.
+
+    Reads `SPLIT_T` partial (acc, max, sum) tuples and emits the final
+    softmax-normalised output. Sink contributes `exp2(sink_log2 - max)`
+    to the global denominator only — it has no v term.
+    """
+    pid_t = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    if pid_t >= n_tokens:
+        return
+
+    head_off = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    head_mask = head_off < H
+
+    # Find global max over splits (and sink, if any).
+    e_max_global = tl.zeros((BLOCK_H,), dtype=tl.float32) - 1.0e30
+    for s in range(SPLIT_T):
+        m = tl.load(
+            max_split_ptr + pid_t * SPLIT_T * H + s * H + head_off,
+            mask=head_mask,
+            other=-1.0e30,
+        )
+        e_max_global = tl.maximum(e_max_global, m)
+
+    sink_log2 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    if has_sink:
+        sink = tl.load(attn_sink_ptr + head_off, mask=head_mask, other=0.0)
+        sink_log2 = sink * LOG2E
+        e_max_global = tl.maximum(e_max_global, sink_log2)
+
+    # Renormalise and reduce.
+    dv_off = tl.arange(0, BLOCK_DV)
+    dv_mask = dv_off < D_V
+    acc_global = tl.zeros((BLOCK_H, BLOCK_DV), dtype=tl.float32)
+    sum_global = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    for s in range(SPLIT_T):
+        m_s = tl.load(
+            max_split_ptr + pid_t * SPLIT_T * H + s * H + head_off,
+            mask=head_mask,
+            other=-1.0e30,
+        )
+        sum_s = tl.load(
+            sum_split_ptr + pid_t * SPLIT_T * H + s * H + head_off,
+            mask=head_mask,
+            other=0.0,
+        )
+        scale = tl.exp2(m_s - e_max_global)
+        sum_global += scale * sum_s
+
+        base_acc = (
+            pid_t * SPLIT_T * H * D_V
+            + s * H * D_V
+            + head_off[:, None] * D_V
+            + dv_off[None, :]
+        )
+        acc_s = tl.load(
+            acc_split_ptr + base_acc,
+            mask=head_mask[:, None] & dv_mask[None, :],
+            other=0.0,
+        )
+        acc_global += scale[:, None] * acc_s
+
+    if has_sink:
+        sum_global += tl.exp2(sink_log2 - e_max_global)
+
+    sum_safe = tl.where(sum_global > 0, sum_global, 1.0)
+    out = (acc_global / sum_safe[:, None]).to(tl.bfloat16)
+    tl.store(
+        out_ptr + pid_t * H * D_V + head_off[:, None] * D_V + dv_off[None, :],
+        out,
+        mask=head_mask[:, None] & dv_mask[None, :],
+    )
+
+
+def _dsv4_sm80_sparse_attn_decode_triton(
+    q: torch.Tensor,  # (B*S, H, D) bf16
+    gathered_kv: torch.Tensor,  # (B*S, T, D) bf16
+    invalid_mask: torch.Tensor,  # (B*S, T) bool
+    attn_sink: torch.Tensor | None,  # (H,) fp32
+    sm_scale: float,
+    head_dim_v: int,
+) -> torch.Tensor:
+    """Split-K sparse-attention decode for V4 on SM80.
+
+    Two-kernel pipeline: a split-K pass over the topk dimension followed
+    by an LSE-merge combine. SPLIT_T is bounded by the BLOCK_N-tile count
+    so each split has real work to do."""
+    n_tokens, h, d = q.shape
+    _, t, d_kv = gathered_kv.shape
+    assert d_kv == d
+    assert invalid_mask.shape == (n_tokens, t)
+
+    block_d = triton.next_power_of_2(d)
+    block_dv = triton.next_power_of_2(head_dim_v)
+    # BLOCK_H capped at 16 (tl.dot's M-min) so the fp32 `acc` tile
+    # (BLOCK_H × BLOCK_DV) stays under A100's 100 KB SMEM limit and so we
+    # get more per-token head blocks for SM utilisation when h > 16.
+    block_h = 16
+    block_n = 32  # keeps q/kv/acc tiles within A100's 164KB SM
+
+    # SPLIT_T heuristic: cap at 16 (combine overhead dominates beyond
+    # that) but otherwise split as much as we have BLOCK_N tiles. Lifts
+    # grid parallelism from (n_tokens, ceil(h/BLOCK_H)) to
+    # (n_tokens, SPLIT_T, ceil(h/BLOCK_H)) — at batch=1 single-decode the
+    # original kernel used 1 SM out of 108.
+    n_tiles = (t + block_n - 1) // block_n
+    split_t = max(1, min(16, n_tiles))
+
+    out = torch.empty((n_tokens, h, head_dim_v), dtype=torch.bfloat16, device=q.device)
+    invalid_u8 = invalid_mask.to(torch.uint8)
+
+    acc_split = torch.empty(
+        (n_tokens, split_t, h, head_dim_v),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    max_split = torch.empty(
+        (n_tokens, split_t, h), dtype=torch.float32, device=q.device
+    )
+    sum_split = torch.empty_like(max_split)
+
+    grid_split = (n_tokens, split_t, triton.cdiv(h, block_h))
+    _dsv4_sm80_sparse_attn_split_kernel[grid_split](
+        q,
+        gathered_kv,
+        invalid_u8,
+        acc_split,
+        max_split,
+        sum_split,
+        n_tokens,
+        t,
+        sm_scale * LOG2E,
+        H=h,
+        D=d,
+        D_V=head_dim_v,
+        BLOCK_H=block_h,
+        BLOCK_N=block_n,
+        BLOCK_D=block_d,
+        BLOCK_DV=block_dv,
+        SPLIT_T=split_t,
+        num_warps=4,
+    )
+
+    grid_combine = (n_tokens, triton.cdiv(h, block_h))
+    _dsv4_sm80_sparse_attn_combine_kernel[grid_combine](
+        acc_split,
+        max_split,
+        sum_split,
+        attn_sink if attn_sink is not None else q.new_zeros(h),
+        out,
+        n_tokens,
+        has_sink=(attn_sink is not None),
+        H=h,
+        D_V=head_dim_v,
+        BLOCK_H=block_h,
+        BLOCK_DV=block_dv,
+        SPLIT_T=split_t,
+        num_warps=4,
+    )
+    return out
+
 
 logger = init_logger(__name__)
 
@@ -180,6 +476,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.kv_norm = mla_modules.kv_norm
         self.wo_a = mla_modules.wo_a
 
+        # SM80 BMM cache for wo_a when n_local_groups > 1 (TP < o_groups).
+        # Marlin-packed FP8 doesn't support per-group output slicing, so we
+        # lazily dequantize to bf16 and run torch.bmm. At n_local_groups == 1
+        # the flat Marlin path is mathematically a 1-batch BMM, so we keep it.
+        self._wo_a_bmm_weight: torch.Tensor | None = None
+
         self._wo_a_act_quant = QuantFP8(
             static=False,
             group_shape=GroupShape(1, 128),
@@ -271,6 +573,48 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 k_cache_prefix=self.mla_attn.prefix,
             )
 
+    def _ensure_wo_a_bmm_weight(self, ref: torch.Tensor) -> None:
+        """Lazily build a (n_local_groups, K, N_per_group) bf16 BMM weight.
+
+        Marlin doesn't expose its packed FP8 weight; recover it by running
+        an identity matrix through the linear so the bf16 output is W^T at
+        full precision."""
+        if self._wo_a_bmm_weight is not None:
+            return
+        K = self.wo_a.input_size_per_partition
+        N_total = self.wo_a.output_size_per_partition
+        n_groups = self.n_local_groups
+        N_per_group = N_total // n_groups
+        eye = torch.eye(K, dtype=ref.dtype, device=ref.device)
+        with torch.no_grad():
+            w_t = self.wo_a(eye)  # (K, N_total) bf16, dequantised
+        if isinstance(w_t, tuple):
+            w_t = w_t[0]
+        # (K, n_groups, N_per_group) -> (n_groups, K, N_per_group)
+        self._wo_a_bmm_weight = (
+            w_t.view(K, n_groups, N_per_group).permute(1, 0, 2).contiguous()
+        )
+
+    def _apply_wo_a_bmm(self, o_rotated: torch.Tensor) -> torch.Tensor:
+        """Per-group BMM dispatch for n_local_groups > 1 (TP < o_groups).
+
+        Input is (T, n_local_heads, head_dim) where n_local_heads splits
+        evenly across n_local_groups. A flat Marlin call would mix groups
+        across the K axis; we use torch.bmm against the per-group bf16
+        weight instead."""
+        self._ensure_wo_a_bmm_weight(o_rotated)
+        assert self._wo_a_bmm_weight is not None
+        n_groups = self.n_local_groups
+        T = o_rotated.shape[0]
+        K_per_group = self._wo_a_bmm_weight.shape[1]
+        N_per_group = self._wo_a_bmm_weight.shape[2]
+        # (T, n_local_heads, head_dim) -> (T, n_groups, K_per_group)
+        # -> (n_groups, T, K_per_group) for bmm.
+        x = o_rotated.reshape(T, n_groups, K_per_group).transpose(0, 1).contiguous()
+        out = torch.bmm(x, self._wo_a_bmm_weight)  # (n_groups, T, N_per_group)
+        # (n_groups, T, N_per_group) -> (T, n_groups * N_per_group)
+        return out.transpose(0, 1).reshape(T, n_groups * N_per_group)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -280,9 +624,26 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
 
+        # Lift q/kv RMSNorm out of the attention custom op so the surrounding
+        # residual / norm graph isn't cut by the opaque boundary. The op
+        # now expects pre-normed inputs; Inductor can combo-fuse this norm
+        # with adjacent ops in the wrapper-level graph.
+        qr, kv = fused_q_kv_rmsnorm(
+            qr,
+            kv,
+            self.q_norm.weight.data,
+            self.kv_norm.weight.data,
+            self.eps,
+        )
+
+        # Lift `wq_b` out as well so the projection-from-LoRA matmul is
+        # graph-visible. The indexer still consumes the LoRA-rank `qr`,
+        # so we pass both `qr` and the projected per-head `q` to the op.
+        num_tokens = hidden_states.shape[0]
+        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+
         # Pre-allocate attention output with FlashMLA-padded head count.
         # The op writes into `o_padded`; we slice to n_local_heads after.
-        num_tokens = hidden_states.shape[0]
         o_padded = torch.empty(
             (num_tokens, self.padded_heads, self.head_dim),
             dtype=hidden_states.dtype,
@@ -294,11 +655,27 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             hidden_states,
             qr,
             kv,
+            q,
             positions,
             o_padded,
             self.layer_name,
         )
         o = o_padded[:, : self.n_local_heads, :]
+
+        if use_dsv4_reference_kernels():
+            # SM80/ROCm reference path: bf16 inv-RoPE then wo_a. At
+            # n_local_groups>1 wo_a is a per-group BMM and we route through
+            # the bf16 dequant + torch.bmm path; the n_local_groups==1 case
+            # is a 1-batch BMM and runs as a flat Marlin GEMM.
+            o_rotated = _apply_inv_rope_to_o(
+                o,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+            )
+            if self.n_local_groups > 1:
+                return self.wo_b(self._apply_wo_a_bmm(o_rotated))
+            return self.wo_b(self.wo_a(o_rotated.flatten(1)))
 
         # O projection: inverse RoPE + FP8 quant + einsum + wo_b
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
@@ -337,20 +714,19 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
         kv: torch.Tensor,
+        q: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor,  # [num_tokens, padded_heads, head_dim], written in place
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
-        qr, kv = fused_q_kv_rmsnorm(
-            qr,
-            kv,
-            self.q_norm.weight.data,
-            self.kv_norm.weight.data,
-            self.eps,
-        )
-        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+        # `qr`, `kv`, and `q` are all pre-computed in the calling `forward()`:
+        # `fused_q_kv_rmsnorm` and `wq_b` were lifted out so the surrounding
+        # residual/RMSNorm graph is no longer cut by the custom-op boundary.
+        # Inductor can now combo-fuse those tails with adjacent ops.
+        # The indexer (below) still consumes `qr` (the normed LoRA tensor)
+        # while kv_insert and `mla_attn` consume `q`.
 
         # Overlap kv_insert with whichever of indexer/compressor is present.
         # Indexer implies compressor; when both exist, compressor rides on the
@@ -457,19 +833,21 @@ def deepseek_v4_attention(
     hidden_states: torch.Tensor,
     qr: torch.Tensor,
     kv: torch.Tensor,
+    q: torch.Tensor,
     positions: torch.Tensor,
     out: torch.Tensor,
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.attention_impl(hidden_states, qr, kv, positions, out)
+    self.attention_impl(hidden_states, qr, kv, q, positions, out)
 
 
 def deepseek_v4_attention_fake(
     hidden_states: torch.Tensor,
     qr: torch.Tensor,
     kv: torch.Tensor,
+    q: torch.Tensor,
     positions: torch.Tensor,
     out: torch.Tensor,
     layer_name: str,
@@ -485,6 +863,152 @@ direct_register_custom_op(
 )
 
 
+@triton.jit
+def _inv_rope_bf16_kernel(
+    o_ptr,  # (T, H, D) bf16, modified in place
+    positions_ptr,  # (T,) int64
+    cos_sin_cache_ptr,  # (max_pos, rope_dim) bf16
+    T,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    rope_dim: tl.constexpr,
+    half_rope: tl.constexpr,
+    nope_dim: tl.constexpr,
+):
+    """Single-launch inv-RoPE on bf16 for the SM80 reference path.
+
+    One program per (token, head). Replaces the ~10-op PyTorch chain in
+    `_apply_inv_rope_to_o` (index_select, clone, slice/stride pairs, mul,
+    add, sub, copy_back) with one kernel.
+
+    GPT-J interleaved: even/odd pairs at positions (2r, 2r+1) within the
+    rope segment are rotated using the (cos, sin) at index r.
+    """
+    pid_t = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    if pid_t >= T:
+        return
+
+    pos = tl.load(positions_ptr + pid_t)
+    base_cs = cos_sin_cache_ptr + pos * rope_dim
+    r = tl.arange(0, half_rope)
+    cos_v = tl.load(base_cs + r).to(tl.float32)
+    sin_v = tl.load(base_cs + half_rope + r).to(tl.float32)
+
+    base_row = o_ptr + (pid_t * H + pid_h) * D + nope_dim
+    even = tl.load(base_row + 2 * r).to(tl.float32)
+    odd = tl.load(base_row + 2 * r + 1).to(tl.float32)
+    new_even = even * cos_v + odd * sin_v
+    new_odd = odd * cos_v - even * sin_v
+    tl.store(base_row + 2 * r, new_even.to(tl.bfloat16))
+    tl.store(base_row + 2 * r + 1, new_odd.to(tl.bfloat16))
+
+
+def _apply_inv_rope_to_o(
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_dim: int,
+) -> torch.Tensor:
+    """Apply inverse GPT-J RoPE on the last `rope_dim` dims of each head.
+    Used by the SM80/ROCm reference path that skips FP8 quantization.
+    Matches the rotation in `_fused_inv_rope_fp8_quant_per_head` numerically."""
+    if not o.is_contiguous():
+        o = o.contiguous()
+    out = o.clone()
+    T, H, D = out.shape
+    nope_dim = D - rope_dim
+    half_rope = rope_dim // 2
+    positions_i64 = positions.to(torch.int64).contiguous()
+    cs = cos_sin_cache
+    # cos_sin_cache is (max_pos, rope_dim) bf16 with the GPT-J layout
+    # [cos | sin] along the last dim. We index by position and split inline.
+    grid = (T, H)
+    _inv_rope_bf16_kernel[grid](
+        out,
+        positions_i64,
+        cs,
+        T,
+        H=H,
+        D=D,
+        rope_dim=rope_dim,
+        half_rope=half_rope,
+        nope_dim=nope_dim,
+    )
+    return out
+
+
+def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
+    if scale.dtype == torch.float8_e8m0fnu:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+
+        return _upcast_e8m0_to_fp32(scale).contiguous()
+    return scale.to(torch.float32)
+
+
+def _expand_last_dim_scales(scale: torch.Tensor, last_dim: int) -> torch.Tensor:
+    scale = _decode_e8m0_scales(scale)
+    block = math.ceil(last_dim / scale.shape[-1])
+    return torch.repeat_interleave(scale, block, dim=-1)[..., :last_dim]
+
+
+def _expand_2d_block_scales(
+    scale: torch.Tensor,
+    rows: int,
+    cols: int,
+) -> torch.Tensor:
+    scale = _decode_e8m0_scales(scale)
+    row_blocks, col_blocks = scale.shape[-2:]
+    row_block = math.ceil(rows / row_blocks)
+    col_block = math.ceil(cols / col_blocks)
+    scale = torch.repeat_interleave(scale, row_block, dim=-2)[..., :rows, :]
+    scale = torch.repeat_interleave(scale, col_block, dim=-1)[..., :, :cols]
+    return scale
+
+
+def _deepseek_v4_fp8_einsum_fallback(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+) -> None:
+    """SM80/ROCm dequantize-and-einsum fallback for `bhr,hdr->bhd`.
+
+    On SM80 with Marlin-packed FP8 weights the wrapper bypasses this and
+    routes through `wo_a` as a regular Linear; this remains for ROCm and
+    any non-Marlin SM80 layout."""
+    if equation != "bhr,hdr->bhd":
+        raise RuntimeError(f"Unsupported fallback equation: {equation}")
+
+    num_groups = a.shape[1]
+    hidden_dim = a.shape[2]
+    output_dim = b.shape[0] // num_groups
+
+    if b.shape[0] % num_groups != 0:
+        raise RuntimeError(
+            f"Cannot reshape weight of shape {tuple(b.shape)} into "
+            f"({num_groups}, {output_dim}, {hidden_dim})."
+        )
+
+    a_deq = (a.to(torch.float32) * _expand_last_dim_scales(a_scale, hidden_dim)).to(
+        torch.bfloat16
+    )
+
+    b_deq = b.view(num_groups, output_dim, hidden_dim).to(torch.float32)
+    b_scale_deq = _expand_2d_block_scales(
+        b_scale.view(num_groups, -1, b_scale.shape[-1]),
+        output_dim,
+        hidden_dim,
+    )
+    b_deq = (b_deq * b_scale_deq).to(torch.bfloat16)
+
+    out.copy_(torch.einsum(equation, a_deq, b_deq).to(out.dtype))
+
+
 def deepseek_v4_fp8_einsum(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -494,6 +1018,13 @@ def deepseek_v4_fp8_einsum(
     equation: str,
     recipe: list[int],
 ) -> None:
+    if use_dsv4_reference_kernels():
+        # SM80/ROCm: pre-gate to the dequant-and-einsum fallback. Catching
+        # RuntimeError isn't enough because on SM80 DeepGEMM is importable,
+        # so the C++ assert ("Unsupported architecture") fires from inside
+        # the kernel call rather than from the wrapper's _missing() raise.
+        _deepseek_v4_fp8_einsum_fallback(a, a_scale, b, b_scale, out, equation)
+        return
     fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
 
 
@@ -563,6 +1094,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         self.aux_stream = aux_stream
         self.ln_events = [torch.cuda.Event(), torch.cuda.Event()]
+
+        # Cache for `torch.arange(0, topk)` used in invalid-mask construction.
+        # Today the SM80 reference path constructs a fresh arange every gather
+        # call (43 layers x 2 scopes per token). Each is small but the
+        # allocations + kernel launches add up.
+        self._arange_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
 
         # Determine padded head count for FlashMLA
         if num_heads not in self.SUPPORTED_HEAD_COUNTS:
@@ -738,6 +1275,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
+        assert swa_indices is not None
+        assert swa_lens is not None
 
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
@@ -768,6 +1307,28 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 f"Unsupported compress_ratio={self.compress_ratio}; "
                 "expected 1, 4, or 128."
             )
+
+        if use_dsv4_reference_kernels():
+            # SM80/ROCm reference path: gather only the selected indices,
+            # then dequantize. tile_metadata is unused here —
+            # build_tile_scheduler short-circuits to None on these platforms.
+            swa_block_size = self.swa_cache_layer.kv_cache.shape[1]
+            has_extra = not swa_only and kv_cache is not None
+            attn_out = self._ref_sparse_attn_decode_gather(
+                q=q,
+                swa_kv_cache=self.swa_cache_layer.kv_cache,
+                swa_block_size=swa_block_size,
+                swa_indices=swa_indices.unsqueeze(1),
+                swa_topk_length=swa_lens,
+                attn_sink=self.attn_sink[: q.shape[2]],
+                extra_kv_cache=kv_cache.squeeze(-2) if has_extra else None,
+                extra_block_size=kv_cache.shape[1] if has_extra else 0,
+                extra_indices=topk_indices,
+                extra_topk_length=topk_lens,
+            )
+            output.copy_(attn_out.to(output.dtype))
+            return
+
         assert tile_metadata is not None, (
             "swa_metadata missing tile_sched entry for "
             f"compress_ratio={self.compress_ratio}; "
@@ -792,6 +1353,190 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
         )
+
+    def _dequantize_blocked_k_cache(self, quant_k_cache: torch.Tensor) -> torch.Tensor:
+        """Dequantize a UE8M0-packed FP8 KV block cache to bf16."""
+        from vllm.platforms import current_platform
+
+        fp8_dtype = current_platform.fp8_dtype()
+        d = self.head_dim
+        d_nope = self.nope_head_dim
+        d_rope = self.rope_head_dim
+        tile_size = 64
+        num_tiles = d_nope // tile_size
+
+        num_blocks, block_size, _ = quant_k_cache.shape
+        quant_k_cache = quant_k_cache.view(num_blocks, -1)
+        input_nope_rope = quant_k_cache[:, : block_size * (d_nope + 2 * d_rope)].view(
+            num_blocks, block_size, d_nope + 2 * d_rope
+        )
+        input_nope = input_nope_rope[:, :, :d_nope].view(fp8_dtype)
+        input_rope = input_nope_rope[:, :, d_nope:].view(torch.bfloat16)
+        input_scale = (
+            quant_k_cache[:, block_size * (d_nope + 2 * d_rope) :]
+            .view(num_blocks, block_size, 8)[:, :, :num_tiles]
+            .view(torch.float8_e8m0fnu)
+        )
+
+        result = torch.empty(
+            (num_blocks, block_size, 1, d),
+            dtype=torch.bfloat16,
+            device=quant_k_cache.device,
+        )
+        result[..., d_nope:] = input_rope.unsqueeze(2)
+        for tile_idx in range(num_tiles):
+            cur_nope = input_nope[
+                ..., tile_idx * tile_size : (tile_idx + 1) * tile_size
+            ].to(torch.bfloat16)
+            cur_scales = input_scale[:, :, tile_idx].to(torch.bfloat16).unsqueeze(-1)
+            result[..., tile_idx * tile_size : (tile_idx + 1) * tile_size] = (
+                cur_nope * cur_scales
+            ).unsqueeze(2)
+        return result
+
+    def _gather_dequant_blocked_k_at_indices(
+        self,
+        kv_cache: torch.Tensor,
+        flat_indices: torch.Tensor,
+        block_size: int,
+    ) -> torch.Tensor:
+        """Gather and dequantize K vectors at the given flat indices
+        (block_idx * block_size + pos_in_block) directly from the paged
+        FP8 cache without dequantising the full cache. Returns (N, head_dim)
+        bf16. Negative or out-of-range indices produce zero rows."""
+        nope_dim = self.nope_head_dim
+        rope_dim = self.rope_head_dim
+        head_dim = self.head_dim
+        quant_block = 64
+        n_quant = nope_dim // quant_block
+        scale_dim = n_quant + 1  # 7 real + 1 pad
+        token_data_size = nope_dim + rope_dim * 2  # 448 + 128 = 576
+
+        device = kv_cache.device
+        flat_indices = flat_indices.to(torch.int64)
+        valid_mask = flat_indices >= 0
+        safe_idx = flat_indices.clamp_min(0)
+        block_idx = safe_idx // block_size
+        pos_in_block = safe_idx % block_size
+
+        cache_u8 = (
+            kv_cache.view(torch.uint8) if kv_cache.dtype != torch.uint8 else kv_cache
+        )
+        n_blocks = cache_u8.shape[0]
+        block_stride = cache_u8[0].numel()
+        flat = cache_u8.view(n_blocks, block_stride)
+
+        block_idx = block_idx.clamp(max=n_blocks - 1)
+        t_off = pos_in_block * token_data_size
+        s_off = block_size * token_data_size + pos_in_block * scale_dim
+
+        # NoPE (fp8) and RoPE (bf16-as-bytes) are contiguous within each
+        # token's region of the cache, so a single fancy-index op covers
+        # both: nope at [pos*token_data_size : +nope_dim], rope at
+        # [+nope_dim : +nope_dim+2*rope_dim].
+        nope_rope_arange = self._get_arange(nope_dim + rope_dim * 2, device)
+        scale_arange = self._get_arange(n_quant, device)
+        nope_rope_idx = t_off.unsqueeze(-1) + nope_rope_arange
+        scale_idx = s_off.unsqueeze(-1) + scale_arange
+
+        block_idx_b = block_idx.unsqueeze(-1)
+        nope_rope_bytes = flat[block_idx_b, nope_rope_idx]  # (N, 576) uint8
+        fp8_bytes = nope_rope_bytes[:, :nope_dim].contiguous().view(torch.float8_e4m3fn)
+        bf16_raw = nope_rope_bytes[:, nope_dim:].contiguous()
+        bf16_view = bf16_raw.view(torch.bfloat16).view(-1, rope_dim)
+        scales_u8 = flat[block_idx_b, scale_idx]
+
+        x_fp32 = fp8_bytes.to(torch.float32).view(-1, n_quant, quant_block)
+        scale_factor = torch.pow(2.0, scales_u8.to(torch.float32) - 127.0).unsqueeze(-1)
+        dequant_fp8 = (x_fp32 * scale_factor).view(-1, nope_dim).to(torch.bfloat16)
+
+        full = torch.empty(
+            (flat_indices.shape[0], head_dim),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        full[:, :nope_dim] = dequant_fp8
+        full[:, nope_dim:] = bf16_view
+        full.masked_fill_(~valid_mask.unsqueeze(-1), 0)
+        return full
+
+    def _get_arange(self, n: int, device: torch.device) -> torch.Tensor:
+        """Cached `torch.arange(0, n)` keyed by (length, device).
+
+        Each decode step calls this layer's gather many times with
+        identical (length, device) tuples; the cache avoids the per-call
+        allocation and kernel launch."""
+        key = (n, device)
+        cached = self._arange_cache.get(key)
+        if cached is None:
+            cached = torch.arange(0, n, device=device)
+            self._arange_cache[key] = cached
+        return cached
+
+    def _ref_sparse_attn_decode_gather(
+        self,
+        q: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        swa_block_size: int,
+        swa_indices: torch.Tensor,
+        swa_topk_length: torch.Tensor | None,
+        attn_sink: torch.Tensor | None,
+        extra_kv_cache: torch.Tensor | None,
+        extra_block_size: int,
+        extra_indices: torch.Tensor | None,
+        extra_topk_length: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """SM80 reference decode: gather-then-dequantise only the topk
+        positions, then dispatch to the split-K attention kernel."""
+        b, s_q, h_q, d_qk = q.shape
+        d_v = self.head_dim
+
+        def gather_scope(
+            kv_cache: torch.Tensor,
+            block_size: int,
+            indices: torch.Tensor,
+            topk_length: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            indices = indices.reshape(b, s_q, -1)
+            topk = indices.size(-1)
+            gathered = self._gather_dequant_blocked_k_at_indices(
+                kv_cache, indices.reshape(-1), block_size
+            ).view(b, s_q, topk, d_qk)
+            invalid_mask = indices == -1
+            if topk_length is not None:
+                topk_length = topk_length.reshape(b)
+                arange = self._get_arange(topk, invalid_mask.device)
+                invalid_mask |= arange.view(1, 1, topk) >= topk_length.view(b, 1, 1)
+            return gathered, invalid_mask
+
+        gathered_kv, invalid_mask = gather_scope(
+            swa_kv_cache, swa_block_size, swa_indices, swa_topk_length
+        )
+        if extra_kv_cache is not None and extra_indices is not None:
+            extra_gathered, extra_invalid = gather_scope(
+                extra_kv_cache, extra_block_size, extra_indices, extra_topk_length
+            )
+            gathered_kv = torch.cat([gathered_kv, extra_gathered], dim=2)
+            invalid_mask = torch.cat([invalid_mask, extra_invalid], dim=2)
+
+        # No NaN scrub: the FP8 quantiser clamps to +/-448 and the gather
+        # zeroes invalid rows in-place, so the gathered buffer is NaN-free.
+        bs = b * s_q
+        gathered_kv_flat = gathered_kv.view(bs, -1, d_qk)
+        invalid_flat = invalid_mask.view(bs, -1)
+        # q may arrive non-contiguous from the upstream o_padded[...] slice.
+        q_flat = q.view(bs, h_q, d_qk).to(torch.bfloat16).contiguous()
+
+        out_flat = _dsv4_sm80_sparse_attn_decode_triton(
+            q_flat,
+            gathered_kv_flat,
+            invalid_flat,
+            attn_sink,
+            self.scale,
+            d_v,
+        )
+        # Match the prior PyTorch shape: (b, h_q, d_v) for s_q=1.
+        return out_flat.view(b, h_q, d_v)
 
     def _forward_prefill(
         self,
@@ -903,15 +1648,76 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 N,
             )
 
-            output_chunk, _, _ = flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-                out=output[query_start:query_end],
+            if use_dsv4_reference_kernels():
+                # SM80/ROCm reference path. The reference returns the
+                # attention output rather than writing to `out=`, so copy
+                # into the output slice.
+                output_chunk = self._ref_sparse_attn_prefill(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    topk_length=combined_lens,
+                )
+                output[query_start:query_end].copy_(output_chunk.to(output.dtype))
+            else:
+                output_chunk, _, _ = flash_mla_sparse_fwd(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=output[query_start:query_end],
+                )
+
+    def _ref_sparse_attn_prefill(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        indices: torch.Tensor,
+        topk_length: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Pure-PyTorch sparse MLA prefill reference."""
+        indices = indices.clone().squeeze(1)
+        s_q, h_q, d_qk = q.shape
+        topk = indices.shape[-1]
+        s_kv = kv.shape[0]
+        if topk_length is not None:
+            mask = torch.arange(topk, device=indices.device).unsqueeze(
+                0
+            ) >= topk_length.unsqueeze(1)
+            indices[mask] = -1
+        invalid_mask = (indices < 0) | (indices >= s_kv)
+        indices[invalid_mask] = 0
+
+        qf = q.float()
+        gathered_kv = (
+            kv.index_select(0, indices.flatten()).reshape(s_q, topk, d_qk).float()
+        )
+        scores = qf @ gathered_kv.transpose(1, 2)
+        scores *= self.scale
+        scores[invalid_mask.unsqueeze(1).expand_as(scores)] = float("-inf")
+
+        orig_lse = torch.logsumexp(scores, dim=-1)
+        lse_for_o = orig_lse
+        if self.attn_sink is not None:
+            lse_for_o = torch.logsumexp(
+                torch.stack(
+                    [
+                        orig_lse,
+                        self.attn_sink[:h_q].view(1, h_q).expand_as(orig_lse),
+                    ],
+                    dim=0,
+                ),
+                dim=0,
             )
+        lse_for_o = lse_for_o.clone()
+        lse_for_o[lse_for_o == float("-inf")] = float("+inf")
+        probs = torch.exp(scores - lse_for_o.unsqueeze(-1))
+        out = probs @ gathered_kv[..., : self.head_dim]
+        lonely_q_mask = orig_lse == float("-inf")
+        out[lonely_q_mask.unsqueeze(-1).expand_as(out)] = 0.0
+        return out.to(torch.bfloat16)
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):

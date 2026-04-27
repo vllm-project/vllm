@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import use_dsv4_reference_kernels
 from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -23,6 +25,170 @@ if TYPE_CHECKING or current_platform.is_cuda_alike():
 else:
     tilelang = None  # type: ignore[assignment]
     T = None  # type: ignore[assignment]
+
+
+@triton.jit
+def _mhc_sinkhorn_kernel(
+    in_ptr,  # comb_logits (T, hc, hc) fp32
+    out_ptr,  # comb_mix (T, hc, hc) fp32
+    n_tokens,
+    eps: tl.constexpr,
+    hc: tl.constexpr,
+    iterations: tl.constexpr,
+):
+    """Fused softmax + iterative Sinkhorn (row+col) normalisation.
+
+    Replaces:
+        comb_mix = softmax(logits, -1) + eps
+        comb_mix /= comb_mix.sum(-2, keepdim=True) + eps
+        for _ in range(iterations - 1):
+            comb_mix /= comb_mix.sum(-1, keepdim=True) + eps
+            comb_mix /= comb_mix.sum(-2, keepdim=True) + eps
+
+    One program per token; comb is hc x hc held in registers throughout."""
+    pid = tl.program_id(0)
+    if pid >= n_tokens:
+        return
+
+    base = in_ptr + pid * hc * hc
+    rows = tl.arange(0, hc)
+    cols = tl.arange(0, hc)
+    cm = tl.load(base + rows[:, None] * hc + cols[None, :]).to(tl.float32)
+
+    # Row-wise softmax
+    row_max = tl.max(cm, axis=1)
+    cm = cm - row_max[:, None]
+    cm = tl.exp(cm)
+    row_sum = tl.sum(cm, axis=1)
+    cm = cm / row_sum[:, None] + eps
+
+    # First column-norm
+    col_sum = tl.sum(cm, axis=0)
+    cm = cm / (col_sum[None, :] + eps)
+
+    # iterations - 1 more row-then-column normalisations
+    for _ in range(iterations - 1):
+        row_sum = tl.sum(cm, axis=1)
+        cm = cm / (row_sum[:, None] + eps)
+        col_sum = tl.sum(cm, axis=0)
+        cm = cm / (col_sum[None, :] + eps)
+
+    out_base = out_ptr + pid * hc * hc
+    tl.store(out_base + rows[:, None] * hc + cols[None, :], cm)
+
+
+def _mhc_softmax_sinkhorn_triton(
+    comb_logits: torch.Tensor,
+    eps: float,
+    iterations: int,
+) -> torch.Tensor:
+    """Fused softmax + Sinkhorn iterations on (T, hc, hc) input. Replaces
+    the 1 + 2*(iterations-1) PyTorch sum/div pairs with one Triton kernel
+    that holds the (small) hc x hc matrix in registers throughout."""
+    n_tokens, hc, hc2 = comb_logits.shape
+    assert hc == hc2
+    out = torch.empty_like(comb_logits)
+    _mhc_sinkhorn_kernel[(n_tokens,)](
+        comb_logits.contiguous(),
+        out,
+        n_tokens,
+        eps=eps,
+        hc=hc,
+        iterations=iterations,
+        num_warps=1,
+    )
+    return out
+
+
+@triton.jit
+def _mhc_post_per_token(
+    a_ptr,  # comb_res_mix (T, hc, hc) fp32
+    b_ptr,  # residual (T, hc, h) bf16
+    c_ptr,  # post_layer_mix (T, hc, 1) fp32 — last dim length 1
+    d_ptr,  # x (T, h) bf16
+    out_ptr,  # out (T, hc, h) bf16
+    n_tokens,
+    hc: tl.constexpr,
+    h: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Fused mHC post:
+        out[t, j, k] = sum_i comb[t, i, j] * residual[t, i, k]
+                     + post[t, j] * x[t, k]
+    One program per (token, h_block). Loads `comb` (hc x hc) and
+    `post` (hc) once; streams `residual` and `x` over h-tiles."""
+    pid_t = tl.program_id(0).to(tl.int64)
+    pid_hb = tl.program_id(1).to(tl.int64)
+
+    h_off = pid_hb * BLOCK_H + tl.arange(0, BLOCK_H)
+    h_mask = h_off < h
+
+    a_off = (
+        a_ptr
+        + pid_t * hc * hc
+        + tl.arange(0, hc)[:, None] * hc
+        + tl.arange(0, hc)[None, :]
+    )
+    a = tl.load(a_off).to(tl.float32)  # (hc, hc) fp32
+
+    c_off = c_ptr + pid_t * hc + tl.arange(0, hc)
+    c = tl.load(c_off).to(tl.float32)  # (hc,) fp32
+
+    d_off = d_ptr + pid_t * h + h_off
+    d = tl.load(d_off, mask=h_mask, other=0.0).to(tl.float32)  # (BLOCK_H,)
+
+    # b: (hc, BLOCK_H) bf16 → fp32
+    b_off = b_ptr + pid_t * hc * h + tl.arange(0, hc)[:, None] * h + h_off[None, :]
+    b = tl.load(b_off, mask=h_mask[None, :], other=0.0).to(tl.float32)
+
+    # out[j, k] = sum_i a[i, j] * b[i, k] + c[j] * d[k]
+    # tl.dot requires K >= 16; hc is typically 4. 3D-broadcast + reduce
+    # turns the contraction into a few FMAs in registers (Triton can't
+    # index a 2D tensor by a constexpr scalar, so static_range over rows
+    # is unavailable).
+    a_T = tl.trans(a)  # (hc, hc): a_T[j, i] = a[i, j]
+    prod = a_T[:, :, None] * b[None, :, :]  # (hc, hc, BLOCK_H)
+    mixed = tl.sum(prod, axis=1)  # (hc, BLOCK_H)
+    post_term = c[:, None] * d[None, :]
+    result = (mixed + post_term).to(tl.bfloat16)
+
+    out_off = out_ptr + pid_t * hc * h + tl.arange(0, hc)[:, None] * h + h_off[None, :]
+    tl.store(out_off, result, mask=h_mask[None, :])
+
+
+def _mhc_post_triton(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+) -> torch.Tensor:
+    """SM80 fused Triton mhc_post. Replaces the multi-op PyTorch reference."""
+    outer_shape = residual.shape[:-2]
+    hc = residual.shape[-2]
+    h = residual.shape[-1]
+    n_tokens = residual.numel() // (hc * h)
+
+    res = residual.reshape(n_tokens, hc, h).contiguous()
+    comb = comb_res_mix.reshape(n_tokens, hc, hc).to(torch.float32).contiguous()
+    post = post_layer_mix.reshape(n_tokens, hc).to(torch.float32).contiguous()
+    x_flat = x.reshape(n_tokens, h).contiguous()
+
+    out = torch.empty_like(res)
+
+    BLOCK_H = 256 if h >= 256 else 128
+    grid = (n_tokens, triton.cdiv(h, BLOCK_H))
+    _mhc_post_per_token[grid](
+        comb,
+        res,
+        post,
+        x_flat,
+        out,
+        n_tokens,
+        hc=hc,
+        h=h,
+        BLOCK_H=BLOCK_H,
+    )
+    return out.view(*outer_shape, hc, h)
 
 
 @cache
@@ -234,6 +400,43 @@ def mhc_pre(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
+    if use_dsv4_reference_kernels():
+        # SM80/ROCm reference path: pure-PyTorch fused implementation that
+        # bypasses both DeepGEMM `tf32_hc_prenorm_gemm` (Hopper+ only) and
+        # the tilelang follow-up. Lifted from PR 40871's ROCm branch.
+        x = residual_flat.view(num_tokens, hc_mult * hidden_size).to(torch.float32)
+        mixes = torch.matmul(x, fn_flat.t())
+        sqrsum = x.square().sum(dim=-1, keepdim=True)
+        mixes = mixes * torch.rsqrt(sqrsum / (hc_mult * hidden_size) + rms_eps)
+
+        pre_logits = mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]
+        pre_mix = torch.sigmoid(pre_logits) + hc_pre_eps
+
+        post_logits = (
+            mixes[:, hc_mult : 2 * hc_mult] * hc_scale[1]
+            + hc_base[hc_mult : 2 * hc_mult]
+        )
+        post_mix = torch.sigmoid(post_logits) * hc_post_mult_value
+
+        comb_logits = mixes[:, 2 * hc_mult :].view(
+            num_tokens, hc_mult, hc_mult
+        ) * hc_scale[2] + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
+        # Fused softmax + Sinkhorn iterations (replaces 1 + 2*(iters-1)
+        # PyTorch sum/div pairs with one Triton kernel — primary mhc_pre
+        # CPU-launch bottleneck on SM80 with sinkhorn_repeat=20).
+        comb_mix = _mhc_softmax_sinkhorn_triton(
+            comb_logits, hc_sinkhorn_eps, sinkhorn_repeat
+        )
+
+        layer_input = torch.sum(
+            pre_mix.unsqueeze(-1) * residual_flat.to(torch.float32), dim=1
+        ).to(torch.bfloat16)
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
+
     # these number are from deepgemm kernel impl
     block_k = 64
     block_m = 64
@@ -414,6 +617,11 @@ def mhc_post(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
+    if use_dsv4_reference_kernels():
+        # SM80/ROCm fused Triton path; faster than the multi-op PyTorch
+        # einsum + broadcast reference and matches the upstream tilelang
+        # kernel's output to bf16 precision.
+        return _mhc_post_triton(x, residual, post_layer_mix, comb_res_mix)
     out = torch.empty_like(residual)
     mhc_post_tilelang(
         comb_res_mix,

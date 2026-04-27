@@ -92,6 +92,42 @@ def is_deep_gemm_supported() -> bool:
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
+def _resolve_use_dsv4_ref_kernels() -> bool:
+    try:
+        if not is_deep_gemm_supported():
+            return True
+        from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
+
+        ok, _ = is_flashmla_sparse_supported()
+        return not ok
+    except Exception:
+        # CUDA might not be initialized at the moment this module is first
+        # imported (CPU-only build, test harnesses, etc.). Default to True —
+        # the SM80 reference paths produce correct output on every platform.
+        return True
+
+
+# Resolved once at module import time so torch.compile / Dynamo sees a plain
+# Python bool global at every dispatch site, allowing the branch to be
+# constant-folded inside compiled regions. The previous functools.cache
+# wrapper was untraceable; placing the lookup in the function body chained
+# to is_deep_gemm_supported() (which still uses @functools.cache) and
+# tripped Dynamo even on the hot path. With this constant, Dynamo never
+# follows the cached chain at trace time.
+USE_DSV4_REF_KERNELS: bool = _resolve_use_dsv4_ref_kernels()
+
+
+def use_dsv4_reference_kernels() -> bool:
+    """True when DeepGEMM hyperconnection / FlashMLA-Sparse kernels are
+    unusable on the current platform.
+
+    Captures SM80 (A100/A800), ROCm, and any platform where DeepGEMM or
+    FlashMLA-Sparse cannot run. Used by DeepSeek V4 sites to dispatch to
+    pure-PyTorch reference implementations.
+    """
+    return USE_DSV4_REF_KERNELS
+
+
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
     """Return `True` if vLLM is configured to use DeepGEMM "

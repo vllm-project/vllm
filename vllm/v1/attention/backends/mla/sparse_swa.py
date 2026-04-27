@@ -362,6 +362,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         }
         if num_decode_tokens == 0:
             return out
+        # SM80/ROCm: skip FlashMLA tile-sched allocation; the reference
+        # decode path doesn't read tile_sched_*, so all-None is the
+        # sentinel _forward_decode's gate already tolerates.
+        from vllm.utils.deep_gemm import use_dsv4_reference_kernels
+
+        if use_dsv4_reference_kernels():
+            return out
         for layer_type in self._layer_types:
             # get_mla_metadata() is the official FlashMLA entry point that
             # returns a fresh empty FlashMLASchedMeta; using it keeps this

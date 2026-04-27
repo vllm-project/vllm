@@ -621,6 +621,14 @@ class DeepseekV4MoE(nn.Module):
             )
         else:
             self.use_mega_moe = False
+        # Mega-MoE relies on DeepGEMM's `fp8_fp4_mega_moe`, which is
+        # Hopper/Blackwell-only. Force the standard FusedMoE path on
+        # SM80/ROCm to avoid `Unsupported architecture` runtime errors.
+        if self.use_mega_moe:
+            from vllm.utils.deep_gemm import use_dsv4_reference_kernels
+
+            if use_dsv4_reference_kernels():
+                self.use_mega_moe = False
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hidden_size = config.hidden_size

@@ -750,6 +750,13 @@ class CompilationConfig:
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
+        # SM80/ROCm reference fallbacks. Their bodies use data-dependent
+        # control flow (.any() / .nonzero() / .item()) that cudagraph
+        # capture forbids; listing them here splits the piecewise cudagraph
+        # at the call site so they run eager outside the captured replay.
+        "vllm::deepseek_v4_compressor_sparse_sm80",
+        "vllm::deepseek_v4_compressor_indexer_sm80",
+        "vllm::deepseek_v4_dequant_gather_sm80",
     ]
 
     def compute_hash(self) -> str:

@@ -17,6 +17,7 @@ preparation.
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.mqa_logits_triton import _decode_e4m3fn
 
 
 @triton.jit
@@ -303,6 +304,249 @@ def _dequantize_and_gather_k_kernel(
             tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
+def _dequantize_and_gather_k_cache_torch(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    """SM80 PyTorch fallback. Vectorised — single batched gather across all
+    (req, token_in_seq) pairs, then dequant + scatter into `out`."""
+    TOKEN_FP8_DIM = 448
+    TOKEN_BF16_DIM = 64
+    TOKEN_SCALE_DIM = 8
+    QUANT_BLOCK_SIZE = 64
+    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
+    OUTPUT_DIM = 512
+    N_NOPE_BLOCKS = TOKEN_FP8_DIM // QUANT_BLOCK_SIZE
+
+    device = out.device
+    num_reqs = seq_lens.shape[0]
+    if num_reqs == 0:
+        return
+
+    k_cache_u8 = k_cache.view(torch.uint8) if k_cache.dtype != torch.uint8 else k_cache
+    n_blocks = k_cache_u8.shape[0]
+    block_stride = k_cache_u8[0].numel()
+    flat = k_cache_u8.view(n_blocks, block_stride)
+
+    effective_lens = (
+        gather_lens.to(torch.int64)
+        if gather_lens is not None
+        else seq_lens.to(torch.int64)
+    )
+    if effective_lens.numel() == 0:
+        return
+    max_len = int(effective_lens.max().item())
+    if max_len <= 0:
+        return
+
+    t_grid = torch.arange(max_len, device=device, dtype=torch.int64)
+    valid = t_grid.unsqueeze(0) < effective_lens.unsqueeze(-1)  # (R, max_len)
+    req_idx_flat, t_flat = valid.nonzero(as_tuple=True)
+    if req_idx_flat.numel() == 0:
+        return
+
+    block_indices = t_flat // block_size
+    block_offsets = t_flat % block_size
+    block_numbers = block_table[req_idx_flat, block_indices].to(torch.int64)
+
+    t_off = block_offsets * TOKEN_DATA_SIZE
+    s_off = block_size * TOKEN_DATA_SIZE + block_offsets * TOKEN_SCALE_DIM
+
+    fp8_idx = t_off.unsqueeze(-1) + torch.arange(
+        TOKEN_FP8_DIM, device=device, dtype=torch.int64
+    )
+    bf16_idx = (t_off + TOKEN_FP8_DIM).unsqueeze(-1) + torch.arange(
+        TOKEN_BF16_DIM * 2, device=device, dtype=torch.int64
+    )
+    scale_idx = s_off.unsqueeze(-1) + torch.arange(
+        N_NOPE_BLOCKS, device=device, dtype=torch.int64
+    )
+
+    fp8_bytes = flat[block_numbers.unsqueeze(-1), fp8_idx].view(torch.float8_e4m3fn)
+    bf16_bytes_raw = flat[block_numbers.unsqueeze(-1), bf16_idx].contiguous()
+    bf16_view = bf16_bytes_raw.view(torch.bfloat16).view(-1, TOKEN_BF16_DIM)
+    scales_u8 = flat[block_numbers.unsqueeze(-1), scale_idx]
+
+    x_fp32 = fp8_bytes.to(torch.float32).view(-1, N_NOPE_BLOCKS, QUANT_BLOCK_SIZE)
+    scale_factor = torch.pow(2.0, scales_u8.to(torch.float32) - 127.0).unsqueeze(-1)
+    dequant_fp8 = (x_fp32 * scale_factor).view(-1, TOKEN_FP8_DIM).to(torch.bfloat16)
+
+    full = torch.empty(
+        (req_idx_flat.shape[0], OUTPUT_DIM),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    full[:, :TOKEN_FP8_DIM] = dequant_fp8
+    full[:, TOKEN_FP8_DIM:] = bf16_view
+
+    out[req_idx_flat, t_flat + offset, :] = full
+
+
+@triton.jit
+def _dequantize_and_gather_k_kernel_sm80(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    scale_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    token_data_size: tl.constexpr,
+    block_stride: tl.constexpr,
+    output_dim: tl.constexpr,
+    fp8_max: tl.constexpr,
+    n_quant_blocks: tl.constexpr,
+):
+    """SM80 variant of `_dequantize_and_gather_k_kernel`. Replaces the
+    `tl.float8e4nv` bitcast with the software `_decode_e4m3fn` decoder
+    from PR 38476 (uint8 → fp32 in ~6 ops/elt). Same launch shape and
+    layout as the SM90+ kernel."""
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+
+    for i in range(worker_id, gather_len, num_workers):
+        pos = start_pos + i
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+
+        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+        token_scale_ptr = (
+            cache_block_ptr
+            + cache_block_size * token_data_size
+            + pos_in_block * scale_dim
+        )
+        token_fp8_ptr = token_data_ptr
+        token_bf16_ptr = token_data_ptr + fp8_dim
+        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+
+        for qblock_idx in tl.static_range(n_quant_blocks):
+            qblock_start = qblock_idx * quant_block
+            if qblock_start < fp8_dim:
+                offsets = qblock_start + tl.arange(0, quant_block)
+                mask = offsets < fp8_dim
+                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+                # Software fp8e4nv → fp32 (no tl.float8e4nv reference).
+                x_float = _decode_e4m3fn(x_uint8)
+                encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                exponent = encoded_scale.to(tl.float32) - 127.0
+                scale = tl.exp2(exponent)
+                x_dequant = x_float * scale
+                tl.store(
+                    output_row_ptr + offsets,
+                    x_dequant.to(tl.bfloat16),
+                    mask=mask,
+                )
+
+        bf16_output_offset = fp8_dim
+        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+        for j in tl.static_range(bf16_dim // 16):
+            chunk_offsets = j * 16 + tl.arange(0, 16)
+            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+
+def _dequantize_and_gather_k_cache_triton(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    """SM80 Triton dispatch — uses _decode_e4m3fn instead of the
+    fp8e4nv bitcast that Triton refuses to compile on SM80."""
+    TOKEN_FP8_DIM = 448
+    TOKEN_BF16_DIM = 64
+    TOKEN_SCALE_DIM = 8
+    QUANT_BLOCK_SIZE = 64
+    FP8_MAX = 448.0
+    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
+
+    num_reqs = seq_lens.shape[0]
+    NUM_WORKERS = 128
+    _dequantize_and_gather_k_kernel_sm80[(num_reqs, NUM_WORKERS)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        seq_lens,
+        block_table,
+        offset,
+        gather_lens,
+        max_blocks_per_seq=block_table.shape[-1],
+        fp8_dim=TOKEN_FP8_DIM,
+        bf16_dim=TOKEN_BF16_DIM,
+        scale_dim=TOKEN_SCALE_DIM,
+        quant_block=QUANT_BLOCK_SIZE,
+        cache_block_size=block_size,
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=k_cache.stride(0),
+        output_dim=512,
+        fp8_max=FP8_MAX,
+        n_quant_blocks=7,
+    )
+
+
+def _dequant_gather_sm80_op(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    _dequantize_and_gather_k_cache_triton(
+        out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
+
+
+def _dequant_gather_sm80_op_fake(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    return None
+
+
+from vllm.utils.torch_utils import direct_register_custom_op  # noqa: E402
+
+direct_register_custom_op(
+    op_name="deepseek_v4_dequant_gather_sm80",
+    op_func=_dequant_gather_sm80_op,
+    mutates_args=["out"],
+    fake_impl=_dequant_gather_sm80_op_fake,
+)
+
+
 def dequantize_and_gather_k_cache(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -317,6 +561,17 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
 ) -> None:
+    from vllm.utils.deep_gemm import use_dsv4_reference_kernels
+
+    if use_dsv4_reference_kernels():
+        # SM80: Triton can't bitcast uint8 → float8e4nv; route through the
+        # custom op so cudagraph capture splits at this call site (the body
+        # uses .max().item() and .nonzero(), forbidden during capture).
+        torch.ops.vllm.deepseek_v4_dequant_gather_sm80(
+            out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        )
+        return
+
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
     TOKEN_SCALE_DIM = 8
