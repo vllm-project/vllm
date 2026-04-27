@@ -34,7 +34,11 @@ from vllm.utils.torch_utils import (
 )
 
 from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from ..vllm_inductor_pass import (
+    VllmFusionPatternMatcherPass,
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+)
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -993,9 +997,9 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern):
         )
 
 
-class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
+class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config)
+        super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
         self.disabled = True
         self.tp_size = get_tensor_model_parallel_world_size()
         if self.tp_size <= 1:
@@ -1062,27 +1066,21 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             config.scheduler_config.max_num_batched_tokens,
         )
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
-        )
-
-        self.register_patterns()
-        self.dump_patterns(config, self.patterns)
-
-    @enable_fake_mode
-    def register_patterns(self):
         for epsilon in [1e-5, 1e-6]:
-            AiterAllreduceFusedRMSNormPattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-            ).register(self.patterns)
-
-            AiterAllreduceFusedAddRMSNormPattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-            ).register(self.patterns)
+            self.register(
+                AiterAllreduceFusedRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
 
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
@@ -1090,30 +1088,16 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
 
         self.disabled = False
 
+        self.dump_patterns(config, self.pm_pass)
+
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         if self.disabled:
             logger.warning_once("AllReduce fusion pass is disabled.")
             return False
         return bool(compile_range.end <= self.max_token_num)
 
-    @VllmInductorPass.time_and_log
-    def __call__(self, graph: fx.Graph):
-        if self.disabled:
-            logger.debug("ROCmAiterAllReduceRMSNormFusionPass disabled")
-            return
-
-        self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
-
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
             return
         with contextlib.suppress(Exception):
             rocm_aiter_ops.destroy_aiter_allreduce()
-
-    def uuid(self) -> str:
-        return VllmInductorPass.hash_source(
-            self,
-            AiterAllreduceFusedRMSNormPattern,
-            AiterAllreduceFusedAddRMSNormPattern,
-        )

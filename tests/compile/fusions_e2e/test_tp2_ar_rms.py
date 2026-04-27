@@ -36,6 +36,10 @@ from .models import (
     qwen3_a3b_fp8,
 )
 
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda_like(), reason="Only test CUDA"
+)
+
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
