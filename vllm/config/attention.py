@@ -51,10 +51,11 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
+    use_fp4_indexer_cache: bool = False
+    """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
+
     use_non_causal: bool = False
-    """Require attention backends that support non-causal (bidirectional)
-    attention.  Set automatically for dflash draft models via
-    ``DFlashProposer._create_draft_vllm_config``."""
+    """Whether to use non-causal (bidirectional) attention."""
 
     def compute_hash(self) -> str:
         """
