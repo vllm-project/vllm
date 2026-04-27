@@ -6,15 +6,15 @@ This folder provides several example scripts on how to inference Qwen2.5-Omni of
 
 ```bash
 # Audio + image + video
-python examples/offline_inference/qwen2_5_omni/only_thinker.py \
+python examples/generate/multimodal/qwen2_5_omni/only_thinker.py \
     -q mixed_modalities
 
 # Read vision and audio inputs from a single video file
-python examples/offline_inference/qwen2_5_omni/only_thinker.py \
+python examples/generate/multimodal/qwen2_5_omni/only_thinker.py \
     -q use_audio_in_video
 
 # Multiple audios
-python examples/offline_inference/qwen2_5_omni/only_thinker.py \
+python examples/generate/multimodal/qwen2_5_omni/only_thinker.py \
     -q multi_audios
 ```
 
@@ -24,16 +24,16 @@ You can also test Qwen2.5-Omni on a single modality:
 
 ```bash
 # Process audio inputs
-python examples/offline_inference/audio_language.py \
+python examples/generate/multimodal/audio_language_offline.py \
     --model-type qwen2_5_omni
 
 # Process image inputs
-python examples/offline_inference/vision_language.py \
+python examples/generate/multimodal/vision_language_offline.py \
     --modality image \
     --model-type qwen2_5_omni
 
 # Process video inputs
-python examples/offline_inference/vision_language.py \
+python examples/generate/multimodal/vision_language_offline.py \
     --modality video \
     --model-type qwen2_5_omni
 ```
