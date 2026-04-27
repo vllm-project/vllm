@@ -31,6 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .commandr import LayerNorm
@@ -44,7 +45,7 @@ from .utils import (
 )
 
 
-@torch.compile(dynamic=True, backend="inductor")
+@torch.compile(backend=current_platform.simple_compile_backend)
 def token_choice_with_bias(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -93,6 +94,7 @@ class CohereMoeMLP(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=False,
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
@@ -230,19 +232,6 @@ class CohereMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=params_dtype,
-            renormalize=getattr(config, "norm_topk_prob", True),
-            quant_config=quant_config,
-            tp_size=tp_size,
-            prefix=f"{prefix}.experts",
-            custom_routing_function=self.custom_routing_function,
-        )
-
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = CohereMoeMLP(
                 config=config,
@@ -260,21 +249,29 @@ class CohereMoe(nn.Module):
             self.shared_experts = None
             self.shared_expert_combination_strategy = None
 
+        self.experts = FusedMoE(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=params_dtype,
+            renormalize=getattr(config, "norm_topk_prob", True),
+            quant_config=quant_config,
+            tp_size=tp_size,
+            prefix=f"{prefix}.experts",
+            custom_routing_function=self.custom_routing_function,
+            shared_experts=self.shared_experts,
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
-        shared_output = None
-        if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
         router_logits, _ = self.gate(hidden_states)
+        # FusedMoE handles shared expert overlap internally and returns
+        # shared_output + routed_output when shared_experts is set.
         final_hidden_states = self.experts(hidden_states, router_logits)
-
-        if shared_output is not None:
-            if self.shared_expert_combination_strategy == "average":
-                final_hidden_states = (final_hidden_states + shared_output) / 2
-            else:
-                final_hidden_states = final_hidden_states + shared_output
-
+        if self.shared_expert_combination_strategy == "average":
+            final_hidden_states = final_hidden_states / 2
         return final_hidden_states.view(orig_shape)
 
 
