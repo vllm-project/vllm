@@ -314,6 +314,9 @@ class OffloadingConnectorScheduler:
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
 
+        params = req_status.req_context.kv_transfer_params
+        do_remote_decode = params is not None and params.get("do_remote_decode")
+
         keys_to_load: list[OffloadKey] = []
         dst_block_ids: list[int] = []
         # per group
@@ -360,7 +363,11 @@ class OffloadingConnectorScheduler:
             group_sizes.append(num_pending_gpu_blocks)
             block_indices.append(num_locally_computed_gpu_blocks)
 
-            group_state.next_stored_block_idx = num_blocks
+            if not do_remote_decode:
+                # For P/D prefill requests (do_remote_decode=True), we do
+                # NOT skip saving the hit prefix, as we need to stream the
+                # entire KV cache so a remote decode node can consume it.
+                group_state.next_stored_block_idx = num_blocks
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
