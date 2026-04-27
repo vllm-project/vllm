@@ -168,13 +168,13 @@ def _reshape_kv_cache(
                 attn_backend = attn_backends[layer_name]
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     num_blocks,
-                    kv_cache_spec.block_size,
+                    kv_cache_spec.storage_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype_str=cache_dtype,
                 )
 
-                # FIXME(woosuk): Add kv_cache_stride_order to all attn backends
+                # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
                 try:
                     kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                     assert len(kv_cache_stride_order) == len(kv_cache_shape)
@@ -188,9 +188,29 @@ def _reshape_kv_cache(
                 ]
 
                 dtype = kv_cache_spec.dtype
-                kv_tensor_reshaped = kv_raw_tensor.view(dtype)
-                kv_tensor_reshaped = kv_tensor_reshaped.view(kv_cache_shape)
-                kv_caches[layer_name] = kv_tensor_reshaped.permute(*inv_order)
+                kv_tensor = kv_raw_tensor.view(dtype)
+                if kv_cache_spec.page_size_padded is not None:
+                    # Use strided view to handle page_size_bytes that
+                    # include padding. This follows the same pattern as
+                    # MambaSpec handling in gpu_model_runner.py.
+                    # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                    # (i.e. the first physical dimension is the block
+                    # index), which holds for MLA backends but NOT for
+                    # standard attention backends whose shape starts with
+                    # a K/V dimension of size 2.
+                    dtype_size = get_dtype_size(dtype)
+                    page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                    strides = list(torch.empty(kv_cache_shape).stride())
+                    strides[inv_order[0]] = page_stride
+                    kv_cache = torch.as_strided(
+                        kv_tensor,
+                        size=kv_cache_shape,
+                        stride=tuple(strides),
+                    )
+                else:
+                    # No padding — safe to use a contiguous view.
+                    kv_cache = kv_tensor.view(kv_cache_shape)
+                kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
             elif isinstance(kv_cache_spec, MambaSpec):
                 has_mamba = True
@@ -296,6 +316,7 @@ def build_attn_metadata(
     num_accepted_tokens: torch.Tensor | None = None,
     num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     for_cudagraph_capture: bool = False,
+    positions: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -324,6 +345,7 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            positions=positions,
             is_prefilling=is_prefilling,
         )
         if encoder_seq_lens and i in encoder_seq_lens:
