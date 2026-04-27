@@ -14,8 +14,12 @@ from argparse import ArgumentParser, Namespace
 from typing import Any
 
 from vllm.config import MoEOffloadConfig
+from vllm.logger import init_logger
 
 _PATCHED_ATTR = "_moe_offload_cli_patched"
+_ACTIVE_EXPERT_FETCH_METHOD = "passive"
+
+logger = init_logger(__name__)
 
 
 def _parser_has_option(parser: ArgumentParser, option: str) -> bool:
@@ -39,55 +43,51 @@ def _add_moe_offload_args(parser: ArgumentParser) -> ArgumentParser:
             "Default: disabled."
         ),
     )
-    group.add_argument(
-        "--moe-gpu-limit",
-        type=float,
-        default=MoEOffloadConfig.gpu_limit,
-        help=(
-            "Maximum fraction of GPU memory for the offload-managed "
-            "working set. Default: 0.4."
-        ),
-    )
-    group.add_argument(
-        "--moe-active-expert-budget",
-        type=int,
-        default=MoEOffloadConfig.active_expert_budget,
-        help=(
-            "Maximum number of active expert models resident on GPU. "
-            "Default: 2."
-        ),
-    )
-    group.add_argument(
-        "--moe-max-pipeline-depth",
-        type=int,
-        default=MoEOffloadConfig.max_pipeline_depth,
-        help=(
-            "Maximum routed expert bucket pipeline depth for expert reuse. "
-            "Default: 4."
-        ),
-    )
     return parser
 
 
 def _make_config_from_args(args_obj: Any) -> MoEOffloadConfig:
     return MoEOffloadConfig(
         enabled=bool(getattr(args_obj, "moe_cpu_offload", False)),
-        gpu_limit=float(getattr(args_obj, "moe_gpu_limit", MoEOffloadConfig.gpu_limit)),
-        active_expert_budget=int(
-            getattr(
-                args_obj,
-                "moe_active_expert_budget",
-                MoEOffloadConfig.active_expert_budget,
-            )
-        ),
-        max_pipeline_depth=int(
-            getattr(
-                args_obj,
-                "moe_max_pipeline_depth",
-                MoEOffloadConfig.max_pipeline_depth,
-            )
-        ),
     )
+
+
+def _get_num_experts(model_config: Any) -> int | None:
+    if model_config is None:
+        return None
+    get_num_experts = getattr(model_config, "get_num_experts", None)
+    if get_num_experts is None:
+        return None
+    try:
+        return int(get_num_experts())
+    except Exception:
+        return None
+
+
+def _get_active_expert_count(model_config: Any) -> int | None:
+    if model_config is None:
+        return None
+
+    candidates = (
+        "top_k_experts",
+        "num_experts_per_tok",
+        "moe_top_k",
+        "num_experts_per_token",
+    )
+    for config in (
+        getattr(model_config, "hf_text_config", None),
+        getattr(model_config, "hf_config", None),
+    ):
+        if config is None:
+            continue
+        for name in candidates:
+            value = getattr(config, name, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    continue
+    return None
 
 
 def patch_engine_args() -> None:
@@ -98,7 +98,7 @@ def patch_engine_args() -> None:
         return
 
     original_add_cli_args = EngineArgs.add_cli_args
-    original_from_cli_args = EngineArgs.from_cli_args
+    original_from_cli_args = EngineArgs.from_cli_args.__func__
     original_create_engine_config = EngineArgs.create_engine_config
 
     def add_cli_args(parser):  # type: ignore[no-untyped-def]
@@ -107,17 +107,43 @@ def patch_engine_args() -> None:
 
     @classmethod
     def from_cli_args(cls, args: Namespace):  # type: ignore[no-untyped-def]
-        engine_args = original_from_cli_args(args)
-        engine_args.moe_cpu_offload = bool(args.moe_cpu_offload)
-        engine_args.moe_gpu_limit = args.moe_gpu_limit
-        engine_args.moe_active_expert_budget = args.moe_active_expert_budget
-        engine_args.moe_max_pipeline_depth = args.moe_max_pipeline_depth
+        engine_args = original_from_cli_args(cls, args)
+        engine_args.moe_cpu_offload = bool(
+            getattr(args, "moe_cpu_offload", MoEOffloadConfig.enabled)
+        )
         engine_args.moe_offload_config = _make_config_from_args(engine_args)
         return engine_args
 
     def create_engine_config(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         vllm_config = original_create_engine_config(self, *args, **kwargs)
-        vllm_config.moe_offload_config = _make_config_from_args(self)
+        moe_offload_config = _make_config_from_args(self)
+        model_config = getattr(vllm_config, "model_config", None)
+        is_moe_model = bool(getattr(model_config, "is_moe", False))
+        if moe_offload_config.enabled and not is_moe_model:
+            moe_offload_config = MoEOffloadConfig(
+                enabled=False,
+            )
+            logger.info(
+                "MoE CPU offload ignored: --moe-cpu-offload was set, "
+                "but the model is not a MoE model."
+            )
+        elif moe_offload_config.enabled:
+            self.enforce_eager = True
+            if model_config is not None:
+                model_config.enforce_eager = True
+            num_experts = _get_num_experts(model_config)
+            active_experts = _get_active_expert_count(model_config)
+            moe_offload_config = MoEOffloadConfig(
+                enabled=True,
+            )
+            logger.info(
+                "MoE CPU offload enabled: total experts=%s, active experts=%s, "
+                "active expert transfer=%s.",
+                num_experts if num_experts is not None else "unknown",
+                active_experts if active_experts is not None else "unknown",
+                _ACTIVE_EXPERT_FETCH_METHOD,
+            )
+        vllm_config.moe_offload_config = moe_offload_config
         return vllm_config
 
     EngineArgs.add_cli_args = staticmethod(add_cli_args)

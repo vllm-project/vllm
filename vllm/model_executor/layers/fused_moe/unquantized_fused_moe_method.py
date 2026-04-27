@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalizeModular,
 )
+from vllm.model_executor.layers.fused_moe.moe_offload import (
+    local_expert_token_counts,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
@@ -93,6 +96,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
+        weight_device = (
+            torch.device("cpu")
+            if getattr(layer, "moe_cpu_offload_enabled", False)
+            else None
+        )
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.empty(
@@ -100,6 +108,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w13_up_dim,
                 hidden_size,
                 dtype=params_dtype,
+                device=weight_device,
             ),
             requires_grad=False,
         )
@@ -107,7 +116,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w13_weight, extra_weight_attrs)
         if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(
-                torch.zeros(num_experts, w13_up_dim, dtype=params_dtype),
+                torch.zeros(
+                    num_experts,
+                    w13_up_dim,
+                    dtype=params_dtype,
+                    device=weight_device,
+                ),
                 requires_grad=False,
             )
             layer.register_parameter("w13_bias", w13_bias)
@@ -119,6 +133,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 hidden_size,
                 intermediate_size_per_partition,
                 dtype=params_dtype,
+                device=weight_device,
             ),
             requires_grad=False,
         )
@@ -126,7 +141,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w2_weight, extra_weight_attrs)
         if self.moe.has_bias:
             w2_bias = torch.nn.Parameter(
-                torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    dtype=params_dtype,
+                    device=weight_device,
+                ),
                 requires_grad=False,
             )
             layer.register_parameter("w2_bias", w2_bias)
@@ -182,6 +202,45 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Padding the weight for better performance on ROCm
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
+
+        if layer.moe_cpu_offload_enabled:
+            if layer.expert_map is not None:
+                raise NotImplementedError(
+                    "MoE CPU offload Stage 2 does not yet support expert "
+                    "parallel expert maps."
+                )
+            w13, w2 = convert_to_unquantized_kernel_format(
+                self.unquantized_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+            )
+            layer.init_moe_offload_cache_from_sources(
+                {
+                    "w13_weight": w13,
+                    "w2_weight": w2,
+                    **(
+                        {
+                            "w13_bias": layer.w13_bias,
+                            "w2_bias": layer.w2_bias,
+                        }
+                        if self.moe.has_bias
+                        else {}
+                    ),
+                }
+            )
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            assert self.experts_cls is not None
+            self.moe_kernel = make_unquantized_moe_kernel(
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                backend=self.unquantized_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+            return
 
         if self.unquantized_backend in [
             UnquantizedMoeBackend.TPU,
@@ -241,6 +300,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
             )
 
+        layer.maybe_init_moe_offload_cache()
+
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
             return biased_moe_quant_config(
@@ -275,6 +336,57 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
+        if layer.moe_offload_cache is not None:
+            if (
+                layer.w13_weight.device != x.device
+                or layer.w2_weight.device != x.device
+            ):
+                layer.move_moe_offload_cache_to_device(x.device)
+            if shared_experts_input is not None:
+                raise NotImplementedError(
+                    "MoE CPU offload Stage 2 does not yet support internally "
+                    "overlapped shared experts."
+                )
+            token_counts = local_expert_token_counts(
+                topk_ids,
+                local_num_experts=layer.local_num_experts,
+                expert_map=layer.expert_map,
+            )
+            output: torch.Tensor | None = None
+            for expert_counts in layer.moe_offload_cache.expert_batches_for_counts(
+                token_counts
+            ):
+                layer.move_moe_offload_cache_to_device(x.device)
+                layer.moe_offload_cache.ensure_experts_resident(expert_counts)
+                wave_experts = set(expert_counts)
+                try:
+                    wave_topk_ids, wave_topk_weights = (
+                        layer.moe_offload_cache.make_wave_tensors(
+                            topk_ids,
+                            topk_weights,
+                            local_expert_ids=wave_experts,
+                            expert_map=layer.expert_map,
+                        )
+                    )
+                    wave_output = self.moe_kernel.apply(
+                        hidden_states=x,
+                        w1=layer.w13_weight,
+                        w2=layer.w2_weight,
+                        topk_weights=wave_topk_weights,
+                        topk_ids=wave_topk_ids,
+                        activation=layer.activation,
+                        apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                        global_num_experts=layer.global_num_experts,
+                        expert_map=layer.expert_map,
+                        shared_experts_input=None,
+                    )
+                finally:
+                    layer.moe_offload_cache.retire_experts(wave_experts)
+                    layer.release_moe_offload_cache_gpu_targets()
+                output = wave_output if output is None else output + wave_output
+            if output is not None:
+                return output
+
         return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,

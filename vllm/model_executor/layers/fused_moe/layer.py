@@ -32,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
+from vllm.model_executor.layers.fused_moe.moe_offload import (
+    ExpertCache,
+)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -56,6 +59,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -295,6 +299,7 @@ class FusedMoE(PluggableLayer):
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
+        self.moe_offload_cache: ExpertCache | None = None
 
         # FIXME (varun): We should have a better way of inferring the activation
         # datatype. This works for now as the tensor datatype entering the MoE
@@ -605,6 +610,78 @@ class FusedMoE(PluggableLayer):
             routed_scaling_factor=routed_scaling_factor
             if apply_routed_scale_to_output
             else 1.0,
+        )
+
+    @property
+    def moe_cpu_offload_enabled(self) -> bool:
+        moe_config = getattr(self.vllm_config, "moe_offload_config", None)
+        return bool(moe_config is not None and moe_config.enabled)
+
+    def maybe_init_moe_offload_cache(self) -> None:
+        if not self.moe_cpu_offload_enabled or self.moe_offload_cache is not None:
+            return
+
+        self.moe_offload_cache = ExpertCache.from_layer(
+            self,
+            active_expert_budget=None,
+            layer_id=self.layer_id,
+        )
+
+    def init_moe_offload_cache_from_sources(
+        self,
+        sources: dict[str, torch.Tensor],
+    ) -> None:
+        if not self.moe_cpu_offload_enabled:
+            return
+        if self.moe_offload_cache is not None:
+            return
+
+        device = torch.device(self.vllm_config.device_config.device)
+        if torch.cuda.is_available() and device.type == "cuda":
+            device = torch.device("cuda", torch.cuda.current_device())
+        self.moe_offload_cache = ExpertCache.from_cpu_sources(
+            layer_id=self.layer_id,
+            active_expert_budget=None,
+            sources=sources,
+            device=device,
+        )
+        for name in sources:
+            if name in ("w13_weight", "w2_weight", "w13_bias", "w2_bias"):
+                replace_parameter(self, name, self.moe_offload_cache.target_for(name))
+
+    def move_moe_offload_cache_to_device(self, device: torch.device) -> None:
+        if self.moe_offload_cache is None:
+            return
+        self.moe_offload_cache.ensure_targets_on_device(device)
+        for name in ("w13_weight", "w2_weight", "w13_bias", "w2_bias"):
+            try:
+                target = self.moe_offload_cache.target_for(name)
+            except KeyError:
+                continue
+            replace_parameter(self, name, target)
+
+    def release_moe_offload_cache_gpu_targets(self) -> None:
+        if self.moe_offload_cache is None:
+            return
+        self.moe_offload_cache.release_targets_to_cpu()
+        for name in ("w13_weight", "w2_weight", "w13_bias", "w2_bias"):
+            try:
+                target = self.moe_offload_cache.target_for(name)
+            except KeyError:
+                continue
+            replace_parameter(self, name, target)
+
+    def ensure_moe_offload_experts_resident(
+        self,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.moe_offload_cache is None:
+            return topk_ids
+
+        return self.moe_offload_cache.ensure_experts_resident_and_remap(
+            topk_ids,
+            local_num_experts=self.local_num_experts,
+            expert_map=self.expert_map,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py

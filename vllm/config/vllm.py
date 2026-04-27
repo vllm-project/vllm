@@ -39,6 +39,7 @@ from .load import LoadConfig
 from .lora import LoRAConfig
 from .mamba import MambaConfig
 from .model import ModelConfig
+from .moe import MoEOffloadConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
@@ -285,6 +286,8 @@ class VllmConfig:
     """Load configuration."""
     offload_config: OffloadConfig = Field(default_factory=OffloadConfig)
     """Model weight offloading configuration."""
+    moe_offload_config: MoEOffloadConfig = Field(default_factory=MoEOffloadConfig)
+    """Sparse-MoE CPU offload expert paging configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)

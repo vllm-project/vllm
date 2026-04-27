@@ -5,8 +5,9 @@ from argparse import ArgumentError
 
 import pytest
 
-from vllm.config import MoEOffloadConfig, VllmConfig
-from vllm.engine.arg_utils import EngineArgs
+from vllm.config import ModelConfig, MoEOffloadConfig, VllmConfig, replace
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.engine import moe_offload_cli
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
@@ -73,52 +74,95 @@ def test_moe_cpu_offload_flags_visible_and_defaulted():
     }
 
     assert "--moe-cpu-offload" in option_strings
-    assert "--moe-gpu-limit" in option_strings
-    assert "--moe-active-expert-budget" in option_strings
-    assert "--moe-max-pipeline-depth" in option_strings
+    assert "--moe-gpu-limit" not in option_strings
+    assert "--moe-active-expert-budget" not in option_strings
+    assert "--moe-active-expert-cache" not in option_strings
+    assert "--moe-max-pipeline-depth" not in option_strings
 
     args = parser.parse_args([])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.moe_cpu_offload is False
-    assert engine_args.moe_gpu_limit == 0.4
-    assert engine_args.moe_active_expert_budget == 2
-    assert engine_args.moe_max_pipeline_depth == 4
 
     config = engine_args.create_engine_config()
     assert isinstance(config.moe_offload_config, MoEOffloadConfig)
     assert config.moe_offload_config.enabled is False
-    assert config.moe_offload_config.gpu_limit == 0.4
-    assert config.moe_offload_config.active_expert_budget == 2
-    assert config.moe_offload_config.max_pipeline_depth == 4
 
 
-def test_moe_cpu_offload_flags_parse_explicit_values():
+def test_moe_cpu_offload_flag_parses():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args([
-        "--moe-cpu-offload",
-        "--moe-gpu-limit", "0.35",
-        "--moe-active-expert-budget", "3",
-        "--moe-max-pipeline-depth", "8",
-    ])
+    args = parser.parse_args(["--moe-cpu-offload"])
     engine_args = EngineArgs.from_cli_args(args=args)
     config = engine_args.create_engine_config()
 
     assert engine_args.moe_cpu_offload is True
+    assert config.moe_offload_config.enabled is False
+
+
+def test_moe_cpu_offload_ignores_dense_model(monkeypatch):
+    log_messages = []
+    monkeypatch.setattr(
+        moe_offload_cli.logger,
+        "info",
+        lambda message, *args: log_messages.append(message % args if args else message),
+    )
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--model", "facebook/opt-125m", "--moe-cpu-offload"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    config = engine_args.create_engine_config()
+
+    assert config.model_config.is_moe is False
+    assert config.model_config.enforce_eager is False
+    assert config.moe_offload_config.enabled is False
+    assert log_messages == [
+        "MoE CPU offload ignored: --moe-cpu-offload was set, "
+        "but the model is not a MoE model."
+    ]
+
+
+def test_moe_cpu_offload_enables_for_moe_model(monkeypatch):
+    monkeypatch.setattr(ModelConfig, "is_moe", property(lambda self: True))
+    monkeypatch.setattr(moe_offload_cli, "_get_active_expert_count", lambda _: 8)
+    log_messages = []
+    monkeypatch.setattr(
+        moe_offload_cli.logger,
+        "info",
+        lambda message, *args: log_messages.append(message % args if args else message),
+    )
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--model", "facebook/opt-125m", "--moe-cpu-offload"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    config = engine_args.create_engine_config()
+
+    assert config.model_config.enforce_eager is True
     assert config.moe_offload_config.enabled is True
-    assert config.moe_offload_config.gpu_limit == 0.35
-    assert config.moe_offload_config.active_expert_budget == 3
-    assert config.moe_offload_config.max_pipeline_depth == 8
+    assert log_messages == [
+        "MoE CPU offload enabled: total experts=0, active experts=8, "
+        "active expert transfer=passive."
+    ]
 
 
-def test_moe_offload_config_validates_ranges():
-    with pytest.raises(ValueError):
-        MoEOffloadConfig(gpu_limit=0)
-    with pytest.raises(ValueError):
-        MoEOffloadConfig(gpu_limit=1.1)
-    with pytest.raises(ValueError):
-        MoEOffloadConfig(active_expert_budget=0)
-    with pytest.raises(ValueError):
-        MoEOffloadConfig(max_pipeline_depth=0)
+def test_moe_cpu_offload_cli_preserves_async_engine_args():
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--enable-log-requests"])
+
+    engine_args = AsyncEngineArgs.from_cli_args(args=args)
+
+    assert isinstance(engine_args, AsyncEngineArgs)
+    assert engine_args.enable_log_requests is True
+    assert engine_args.moe_cpu_offload is False
+
+
+def test_moe_offload_config_survives_vllm_config_replace():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--moe-cpu-offload"])
+    config = EngineArgs.from_cli_args(args=args).create_engine_config()
+
+    replaced = replace(config, performance_mode="throughput")
+
+    assert replaced.performance_mode == "throughput"
+    assert replaced.moe_offload_config.enabled is False
 
 
 def test_defaults_with_usage_context():
