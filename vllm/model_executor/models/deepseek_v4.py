@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_rank,
@@ -62,18 +62,49 @@ from .utils import (
     maybe_prefix,
 )
 
+_DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+
+
+def _get_deepseek_v4_expert_dtype() -> str:
+    """Read ``expert_dtype`` from the active vLLM config's hf_config.
+
+    Returns ``"fp4"`` when the field is missing so checkpoints predating
+    this knob keep their original behavior.
+    """
+    try:
+        hf_config = get_current_vllm_config().model_config.hf_config
+    except Exception:
+        return "fp4"
+    expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
+    if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
+        raise ValueError(
+            f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "
+            f"expected one of {_DEEPSEEK_V4_EXPERT_DTYPES}."
+        )
+    return expert_dtype
+
 
 class DeepseekV4FP8Config(Fp8Config):
-    """FP8 config that routes MoE layers to MXFP4 quantization.
+    """FP8 config for DeepSeek V4 with expert-dtype-aware MoE dispatch.
 
-    DeepSeek V4 checkpoints use FP8 for linear/attention layers but
-    MXFP4 for MoE expert weights. This config inherits standard FP8
-    behavior and overrides only the MoE dispatch.
+    DeepSeek V4 checkpoints always use FP8 block quantization for
+    linear/attention layers. The MoE expert weights vary by checkpoint:
+    - ``expert_dtype="fp4"`` (e.g. DeepSeek-V4-Flash): MXFP4 experts
+      with ue8m0 (e8m0fnu) FP8 linear scales.
+    - ``expert_dtype="fp8"`` (e.g. DeepSeek-V4-Flash-Base): FP8 block
+      experts with float32 FP8 linear scales.
+
+    The dispatch and the linear scale dtype are both keyed off
+    ``expert_dtype`` from the model's hf_config; missing values default
+    to ``"fp4"`` so existing FP4 checkpoints stay unchanged.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.is_scale_e8m0: bool = True
+        self.expert_dtype = _get_deepseek_v4_expert_dtype()
+        # FP4 checkpoints store FP8 linear scales as e8m0fnu; FP8 expert
+        # checkpoints (Flash-Base) store them as float32.
+        self.is_scale_e8m0: bool = self.expert_dtype == "fp4"
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -101,11 +132,14 @@ class DeepseekV4FP8Config(Fp8Config):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            return Mxfp4MoEMethod(layer.moe_config)
+            if self.expert_dtype == "fp4":
+                return Mxfp4MoEMethod(layer.moe_config)
+            # expert_dtype == "fp8": fall through to Fp8Config which
+            # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
 
     def is_mxfp4_quant(self, prefix, layer):
-        return isinstance(layer, FusedMoE)
+        return isinstance(layer, FusedMoE) and self.expert_dtype == "fp4"
 
 
 @triton.jit
@@ -634,6 +668,12 @@ class DeepseekV4MoE(nn.Module):
         if self.use_mega_moe and self.scoring_func != "sqrtsoftplus":
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently supports sqrtsoftplus routing only."
+            )
+        if self.use_mega_moe and getattr(config, "expert_dtype", "fp4") != "fp4":
+            raise NotImplementedError(
+                "DeepSeek V4 MegaMoE only supports fp4 experts; got expert_dtype="
+                f"{config.expert_dtype!r}. Drop --kernel-config moe_backend="
+                "deep_gemm_mega_moe for this checkpoint."
             )
 
         self.gate = GateLinear(
@@ -1355,10 +1395,24 @@ def hc_head(
     return y.to(dtype)
 
 
-class DeepseekV4ForCausalLM(nn.Module):
-    model_cls = DeepseekV4Model
-
-    hf_to_vllm_mapper = WeightsMapper(
+def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
+    if expert_dtype == "fp4":
+        # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
+        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
+        # shared experts use Fp8LinearMethod's block scales, which
+        # register as ``weight_scale_inv``.
+        scale_regex = {
+            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+            re.compile(r"\.scale$"): ".weight_scale_inv",
+        }
+    else:
+        # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
+        # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
+        # there.
+        scale_regex = {
+            re.compile(r"\.scale$"): ".weight_scale_inv",
+        }
+    return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
             "embed.": "model.embed.",
@@ -1366,12 +1420,7 @@ class DeepseekV4ForCausalLM(nn.Module):
             "hc_head": "model.hc_head",
             "mtp.": "model.mtp.",
         },
-        orig_to_new_regex={
-            # Routed MoE expert scales: experts.N.wX.scale -> .weight_scale
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            # Everything else (FP8 linear + shared experts): .scale -> .weight_scale_inv
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        },
+        orig_to_new_regex=scale_regex,
         orig_to_new_suffix={
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
@@ -1383,11 +1432,22 @@ class DeepseekV4ForCausalLM(nn.Module):
         },
     )
 
+
+class DeepseekV4ForCausalLM(nn.Module):
+    model_cls = DeepseekV4Model
+
+    # Default mapper assumes the original FP4-expert checkpoint layout.
+    # Overridden per-instance in __init__ when expert_dtype != "fp4".
+    hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         self.config = config
+        expert_dtype = getattr(config, "expert_dtype", "fp4")
+        if expert_dtype != "fp4":
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
 
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
