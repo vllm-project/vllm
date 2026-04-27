@@ -340,10 +340,12 @@ def test_mla_rope_kvcache_cat_fusion(
         fusion_pass = MLARoPEKVCacheCatFusionPass(vllm_config)
         # note: FixFunctionalizationPass is required to correctly lower
         # the fused op to its inplace version with auto-functionalization v1.
-        # Else, PyTorch's builtin decompose_auto_functionalized FX pass incorrectly
-        # lowers the non-contiguous q_pe input tensor without its storage offset of 128.
-        # This is not an issue with auto-functionalization v2 since it actually
-        # tracks the base storage tensors and their memory layouts.
+        # Without it, decompose_auto_functionalized calls clone_preserve_strides
+        # on the non-contiguous q_pe slice directly, and inductor's lowering 
+        # of the resulting as_strided chain incorrectly drops the storage offset.
+        # auto-functionalization v2 avoids this: it clones the contiguous base
+        # tensor (_all_bases) and reconstructs the slice as a view, so the
+        # offset is never passed through as_strided lowering.
         passes = [
             NoOpEliminationPass(vllm_config),
             fusion_pass,
