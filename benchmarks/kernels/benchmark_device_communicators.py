@@ -41,6 +41,10 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
 )
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment,
+    init_distributed_environment,
+)
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -488,8 +492,7 @@ def main():
     args = parser.parse_args()
 
     # Initialize distributed
-    if not dist.is_initialized():
-        dist.init_process_group(backend="gloo")
+    init_distributed_environment(backend="gloo")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -565,6 +568,7 @@ def main():
     # Cleanup
     if cpu_group != dist.group.WORLD:
         dist.destroy_process_group(cpu_group)
+    destroy_distributed_environment()
 
 
 if __name__ == "__main__":
