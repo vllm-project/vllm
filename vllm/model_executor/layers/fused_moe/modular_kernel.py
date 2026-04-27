@@ -1215,6 +1215,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        final_output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1242,6 +1243,16 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+
+        # When expert workspaces are both empty (e.g. AiterExperts manages
+        # its own buffers), write directly into the caller's output tensor
+        # to avoid a redundant copy in the finalize step.
+        if (
+            final_output is not None
+            and prod(workspace13.shape) == 0
+            and prod(workspace2.shape) == 0
+        ):
+            fused_out = final_output
 
         self.fused_experts.apply(
             output=fused_out,
@@ -1403,6 +1414,7 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            final_output=output,
         )
 
         return self._finalize(

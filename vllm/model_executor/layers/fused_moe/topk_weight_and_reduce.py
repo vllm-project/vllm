@@ -62,6 +62,9 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         if output is None:
             return fused_expert_output
 
+        if output is fused_expert_output:
+            return output
+
         # MoEPrepareAndFinalizeNoDPEPModular needs the output to be in the `output`
         # tensor.
         assert output.size() == fused_expert_output.size(), (

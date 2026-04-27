@@ -120,34 +120,46 @@ def _rocm_aiter_fused_moe_impl(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
-) -> torch.Tensor:
+    moe_buf: torch.Tensor | None = None,
+) -> None:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    return fused_moe(
-        hidden_states,
-        w1,
-        w2,
-        topk_weight,
-        topk_ids,
-        expert_mask,
-        activation,
-        quant_type,
-        doweight_stage1,
-        w1_scale,
-        w2_scale,
-        a1_scale,
-        a2_scale,
-        num_local_tokens=num_local_tokens,
-        dtype=output_dtype,
-        hidden_pad=hidden_pad,
-        intermediate_pad=intermediate_pad,
-        bias1=bias1,
-        bias2=bias2,
-    )
+    try:
+        from aiter.fused_moe import output_buffer_override
+        ctx = output_buffer_override(moe_buf) if moe_buf is not None else None
+    except ImportError:
+        ctx = None
+
+    from contextlib import nullcontext
+    with ctx if ctx is not None else nullcontext():
+        result = fused_moe(
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            expert_mask,
+            activation,
+            quant_type,
+            doweight_stage1,
+            w1_scale,
+            w2_scale,
+            a1_scale,
+            a2_scale,
+            num_local_tokens=num_local_tokens,
+            dtype=output_dtype,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
+            bias1=bias1,
+            bias2=bias2,
+        )
+
+    if moe_buf is not None and result is not moe_buf:
+        moe_buf.copy_(result)
 
 
 def _rocm_aiter_fused_moe_fake(
@@ -170,10 +182,9 @@ def _rocm_aiter_fused_moe_fake(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if output_dtype is not None:
-        return torch.empty_like(hidden_states, dtype=output_dtype)
-    return torch.empty_like(hidden_states)
+    moe_buf: torch.Tensor | None = None,
+) -> None:
+    pass
 
 
 def _rocm_aiter_asm_moe_tkw1_impl(
@@ -1372,7 +1383,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_fused_moe",
                 op_func=_rocm_aiter_fused_moe_impl,
-                mutates_args=[],
+                mutates_args=["moe_buf"],
                 fake_impl=_rocm_aiter_fused_moe_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -1690,8 +1701,16 @@ class rocm_aiter_ops:
         intermediate_pad: int = 0,
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
+        moe_buf: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_fused_moe(
+        if moe_buf is None:
+            M = topk_ids.shape[0]
+            model_dim = w2.shape[1]
+            dtype = output_dtype if output_dtype is not None else hidden_states.dtype
+            moe_buf = torch.empty(
+                (M, model_dim), dtype=dtype, device=hidden_states.device
+            )
+        torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
             w1,
             w2,
@@ -1711,7 +1730,9 @@ class rocm_aiter_ops:
             intermediate_pad,
             bias1,
             bias2,
+            moe_buf,
         )
+        return moe_buf
 
     @staticmethod
     def asm_moe_tkw1(
