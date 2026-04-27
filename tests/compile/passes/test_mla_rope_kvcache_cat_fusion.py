@@ -11,6 +11,9 @@ from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
     MLARoPEKVCacheCatFusionPass,
 )
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -108,6 +111,14 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             bias=False,
             prefix=f"{prefix}.kv_b_proj",
         ).to(device)
+
+        # ColumnParallelLinear default init in bf16 with seed 0 produces
+        # near-zero weights (7/4.7M nonzero), making the GEMM output almost
+        # entirely zero and masking correctness bugs. Reinitialize to get
+        # dense outputs.
+        with torch.no_grad():
+            torch.nn.init.normal_(self.q_b_proj.weight, std=0.02)
+            torch.nn.init.normal_(self.kv_b_proj.weight, std=0.02)
 
         # Register layer metadata for the fusion pass via MLAAttention
         self.mla_attn = MLAAttention(
@@ -327,10 +338,18 @@ def test_mla_rope_kvcache_cat_fusion(
         )
 
         fusion_pass = MLARoPEKVCacheCatFusionPass(vllm_config)
+        # note: FixFunctionalizationPass is required to correctly lower
+        # the fused op to its inplace version with auto-functionalization v1.
+        # Else, PyTorch's builtin decompose_auto_functionalized FX pass incorrectly
+        # lowers the non-contiguous q_pe input tensor without its storage offset of 128
+        # (e.g. q_pe, a slice with offset 128 and strides (3072,192,1)).
+        # This is not an issue with auto-functionalization v2 since it actually
+        # tracks the base storage tensors and their memory layouts.
         passes = [
             NoOpEliminationPass(vllm_config),
             fusion_pass,
             PostCleanupPass(vllm_config),
+            FixFunctionalizationPass(vllm_config),
         ]
         backend = TestBackend(*passes)
 
