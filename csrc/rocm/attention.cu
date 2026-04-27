@@ -3615,18 +3615,17 @@ void paged_attention_custom_launcher_navi(
 // kernels if shuffle KV cache layout is needed on RDNA GPUs.
 #define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,    \
                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)                \
-  if (use_interleaved_v_cache                                         \
-    TORCH_CHECK(!is_navi,                                                     \
-                "Reading interleaved V-cache layout from paged decode "       \
-                "attention not supported on NAVI GPUs");                      \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,    \
-                                    true>(                                    \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,         \
+  if (use_interleaved_v_cache) {                                             \
+    TORCH_CHECK(!is_navi,                                                    \
+                "Reading interleaved V-cache layout from paged decode "      \
+                "attention not supported on NAVI GPUs");                     \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,   \
+                                    true>(                                   \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
-  }                                                                          \
-  else {                                                                     \
+  } else {                                                                   \
     if (!is_navi) {                                                          \
       paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
                                       OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
