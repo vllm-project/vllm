@@ -5,7 +5,13 @@
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class AnthropicError(BaseModel):
@@ -99,6 +105,8 @@ class AnthropicToolChoice(BaseModel):
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str
     messages: list[AnthropicMessage]
     max_tokens: int
@@ -124,6 +132,28 @@ class AnthropicMessagesRequest(BaseModel):
             "Will be accessible by the template."
         ),
     )
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional request fields to merge into the Anthropic request "
+            "body before conversion to the OpenAI-compatible request."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def flatten_extra_body(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        extra_body = data.get("extra_body")
+        if not isinstance(extra_body, dict):
+            return data
+
+        flattened = dict(data)
+        for key, value in extra_body.items():
+            flattened[key] = value
+        return flattened
 
     @field_validator("model")
     @classmethod
@@ -213,6 +243,8 @@ class AnthropicContextManagement(BaseModel):
 class AnthropicCountTokensRequest(BaseModel):
     """Anthropic messages.count_tokens request"""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str
     messages: list[AnthropicMessage]
     system: str | list[AnthropicContentBlock] | None = None
@@ -227,6 +259,28 @@ class AnthropicCountTokensRequest(BaseModel):
             "Will be accessible by the template."
         ),
     )
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional request fields to merge into the Anthropic request "
+            "body before conversion to the OpenAI-compatible request."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def flatten_extra_body(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        extra_body = data.get("extra_body")
+        if not isinstance(extra_body, dict):
+            return data
+
+        flattened = dict(data)
+        for key, value in extra_body.items():
+            flattened[key] = value
+        return flattened
 
     @field_validator("model")
     @classmethod

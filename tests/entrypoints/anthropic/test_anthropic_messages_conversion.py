@@ -635,3 +635,73 @@ class TestThinkingBlockConversion:
         # Redacted thinking is ignored, normal thinking still becomes reasoning.
         assert asst.get("reasoning") == "Thinking..."
         assert asst.get("content") == "Hi!"
+
+
+# ======================================================================
+# extra_body conversion
+# ======================================================================
+
+
+class TestExtraBodyConversion:
+    def test_extra_body_overrides_conflicting_top_level_fields(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            chat_template_kwargs={"enable_thinking": True},
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                },
+                "request_id": "override-request-id",
+            },
+            request_id="top-level-request-id",
+        )
+
+        result = _convert(request)
+
+        assert result.chat_template_kwargs == {
+            "enable_thinking": False,
+        }
+        assert result.request_id == "override-request-id"
+
+    def test_extra_body_chat_template_kwargs_are_promoted(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.chat_template_kwargs == {
+            "enable_thinking": False,
+        }
+
+    def test_extra_body_openai_fields_are_promoted(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                },
+                "documents": [{"title": "Doc 1", "text": "Body"}],
+                "media_io_kwargs": {"image": {"image_mode": "RGB"}},
+                "mm_processor_kwargs": {"max_dynamic_patch": 4},
+                "structured_outputs": {"json_object": True},
+                "request_id": "anthropic-extra-body",
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.chat_template_kwargs == {
+            "enable_thinking": False,
+        }
+        assert result.documents == [{"title": "Doc 1", "text": "Body"}]
+        assert result.media_io_kwargs == {"image": {"image_mode": "RGB"}}
+        assert result.mm_processor_kwargs == {"max_dynamic_patch": 4}
+        assert result.structured_outputs is not None
+        assert result.structured_outputs.json_object is True
+        assert result.request_id == "anthropic-extra-body"

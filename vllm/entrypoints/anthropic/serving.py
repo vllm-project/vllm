@@ -132,6 +132,14 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._convert_tools(anthropic_request, req)
         return req
 
+    @staticmethod
+    def _get_extra_chat_completion_kwargs(
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> dict[str, Any]:
+        extra_kwargs = dict(anthropic_request.model_extra or {})
+        extra_kwargs.pop("extra_body", None)
+        return extra_kwargs
+
     @classmethod
     def _convert_system_message(
         cls,
@@ -319,14 +327,17 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
     ) -> ChatCompletionRequest:
         """Build base ChatCompletionRequest"""
+        extra_kwargs = cls._get_extra_chat_completion_kwargs(anthropic_request)
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return ChatCompletionRequest(
+                **extra_kwargs,
                 model=anthropic_request.model,
                 messages=openai_messages,
                 chat_template_kwargs=anthropic_request.chat_template_kwargs,
             )
 
         return ChatCompletionRequest(
+            **extra_kwargs,
             model=anthropic_request.model,
             messages=openai_messages,
             max_tokens=anthropic_request.max_tokens,
