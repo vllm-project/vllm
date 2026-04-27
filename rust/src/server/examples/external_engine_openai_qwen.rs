@@ -10,7 +10,7 @@ use async_openai::types::chat::{
 use async_openai::types::models::ListModelResponse;
 use clap::Parser;
 use futures::StreamExt as _;
-use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
@@ -72,14 +72,10 @@ async fn main() -> Result<()> {
     };
 
     let bind_address = format!("127.0.0.1:{port}");
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let shutdown = CancellationToken::new();
     let server_config = config.clone();
-    let server_task = tokio::spawn(async move {
-        serve(server_config, async move {
-            let _ = shutdown_rx.await;
-        })
-        .await
-    });
+    let server_shutdown = shutdown.clone();
+    let server_task = tokio::spawn(async move { serve(server_config, server_shutdown).await });
 
     let client = Client::with_config(
         OpenAIConfig::new()
@@ -93,7 +89,7 @@ async fn main() -> Result<()> {
     println!();
     println!("final_text={final_text:?}");
 
-    shutdown(server_task, shutdown_tx).await
+    shutdown_server(server_task, shutdown).await
 }
 
 fn init_tracing() {
@@ -210,11 +206,11 @@ async fn stream_completion(
     Ok(final_text)
 }
 
-async fn shutdown(
+async fn shutdown_server(
     server_task: tokio::task::JoinHandle<anyhow::Result<()>>,
-    shutdown_tx: oneshot::Sender<()>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
-    let _ = shutdown_tx.send(());
+    shutdown.cancel();
     server_task
         .await
         .context("server task join failed")?

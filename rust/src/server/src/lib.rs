@@ -12,13 +12,11 @@ mod routes;
 mod state;
 mod utils;
 
-use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
-use futures::FutureExt as _;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::either::Either;
@@ -84,24 +82,19 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     ))
 }
 
-/// Run the OpenAI-compatible HTTP server until the supplied shutdown future resolves.
+/// Run the OpenAI-compatible HTTP server until the supplied shutdown token is cancelled.
 ///
 /// The server owns one `vllm-chat` facade, which in turn owns the lower `vllm-text` and
 /// `vllm-llm` layers, and shuts them down before returning.
-pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
+pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     config
         .validate()
         .context("invalid OpenAI frontend configuration")?;
 
-    let shutdown = Box::pin(shutdown).shared();
-
     // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
         result = build_state(&config) => result?,
-        _ = shutdown.clone() => return Ok(()),
+        _ = shutdown.cancelled() => return Ok(()),
     };
     let listener = Listener::bind(&config.listener_mode)
         .await
@@ -143,43 +136,43 @@ where
         }
     });
 
-    // Run HTTP and gRPC concurrently under a shared cancellation token. If either
-    // server exits — cleanly or with an error — we trip the token so the other
-    // begins a graceful drain immediately. This avoids a partial-outage state where
-    // one protocol keeps serving after the other has died.
-    let internal_shutdown = CancellationToken::new();
+    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown token.
+    // Caller cancellation propagates into both protocols; if either protocol exits first,
+    // we cancel this child token so its sibling also begins a graceful drain.
+    let server_shutdown = shutdown.child_token();
 
     let http_fut = {
-        let external = shutdown.clone();
-        let internal = internal_shutdown.clone();
+        let shutdown = server_shutdown.child_token();
+        let server_shutdown = server_shutdown.clone();
         async move {
-            let signal = combined_shutdown(external, internal.clone());
             let result = axum::serve(listener, app)
-                .with_graceful_shutdown(signal)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
                 .await
                 .context("HTTP server failed");
-            internal.cancel();
+            server_shutdown.cancel();
             result
         }
     };
 
     let grpc_fut = {
-        let external = shutdown.clone();
-        let internal = internal_shutdown.clone();
+        let shutdown = server_shutdown.child_token();
+        let server_shutdown = server_shutdown.clone();
         async move {
             let Some((grpc_listener, svc)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
-                external.await;
+                shutdown.cancelled_owned().await;
                 return Ok(());
             };
-            let signal = combined_shutdown(external, internal.clone());
             let result = TonicServer::builder()
                 .add_service(svc)
-                .serve_with_incoming_shutdown(TcpListenerStream::new(grpc_listener), signal)
+                .serve_with_incoming_shutdown(
+                    TcpListenerStream::new(grpc_listener),
+                    shutdown.cancelled_owned(),
+                )
                 .await
                 .context("gRPC server failed");
-            internal.cancel();
+            server_shutdown.cancel();
             result
         }
     };
@@ -188,17 +181,4 @@ where
     http_res.and(grpc_res)?;
 
     state.shutdown().await
-}
-
-/// Resolves when either the external shutdown future fires or the internal
-/// cancellation token is tripped. Used to fan one shared shutdown signal out to
-/// both server loops while also letting either loop pull the other down.
-async fn combined_shutdown<F>(external: F, internal: CancellationToken)
-where
-    F: Future<Output = ()>,
-{
-    tokio::select! {
-        _ = external => {}
-        _ = internal.cancelled() => {}
-    }
 }

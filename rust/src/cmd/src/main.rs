@@ -6,8 +6,7 @@ use std::env;
 use std::process::ExitStatus;
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures::FutureExt as _;
-use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::cli::{Cli, Command};
@@ -48,25 +47,34 @@ enum ShutdownReason {
     EngineExited(ExitStatus),
 }
 
-/// Shutdown signal from Ctrl-C or SIGTERM.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C signal handler");
-    };
+/// Cancellation token tripped by Ctrl-C or SIGTERM.
+fn shutdown_signal() -> CancellationToken {
+    let token = CancellationToken::new();
+    let shutdown = token.clone();
 
-    let sigterm = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM signal handler")
-            .recv()
-            .await;
-    };
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl-C signal handler");
+        };
 
-    tokio::select! {
-        _ = ctrl_c => info!("received shutdown signal (Ctrl-C), shutting down..."),
-        _ = sigterm => info!("received shutdown signal (SIGTERM), shutting down..."),
-    }
+        let sigterm = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM signal handler")
+                .recv()
+                .await;
+        };
+
+        tokio::select! {
+            _ = ctrl_c => info!("received shutdown signal (Ctrl-C), shutting down..."),
+            _ = sigterm => info!("received shutdown signal (SIGTERM), shutting down..."),
+        }
+
+        shutdown.cancel();
+    });
+
+    token
 }
 
 fn main() -> Result<()> {
@@ -116,31 +124,20 @@ async fn async_main(cli: Cli) -> Result<()> {
                 .await
                 .context("failed to start managed Python headless engine")?;
 
-            let (shutdown_signal_tx, shutdown_signal_rx) = oneshot::channel();
-            let shutdown_engine = engine.clone();
-            let shutdown_task = tokio::spawn(async move {
-                // Drive the frontend shutdown from either Ctrl-C or unexpected
-                // Python-engine termination, whichever happens first.
-                tokio::select! {
-                    _ = shutdown_signal() => ShutdownReason::Signal,
-
-                    status = shutdown_engine.wait_for_exit() => {
-                        warn!(%status, "managed Python headless engine exited");
-                        ShutdownReason::EngineExited(status)
-                    },
-                }
-            });
+            let shutdown = shutdown_signal();
 
             let mut serve_task = if args.headless {
                 info!("running managed Python headless engine without Rust frontend");
+                let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let _ = shutdown_signal_rx.await;
+                    shutdown.cancelled().await;
                     Ok(())
                 })
             } else {
                 let config = args.to_frontend_config(handshake_address);
+                let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let result = vllm_server::serve(config, shutdown_signal_rx.map(|_| ())).await;
+                    let result = vllm_server::serve(config, shutdown).await;
                     if result.is_ok() {
                         info!("OpenAI server shut down gracefully");
                     }
@@ -149,10 +146,18 @@ async fn async_main(cli: Cli) -> Result<()> {
             };
 
             let shutdown_reason = tokio::select! {
-                reason = shutdown_task => {
-                    let _ = shutdown_signal_tx.send(());
-                    reason.context("shutdown task join failed")?
+                biased;
+
+                // Received shutdown signal via Ctrl-C or SIGTERM.
+                _ = shutdown.cancelled() => ShutdownReason::Signal,
+
+                // Engine process exited unexpectedly.
+                status = engine.wait_for_exit() => {
+                    warn!(%status, "managed Python headless engine exited, shutting down...");
+                    ShutdownReason::EngineExited(status)
                 }
+
+                // Serve task exited unexpectedly.
                 serve_result = &mut serve_task => {
                     let serve_result = serve_result.context("serve task join failed")?;
                     match serve_result {
@@ -161,6 +166,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                     }
                 }
             };
+            // Regardless of the shutdown reason, broadcast shutdown signal here to ensure that all
+            // serving tasks are notified.
+            shutdown.cancel();
 
             // Shutdown begins. Terminate the managed engine first.
             engine.shutdown().await?;

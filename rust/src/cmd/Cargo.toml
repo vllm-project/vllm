@@ -15,7 +15,6 @@ native-tls-vendored = ["dep:native-tls-vendored"]
 anyhow.workspace = true
 clap.workspace = true
 educe.workspace = true
-futures.workspace = true
 itertools.workspace = true
 libc.workspace = true
 native-tls-vendored = { workspace = true, optional = true }
@@ -25,6 +24,7 @@ serde_with.workspace = true
 thiserror-ext.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["process", "signal"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
