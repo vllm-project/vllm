@@ -117,6 +117,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 return vllm_server::serve(config, shutdown_signal()).await;
             }
 
+            let shutdown_timeout = args.runtime.shutdown_timeout();
             let engine_config = args.clone().into_managed_engine_config(handshake_port);
             let handshake_address = engine_config.handshake_address();
 
@@ -171,7 +172,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             shutdown.cancel();
 
             // Shutdown begins. Terminate the managed engine first.
-            engine.shutdown().await?;
+            engine.shutdown(shutdown_timeout).await?;
             info!("managed engine shut down gracefully");
             // Wait for the API server to shut down gracefully by draining in-flight requests.
             if !matches!(shutdown_reason, ShutdownReason::Server(_)) {

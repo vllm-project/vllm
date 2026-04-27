@@ -12,17 +12,18 @@ mod routes;
 mod state;
 mod utils;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
 use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use tokio::net::TcpListener;
+use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -140,15 +141,48 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     // Caller cancellation propagates into both protocols; if either protocol exits first,
     // we cancel this child token so its sibling also begins a graceful drain.
     let server_shutdown = shutdown.child_token();
+    let force_shutdown = CancellationToken::new();
+    let shutdown_deadline = Arc::new(OnceLock::new());
+
+    // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
+    tokio::spawn({
+        let shutdown = server_shutdown.clone();
+        let force_shutdown = force_shutdown.clone();
+        let shutdown_deadline = shutdown_deadline.clone();
+        let shutdown_timeout = config.shutdown_timeout;
+
+        async move {
+            shutdown.cancelled().await;
+            let deadline = Instant::now() + shutdown_timeout;
+            let _ = shutdown_deadline.set(deadline);
+
+            if shutdown_timeout.is_zero() {
+                force_shutdown.cancel();
+            } else {
+                sleep_until(deadline).await;
+                force_shutdown.cancel();
+            }
+        }
+    });
 
     let http_fut = {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
+        let force_shutdown = force_shutdown.clone();
         async move {
-            let result = axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown.cancelled_owned())
-                .await
-                .context("HTTP server failed");
+            let server =
+                axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+
+            let result = tokio::select! {
+                result = server => {
+                    result.context("HTTP server failed")
+                }
+                _ = force_shutdown.cancelled() => {
+                    warn!("HTTP graceful shutdown deadline elapsed; aborting server");
+                    Ok(())
+                }
+            };
+
             server_shutdown.cancel();
             result
         }
@@ -157,21 +191,31 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     let grpc_fut = {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
+        let force_shutdown = force_shutdown.clone();
         async move {
             let Some((grpc_listener, svc)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
-                shutdown.cancelled_owned().await;
+                shutdown.cancelled().await;
                 return Ok(());
             };
-            let result = TonicServer::builder()
+            let server = TonicServer::builder()
                 .add_service(svc)
                 .serve_with_incoming_shutdown(
                     TcpListenerStream::new(grpc_listener),
                     shutdown.cancelled_owned(),
-                )
-                .await
-                .context("gRPC server failed");
+                );
+
+            let result = tokio::select! {
+                result = server => {
+                    result.context("gRPC server failed")
+                }
+                _ = force_shutdown.cancelled() => {
+                    warn!("gRPC graceful shutdown deadline elapsed; aborting server");
+                    Ok(())
+                }
+            };
+
             server_shutdown.cancel();
             result
         }
@@ -180,5 +224,9 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
     http_res.and(grpc_res)?;
 
-    state.shutdown().await
+    let shutdown_deadline = shutdown_deadline
+        .get()
+        .copied()
+        .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
+    state.shutdown(shutdown_deadline).await
 }

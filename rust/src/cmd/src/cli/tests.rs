@@ -43,6 +43,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             512,
                         ),
                         grpc_port: None,
+                        shutdown_timeout: 0,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -203,6 +204,7 @@ fn frontend_args_accept_json() {
                         renderer: Auto,
                         max_model_len: None,
                         grpc_port: None,
+                        shutdown_timeout: 0,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -241,6 +243,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
+    assert_eq!(args.runtime.shutdown_timeout, 0);
 }
 
 #[test]
@@ -255,7 +258,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -273,6 +276,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(args.runtime.max_model_len, Some(8192));
+    assert_eq!(args.runtime.shutdown_timeout, 3);
 }
 
 #[test]
@@ -586,6 +590,7 @@ fn serve_args_accept_handshake_aliases() {
                         renderer: Auto,
                         max_model_len: None,
                         grpc_port: None,
+                        shutdown_timeout: 0,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -698,6 +703,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             enable_log_requests: false,
             disable_log_stats: false,
             grpc_port: None,
+            shutdown_timeout: 0ns,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -758,6 +764,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             enable_log_requests: false,
             disable_log_stats: false,
             grpc_port: None,
+            shutdown_timeout: 0ns,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -833,6 +840,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             enable_log_requests: false,
             disable_log_stats: false,
             grpc_port: None,
+            shutdown_timeout: 0ns,
         }
     "#]]
     .assert_debug_eq(&config);

@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
         enable_log_requests: false,
         disable_log_stats: false,
         grpc_port: None,
+        shutdown_timeout: Duration::ZERO,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

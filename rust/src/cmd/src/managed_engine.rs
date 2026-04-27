@@ -8,11 +8,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tokio::time::{interval, timeout};
+use tokio::time::interval;
 use tracing::info;
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const MIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Allocate one ephemeral TCP port for the managed headless-engine handshake on the given host.
 pub fn allocate_handshake_port(host: &str) -> Result<u16> {
@@ -123,7 +123,7 @@ impl ManagedEngineHandle {
     }
 
     /// Terminate the managed engine process group and wait for it to stop.
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self, timeout: Duration) -> Result<()> {
         if self.shutdown_started.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -132,12 +132,19 @@ impl ManagedEngineHandle {
             return Ok(());
         };
 
+        // Enforce a minimum shutdown timeout to give the engine process enough time to clean up.
+        let shutdown_timeout = std::cmp::max(timeout, MIN_SHUTDOWN_TIMEOUT);
+
         // First, try to gracefully terminate.
-        info!(pid, "shutting down managed engine with SIGTERM");
+        info!(
+            pid,
+            ?shutdown_timeout,
+            "shutting down managed engine with SIGTERM"
+        );
         process_group::terminate(pid)?;
 
         // Wait for the process to exit on its own.
-        if timeout(SHUTDOWN_TIMEOUT, self.wait_for_exit())
+        if tokio::time::timeout(shutdown_timeout, self.wait_for_exit())
             .await
             .is_ok()
         {

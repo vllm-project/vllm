@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -57,6 +58,8 @@ pub struct Config {
     pub disable_log_stats: bool,
     /// TCP port for the gRPC Generate service. When `None`, no gRPC server is started.
     pub grpc_port: Option<u16>,
+    /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
+    pub shutdown_timeout: Duration,
 }
 
 impl Config {

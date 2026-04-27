@@ -1,9 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::Context as _;
+use tokio::time::{Duration, Instant, sleep_until};
+use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
+
+const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Shared router state for the minimal single-model OpenAI server.
 pub struct AppState {
@@ -54,13 +57,35 @@ impl AppState {
         self.server_load.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Shutdown the app. Caller should ensure that no outstanding references to the state remain
-    /// before calling this method.
-    pub async fn shutdown(self: Arc<Self>) -> anyhow::Result<()> {
-        let state = Arc::try_unwrap(self)
-            .ok()
-            .context("openai server state still has outstanding references")?;
-        state.chat.shutdown().await?;
-        Ok(())
+    /// Wait until all request-owned references are dropped, then shut down the engine client.
+    ///
+    /// If the deadline elapses while request/connection tasks still hold state references, skip the
+    /// clean engine-client shutdown and let process teardown reclaim the remaining resources.
+    pub async fn shutdown(mut self: Arc<Self>, deadline: Instant) -> anyhow::Result<()> {
+        loop {
+            match Arc::try_unwrap(self) {
+                Ok(state) => {
+                    state.chat.shutdown().await?;
+                    return Ok(());
+                }
+                Err(state) => self = state,
+            }
+            let ref_count = Arc::strong_count(&self);
+
+            let now = Instant::now();
+            if now >= deadline {
+                warn!(
+                    ref_count,
+                    "shutdown deadline elapsed before app state became idle; skipping engine-client shutdown"
+                );
+                return Ok(());
+            }
+
+            sleep_until(std::cmp::min(
+                deadline,
+                now + SHUTDOWN_REFCOUNT_POLL_INTERVAL,
+            ))
+            .await;
+        }
     }
 }

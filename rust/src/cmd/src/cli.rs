@@ -118,6 +118,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub grpc_port: Option<u16>,
+    /// Maximum time to wait for active requests to drain during shutdown.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub shutdown_timeout: u64,
 
     /// The file path to the chat template, or the template in single-line form for the specified
     /// model.
@@ -166,8 +170,13 @@ pub struct SharedRuntimeArgs {
 
 impl SharedRuntimeArgs {
     /// Maximum time to wait for the expected engines to register on the frontend transport.
-    fn ready_timeout(&self) -> Duration {
+    pub fn ready_timeout(&self) -> Duration {
         Duration::from_secs(self.engine_ready_timeout_secs)
+    }
+
+    /// Maximum time to wait for active requests to drain during shutdown.
+    pub fn shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(self.shutdown_timeout)
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -182,12 +191,15 @@ impl SharedRuntimeArgs {
         coordinator_address: Option<String>,
         engine_count: usize,
     ) -> Config {
+        let ready_timeout = self.ready_timeout();
+        let shutdown_timeout = self.shutdown_timeout();
+
         Config {
             transport_mode: TransportMode::Bootstrapped {
                 input_address,
                 output_address,
                 engine_count,
-                ready_timeout: self.ready_timeout(),
+                ready_timeout,
             },
             coordinator_mode: match coordinator_address {
                 Some(address) => CoordinatorMode::External { address },
@@ -204,6 +216,7 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
+            shutdown_timeout,
         }
     }
 
@@ -218,12 +231,15 @@ impl SharedRuntimeArgs {
         local_input_address: Option<String>,
         local_output_address: Option<String>,
     ) -> Config {
+        let ready_timeout = self.ready_timeout();
+        let shutdown_timeout = self.shutdown_timeout();
+
         Config {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
                 engine_count,
-                ready_timeout: self.ready_timeout(),
+                ready_timeout,
                 local_input_address,
                 local_output_address,
             },
@@ -239,6 +255,7 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
+            shutdown_timeout,
         }
     }
 }
