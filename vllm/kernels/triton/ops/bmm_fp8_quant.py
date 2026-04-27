@@ -342,13 +342,13 @@ def bmm_fp8_group_quant(
         weight: (N, L, V) weight tensor in bf16/fp16
         output: (B, N*V) pre-allocated output tensor in FP8
         output_scales: pre-allocated scales buffer. Layout depends on flags:
-          - default: (B, N) fp32. Row- or column-major is inferred from
-            strides (caller supplies the layout it wants filled in).
-          - scale_ue8m0=True: same (B, N) fp32, values rounded up to the
-            next power of 2 (UE8M0 representation).
-          - tma_aligned=True: (B, ceil(N/4)) int32 with strides
-            (1, ((B+3)//4)*4) — packed UE8M0 exponents matching
-            `per_token_group_quant_8bit_packed`. Implies scale_ue8m0=True.
+            - default: (B, N) fp32. Row- or column-major is inferred from
+              strides (caller supplies the layout it wants filled in).
+            - scale_ue8m0=True: same (B, N) fp32, values rounded up to the
+              next power of 2 (UE8M0 representation).
+            - tma_aligned=True: (B, ceil(N/4)) int32 with strides
+              (1, ((B+3)//4)*4) — packed UE8M0 exponents matching
+              `per_token_group_quant_8bit_packed`. Implies scale_ue8m0=True.
         scale_ue8m0: store scales as power-of-2 (UE8M0).
         tma_aligned: store scales in the DeepGEMM packed UE8M0 layout.
     """
