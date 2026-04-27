@@ -898,6 +898,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             destroy_fi_ar_workspace()
 
 
+# TODO: make BasePattern to inherit from VllmPatternReplacement
 class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
     FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
 
