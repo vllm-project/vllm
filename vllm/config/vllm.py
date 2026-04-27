@@ -785,6 +785,25 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+        if (
+            self.model_config is not None
+            and self.model_config.enable_return_routed_experts
+        ):
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with "
+                    "pipeline parallelism (PP > 1)."
+                )
+            offload = self.offload_config
+            if (
+                offload.uva.cpu_offload_gb > 0
+                or offload.prefetch.offload_group_size > 0
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with "
+                    "CPU offloading."
+                )
+
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 

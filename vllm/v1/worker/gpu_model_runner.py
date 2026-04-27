@@ -7117,15 +7117,6 @@ class GPUModelRunner(
         return 0
 
     def init_routed_experts_capturer(self):
-        # PP>1 would overlap multiple in-flight async-scheduled steps,
-        # each wanting to D2H into the same pinned buffer. We currently
-        # only pre-allocate one set; lift this restriction only after
-        # making the pinned buffers per-batch-slot.
-        assert self.parallel_config.pipeline_parallel_size <= 1, (
-            "Routed experts capture currently only supports PP<=1 because "
-            "the pinned CPU buffer is reused across async-scheduled steps "
-            "and would be overwritten before get_output() finalizes."
-        )
         logger.info(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
