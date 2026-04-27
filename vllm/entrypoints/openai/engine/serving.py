@@ -157,6 +157,19 @@ class OpenAIServing:
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
 
+        # Computed once at startup (cached by ``vllm_config`` identity) and
+        # stamped on non-streaming responses. Streaming chunks deliberately
+        # omit it to avoid per-chunk overhead.
+        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+
+        try:
+            self.system_fingerprint: str | None = get_system_fingerprint(
+                engine_client.vllm_config
+            )
+        except Exception:
+            # Never fail server startup over the fingerprint.
+            self.system_fingerprint = None
+
     async def beam_search(
         self,
         prompt: EngineInput,
