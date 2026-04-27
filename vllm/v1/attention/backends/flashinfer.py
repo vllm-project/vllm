@@ -1296,13 +1296,14 @@ class FlashInferImpl(AttentionImpl):
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
+        self.maybe_override_cp_for_vllm_config(vllm_config)
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
 
         dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            self.dcp_world_size > 1
+            and vllm_config is not None
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
         if dcp_a2a:
