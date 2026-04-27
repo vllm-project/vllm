@@ -47,7 +47,8 @@ _xpu_kernels_group_quant_args = (
     )
 )
 """xpu_kernels dynamic_group_quant_fp8 requires a contiguous input tensor with
- hidden dim divisible by group size."""
+hidden dim divisible by group size and scale alignment of 1 (unlike vllm_c
+ dynamic_group_quant_fp8)."""
 
 
 @ir.ops.dynamic_group_quant_fp8.register_impl(

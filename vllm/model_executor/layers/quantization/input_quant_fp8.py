@@ -134,7 +134,7 @@ class QuantFP8(CustomOp):
             scale_alignment = 4 if self.tma_aligned_scales else 1
             return ir.ops.dynamic_group_quant_fp8(
                 x,
-                group_shape=[self.group_shape.row, self.group_shape.col],
+                group_shape=list(self.group_shape),
                 column_major=self.column_major_scales,
                 use_ue8m0=self.use_ue8m0,
                 fp8_dtype=_FP8_DTYPE,

@@ -8,8 +8,8 @@ from torch import Tensor
 from ..op import register_op
 
 
-def get_tma_aligned_size(x: int, element_size: int) -> int:
-    align = 16 // element_size
+def get_tma_aligned_size(x: int, scale_alignment: int) -> int:
+    align = 16 // scale_alignment
     return (x + align - 1) // align * align
 
 

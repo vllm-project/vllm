@@ -954,12 +954,9 @@ class RocmPlatform(Platform):
             rms_norm = default
 
         # TODO(luka/TJ/Badr) remove env vars completely.
-        # See #39357 for more details.
-        use_aiter_quant = (
-            cc.is_custom_op_enabled("quant_fp8")
-            and envs.VLLM_ROCM_USE_AITER
-            and envs.VLLM_ROCM_USE_AITER_LINEAR
-        )
+        # See https://github.com/vllm-project/vllm/issues/39357
+        # for more details.
+        use_aiter_quant = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
         quant_fp8 = ["aiter"] + default if use_aiter_quant else default
         dynamic_group_quant_fp8 = (
             ["aiter", "triton", "native"] if use_aiter_quant else ["triton", "native"]

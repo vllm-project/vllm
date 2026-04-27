@@ -190,7 +190,6 @@ class MLAAttnNvfp4QuantPattern(
         self._qk_head_dim = layer.qk_nope_head_dim + layer.qk_rope_head_dim
         self._output_dim = layer.num_heads * layer.v_head_dim
         self._dtype = dtype
-        self._QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
     @property
     def pattern(
@@ -223,7 +222,7 @@ class MLAAttnNvfp4QuantPattern(
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
                 at2 = auto_functionalized(
-                    self._QUANT_OP,
+                    torch.ops._C.scaled_fp4_quant.out,
                     input=at1[1],
                     input_scale=input_scale,
                     is_sf_swizzled_layout=True,
@@ -257,7 +256,7 @@ class MLAAttnNvfp4QuantPattern(
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             at2 = auto_functionalized(
-                self._QUANT_OP,
+                torch.ops._C.scaled_fp4_quant.out,
                 input=at1[1],
                 input_scale=input_scale,
                 is_sf_swizzled_layout=True,
