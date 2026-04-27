@@ -398,6 +398,17 @@ class OffloadingConnectorScheduler:
                 # entire KV cache so a remote decode node can consume it.
                 group_state.next_stored_block_idx = num_blocks
 
+        # Fence dst blocks against finished-request pending stores.
+        if (
+            self._block_id_to_pending_jobs
+            and not self._block_id_to_pending_jobs.keys().isdisjoint(dst_block_ids)
+        ):
+            self._current_batch_jobs_to_flush.update(
+                jid
+                for bid in dst_block_ids
+                for jid in self._block_id_to_pending_jobs.get(bid, ())
+            )
+
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
