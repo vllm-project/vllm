@@ -169,8 +169,11 @@ class OffloadingConnectorScheduler:
         self._job_counter: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
 
-        # GPU block_id -> in-flight job_ids that touch it.
+        # block_id -> pending store job_ids. Populated only for finished
+        # requests (running-request blocks are protected by their ref_cnt).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
+        # Flat mirror of _block_id_to_pending_jobs.keys() for fast
+        # isdisjoint checks against new request blocks.
         self._unprotected_block_ids: set[int] = set()
 
     def _generate_job_id(self) -> int:
@@ -558,9 +561,6 @@ class OffloadingConnectorScheduler:
                 is_store=True,
                 gpu_block_ids=src_block_ids,
             )
-            for bid in src_block_ids:
-                self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-                self._unprotected_block_ids.add(bid)
 
             store_jobs[job_id] = TransferJob(
                 req_id=req_id, transfer_spec=(src_spec, dst_spec)
@@ -623,8 +623,12 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
+            # .get because a store completing before its request
+            # finishes never had an index entry.
             for bid in job_status.gpu_block_ids or ():
-                pending = self._block_id_to_pending_jobs[bid]
+                pending = self._block_id_to_pending_jobs.get(bid)
+                if pending is None:
+                    continue
                 pending.remove(job_id)
                 if not pending:
                     del self._block_id_to_pending_jobs[bid]
@@ -654,8 +658,18 @@ class OffloadingConnectorScheduler:
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
-        if req_status is not None and not req_status.transfer_jobs:
+        if req_status is None:
+            return False, None
+        if not req_status.transfer_jobs:
             del self._req_status[request.request_id]
+            return False, None
+        # Pending stores will outlive the request's block ownership.
+        # Register them so future block reuse triggers a flush.
+        for job_id in req_status.transfer_jobs:
+            job_status = self._jobs[job_id]
+            for bid in job_status.gpu_block_ids or ():
+                self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+                self._unprotected_block_ids.add(bid)
         return False, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
