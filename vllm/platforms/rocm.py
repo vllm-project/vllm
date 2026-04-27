@@ -414,10 +414,17 @@ class RocmPlatform(Platform):
         "gguf",
         "quark",
         "mxfp4",
-        "gpt_oss_mxfp4",
+        "mxfp8",
         "torchao",
         "bitsandbytes",
+        "modelopt",
         "modelopt_fp4",
+        "modelopt_mxfp8",
+        "modelopt_mixed",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
     ]
 
     @classmethod
@@ -785,9 +792,9 @@ class RocmPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
-        free_mem, total_mem = torch.cuda.mem_get_info(device)
-        return total_mem - free_mem
+        return torch.cuda.max_memory_allocated(device)
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
