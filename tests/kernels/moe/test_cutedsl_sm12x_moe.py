@@ -38,7 +38,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 )
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
-    FlashInferCuteDSLSM12xExperts,
+    FlashInferB12xExperts,
 )
 from vllm.utils.torch_utils import set_random_seed
 
@@ -83,7 +83,7 @@ def test_flashinfer_b12x_moe(
     dtype: torch.dtype,
     workspace_init,
 ):
-    """Test FlashInferCuteDSLSM12xExperts against a BF16 torch reference.
+    """Test FlashInferB12xExperts against a BF16 torch reference.
 
     The SM12x kernel takes BF16 hidden states directly and fuses token
     dispatch, W1 GEMM, SwiGLU, and W2 GEMM into one call.  We verify
@@ -176,7 +176,7 @@ def test_flashinfer_b12x_moe(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            FlashInferCuteDSLSM12xExperts(
+            FlashInferB12xExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
