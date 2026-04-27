@@ -41,7 +41,7 @@ class TransferJobStatus:
     # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
-    # Offload keys this job coverstor; passed to manager.complete_*().
+    # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
     # GPU blocks the fence tracks. Store src blocks; None for loads.
@@ -156,8 +156,6 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
-        # Job IDs to flush this batch (preempted reqs + fence hits in
-        # _build_store_jobs).
         self._current_batch_jobs_to_flush: set[int] = set()
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
@@ -172,9 +170,6 @@ class OffloadingConnectorScheduler:
         # block_id -> pending store job_ids. Populated only for finished
         # requests (running-request blocks are protected by their ref_cnt).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
-        # Flat mirror of _block_id_to_pending_jobs.keys() for fast
-        # isdisjoint checks against new request blocks.
-        self._unprotected_block_ids: set[int] = set()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -445,11 +440,13 @@ class OffloadingConnectorScheduler:
             if new_block_id_groups:
                 req_status.update_block_id_groups(new_block_id_groups)
                 # Fence new blocks against in-flight stores.
-                if self._unprotected_block_ids:
+                if self._block_id_to_pending_jobs:
                     new_blocks_flat = [
                         bid for new_blocks in new_block_id_groups for bid in new_blocks
                     ]
-                    if not self._unprotected_block_ids.isdisjoint(new_blocks_flat):
+                    if not self._block_id_to_pending_jobs.keys().isdisjoint(
+                        new_blocks_flat
+                    ):
                         self._current_batch_jobs_to_flush.update(
                             jid
                             for bid in new_blocks_flat
@@ -630,7 +627,6 @@ class OffloadingConnectorScheduler:
                     pending.remove(job_id)
                     if not pending:
                         del self._block_id_to_pending_jobs[bid]
-                        self._unprotected_block_ids.discard(bid)
 
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
@@ -666,7 +662,6 @@ class OffloadingConnectorScheduler:
             job_status = self._jobs[job_id]
             for bid in job_status.gpu_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-                self._unprotected_block_ids.add(bid)
         return False, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
