@@ -51,9 +51,10 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
         - ue8m0  : scalar uint8    (block scale = 2^(ue8m0 - 127))
     """
     amax = tl.maximum(tl.max(tl.abs(x_lo)), tl.max(tl.abs(x_hi)))
-    amax = tl.maximum(amax, 1e-4)
+    # 6 * 2^-126 is from https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/kernel.py#L163
+    amax = tl.maximum(amax, 6.0 * (2**-126))
     # ue8m0 block scale: 2^ceil(log2(amax/6.0)).
-    log2_ratio = tl.math.ceil(tl.math.log2(amax / 6.0))
+    log2_ratio = tl.math.ceil(tl.math.log2(amax * (1.0 / 6.0)))
     log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
     scale = tl.math.exp2(log2_ratio)
     ue8m0 = (log2_ratio + 127.0).to(tl.uint8)
