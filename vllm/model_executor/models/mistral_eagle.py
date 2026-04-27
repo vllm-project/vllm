@@ -12,23 +12,39 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
-from vllm.model_executor.models.llama import (
-    LlamaDecoderLayer,
-    LlamaModel,
+from vllm.model_executor.models.llama import LlamaConfig
+from vllm.model_executor.models.mistral import (
+    MistralDecoderLayer,
+    MistralForCausalLM,
+    MistralModel,
 )
-from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
+    get_draft_quant_config,
     maybe_prefix,
 )
 
 logger = init_logger(__name__)
 
 
+class EagleMistralDecoderLayer(MistralDecoderLayer):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        config: LlamaConfig | None = None,
+    ) -> None:
+        super().__init__(vllm_config, prefix=prefix, config=config)
+
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        return get_draft_quant_config(vllm_config)
+
+
 @support_torch_compile
-class EagleMistralModel(LlamaModel):
+class EagleMistralModel(MistralModel):
     def __init__(
         self,
         *,
@@ -36,7 +52,7 @@ class EagleMistralModel(LlamaModel):
         prefix: str = "",
         start_layer_id: int = 0,
     ) -> None:
-        # Bypass LlamaModel.__init__ to avoid creating duplicate attention
+        # Bypass MistralModel.__init__ to avoid creating duplicate attention
         # layer entries in the global context.
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -52,7 +68,7 @@ class EagleMistralModel(LlamaModel):
 
         self.layers = nn.ModuleList(
             [
-                LlamaDecoderLayer(
+                EagleMistralDecoderLayer(
                     vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
                     config=self.config,
@@ -69,10 +85,6 @@ class EagleMistralModel(LlamaModel):
             return_bias=False,
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-
-        # Store weight scales for bf16->fp8 conversion on the fly.
-        # Needs to persist across multiple `load_weights` calls.
-        self._loaded_weight_scales: dict[str, torch.Tensor] = {}
 
     def forward(
         self,
@@ -113,11 +125,8 @@ class EagleMistralForCausalLM(MistralForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        # Draft model quantization config may differ from the target model.
-        self.quant_config = VllmConfig.get_quantization_config(
-            vllm_config.speculative_config.draft_model_config, vllm_config.load_config
-        )
-        vllm_config.quant_config = self.quant_config
+        # Get drafter's quantization config
+        self.quant_config = get_draft_quant_config(vllm_config)
         self.model = EagleMistralModel(
             vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
         )
