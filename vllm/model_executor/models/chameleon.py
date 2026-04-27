@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1039,11 +1040,11 @@ class ChameleonForConditionalGeneration(
                 self._image_tokens_index_cache = cache
             image_tokens_idx = cache.get(logits.device)
             if image_tokens_idx is None:
-                image_tokens_idx = torch.tensor(
+                image_tokens_idx = async_tensor_h2d(
                     self.model.vocabulary_mapping.image_tokens,
                     dtype=torch.long,
-                    pin_memory=True,
-                ).to(logits.device, non_blocking=True)
+                    device=logits.device,
+                )
                 cache[logits.device] = image_tokens_idx
             logits.index_fill_(1, image_tokens_idx, torch.finfo(logits.dtype).min)
 

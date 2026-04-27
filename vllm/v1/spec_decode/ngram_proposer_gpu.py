@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -571,12 +572,8 @@ def update_ngram_gpu_tensors_incremental(
     if reorder_src:
         # Pinned CPU + non_blocking H2D avoids the synchronous copy that
         # `torch.tensor(list, device=cuda)` would otherwise force.
-        src_tensor = torch.tensor(reorder_src, dtype=torch.long, pin_memory=True).to(
-            device, non_blocking=True
-        )
-        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, pin_memory=True).to(
-            device, non_blocking=True
-        )
+        src_tensor = async_tensor_h2d(reorder_src, dtype=torch.long, device=device)
+        dst_tensor = async_tensor_h2d(reorder_dst, dtype=torch.long, device=device)
 
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()

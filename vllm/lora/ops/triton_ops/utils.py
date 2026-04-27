@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
@@ -51,9 +52,9 @@ def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
     if len(lora_a_weights) > 1:
         # Pinned CPU + non_blocking H2D avoids the synchronous copy that
         # `torch.tensor(list, device=cuda)` would otherwise force.
-        lora_ptr_tensor = torch.tensor(
-            tensor_ptrs, pin_memory=True, dtype=torch.uint64
-        ).to(device, non_blocking=True)
+        lora_ptr_tensor = async_tensor_h2d(
+            tensor_ptrs, dtype=torch.uint64, device=device
+        )
     else:
         lora_ptr_tensor = lora_a_weights[0]
 
@@ -112,12 +113,12 @@ def _get_lora_b_ptr(
     if len(lora_weights) > 1:
         # note these are device tensors. Pinned CPU + non_blocking H2D
         # avoids the sync that `torch.tensor(list, device=cuda)` forces.
-        lora_ptr_tensor = torch.tensor(
-            tensor_ptrs, pin_memory=True, dtype=torch.uint64
-        ).to(device, non_blocking=True)
-        slice_start_tensor = torch.tensor(
-            slice_offset_lst, pin_memory=True, dtype=torch.uint64
-        ).to(device, non_blocking=True)
+        lora_ptr_tensor = async_tensor_h2d(
+            tensor_ptrs, dtype=torch.uint64, device=device
+        )
+        slice_start_tensor = async_tensor_h2d(
+            slice_offset_lst, dtype=torch.uint64, device=device
+        )
     else:
         slice_start_tensor = slice_offset_lst[0]
         lora_ptr_tensor = lora_b_weight[0]
@@ -137,17 +138,17 @@ def _get_lora_b_ptr(
 
     else:
         # Pinned CPU + non_blocking H2D to avoid blocking copies.
-        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, pin_memory=True).to(
-            device, non_blocking=True
+        lora_strides_d0_tensor = async_tensor_h2d(
+            lora_strides_d0, dtype=torch.int64, device=device
         )
-        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, pin_memory=True).to(
-            device, non_blocking=True
+        lora_strides_d1_tensor = async_tensor_h2d(
+            lora_strides_d1, dtype=torch.int64, device=device
         )
-        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, pin_memory=True).to(
-            device, non_blocking=True
+        lora_strides_d2_tensor = async_tensor_h2d(
+            lora_strides_d2, dtype=torch.int64, device=device
         )
-        hidden_sizes_tensor = torch.tensor(hidden_sizes, pin_memory=True).to(
-            device, non_blocking=True
+        hidden_sizes_tensor = async_tensor_h2d(
+            hidden_sizes, dtype=torch.int64, device=device
         )
         same_stride = False
     # MAX_N is the maximum hidden size among all the lora_b weights

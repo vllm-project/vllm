@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -295,15 +296,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device = common_attn_metadata.query_start_loc.device
         # Build on pinned CPU and upload non-blocking to avoid the synchronous
         # H2D copy that `torch.as_tensor(list, device=cuda)` would force.
-        cu_chunk_seqlen_p = torch.tensor(
-            cu_chunk_seqlen, dtype=torch.int32, pin_memory=True
-        ).to(device, non_blocking=True)
-        seq_idx_p = torch.tensor(seq_idx, dtype=torch.int32, pin_memory=True).to(
-            device, non_blocking=True
+        cu_chunk_seqlen_p = async_tensor_h2d(
+            cu_chunk_seqlen, dtype=torch.int32, device=device
         )
-        last_chunk_indices_p = torch.tensor(
-            last_chunk_indices, dtype=torch.int32, pin_memory=True
-        ).to(device, non_blocking=True)
+        seq_idx_p = async_tensor_h2d(seq_idx, dtype=torch.int32, device=device)
+        last_chunk_indices_p = async_tensor_h2d(
+            last_chunk_indices, dtype=torch.int32, device=device
+        )
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
 
     def _compute_prefix_caching_block_indices(

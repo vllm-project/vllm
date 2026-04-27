@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -112,12 +112,10 @@ def convert_mapping(
         embedding_indices,
     ]
 
-    pin_memory = is_pin_memory_available()
-    indices = torch.tensor(indices_list, dtype=torch.long, pin_memory=pin_memory)
-    indices = indices.to(device, non_blocking=True)
-    prompt_mapping_tensor = torch.tensor(
-        prompt_mapping, dtype=torch.long, pin_memory=pin_memory
-    ).to(device, non_blocking=True)
+    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device)
+    prompt_mapping_tensor = async_tensor_h2d(
+        prompt_mapping, dtype=torch.long, device=device
+    )
     embeddings_indices = torch.stack(
         [
             indices[2] * extra_vocab_size,

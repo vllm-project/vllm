@@ -80,6 +80,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
@@ -438,11 +439,11 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             total_chunks = int(chunk_num.sum())
         # `torch.tensor([...], device=cuda)` forces a blocking H2D; use
         # pinned CPU + non-blocking upload instead.
-        chunk_lengths = torch.tensor(
+        chunk_lengths = async_tensor_h2d(
             [self.n_window * 2] * total_chunks,
             dtype=torch.long,
-            pin_memory=True,
-        ).to(feature_lens.device, non_blocking=True)
+            device=feature_lens.device,
+        )
         tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
         chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
         chunk_lengths[chunk_lengths == 0] = self.n_window * 2
@@ -519,11 +520,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if remainder:
                 cu_chunk_lens.append(remainder)
         # Build on pinned CPU then non-blocking upload.
-        cu_seqlens = (
-            torch.tensor(cu_chunk_lens, dtype=torch.int32, pin_memory=True)
-            .to(aftercnn_lens.device, non_blocking=True)
-            .cumsum(-1, dtype=torch.int32)
-        )
+        cu_seqlens = async_tensor_h2d(
+            cu_chunk_lens, dtype=torch.int32, device=aftercnn_lens.device
+        ).cumsum(-1, dtype=torch.int32)
 
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 

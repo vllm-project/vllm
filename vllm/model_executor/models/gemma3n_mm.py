@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -643,9 +644,9 @@ class Gemma3nForConditionalGeneration(
             self._audio_padding_toks_cache = cache
         audio_padding_toks = cache.get(audio_features.device)
         if audio_padding_toks is None:
-            audio_padding_toks = torch.tensor(
-                [[self.vocab_size - 1]], dtype=torch.long, pin_memory=True
-            ).to(audio_features.device, non_blocking=True)
+            audio_padding_toks = async_tensor_h2d(
+                [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
+            )
             cache[audio_features.device] = audio_padding_toks
         audio_padding_embs = self.embed_audio(input_ids=audio_padding_toks)
         audio_features = torch.where(

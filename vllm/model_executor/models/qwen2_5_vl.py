@@ -84,6 +84,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
@@ -1397,9 +1398,7 @@ class Qwen2_5_VLForConditionalGeneration(
         # Tensors. Build on pinned CPU and upload non-blocking to avoid the
         # synchronous H2D copy that `torch.as_tensor(list, device=cuda)`
         # would force.
-        input_ids_t = torch.tensor(
-            input_ids, dtype=torch.long, pin_memory=is_pin_memory_available()
-        ).to(device, non_blocking=True)
+        input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
 
         mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
         mm_embeddings_pos = [
