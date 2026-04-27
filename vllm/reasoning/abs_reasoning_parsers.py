@@ -99,6 +99,36 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def find_reasoning_end_index(
+        self, prefix_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> int | None:
+        """Find where reasoning ends inside a streaming token delta.
+
+        Args:
+            prefix_ids: Token ids accepted before this delta.
+            delta_ids: Newly accepted candidate token ids.
+
+        Returns:
+            The index in ``delta_ids`` where the reasoning-end marker completes,
+            or ``None`` if the marker does not complete inside ``delta_ids``.
+        """
+        current_input_ids = list(prefix_ids)
+        for end_index, token_id in enumerate(delta_ids):
+            current_input_ids.append(token_id)
+            if self.is_reasoning_end_streaming(current_input_ids, (token_id,)):
+                return end_index
+        return None
+
+    def may_have_reasoning_end_in_delta(self, delta_ids: Sequence[int]) -> bool:
+        """Cheap precheck before running reasoning-boundary detection.
+
+        Parsers with explicit single-token end markers should override this to
+        avoid expensive fallback checks on every speculative decode step.
+        The default is conservative for parsers that may use multi-token or
+        context-dependent reasoning-end markers.
+        """
+        return bool(delta_ids)
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

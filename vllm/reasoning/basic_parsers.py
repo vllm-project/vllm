@@ -86,6 +86,18 @@ class BaseThinkingReasoningParser(ReasoningParser):
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
 
+    def find_reasoning_end_index(
+        self, prefix_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> int | None:
+        end_token_id = self.end_token_id
+        try:
+            return delta_ids.index(end_token_id)
+        except ValueError:
+            return None
+
+    def may_have_reasoning_end_in_delta(self, delta_ids: Sequence[int]) -> bool:
+        return self.end_token_id in delta_ids
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens

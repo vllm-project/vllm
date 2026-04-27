@@ -1685,6 +1685,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Enable reasoning-boundary validation inside accepted speculative tokens.
+    # This is opt-in to avoid unexpected regressions for parsers that are not
+    # yet adapted to the validation path.
+    "VLLM_SPEC_REASONING_BOUNDARY_VALIDATION": lambda: bool(
+        int(os.getenv("VLLM_SPEC_REASONING_BOUNDARY_VALIDATION", "0"))
+    ),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))

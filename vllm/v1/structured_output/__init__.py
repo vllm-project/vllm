@@ -32,6 +32,45 @@ else:
 logger = init_logger(__name__)
 
 
+def validate_spec_tokens_with_reasoning_boundary(
+    request: "Request",
+    token_ids: list[int],
+    reasoner: "ReasoningParser",
+) -> list[int]:
+    """Validate accepted speculative tokens across a reasoning boundary.
+
+    Reasoning tokens are unconstrained. Once the reasoning-end marker is
+    accepted, only the post-boundary answer suffix is grammar-validated and
+    committed to the grammar state.
+    """
+    structured_req = request.structured_output_request
+    assert token_ids
+    assert request.use_structured_output
+    assert structured_req is not None
+    assert structured_req.grammar is not None
+    assert structured_req.reasoning_ended is False
+    grammar = structured_req.grammar
+
+    boundary_end = reasoner.find_reasoning_end_index(
+        request.all_token_ids, token_ids
+    )
+    if boundary_end is None:
+        return token_ids
+
+    keep = token_ids[: boundary_end + 1]
+    suffix = token_ids[boundary_end + 1 :]
+
+    structured_req.reasoning_ended = True
+
+    if not suffix:
+        return keep
+
+    valid_suffix = grammar.validate_tokens(suffix)
+    if valid_suffix:
+        grammar.accept_tokens(request.request_id, valid_suffix)
+    return keep + valid_suffix
+
+
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
 
