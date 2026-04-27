@@ -1413,42 +1413,32 @@ class Scheduler(SchedulerInterface):
                 and structured_req is not None
                 and self.structured_output_manager.reasoner is not None
                 and not self.structured_output_manager.enable_in_reasoning
-                and structured_req.reasoning_ended is not True
+                and structured_req.reasoning_ended is False
                 and self.enable_spec_reasoning_boundary_validation
             )
             advanced_with_reasoning_boundary = False
             if validate_reasoning_boundary:
                 reasoner = self.structured_output_manager.reasoner
-                if structured_req.reasoning_ended is None:
-                    structured_req.reasoning_ended = reasoner.is_reasoning_end(
-                        request.prompt_token_ids or []
-                    )
+                may_have_reasoning_end = reasoner.may_have_reasoning_end_in_delta(
+                    new_token_ids
+                )
 
-                if structured_req.reasoning_ended is False:
-                    may_have_reasoning_end = (
-                        reasoner.may_have_reasoning_end_in_delta(new_token_ids)
+                if may_have_reasoning_end:
+                    num_new_token_ids = len(new_token_ids)
+                    new_token_ids = validate_spec_tokens_with_reasoning_boundary(
+                        request,
+                        new_token_ids,
+                        reasoner,
                     )
-
-                    if may_have_reasoning_end:
-                        num_new_token_ids = len(new_token_ids)
-                        new_token_ids = validate_spec_tokens_with_reasoning_boundary(
-                            request,
-                            new_token_ids,
-                            reasoner,
-                        )
-                        advanced_with_reasoning_boundary = (
-                            structured_req.reasoning_ended is True
-                        )
-                        num_rejected_by_grammar = num_new_token_ids - len(new_token_ids)
-                        if num_rejected_by_grammar:
-                            if request.num_computed_tokens > 0:
-                                request.num_computed_tokens -= (
-                                    num_rejected_by_grammar
-                                )
-                            if request.num_output_placeholders > 0:
-                                request.num_output_placeholders -= (
-                                    num_rejected_by_grammar
-                                )
+                    advanced_with_reasoning_boundary = (
+                        structured_req.reasoning_ended is True
+                    )
+                    num_rejected_by_grammar = num_new_token_ids - len(new_token_ids)
+                    if num_rejected_by_grammar:
+                        if request.num_computed_tokens > 0:
+                            request.num_computed_tokens -= num_rejected_by_grammar
+                        if request.num_output_placeholders > 0:
+                            request.num_output_placeholders -= num_rejected_by_grammar
 
             if scheduled_spec_token_ids and generated_token_ids:
                 spec_decoding_stats = self.make_spec_decoding_stats(
@@ -1469,7 +1459,11 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(request):
+            if (
+                new_token_ids
+                and not advanced_with_reasoning_boundary
+                and self.structured_output_manager.should_advance(request)
+            ):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None

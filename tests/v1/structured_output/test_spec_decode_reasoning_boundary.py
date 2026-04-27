@@ -175,10 +175,9 @@ def test_scheduler_validates_and_truncates_post_boundary_spec_tokens():
     grammar.accept_tokens.assert_called_once_with(request.request_id, [11])
 
 
-def test_scheduler_initializes_prompt_reasoning_state_before_boundary_path():
+def test_scheduler_boundary_path_requires_initialized_reasoning_state():
     scheduler, request = prepare_running_request(reasoning_ended=None)
     reasoner = Mock(spec=ReasoningParser)
-    reasoner.is_reasoning_end.return_value = True
     scheduler.structured_output_manager.reasoner = reasoner
 
     scheduler.update_from_output(
@@ -187,9 +186,7 @@ def test_scheduler_initializes_prompt_reasoning_state_before_boundary_path():
     )
 
     grammar = request.structured_output_request.grammar
-    assert request.structured_output_request.reasoning_ended is True
     assert list(request.output_token_ids) == [10, 11, 12]
-    reasoner.is_reasoning_end.assert_called_once_with(request.prompt_token_ids)
     reasoner.may_have_reasoning_end_in_delta.assert_not_called()
     grammar.validate_tokens.assert_not_called()
-    grammar.accept_tokens.assert_called_once_with(request.request_id, [10, 11, 12])
+    grammar.accept_tokens.assert_not_called()
