@@ -17,6 +17,7 @@ from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -65,6 +66,9 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -576,12 +580,12 @@ def create_kv_caches_with_random(
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
+    device: str | torch.device,
+    pin_memory: bool = PIN_MEMORY,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
+    return t.to(device=device, non_blocking=True)
 
 
 def make_ndarray_with_pad(
