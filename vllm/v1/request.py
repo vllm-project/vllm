@@ -159,6 +159,14 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # True once the request has been admitted to self.running at least
+        # once — i.e. workers have seen it as a `scheduled_new_reqs` entry
+        # and created local state for it. Used by the lateral-preempt path
+        # to decide whether a victim should re-enter as RequestStatus.WAITING
+        # (worker recreates state fresh) or PREEMPTED (worker resumes from
+        # cached state).
+        self.has_executed = False
+
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
