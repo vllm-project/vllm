@@ -538,7 +538,7 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
-        libcublas-dev-${CUDA_VERSION_DASH} \
+        libcublas-${CUDA_VERSION_DASH} \
         # Required by fastsafetensors (fixes #20384)
         libnuma-dev && \
     # Fixes nccl_allocator requiring nccl.h at runtime
@@ -580,7 +580,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.8.post1
+ARG FLASHINFER_VERSION=0.6.9
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
