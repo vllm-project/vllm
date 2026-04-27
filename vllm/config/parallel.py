@@ -77,6 +77,21 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
+    expert_load_stats_path: str | None = None
+    """
+    When set to a file path, EPLB logs expert-load statistics as JSONL.
+    These records can be used to generate an offline static EPLB mapping.
+    """
+    initial_mapping_path: str | None = None
+    """
+    Path to a JSONL file with an eplb_initial_mapping record containing
+    per-layer physical-to-logical expert mapping.
+    """
+    disable_online_rebalancing: bool = False
+    """
+    Disable online EPLB rearrangement. Requires initial_mapping_path so
+    EPLB still has a static offline mapping to apply at startup.
+    """
     use_async: bool = False
     """
     Whether to use non-blocking EPLB.
@@ -101,6 +116,10 @@ class EPLBConfig:
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
+        if self.disable_online_rebalancing and self.initial_mapping_path is None:
+            raise ValueError(
+                "disable_online_rebalancing=True requires initial_mapping_path."
+            )
         return self
 
 

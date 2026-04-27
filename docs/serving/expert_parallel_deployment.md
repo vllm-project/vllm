@@ -150,6 +150,9 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `expert_load_stats_path` | Path to write expert-load statistics as JSONL for offline mapping generation | `null` |
+| `initial_mapping_path` | Path to a JSONL file containing an `eplb_initial_mapping` record | `null` |
+| `disable_online_rebalancing` | Disable runtime EPLB rearrangement after applying the initial mapping | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
@@ -201,6 +204,51 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
 ```
 
 For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
+
+### Offline EPLB Mapping
+
+For stable workloads, you can collect expert-load statistics once and use them to generate an offline EPLB mapping. This avoids online expert rearrangement during serving while still using redundant expert slots.
+
+First collect stats:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-eplb \
+  --eplb-config '{"expert_load_stats_path":"eplb_stats.jsonl"}'
+```
+
+Then generate an offline mapping:
+
+```bash
+python tools/eplb/generate_static_mapping.py \
+  --stats-path eplb_stats.jsonl \
+  --output eplb_offline_mapping.jsonl \
+  --num-redundant-experts 32
+```
+
+The generated mapping file is JSONL with an `eplb_initial_mapping` record:
+
+```json
+{"record_type":"eplb_initial_mapping","version":1,"num_redundant_experts":32,"num_slots":288,"initial_global_assignments":{"0":[...]}}
+```
+
+Use the mapping as the initial EPLB placement:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-eplb \
+  --eplb-config '{"initial_mapping_path":"eplb_offline_mapping.jsonl","num_redundant_experts":32}'
+```
+
+To keep that placement fixed and disable online rearrangement, add `disable_online_rebalancing`:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-eplb \
+  --eplb-config '{"initial_mapping_path":"eplb_offline_mapping.jsonl","num_redundant_experts":32,"disable_online_rebalancing":true}'
+```
+
+If `initial_mapping_path` is set without `disable_online_rebalancing`, vLLM applies the offline mapping at startup and then continues online EPLB rebalancing.
 
 ## Advanced Configuration
 

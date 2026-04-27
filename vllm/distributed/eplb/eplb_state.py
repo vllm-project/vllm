@@ -26,9 +26,12 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import io
+import json
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -278,6 +281,14 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
+        self._expert_load_stats_file: io.TextIOWrapper | None = None
+        """
+        Open JSONL file handle for expert-load stats, if enabled.
+        """
+        self._pending_initial_mapping_rearrange: bool = False
+        """
+        Whether initial_mapping_path needs one startup weight rearrangement.
+        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -339,6 +350,146 @@ class EplbState:
                     )
                 )
 
+    def _load_initial_mapping_record(self, mapping_path: str) -> dict:
+        """Load the last eplb_initial_mapping record from a JSONL file."""
+        selected_record: dict | None = None
+        with open(mapping_path) as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{mapping_path}:{line_no}: invalid JSON: {exc}"
+                    ) from exc
+                if record.get("record_type") == "eplb_initial_mapping":
+                    selected_record = record
+
+        if selected_record is None:
+            raise ValueError(
+                f"{mapping_path} does not contain an eplb_initial_mapping record."
+            )
+        return selected_record
+
+    def _load_initial_mapping(
+        self,
+        mapping_path: str,
+        num_moe_layers: int,
+        num_physical_experts: int,
+        num_logical_experts: int,
+        num_redundant_experts: int,
+        max_slots_per_logical: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Load per-layer physical-to-logical mapping from a JSONL file."""
+        cfg = self._load_initial_mapping_record(mapping_path)
+        if cfg.get("version") != 1:
+            raise ValueError(
+                f"{mapping_path}: expected eplb_initial_mapping version 1, "
+                f"got {cfg.get('version')!r}."
+            )
+        if cfg.get("num_redundant_experts") != num_redundant_experts:
+            raise ValueError(
+                f"{mapping_path}: num_redundant_experts "
+                f"{cfg.get('num_redundant_experts')!r} does not match "
+                f"eplb_config.num_redundant_experts={num_redundant_experts}."
+            )
+        if cfg.get("num_slots") != num_physical_experts:
+            raise ValueError(
+                f"{mapping_path}: num_slots {cfg.get('num_slots')!r} does not "
+                f"match expected physical experts {num_physical_experts}."
+            )
+        if num_physical_experts != num_logical_experts + num_redundant_experts:
+            raise ValueError(
+                "num_physical_experts must equal num_logical_experts + "
+                "num_redundant_experts for initial EPLB mapping, got "
+                f"{num_physical_experts} != {num_logical_experts} + "
+                f"{num_redundant_experts}."
+            )
+
+        assignments = cfg.get("initial_global_assignments")
+        if not isinstance(assignments, dict):
+            raise ValueError(
+                f"{mapping_path}: initial_global_assignments must be an object."
+            )
+
+        rows: list[list[int]] = []
+        for layer in range(num_moe_layers):
+            layer_key = str(layer)
+            if layer_key not in assignments:
+                raise ValueError(
+                    f"{mapping_path}: missing initial_global_assignments "
+                    f"for layer {layer}."
+                )
+            row = assignments[layer_key]
+            if not isinstance(row, list) or len(row) != num_physical_experts:
+                raise ValueError(
+                    f"{mapping_path}: layer {layer} must contain exactly "
+                    f"{num_physical_experts} assignments."
+                )
+            int_row = []
+            for phy, logical_idx in enumerate(row):
+                if not isinstance(logical_idx, int):
+                    raise ValueError(
+                        f"{mapping_path}: layer {layer}, physical slot {phy} "
+                        "must be an integer logical expert id."
+                    )
+                if not 0 <= logical_idx < num_logical_experts:
+                    raise ValueError(
+                        f"{mapping_path}: layer {layer}, physical slot {phy} "
+                        f"has logical expert id {logical_idx}, expected range "
+                        f"[0, {num_logical_experts})."
+                    )
+                int_row.append(logical_idx)
+            if len(set(int_row)) != num_logical_experts:
+                raise ValueError(
+                    f"{mapping_path}: every logical expert must appear at "
+                    f"least once in layer {layer}."
+                )
+            rows.append(int_row)
+
+        physical_to_logical_map = torch.tensor(
+            rows, dtype=torch.long, device=self.device
+        )
+        assert physical_to_logical_map.shape == (
+            num_moe_layers,
+            num_physical_experts,
+        ), (
+            f"JSONL mapping shape {physical_to_logical_map.shape} != "
+            f"expected ({num_moe_layers}, {num_physical_experts})"
+        )
+
+        logical_to_physical_map = torch.full(
+            (num_moe_layers, num_logical_experts, max_slots_per_logical),
+            -1,
+            device=self.device,
+        )
+        logical_replica_count = torch.zeros(
+            (num_moe_layers, num_logical_experts),
+            device=self.device,
+            dtype=torch.long,
+        )
+
+        for layer in range(num_moe_layers):
+            for phy in range(num_physical_experts):
+                log_idx = int(physical_to_logical_map[layer, phy])
+                cnt = int(logical_replica_count[layer, log_idx])
+                if cnt >= max_slots_per_logical:
+                    raise ValueError(
+                        f"{mapping_path}: logical expert {log_idx} in layer "
+                        f"{layer} has more than {max_slots_per_logical} replicas."
+                    )
+                logical_to_physical_map[layer, log_idx, cnt] = phy
+                logical_replica_count[layer, log_idx] = cnt + 1
+
+        logger.info("Loaded initial EPLB mapping from %s", mapping_path)
+        return (
+            physical_to_logical_map,
+            logical_to_physical_map,
+            logical_replica_count,
+        )
+
     def add_model(
         self,
         model: MixtureOfExperts,
@@ -350,16 +501,6 @@ class EplbState:
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
-        physical_to_logical_map_list = (
-            EplbState.build_initial_global_physical_to_logical_map(
-                model.num_routed_experts,
-                model.num_redundant_experts,
-            )
-        )
-        physical_to_logical_map = torch.tensor(
-            physical_to_logical_map_list,
-            device=self.device,
-        )
         # Assuming 8 GPUs per node, this supports up to
         # (1023 + 1) / 8 = 128 nodes for now.
         # TODO(rui): make this configurable
@@ -369,48 +510,85 @@ class EplbState:
             f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
         )
         max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
-        logical_to_physical_map = torch.full(
-            (model.num_logical_experts, max_slots_per_logical_expert),
-            -1,
-            device=self.device,
-        )
-        logical_replica_count = torch.zeros(
-            (model.num_logical_experts,),
-            device=self.device,
-            dtype=torch.long,
-        )
 
-        for i in range(model.num_physical_experts):
-            logical_idx = physical_to_logical_map[i]
-            logical_to_physical_map[logical_idx, logical_replica_count[logical_idx]] = i
-            logical_replica_count[logical_idx] += 1
+        mapping_path = self.parallel_config.eplb_config.initial_mapping_path
+        if mapping_path is not None:
+            (
+                physical_to_logical_map,
+                logical_to_physical_map,
+                logical_replica_count,
+            ) = self._load_initial_mapping(
+                mapping_path,
+                model.num_moe_layers,
+                model.num_physical_experts,
+                model.num_logical_experts,
+                model.num_redundant_experts,
+                max_slots_per_logical_expert,
+            )
+            # CORRECTNESS: the model has just been loaded with weights in
+            # identity order (phys slot i holds logical expert i, plus
+            # redundant copies of the first few experts). The JSONL mapping above
+            # swapped the maps but did NOT move the physical weights, so
+            # the router would end up dispatching tokens for logical X to
+            # the slot of some other logical Y. Defer the physical
+            # rearrangement to the first profile step, where NCCL is
+            # ready and the kernel already exists.
+            self._pending_initial_mapping_rearrange = True
+        else:
+            physical_to_logical_map_list = (
+                EplbState.build_initial_global_physical_to_logical_map(
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                )
+            )
+            physical_to_logical_map = torch.tensor(
+                physical_to_logical_map_list,
+                device=self.device,
+            )
+            logical_to_physical_map = torch.full(
+                (model.num_logical_experts, max_slots_per_logical_expert),
+                -1,
+                device=self.device,
+            )
+            logical_replica_count = torch.zeros(
+                (model.num_logical_experts,),
+                device=self.device,
+                dtype=torch.long,
+            )
 
-        # Duplicate initial mapping for all layers
-        physical_to_logical_map = (
-            physical_to_logical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
+            for i in range(model.num_physical_experts):
+                logical_idx = physical_to_logical_map[i]
+                logical_to_physical_map[
+                    logical_idx, logical_replica_count[logical_idx]
+                ] = i
+                logical_replica_count[logical_idx] += 1
+
+            # Duplicate initial mapping for all layers
+            physical_to_logical_map = (
+                physical_to_logical_map.unsqueeze(0)
+                .expand(
+                    model.num_moe_layers,
+                    -1,
+                )
+                .contiguous()
             )
-            .contiguous()
-        )
-        logical_to_physical_map = (
-            logical_to_physical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-                -1,
+            logical_to_physical_map = (
+                logical_to_physical_map.unsqueeze(0)
+                .expand(
+                    model.num_moe_layers,
+                    -1,
+                    -1,
+                )
+                .contiguous()
             )
-            .contiguous()
-        )
-        logical_replica_count = (
-            logical_replica_count.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
+            logical_replica_count = (
+                logical_replica_count.unsqueeze(0)
+                .expand(
+                    model.num_moe_layers,
+                    -1,
+                )
+                .contiguous()
             )
-            .contiguous()
-        )
 
         expert_load_pass = torch.zeros(
             (model.num_moe_layers, model.num_physical_experts),
@@ -470,6 +648,87 @@ class EplbState:
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
+    def _apply_initial_mapping_rearrange(self, ep_group: ProcessGroup) -> None:
+        """Move startup weights from default layout to initial_mapping_path."""
+        ep_size = ep_group.size()
+        ep_rank = ep_group.rank()
+        for state in self.model_states.values():
+            num_physical = state.model.num_physical_experts
+            num_local = num_physical // ep_size
+            local_start = ep_rank * num_local
+
+            logger.info(
+                "EPLB: applying initial_mapping_path rearrangement "
+                "(model %s): moving weights from identity layout to "
+                "the JSONL-specified mapping",
+                state.model_name,
+            )
+
+            for layer_idx, layer_weights in enumerate(state.model.expert_weights):
+                # Target logical id for each of this rank's local slots.
+                # Equals the source phys slot in the identity layout.
+                src_indices = state.physical_to_logical_map[
+                    layer_idx, local_start : local_start + num_local
+                ].to(torch.long)
+
+                for weight in layer_weights:
+                    w_contig = weight.contiguous()
+                    gather_list = [torch.empty_like(w_contig) for _ in range(ep_size)]
+                    torch.distributed.all_gather(gather_list, w_contig, group=ep_group)
+                    gathered = torch.cat(gather_list, dim=0)
+                    weight.copy_(gathered[src_indices])
+                    del gather_list, gathered
+
+    def _write_expert_load_stats(
+        self,
+        eplb_model_state: EplbModelState,
+        num_tokens_per_rank: torch.Tensor,
+        expert_load_pass: torch.Tensor,
+    ) -> None:
+        """Append one JSONL record with expert-load statistics."""
+        if num_tokens_per_rank.sum().item() == 0:
+            return
+
+        if self._expert_load_stats_file is None:
+            stats_path = self.parallel_config.eplb_config.expert_load_stats_path
+            assert stats_path is not None
+            path = Path(stats_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._expert_load_stats_file = open(path, "a")  # noqa: SIM115
+            logger.info("EPLB expert-load stats -> %s", path)
+
+        num_ranks = num_tokens_per_rank.shape[1]
+        num_physical = expert_load_pass.shape[1]
+        experts_per_rank = num_physical // max(num_ranks, 1)
+
+        p2l = eplb_model_state.physical_to_logical_map[0].detach().cpu().tolist()
+        rank_experts = []
+        for r in range(num_ranks):
+            start = r * experts_per_rank
+            end = start + experts_per_rank
+            ids = p2l[start:end]
+            rank_experts.append([ids[0], ids[-1]] if ids else [0, 0])
+
+        record: dict = {
+            "record_type": "eplb_load_stats",
+            "version": 1,
+            "model": eplb_model_state.model_name,
+            "step": self.expert_rearrangement_step,
+            "next_rearrange": (
+                self.expert_rearrangement_step_interval - self.expert_rearrangement_step
+            ),
+            "num_ranks": num_ranks,
+            "num_layers": num_tokens_per_rank.shape[0],
+            "experts_per_rank": rank_experts,
+            "tokens": num_tokens_per_rank.long().cpu().tolist(),
+            "expert_load": expert_load_pass.long().cpu().tolist(),
+            "p2l_map": (eplb_model_state.physical_to_logical_map.long().cpu().tolist()),
+        }
+
+        if self._expert_load_stats_file is not None:
+            self._expert_load_stats_file.write(json.dumps(record) + "\n")
+            self._expert_load_stats_file.flush()
+
     def step(
         self,
         is_dummy: bool = False,
@@ -498,6 +757,13 @@ class EplbState:
         ep_group = get_ep_group().device_group
         if is_profile:
             self.rearrange(is_profile=True)
+            # Static initial mapping: physically move expert weights to
+            # match the JSONL mapping that was loaded in add_model. Only
+            # runs once (guarded by the flag), right after the dummy
+            # rearrange set up the NCCL buffers.
+            if self._pending_initial_mapping_rearrange:
+                self._apply_initial_mapping_rearrange(ep_group)
+                self._pending_initial_mapping_rearrange = False
             return
 
         if is_dummy:
@@ -554,6 +820,29 @@ class EplbState:
                         - self.expert_rearrangement_step,
                     )
 
+        should_write_load_stats = (
+            self.parallel_config.eplb_config.expert_load_stats_path is not None
+        )
+        if should_write_load_stats:
+            expert_load_pass_list = self._sync_load_pass()
+            ep_group = get_ep_group().device_group
+            for expert_load_pass, eplb_model_state in zip(
+                expert_load_pass_list, self.model_states.values()
+            ):
+                num_tokens_per_rank = (
+                    expert_load_pass.reshape(
+                        expert_load_pass.shape[0], ep_group.size(), -1
+                    )
+                    .sum(dim=-1)
+                    .float()
+                )
+                if ep_group.rank() == 0:
+                    self._write_expert_load_stats(
+                        eplb_model_state,
+                        num_tokens_per_rank,
+                        expert_load_pass,
+                    )
+
         # Update the expert load sliding window
         if not is_dummy:
             should_record = self._should_record_current_step(log_stats=log_stats)
@@ -589,7 +878,14 @@ class EplbState:
                         ep_rank=ep_group.rank(),
                     )
 
-        if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
+        online_rebalancing_enabled = (
+            not self.parallel_config.eplb_config.disable_online_rebalancing
+        )
+        if (
+            online_rebalancing_enabled
+            and self.expert_rearrangement_step
+            >= self.expert_rearrangement_step_interval
+        ):
             if self.is_async and any(
                 eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
@@ -611,12 +907,22 @@ class EplbState:
         1) The next rearrangement step, so the sliding window is ready.
         2) The next balancedness logging step, when log_stats is enabled.
         """
+        if self.parallel_config.eplb_config.disable_online_rebalancing:
+            return (
+                log_stats
+                or self.parallel_config.eplb_config.expert_load_stats_path is not None
+            )
+
         steps_remaining = (
             self.expert_rearrangement_step_interval - self.expert_rearrangement_step
         )
         should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
 
-        if not log_stats:
+        stats_enabled = (
+            log_stats
+            or self.parallel_config.eplb_config.expert_load_stats_path is not None
+        )
+        if not stats_enabled:
             return should_record_for_rearrange
 
         log_interval = self.parallel_config.eplb_config.log_balancedness_interval
