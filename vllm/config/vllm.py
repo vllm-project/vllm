@@ -49,11 +49,11 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import (
     SupportsHash,
-    _DeferredValue,
+    _RuntimeDefaultValue,
     config,
-    initialize_deferred_fields_recursive,
+    initialize_runtime_default_fields_recursive,
     replace,
-    validate_deferred_fields_recursive,
+    validate_runtime_default_fields_recursive,
 )
 from .weight_transfer import WeightTransferConfig
 
@@ -643,10 +643,11 @@ class VllmConfig:
         """
         current = getattr(config_obj, key)
         # Apply the default when the field is unset (None) or still holds its
-        # Deferred sentinel (a _DeferredValue produced by Deferred(factory)).
-        # Without the _DeferredValue check, optimization-level defaults would
-        # never be applied to deferred fields because their sentinel is not None.
-        if current is None or isinstance(current, _DeferredValue):
+        # RuntimeDefault sentinel (a _RuntimeDefaultValue produced by
+        # RuntimeDefault(factory)).
+        # Without the _RuntimeDefaultValue check, optimization-level defaults would
+        # never be applied to runtime default fields because their sentinel is not None.
+        if current is None or isinstance(current, _RuntimeDefaultValue):
             # Some config values are known before initialization and are
             # hard coded.
             # Other values depend on the user given configuration, so they are
@@ -979,13 +980,13 @@ class VllmConfig:
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
 
-        # Initialize deferred fields in all nested sub-configs (must run after
+        # Initialize runtime default fields in all nested sub-configs (must run after
         # the optimization-level table is applied so the table's explicit values
-        # take priority over the Deferred fallbacks).
+        # take priority over the RuntimeDefault fallbacks).
         for _f in fields(self):  # type: ignore[arg-type]
             _v = getattr(self, _f.name)
             if _v is not None:
-                initialize_deferred_fields_recursive(_v, self)
+                initialize_runtime_default_fields_recursive(_v, self)
 
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
@@ -1369,14 +1370,14 @@ class VllmConfig:
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
-        # Validate that every sub-config with Deferred() fields had them all
+        # Validate that every sub-config with RuntimeDefault() fields had them all
         # initialized before __post_init__ completed.  The recursive walk means
-        # new @config classes with Deferred() fields nested at any depth are
+        # new @config classes with RuntimeDefault() fields nested at any depth are
         # covered automatically without touching this code.
         for _f in fields(self):  # type: ignore[arg-type]
             _value = getattr(self, _f.name)
             if _value is not None:
-                validate_deferred_fields_recursive(_value)
+                validate_runtime_default_fields_recursive(_value)
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when

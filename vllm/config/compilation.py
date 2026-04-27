@@ -13,8 +13,8 @@ from pydantic import Field, TypeAdapter, field_validator
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
-    Deferred,
     Range,
+    RuntimeDefault,
     config,
     get_hash_factors,
     hash_factors,
@@ -120,34 +120,34 @@ class PassConfig:
 
     # Fields initialized during VllmConfig.__post_init__.
     #
-    # Deferred() fields have no fallback: they must be set by the user or by
+    # RuntimeDefault() fields have no fallback: they must be set by the user or by
     # the optimization-level table (OPTIMIZATION_LEVEL_TO_CONFIG in vllm.py).
-    # Deferred(False) is reserved for fields absent from the optimization-level
+    # RuntimeDefault(False) is reserved for fields absent from the optimization-level
     # tables.
 
-    fuse_norm_quant: bool = Deferred()
+    fuse_norm_quant: bool = RuntimeDefault()
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = Deferred()
+    fuse_act_quant: bool = RuntimeDefault()
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = Deferred()
+    fuse_attn_quant: bool = RuntimeDefault()
     """Fuse the custom Attention and MLAAttention + quant ops."""
-    enable_sp: bool = Deferred()
+    enable_sp: bool = RuntimeDefault()
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = Deferred()
+    fuse_gemm_comms: bool = RuntimeDefault()
     """Enable async TP."""
-    fuse_allreduce_rms: bool = Deferred()
+    fuse_allreduce_rms: bool = RuntimeDefault()
     """Enable flashinfer allreduce fusion."""
-    fuse_minimax_qk_norm: bool = Deferred()
+    fuse_minimax_qk_norm: bool = RuntimeDefault()
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = Deferred()
+    fuse_act_padding: bool = RuntimeDefault()
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_mla_dual_rms_norm: bool = Deferred()
+    fuse_mla_dual_rms_norm: bool = RuntimeDefault()
     """Fuse paired q/kv RMS norms in MLA attention."""
-    fuse_rope_kvcache: bool = Deferred()
+    fuse_rope_kvcache: bool = RuntimeDefault()
     """Fuse the QK rope + KV cache ops."""
 
     eliminate_noops: bool = Field(default=True)

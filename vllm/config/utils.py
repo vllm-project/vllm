@@ -79,7 +79,7 @@ def config(
 
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
         processed = dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
-        _inject_deferred_methods(processed)
+        _inject_runtime_default_methods(processed)
         return processed  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
@@ -245,12 +245,12 @@ def normalize_value(x):
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
 
-    # Deferred sentinel: a field was never initialized before compute_hash()
+    # RuntimeDefault sentinel: a field was never initialized before compute_hash()
     # was called.  This is always a bug — surface it clearly.
-    if isinstance(x, _DeferredValue):
+    if isinstance(x, _RuntimeDefaultValue):
         raise TypeError(
-            f"normalize_value: encountered uninitialized deferred field "
-            f"({x!r}).  Call initialize_deferred_fields() on the containing "
+            f"normalize_value: encountered uninitialized runtime default field "
+            f"({x!r}).  Call initialize_runtime_default_fields() on the containing "
             "config before computing hashes."
         )
 
@@ -486,56 +486,56 @@ def set_from_deprecated_env_if_set(
 
 
 # ---------------------------------------------------------------------------
-# Deferred field initialization
+# RuntimeDefault field initialization
 #
 # Fields whose values cannot be determined at dataclass construction time
 # are declared using one of three forms:
 #
-#     field_name: bool = Deferred()
+#     field_name: bool = RuntimeDefault()
 #         # No fallback — must be set by the caller (e.g. optimization-level
 #         # table).  Validation raises if still unset after __post_init__.
 #
-#     field_name: bool = Deferred(False)
+#     field_name: bool = RuntimeDefault(False)
 #         # Static fallback — resolved to False if not set by the caller.
 #
-#     field_name: bool = Deferred(lambda cfg: cfg.parallel_config.tp > 1)
+#     field_name: bool = RuntimeDefault(lambda cfg: cfg.parallel_config.tp > 1)
 #         # Computed fallback — factory is called with the VllmConfig instance
 #         # if the field has not been set by the caller.
 #
 # Mechanism:
-#   Deferred(...) returns a pydantic Field whose default is a _DeferredValue
+#   RuntimeDefault(...) returns a pydantic Field whose default is a _RuntimeDefaultValue
 #   sentinel (validate_default=False skips type coercion of the sentinel).
-#   _DeferredValue is falsy, so __post_init__ guards that read deferred fields
-#   before initialization behave as if the value were falsy/None.
+#   _RuntimeDefaultValue is falsy, so __post_init__ guards that read runtime default
+#   fields before initialization behave as if the value were falsy/None.
 #
-#   The @config decorator calls _inject_deferred_methods() after pydantic
-#   processes each class.  If the class declares any Deferred() field, two
+#   The @config decorator calls _inject_runtime_default_methods() after pydantic
+#   processes each class.  If the class declares any RuntimeDefault() field, two
 #   methods are attached directly to the class:
-#     • initialize_deferred_fields(vllm_config)  — replaces every
-#       _DeferredValue still present with its resolved value (static or
+#     • initialize_runtime_default_fields(vllm_config)  — replaces every
+#       _RuntimeDefaultValue still present with its resolved value (static or
 #       factory-computed).  Fields already set by the caller are left alone.
-#     • validate_deferred_fields_initialized()   — raises ValueError listing
-#       any field that still holds a _DeferredValue sentinel.
+#     • validate_runtime_default_fields_initialized()   — raises ValueError listing
+#       any field that still holds a _RuntimeDefaultValue sentinel.
 #
 #   VllmConfig.__post_init__ calls these methods on itself and on every
-#   sub-config attribute that satisfies the HasDeferredFields protocol
-#   (detected via isinstance checks).  validate_deferred_fields_initialized()
+#   sub-config attribute that satisfies the HasRuntimeDefaultFields protocol
+#   (detected via isinstance checks).  validate_runtime_default_fields_initialized()
 #   is always called last to assert no sentinels remain.
 # ---------------------------------------------------------------------------
 
 
-class _DeferredValue:
+class _RuntimeDefaultValue:
     """Per-field sentinel that doubles as an optional factory carrier.
 
-    Each ``Deferred(...)`` call produces one ``_DeferredValue`` instance
+    Each ``RuntimeDefault(...)`` call produces one ``_RuntimeDefaultValue`` instance
     that becomes the pydantic default for that field.  Embedding the factory
     in the default value means:
 
-    * Detection uses only ``isinstance(value, _DeferredValue)`` on the live
+    * Detection uses only ``isinstance(value, _RuntimeDefaultValue)`` on the live
       field value — no dependency on ``FieldInfo.metadata`` or pydantic
       internals.
     * ``__bool__`` returns ``False`` so guards in ``__post_init__`` that read
-      deferred fields before initialization treat them as falsy, matching the
+      runtime default fields before initialization treat them as falsy, matching the
       behaviour of the old ``None`` sentinel.
     * When no factory is provided (``MISSING``), the field has no fallback and
       must be set by the user or the optimization-level table; validation will
@@ -548,11 +548,11 @@ class _DeferredValue:
     def __bool__(self) -> bool:
         return False
 
-    def __copy__(self) -> "_DeferredValue":
+    def __copy__(self) -> "_RuntimeDefaultValue":
         return self
 
-    def __deepcopy__(self, memo: dict) -> "_DeferredValue":
-        # _DeferredValue is a sentinel whose identity matters.  Pydantic
+    def __deepcopy__(self, memo: dict) -> "_RuntimeDefaultValue":
+        # _RuntimeDefaultValue is a sentinel whose identity matters.  Pydantic
         # deepcopies mutable defaults when creating each model instance;
         # returning self preserves factory identity so that ``is MISSING``
         # checks and __repr__ work correctly on every instance.
@@ -560,15 +560,15 @@ class _DeferredValue:
 
     def __repr__(self) -> str:
         if self.factory is MISSING:
-            return "<Deferred()>"
+            return "<RuntimeDefault()>"
         factory_name = getattr(self.factory, "__name__", repr(self.factory))
-        return f"<Deferred({factory_name})>"
+        return f"<RuntimeDefault({factory_name})>"
 
 
-def Deferred(factory: "Callable[[Any], Any] | Any" = MISSING) -> Any:
+def RuntimeDefault(factory: "Callable[[Any], Any] | Any" = MISSING) -> Any:
     """Declare a config field whose value is resolved in VllmConfig.__post_init__.
 
-    Returns a pydantic Field whose default is a ``_DeferredValue`` instance.
+    Returns a pydantic Field whose default is a ``_RuntimeDefaultValue`` instance.
     The declared annotation is the true runtime type — no ``| None`` needed.
     ``validate_default=False`` tells pydantic to skip coercion of the sentinel
     through the field's type validator.
@@ -587,91 +587,95 @@ def Deferred(factory: "Callable[[Any], Any] | Any" = MISSING) -> Any:
 
         @config
         class MyConfig:
-            required_flag: bool = Deferred()  # must be set by table/user
-            fallback_flag: bool = Deferred(False)  # falls back to False
-            tp_flag: bool = Deferred(lambda cfg: cfg.parallel_config.tp > 1)
+            required_flag: bool = RuntimeDefault()  # must be set by table/user
+            fallback_flag: bool = RuntimeDefault(False)  # falls back to False
+            tp_flag: bool = RuntimeDefault(lambda cfg: cfg.parallel_config.tp > 1)
     """
     return PydanticField(  # type: ignore[call-overload]
-        default=_DeferredValue(factory),
+        default=_RuntimeDefaultValue(factory),
         validate_default=False,
     )
 
 
 @runtime_checkable
-class HasDeferredFields(Protocol):
+class HasRuntimeDefaultFields(Protocol):
     """Structural interface satisfied by any ``@config`` class that declares at
-    least one ``Deferred()`` field.
+    least one ``RuntimeDefault()`` field.
 
-    The ``@config`` decorator injects ``initialize_deferred_fields`` and
-    ``validate_deferred_fields_initialized`` automatically — no inheritance is
-    required.  ``VllmConfig.__post_init__`` uses ``isinstance(v, HasDeferredFields)``
-    to discover sub-configs that need initialization.
+    The ``@config`` decorator injects ``initialize_runtime_default_fields`` and
+    ``validate_runtime_default_fields_initialized`` automatically — no inheritance is
+    required.  ``VllmConfig.__post_init__`` uses
+    ``isinstance(v, HasRuntimeDefaultFields)`` to discover sub-configs that need
+    initialization.
     """
 
-    def initialize_deferred_fields(self, vllm_config: Any) -> None: ...
-    def validate_deferred_fields_initialized(self) -> None: ...
+    def initialize_runtime_default_fields(self, vllm_config: Any) -> None: ...
+    def validate_runtime_default_fields_initialized(self) -> None: ...
 
 
-def _impl_initialize_deferred_fields(self: Any, vllm_config: Any) -> None:
-    """Injected as ``initialize_deferred_fields`` by the ``@config`` decorator.
+def _impl_initialize_runtime_default_fields(self: Any, vllm_config: Any) -> None:
+    """Injected as ``initialize_runtime_default_fields`` by the ``@config`` decorator.
 
-    Replaces every field still holding a ``_DeferredValue`` with its resolved
+    Replaces every field still holding a ``_RuntimeDefaultValue`` with its resolved
     value.  Fields explicitly set by the caller (e.g. the optimization-level
     table) are left unchanged; only sentinel-valued fields are touched.
     """
     for dc_field in fields(self):  # type: ignore[arg-type]
         current = getattr(self, dc_field.name)
-        if isinstance(current, _DeferredValue) and current.factory is not MISSING:
+        if isinstance(current, _RuntimeDefaultValue) and current.factory is not MISSING:
             factory = current.factory
             value = factory(vllm_config) if callable(factory) else factory
             setattr(self, dc_field.name, value)
 
 
-def _impl_validate_deferred_fields_initialized(self: Any) -> None:
-    """Injected as ``validate_deferred_fields_initialized`` by ``@config``.
+def _impl_validate_runtime_default_fields_initialized(self: Any) -> None:
+    """Injected as ``validate_runtime_default_fields_initialized`` by ``@config``.
 
-    Asserts that no field still holds a ``_DeferredValue``.  Called
+    Asserts that no field still holds a ``RuntimeDefaultValue``.  Called
     automatically by ``VllmConfig.__post_init__`` via auto-discovery.
     Raises ``ValueError`` listing every offending field name.
     """
     uninitialized = [
         dc_field.name
         for dc_field in fields(self)  # type: ignore[arg-type]
-        if isinstance(getattr(self, dc_field.name), _DeferredValue)
+        if isinstance(getattr(self, dc_field.name), _RuntimeDefaultValue)
     ]
     if uninitialized:
         raise ValueError(
-            f"{type(self).__name__}: deferred fields were never initialized: "
+            f"{type(self).__name__}: runtime default fields were never initialized: "
             f"{uninitialized}. This is a bug in VllmConfig initialization."
         )
 
 
-def _walk_deferred(obj: Any) -> Generator[Any, None, None]:
+def _walk_runtime_default(obj: Any) -> Generator[Any, None, None]:
     """Depth-first generator over *obj* and all nested dataclass children."""
     yield obj
     if is_dataclass(obj):
         for f in fields(obj):  # type: ignore[arg-type]
             child = getattr(obj, f.name)
             if child is not None and child is not obj and is_dataclass(child):
-                yield from _walk_deferred(child)
+                yield from _walk_runtime_default(child)
 
 
-def initialize_deferred_fields_recursive(obj: Any, vllm_config: Any) -> None:
-    """Initialize deferred fields in *obj* and all nested ``@config`` dataclasses."""
-    for node in _walk_deferred(obj):
-        if isinstance(node, HasDeferredFields):
-            node.initialize_deferred_fields(vllm_config)
+def initialize_runtime_default_fields_recursive(obj: Any, vllm_config: Any) -> None:
+    """Initialize runtime default fields in *obj* and all nested ``@config``
+    dataclasses."""
+    for node in _walk_runtime_default(obj):
+        if isinstance(node, HasRuntimeDefaultFields):
+            node.initialize_runtime_default_fields(vllm_config)
 
 
-def validate_deferred_fields_recursive(obj: Any) -> None:
-    """Validate deferred fields in *obj* and all nested ``@config`` dataclasses."""
-    for node in _walk_deferred(obj):
-        if isinstance(node, HasDeferredFields):
-            node.validate_deferred_fields_initialized()
+def validate_runtime_default_fields_recursive(obj: Any) -> None:
+    """Validate runtime default fields in *obj* and all nested ``@config``
+    dataclasses."""
+    for node in _walk_runtime_default(obj):
+        if isinstance(node, HasRuntimeDefaultFields):
+            node.validate_runtime_default_fields_initialized()
 
 
-def _inject_deferred_methods(cls: type) -> None:
-    """Attach deferred-field methods to *cls* if it declares any ``Deferred()`` fields.
+def _inject_runtime_default_methods(cls: type) -> None:
+    """Attach runtime default field methods to *cls* if it declares any
+    ``RuntimeDefault()`` fields.
 
     Called by the ``@config`` decorator after pydantic has finished processing
     the class.  Uses ``dataclasses.fields()`` + ``PydanticFieldInfo.default``
@@ -679,15 +683,15 @@ def _inject_deferred_methods(cls: type) -> None:
     """
     if not is_dataclass(cls):
         return
-    has_deferred = any(
+    has_runtime_default = any(
         isinstance(f.default, PydanticFieldInfo)
-        and isinstance(f.default.default, _DeferredValue)
+        and isinstance(f.default.default, _RuntimeDefaultValue)
         for f in fields(cls)  # type: ignore[arg-type]
     )
-    if has_deferred:
-        cls.initialize_deferred_fields = (  # type: ignore[attr-defined]
-            _impl_initialize_deferred_fields
+    if has_runtime_default:
+        cls.initialize_runtime_default_fields = (  # type: ignore[attr-defined]
+            _impl_initialize_runtime_default_fields
         )
-        cls.validate_deferred_fields_initialized = (  # type: ignore[attr-defined]
-            _impl_validate_deferred_fields_initialized
+        cls.validate_runtime_default_fields_initialized = (  # type: ignore[attr-defined]
+            _impl_validate_runtime_default_fields_initialized
         )
