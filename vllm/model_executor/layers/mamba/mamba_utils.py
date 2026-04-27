@@ -259,9 +259,13 @@ class MambaStateShapeCalculator:
         # RWKV-7 has no causal conv1d. Each block does its own token_shift,
         # so we keep two independent 1-token shift buffers per layer:
         # one for the time-mix block, one for the channel-mix (FFN) block.
-        # Modeled as 1-step conv-style states for cache-allocator compatibility.
-        attn_shift_shape = (1, divide(hidden_size, tp_world_size))
-        ffn_shift_shape = (1, divide(hidden_size, tp_world_size))
+        # The shift operates on the layer input, which is the full-hidden
+        # (replicated) tensor that feeds the column-parallel projections,
+        # so the shift state holds the full hidden dim on every rank --
+        # it is not sharded along ``tp_world_size``. The duplicated bytes
+        # are negligible (one token per layer per sequence).
+        attn_shift_shape = (1, hidden_size)
+        ffn_shift_shape = (1, hidden_size)
         # Recurrent matrix-valued state per head: shape (H/tp, K, V).
         # For the dense Goose family K == V == head_dim, but we keep them
         # independent to support `value_dim` overrides in future configs.

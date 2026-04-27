@@ -10,6 +10,7 @@ from vllm.config import (
     ModelConfig,
     get_current_vllm_config,
 )
+from vllm.distributed import divide
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.fla.ops.rwkv7 import (
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -29,6 +31,8 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.rwkv7_attn import Rwkv7AttentionMetadata
@@ -39,8 +43,13 @@ class LoRA(nn.Module):
 
     Mirrors fla's `fla.layers.rwkv6.LoRA`: down → activation → up, with an
     optional bias added inside the up-projection. Parameter names
-    (`lora.0.weight`, `lora.2.weight`, `lora.2.bias`) match fla so that
-    `fla-hub/rwkv7-*` checkpoints load without remapping.
+    (``lora.0.weight``, ``lora.2.weight``, ``lora.2.bias``) match fla so
+    that ``fla-hub/rwkv7-*`` checkpoints load without remapping.
+
+    TP behavior: input is the full (replicated) hidden state, so the down
+    projection is replicated. Output shards along its head/channel axis,
+    so the up projection is column-parallel and returns the local rank's
+    slice without cross-rank gather.
     """
 
     def __init__(
@@ -50,6 +59,7 @@ class LoRA(nn.Module):
         low_rank_dim: int,
         bias: bool = True,
         activation: str | None = "tanh",
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -58,24 +68,43 @@ class LoRA(nn.Module):
         self.bias = bias
 
         if activation is None:
-            act: nn.Module = nn.Identity()
+            self.act: nn.Module = nn.Identity()
         elif activation == "sigmoid":
-            act = nn.Sigmoid()
+            self.act = nn.Sigmoid()
         elif activation == "tanh":
-            act = nn.Tanh()
+            self.act = nn.Tanh()
         elif activation == "relu":
-            act = nn.ReLU()
+            self.act = nn.ReLU()
         else:
             raise ValueError(f"Unsupported activation `{activation}`.")
 
-        self.lora = nn.Sequential(
-            nn.Linear(input_dim, low_rank_dim, bias=False),
-            act,
-            nn.Linear(low_rank_dim, output_dim, bias=bias),
+        # ``lora.0`` matches the fla checkpoint layout (down, then activation,
+        # then up). The down projection sees the full hidden input on every
+        # rank, so it stays replicated; the up projection's output is sharded
+        # along the head/channel axis to feed downstream per-rank ops.
+        self.lora = nn.ModuleDict(
+            {
+                "0": ReplicatedLinear(
+                    input_dim,
+                    low_rank_dim,
+                    bias=False,
+                    prefix=f"{prefix}.lora.0",
+                ),
+                "2": ColumnParallelLinear(
+                    low_rank_dim,
+                    output_dim,
+                    bias=bias,
+                    gather_output=False,
+                    prefix=f"{prefix}.lora.2",
+                ),
+            }
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.lora(x)
+        h, _ = self.lora["0"](x)
+        h = self.act(h)
+        out, _ = self.lora["2"](h)
+        return out
 
 
 def compute_token_shift_delta(
@@ -347,12 +376,6 @@ class RWKV7Attention(nn.Module, MambaBase):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        # TP > 1 needs head-dim sharding on r_k and the GroupNorm group count
-        # split. Punted to a follow-up — RWKV-7 weights are <6 GB at bf16,
-        # which fits a single Blackwell easily.
-        assert self.tp_size == 1, (
-            "RWKV-7 currently runs at tensor-parallel size 1 only."
-        )
 
         self.hidden_size = hidden_size
         self.key_dim = hidden_size
@@ -370,7 +393,15 @@ class RWKV7Attention(nn.Module, MambaBase):
         self.model_config = model_config
         self.cache_config = cache_config
 
-        # Time-shift mix scalars (broadcast across batch, time)
+        # Per-rank head/channel counts. ``divide`` raises if not evenly
+        # divisible, so the model surfaces a clear error instead of silently
+        # mis-sharding when ``num_heads`` is not a multiple of ``tp_size``.
+        self.num_heads_per_tp = divide(num_heads, self.tp_size)
+        self.key_dim_per_tp = self.num_heads_per_tp * head_dim
+        self.value_dim_per_tp = self.num_heads_per_tp * self.head_v_dim
+
+        # Time-shift mix scalars. Multiplied with the layer input (full hidden,
+        # replicated across ranks), so they stay replicated.
         self.x_r = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.x_w = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.x_k = nn.Parameter(torch.zeros(1, 1, hidden_size))
@@ -378,10 +409,16 @@ class RWKV7Attention(nn.Module, MambaBase):
         self.x_a = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.x_g = nn.Parameter(torch.zeros(1, 1, hidden_size))
 
-        # Per-channel and per-(head, head_dim) scalar gates
-        self.k_k = nn.Parameter(torch.zeros(self.key_dim))
-        self.k_a = nn.Parameter(torch.zeros(self.key_dim))
-        self.r_k = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
+        # Per-channel and per-(head, head_dim) scalar gates. These multiply
+        # post-projection tensors that are already sharded along the head
+        # axis, so the parameters shard the same way.
+        self.k_k = nn.Parameter(torch.zeros(self.key_dim_per_tp))
+        self.k_a = nn.Parameter(torch.zeros(self.key_dim_per_tp))
+        self.r_k = nn.Parameter(torch.zeros(self.num_heads_per_tp, head_dim))
+        for p in (self.k_k, self.k_a):
+            set_weight_attrs(p, {"weight_loader": sharded_weight_loader(0)})
+        # ``r_k`` shards along the head axis (dim 0).
+        set_weight_attrs(self.r_k, {"weight_loader": sharded_weight_loader(0)})
 
         # Full projections (no bias). At TP=1 these are just regular Linears.
         self.r_proj = ColumnParallelLinear(
@@ -414,11 +451,15 @@ class RWKV7Attention(nn.Module, MambaBase):
         )
 
         # LoRAs. Layer 0 has no v_lora (it sets v_first = v directly).
+        # Up-projection outputs feed downstream per-rank ops (kernel inputs,
+        # gate-output correction), so the up shards along head/channel axis
+        # via ColumnParallelLinear inside ``LoRA``.
         self.w_lora = LoRA(
             hidden_size,
             self.key_dim,
             low_rank_dim=decay_low_rank_dim,
             activation="tanh",
+            prefix=f"{prefix}.w_lora",
         )
         if self.layer_idx != 0:
             self.v_lora = LoRA(
@@ -426,12 +467,14 @@ class RWKV7Attention(nn.Module, MambaBase):
                 self.value_dim,
                 low_rank_dim=v_low_rank_dim,
                 activation=None,
+                prefix=f"{prefix}.v_lora",
             )
         self.a_lora = LoRA(
             hidden_size,
             self.key_dim,
             low_rank_dim=a_low_rank_dim,
             activation=None,
+            prefix=f"{prefix}.a_lora",
         )
         # g_lora has sigmoid between the two legs and no bias on the up-proj
         self.g_lora = LoRA(
@@ -440,15 +483,20 @@ class RWKV7Attention(nn.Module, MambaBase):
             low_rank_dim=gate_low_rank_dim,
             bias=False,
             activation="sigmoid",
+            prefix=f"{prefix}.g_lora",
         )
 
-        # GroupNorm over (num_heads, head_v_dim). RWKV-7 uses bias.
+        # GroupNorm operates on each rank's local head shard. The affine
+        # weight/bias are loaded sharded along channel axis 0.
         self.g_norm = nn.GroupNorm(
-            num_groups=self.num_heads,
-            num_channels=self.value_dim,
+            num_groups=self.num_heads_per_tp,
+            num_channels=self.value_dim_per_tp,
             eps=self.head_dim * norm_eps,
             affine=True,
         )
+        if self.tp_size > 1:
+            for p in (self.g_norm.weight, self.g_norm.bias):
+                set_weight_attrs(p, {"weight_loader": sharded_weight_loader(0)})
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -499,21 +547,21 @@ class RWKV7Attention(nn.Module, MambaBase):
         ``v_first[:num_actual_tokens]`` with the freshly computed ``v``.
         """
         forward_context: ForwardContext = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
+        ctx_meta: object = forward_context.attn_metadata
+        if ctx_meta is None:
             return  # profile/dummy run
 
-        if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.prefix]
-        assert isinstance(attn_metadata, Rwkv7AttentionMetadata)
-
-        m = attn_metadata
+        if isinstance(ctx_meta, dict):
+            ctx_meta = ctx_meta[self.prefix]
+        assert isinstance(ctx_meta, Rwkv7AttentionMetadata)
+        m: Rwkv7AttentionMetadata = ctx_meta
         num_actual_tokens = m.num_actual_tokens
         num_decodes = m.num_decodes
         num_prefills = m.num_prefills
         num_decode_tokens = m.num_decode_tokens
         state_indices = m.state_indices_tensor
         query_start_loc = m.query_start_loc
+        assert state_indices is not None and query_start_loc is not None
         cu_seqlens = query_start_loc.to(torch.int32)
         is_all = m.is_mamba_cache_all
 
@@ -585,21 +633,31 @@ class RWKV7Attention(nn.Module, MambaBase):
         a = self.a_lora(xa).sigmoid()
         g = self.g_lora(xg)
 
-        kk = (k * self.k_k).view(num_actual_tokens, self.num_heads, self.head_dim)
+        kk = (k * self.k_k).view(
+            num_actual_tokens, self.num_heads_per_tp, self.head_dim
+        )
         kk = F.normalize(kk, dim=-1, p=2.0).reshape(num_actual_tokens, -1)
         k = k.addcmul(k * (a - 1), self.k_a)
 
-        # [1, T_total, H, D] reshape for the packed-batch kernel
-        r_4d = r.view(1, num_actual_tokens, self.num_heads, self.head_dim).contiguous()
-        w_4d = w.view(1, num_actual_tokens, self.num_heads, self.head_dim).contiguous()
-        k_4d = k.view(1, num_actual_tokens, self.num_heads, self.head_dim).contiguous()
+        # [1, T_total, H_per_tp, D] reshape for the packed-batch kernel
+        r_4d = r.view(
+            1, num_actual_tokens, self.num_heads_per_tp, self.head_dim
+        ).contiguous()
+        w_4d = w.view(
+            1, num_actual_tokens, self.num_heads_per_tp, self.head_dim
+        ).contiguous()
+        k_4d = k.view(
+            1, num_actual_tokens, self.num_heads_per_tp, self.head_dim
+        ).contiguous()
         v_4d = v.view(
-            1, num_actual_tokens, self.num_heads, self.head_v_dim
+            1, num_actual_tokens, self.num_heads_per_tp, self.head_v_dim
         ).contiguous()
         kk_4d = kk.view(
-            1, num_actual_tokens, self.num_heads, self.head_dim
+            1, num_actual_tokens, self.num_heads_per_tp, self.head_dim
         ).contiguous()
-        a_4d = a.view(1, num_actual_tokens, self.num_heads, self.head_dim).contiguous()
+        a_4d = a.view(
+            1, num_actual_tokens, self.num_heads_per_tp, self.head_dim
+        ).contiguous()
 
         initial_state = recurrent_state_cache[read_slot]
         if initial_state.dtype != torch.float32:
@@ -653,6 +711,9 @@ class RWKV7Attention(nn.Module, MambaBase):
         # Under prefix-caching ('all') mode, also fill the intermediate blocks
         # with the per-chunk-end recurrent states produced by chunk_rwkv7.
         if is_all and num_prefills > 0 and varlen_states is not None:
+            assert m.block_idx_first_scheduled_token is not None
+            assert m.block_idx_last_scheduled_token is not None
+            assert m.mamba_block_size is not None
             # Indices of the prefill rows in the [N, max_blocks] state table.
             state_indices_p = state_indices[num_decodes:]
             # Per-prefill chunk offsets in the global varlen_states tensor.
@@ -694,13 +755,13 @@ class RWKV7Attention(nn.Module, MambaBase):
                 recurrent_state_cache=recurrent_state_cache,
             )
 
-        o = self.g_norm(core_out.view(num_actual_tokens, self.value_dim))
+        o = self.g_norm(core_out.view(num_actual_tokens, self.value_dim_per_tp))
         o = _gate_output_correction(
             o,
-            r_4d.view(num_actual_tokens, self.num_heads, self.head_dim),
-            k_4d.view(num_actual_tokens, self.num_heads, self.head_dim),
+            r_4d.view(num_actual_tokens, self.num_heads_per_tp, self.head_dim),
+            k_4d.view(num_actual_tokens, self.num_heads_per_tp, self.head_dim),
             self.r_k,
-            v_4d.view(num_actual_tokens, self.num_heads, self.head_v_dim),
+            v_4d.view(num_actual_tokens, self.num_heads_per_tp, self.head_v_dim),
             g,
         )
         proj, _ = self.o_proj(o)
@@ -713,6 +774,9 @@ class RWKV7Attention(nn.Module, MambaBase):
             shift_state_cache=attn_shift_cache,
         )
         if is_all and num_prefills > 0:
+            assert m.block_idx_first_scheduled_token is not None
+            assert m.block_idx_last_scheduled_token is not None
+            assert m.mamba_block_size is not None
             cu_seqlens_p_long = (cu_seqlens[num_decodes:] - cu_seqlens[num_decodes]).to(
                 torch.long
             )
