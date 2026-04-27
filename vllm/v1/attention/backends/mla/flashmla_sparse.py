@@ -182,6 +182,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     query_start_loc: torch.Tensor
     slot_mapping: torch.Tensor
 
+    seq_lens: torch.Tensor
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
     block_size: int = 64

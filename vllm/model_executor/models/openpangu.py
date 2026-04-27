@@ -269,33 +269,38 @@ class MomeAttention(MambaBase, CustomOp):
         conv_weight = conv_weight.to(hidden_states.dtype)
         output_chunks = []
 
-        num_decodes = mome_metadata.num_decode_tokens
-        if num_decodes > 0:
+        num_decode_tokens = mome_metadata.num_decode_tokens
+        num_decodes = mome_metadata.num_decodes
+        if num_decode_tokens > 0:
+            decode_output = hidden_states.new_zeros(
+                (num_decode_tokens, hidden_size))
             decode_hidden_states = hidden_states[:num_decodes]
             decode_state_indices = _get_request_state_indices(
                 mome_metadata.state_indices_tensor[:num_decodes])
-            prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
-                hidden_states.dtype)
-            conv_input = torch.cat(
-                [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
-            conv_output = torch.nn.functional.conv1d(
-                conv_input.permute(0, 2, 1),
-                conv_weight,
-                groups=hidden_size,
-            )
-            cache[decode_state_indices, :self.kernel_size -
-                  1] = conv_input[:, -(self.kernel_size - 1):]
-            output_chunks.append(
-                conv_output.permute(0, 2, 1).reshape(-1, hidden_size))
+            if num_decodes > 0:
+                prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
+                    hidden_states.dtype)
+                conv_input = torch.cat(
+                    [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
+                conv_output = torch.nn.functional.conv1d(
+                    conv_input.permute(0, 2, 1),
+                    conv_weight,
+                    groups=hidden_size,
+                )
+                cache[decode_state_indices, :self.kernel_size -
+                      1] = conv_input[:, -(self.kernel_size - 1):]
+                decode_output[:num_decodes] = conv_output.permute(
+                    0, 2, 1).reshape(-1, hidden_size)
+            output_chunks.append(decode_output)
 
         if mome_metadata.num_prefills > 0:
             query_start_loc = mome_metadata.query_start_loc_p
             assert query_start_loc is not None
-            prefill_hidden_states = hidden_states[num_decodes:num_decodes +
+            prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
                                                   mome_metadata.num_prefill_tokens]
             prefill_state_indices = _get_request_state_indices(
                 mome_metadata.state_indices_tensor[
-                    num_decodes:num_decodes + mome_metadata.num_prefills])
+                    num_decode_tokens:num_decode_tokens + mome_metadata.num_prefills])
             conv_output_list = []
             for i in range(mome_metadata.num_prefills):
                 s = query_start_loc[i]
@@ -385,6 +390,7 @@ class PanguIndexer(nn.Module):
         self.sink_len = getattr(config, 'param_sink_number', 0)
         self.num_sink_blocks = self.sink_len // self.vllm_config.cache_config.block_size
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
+        self.topk_tokens += self.sink_len
 
     def forward(
         self,
@@ -394,7 +400,17 @@ class PanguIndexer(nn.Module):
         rotary_emb,
         kv_cache: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         attn_metadata: Optional[Any] = None,
+        attn_layer_name: str = "",
     ) -> torch.Tensor:
+        num_actual_toks = None
+        if attn_metadata is not None:
+            num_actual_toks = getattr(attn_metadata, "num_actual_tokens", None)
+            if num_actual_toks is not None:
+                hidden_states = hidden_states[:num_actual_toks]
+                qr = qr[:num_actual_toks]
+                if isinstance(positions, torch.Tensor):
+                    positions = positions[:num_actual_toks]
+
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         q_pe, q_nope = torch.split(
@@ -421,23 +437,45 @@ class PanguIndexer(nn.Module):
         if attn_metadata is None:
             return self.topk_indices_buffer
         
-        assert isinstance(kv_cache, (list, tuple)), (
-            "PanguIndexer expects the DSA attention cache to be a composite "
-            f"tuple/list, but got {type(kv_cache)}"
-        )
-        assert len(kv_cache) >= 2, (
-            "PanguIndexer expects indexer K cache at kv_cache[1], "
-            f"but got {len(kv_cache)} cache tensors."
-        )
-        
-        indexer_cache = kv_cache[1]
+        if kv_cache is None:
+            forward_context = get_forward_context()
+            kv_cache = self.kv_cache[forward_context.virtual_engine]
+
+        if isinstance(kv_cache, (list, tuple)):
+            assert len(kv_cache) >= 2, (
+                "PanguIndexer expects indexer K cache at kv_cache[1], "
+                f"but got {len(kv_cache)} cache tensors."
+            )
+            indexer_cache = kv_cache[1]
+        else:
+            indexer_cache = kv_cache
+
+        if self.topk_indices_buffer is not None and indexer_cache is not None:
+            return torch.ops.vllm.pangu_sparse_attn_indexer(
+                hidden_states,
+                attn_layer_name,
+                indexer_cache,
+                q,
+                k,
+                weights,
+                self.topk_tokens,
+                self.head_dim,
+                self.vllm_config.cache_config.block_size,
+                self.sink_len,
+                self.num_sink_blocks,
+                self.topk_indices_buffer,
+            )
+
         if indexer_cache is not None:
             # Multi-dimensional indexing is robust to padding between blocks.
             block_size = self.vllm_config.cache_config.block_size
             # Shape: [num_blocks, padded_tokens_per_block, head_dim]
             q_cache = indexer_cache.view(indexer_cache.shape[0], -1, k.shape[-1])
-            block_ids = attn_metadata.slot_mapping // block_size
-            offsets = attn_metadata.slot_mapping % block_size
+            slot_mapping = attn_metadata.slot_mapping
+            if num_actual_toks is not None:
+                slot_mapping = slot_mapping[:num_actual_toks]
+            block_ids = slot_mapping // block_size
+            offsets = slot_mapping % block_size
             q_cache[block_ids, offsets] = k
 
         bs = q.shape[0]
@@ -523,6 +561,135 @@ class PanguIndexer(nn.Module):
                     indices.to(torch.int32) + self.sink_len)
                 
         return topk_indices
+
+
+def pangu_sparse_attn_indexer(
+    hidden_states: torch.Tensor,
+    attn_layer_name: str,
+    kv_cache: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    topk_tokens: int,
+    head_dim: int,
+    block_size: int,
+    sink_len: int,
+    num_sink_blocks: int,
+    topk_indices_buffer: torch.Tensor,
+) -> torch.Tensor:
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        return pangu_sparse_attn_indexer_fake(
+            hidden_states,
+            attn_layer_name,
+            kv_cache,
+            query,
+            key,
+            weights,
+            topk_tokens,
+            head_dim,
+            block_size,
+            sink_len,
+            num_sink_blocks,
+            topk_indices_buffer,
+        )
+
+    attn_metadata = attn_metadata[attn_layer_name]
+    num_actual_toks = getattr(attn_metadata, "num_actual_tokens", query.shape[0])
+    hidden_states = hidden_states[:num_actual_toks]
+    query = query[:num_actual_toks]
+    key = key[:num_actual_toks]
+    weights = weights[:num_actual_toks]
+
+    slot_mapping = attn_metadata.slot_mapping[:num_actual_toks]
+    q_cache = kv_cache.view(kv_cache.shape[0], -1, key.shape[-1])
+    block_ids = slot_mapping // block_size
+    offsets = slot_mapping % block_size
+    q_cache[block_ids, offsets] = key
+
+    topk_indices_buffer[:hidden_states.shape[0]] = -1
+
+    block_table = getattr(attn_metadata, "block_table", None)
+    if block_table is None and hasattr(attn_metadata, "decode"):
+        block_table = getattr(attn_metadata.decode, "block_table", None)
+
+    bs = hidden_states.shape[0]
+    if block_table is None:
+        topk_indices_buffer[:bs, :topk_tokens] = 0
+        return topk_indices_buffer
+
+    block_table = block_table[:, num_sink_blocks:]
+    topk_indices = topk_indices_buffer[:bs, :topk_tokens]
+    num_sink_tokens = min(sink_len, topk_tokens)
+    if num_sink_tokens > 0:
+        sink_indices = torch.arange(
+            num_sink_tokens, dtype=torch.int32, device=query.device)
+        topk_indices[:, :num_sink_tokens] = sink_indices
+
+    token_to_seq = getattr(attn_metadata, "req_id_per_token", None)
+    if token_to_seq is not None:
+        token_to_seq = token_to_seq[:bs].to(device=query.device, dtype=torch.long)
+    else:
+        q_start = getattr(attn_metadata, "query_start_loc", None)
+        num_reqs = getattr(attn_metadata, "num_reqs", block_table.shape[0])
+        if q_start is not None and num_reqs > 0:
+            token_to_seq = torch.zeros(bs, dtype=torch.long, device=query.device)
+            max_reqs = min(int(num_reqs), block_table.shape[0])
+            for seq_idx in range(max_reqs):
+                start = q_start[seq_idx]
+                end = q_start[seq_idx + 1]
+                token_to_seq[start:end] = seq_idx
+        else:
+            token_to_seq = torch.arange(bs, device=query.device)
+
+    q_cache = kv_cache.view(kv_cache.shape[0], -1, head_dim)
+    for i in range(bs):
+        seq_idx = token_to_seq[i]
+        blocks = block_table[seq_idx]
+        valid_blocks = blocks[blocks >= 0]
+        if len(valid_blocks) == 0:
+            continue
+
+        valid_keys = q_cache[valid_blocks, :block_size]
+        flat_keys = valid_keys.reshape(-1, head_dim)
+        token_q = query[i]
+        token_w = weights[i]
+        logits = torch.matmul(token_q, flat_keys.transpose(0, 1))
+        logits = logits * token_w.unsqueeze(-1)
+        total_scores = logits.sum(dim=0)
+
+        k = min(topk_tokens - num_sink_tokens, total_scores.shape[0])
+        if k > 0:
+            _, indices = torch.topk(total_scores, k)
+            topk_indices[i, num_sink_tokens:num_sink_tokens + k] = (
+                indices.to(torch.int32) + sink_len)
+    return topk_indices_buffer
+
+
+def pangu_sparse_attn_indexer_fake(
+    hidden_states: torch.Tensor,
+    attn_layer_name: str,
+    kv_cache: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    topk_tokens: int,
+    head_dim: int,
+    block_size: int,
+    sink_len: int,
+    num_sink_blocks: int,
+    topk_indices_buffer: torch.Tensor,
+) -> torch.Tensor:
+    return topk_indices_buffer
+
+
+direct_register_custom_op(
+    op_name="pangu_sparse_attn_indexer",
+    op_func=pangu_sparse_attn_indexer,
+    mutates_args=["kv_cache", "topk_indices_buffer"],
+    fake_impl=pangu_sparse_attn_indexer_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 class OpenPanguMLP(nn.Module):
@@ -1745,7 +1912,7 @@ class OpenPanguModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
 
         if hasattr(config, "index_topk"):
-            topk_tokens = config.index_topk
+            topk_tokens = config.index_topk + 128
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 topk_tokens,

@@ -123,7 +123,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         attn_metadata = forward_context.attn_metadata
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.mla_attn.layer_name]
-        kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+        indexer_kv_cache = getattr(self.indexer, "kv_cache", None)
+        if indexer_kv_cache is not None:
+            kv_cache = indexer_kv_cache[forward_context.virtual_engine]
+        else:
+            kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
         return kv_cache, attn_metadata
 
     def forward(
@@ -176,7 +180,13 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
 
         if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            self.indexer(
+                hidden_states,
+                q_c,
+                positions,
+                self.indexer_rope_emb,
+                attn_layer_name=self.mla_attn.layer_name,
+            )
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
@@ -307,6 +317,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
                 self.indexer_rope_emb,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
+                attn_layer_name=self.mla_attn.layer_name,
             )
 
         if llama_4_scaling is not None:

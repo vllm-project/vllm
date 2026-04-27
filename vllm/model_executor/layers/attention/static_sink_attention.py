@@ -89,6 +89,7 @@ def create_static_sink_attention_backend(
                 device=device,
                 dtype=torch.int32,
             )
+            self.sink_kv_block_offset = sink_kv_block_offset
 
         def build(
             self,
@@ -96,7 +97,7 @@ def create_static_sink_attention_backend(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
-            if common_attn_metadata.block_table_tensor[0, 0] != 1:
+            if common_attn_metadata.block_table_tensor[0, 0] != self.sink_kv_block_offset:
                 max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
                 num_reqs = common_attn_metadata.num_reqs
                 self.block_table_with_sink[
@@ -440,10 +441,6 @@ class StaticSinkMLAAttention(MLAAttention):
             indexer=indexer,
             **extra_impl_args,
         )
-        if is_hybrid_kv:
-            # Composite KV cache (e.g. for DSA) requires direct attention calls
-            # as unified ops don't support tuple KV caches.
-            self.use_direct_call = True
 
     def update_sink_kv(self, sink_k_pe, sink_compressed_kv) -> None:
         self.sink_k_pe = sink_k_pe
