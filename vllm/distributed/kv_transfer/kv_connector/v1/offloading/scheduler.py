@@ -171,6 +171,7 @@ class OffloadingConnectorScheduler:
 
         # GPU block_id -> in-flight job_ids that touch it.
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
+        self._unprotected_block_ids: set[int] = set()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -441,12 +442,16 @@ class OffloadingConnectorScheduler:
             if new_block_id_groups:
                 req_status.update_block_id_groups(new_block_id_groups)
                 # Fence new blocks against in-flight stores.
-                self._current_batch_jobs_to_flush.update(
-                    jid
-                    for new_blocks in new_block_id_groups
-                    for bid in new_blocks
-                    for jid in self._block_id_to_pending_jobs.get(bid, ())
-                )
+                if self._unprotected_block_ids:
+                    new_blocks_flat = [
+                        bid for new_blocks in new_block_id_groups for bid in new_blocks
+                    ]
+                    if not self._unprotected_block_ids.isdisjoint(new_blocks_flat):
+                        self._current_batch_jobs_to_flush.update(
+                            jid
+                            for bid in new_blocks_flat
+                            for jid in self._block_id_to_pending_jobs.get(bid, ())
+                        )
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
@@ -555,6 +560,7 @@ class OffloadingConnectorScheduler:
             )
             for bid in src_block_ids:
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+                self._unprotected_block_ids.add(bid)
 
             store_jobs[job_id] = TransferJob(
                 req_id=req_id, transfer_spec=(src_spec, dst_spec)
@@ -622,6 +628,7 @@ class OffloadingConnectorScheduler:
                 pending.remove(job_id)
                 if not pending:
                     del self._block_id_to_pending_jobs[bid]
+                    self._unprotected_block_ids.discard(bid)
 
             del self._jobs[job_id]
             req_status = self._req_status[job_status.req_id]
