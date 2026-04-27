@@ -1258,8 +1258,9 @@ def test_streaming_tool_args_not_buffered_until_end(minimax_tool_parser):
 
     accumulated = ""
     tool_call_messages = []
+    first_arg_delta_idx = None
 
-    for delta in deltas:
+    for idx, delta in enumerate(deltas):
         previous = accumulated
         accumulated += delta
         result = minimax_tool_parser.extract_tool_calls_streaming(
@@ -1273,6 +1274,9 @@ def test_streaming_tool_args_not_buffered_until_end(minimax_tool_parser):
         )
         if result is not None and hasattr(result, "tool_calls") and result.tool_calls:
             tool_call_messages.append(result)
+            tc = result.tool_calls[0]
+            if first_arg_delta_idx is None and tc.function and tc.function.arguments:
+                first_arg_delta_idx = idx
 
     assert len(tool_call_messages) > 0, (
         "Tool call streaming should emit at least one DeltaMessage"
@@ -1286,10 +1290,13 @@ def test_streaming_tool_args_not_buffered_until_end(minimax_tool_parser):
     ]
     assert "get_weather" in names, f"Expected function name 'get_weather', got: {names}"
 
-    # Verify we got argument fragments (not all at once at the end)
-    arg_messages = [
-        m
-        for m in tool_call_messages
-        if m.tool_calls[0].function and m.tool_calls[0].function.arguments
-    ]
-    assert len(arg_messages) >= 1, "Should have received at least one argument fragment"
+    # Verify arguments arrived BEFORE the final </tool_calls> delta,
+    # proving they were streamed incrementally and not buffered until end.
+    assert first_arg_delta_idx is not None, (
+        "Should have received at least one argument fragment"
+    )
+    assert first_arg_delta_idx < len(deltas) - 1, (
+        f"Arguments first appeared at delta {first_arg_delta_idx} "
+        f"(last delta is {len(deltas) - 1}); "
+        "they should arrive before the final </tool_calls> delta"
+    )

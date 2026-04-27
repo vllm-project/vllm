@@ -286,7 +286,11 @@ class MinimaxToolParser(ToolParser):
         if self.in_thinking_tag:
             return False
         if self.tool_call_start_token in current_text:
-            return False
+            return bool(
+                self.tool_call_start_token in delta_text
+                or self.tool_call_end_token in delta_text
+                or self._is_potential_tag_start(self.pending_buffer + delta_text)
+            )
         return bool(
             self.pending_buffer
             or self.tool_call_start_token in delta_text
@@ -726,11 +730,6 @@ class MinimaxToolParser(ToolParser):
         # the tool-call argument handlers below can process it.
         if self.pending_buffer:
             delta_text = self.pending_buffer + delta_text
-            current_text = (
-                current_text[: -len(delta_text)] + delta_text
-                if len(delta_text) <= len(current_text)
-                else current_text
-            )
             self.pending_buffer = ""
 
         if self._is_end_tool_calls(current_text):
