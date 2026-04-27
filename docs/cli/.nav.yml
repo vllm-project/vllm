@@ -1,6 +1,7 @@
 nav:
   - README.md
   - serve.md
+  - launch.md
   - chat.md
   - complete.md
   - run-batch.md
