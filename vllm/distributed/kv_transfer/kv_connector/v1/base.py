@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -62,7 +63,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -144,6 +145,17 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     """
 
     pass
+
+
+@dataclass(frozen=True)
+class SchedulerState:
+    """
+    State of the scheduler that the connector can access, scheduler-side.
+    This dataclass ensures read-only access to scheduler state, while enabling
+    expansion of the scheduler state in the future.
+    """
+
+    kv_cache_manager: "KVCacheManager"
 
 
 class KVConnectorWorkerMetadata(ABC):
@@ -445,6 +457,17 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_scheduler_state(self, scheduler_state: SchedulerState):
+        """
+        Bind the scheduler state to the connector.
+        This function is called by the scheduler after initialization
+        and before the first model execution.
+
+        Args:
+            scheduler_state (SchedulerState): the scheduler state.
+        """
+        return
 
     @abstractmethod
     def get_num_new_matched_tokens(

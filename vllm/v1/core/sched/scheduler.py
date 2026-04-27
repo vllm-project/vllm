@@ -24,7 +24,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    SchedulerState,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -238,12 +241,6 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
         )
-        # Bind GPU block pool to the KV connector. This must happen after
-        # kv_cache_manager is constructed so block_pool is available.
-        if self.connector is not None and hasattr(
-            self.connector, "bind_gpu_block_pool"
-        ):
-            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
@@ -298,6 +295,9 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        if self.connector is not None:
+            state = SchedulerState(kv_cache_manager=self.kv_cache_manager)
+            self.connector.bind_scheduler_state(state)
 
     def _mamba_block_aligned_split(
         self,

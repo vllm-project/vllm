@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SchedulerState,
     SupportsHMA,
 )
 from vllm.logger import init_logger
@@ -31,7 +32,6 @@ from vllm.v1.simple_kv_offload.worker import (
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
-    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -165,10 +165,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Scheduler-side methods ---
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
-    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+    def bind_scheduler_state(self, scheduler_state: SchedulerState) -> None:
         if self.scheduler_manager is not None:
-            self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
+            self.scheduler_manager.bind_gpu_block_pool(
+                scheduler_state.kv_cache_manager.block_pool
+            )
 
     def get_num_new_matched_tokens(
         self,
