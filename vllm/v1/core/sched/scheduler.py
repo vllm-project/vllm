@@ -2246,10 +2246,6 @@ class Scheduler(SchedulerInterface):
             )
         )
         
-        for req in async_load_reqs:
-            if req.request_id in async_failed_req_ids:
-                self.kv_cache_manager.free(req)
-
         total_failed_requests = len(async_failed_req_ids)
 
         # handle sync loads (may be cached, collect blocks for eviction)
