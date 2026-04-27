@@ -173,6 +173,7 @@ class CommunicatorBenchmark:
             self.fi_ar_comm = FlashInferAllReduce(
                 group=self.cpu_group,
                 device=self.device,
+                max_size_override=self.max_size_override,
             )
             if not self.fi_ar_comm.disabled:
                 logger.info("Rank %s: FlashInferAllReduce initialized", self.rank)
