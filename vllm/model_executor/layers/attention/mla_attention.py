@@ -782,6 +782,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k_nope_3d = k_c_normed.view(-1, self.num_kv_heads, self.kv_lora_rank)
             k_pe_3d = k_pe.squeeze(1).view(-1, self.num_kv_heads, self.qk_rope_head_dim)
 
+            # Reshape KV cache for AITER kernel
+            # MLA cache: (num_blocks, block_size, head_size)
+            # AITER expects: (B_cache, KH, d_cache) where KH=1 for MLA
+            num_blocks, block_size, head_size = kv_cache.shape
+            kv_cache_reshaped = kv_cache.view(num_blocks * block_size, 1, head_size)
+
             # Call unified kernel for entire batch
             # num_decode_toks_for_zeros=num_mqa_tokens tells kernel how many
             # decode tokens are at the beginning
@@ -790,7 +796,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 q_pe=q_pe,
                 k_nope=k_nope_3d,
                 k_pe=k_pe_3d,
-                kv_cache=kv_cache,
+                kv_cache=kv_cache_reshaped,
                 slot_mapping=slot_mapping,
                 pos=positions,
                 cos=self.cos_cache,
