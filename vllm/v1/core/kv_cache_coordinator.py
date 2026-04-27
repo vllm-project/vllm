@@ -54,8 +54,14 @@ class KVCacheCoordinator(ABC):
             metrics_collector,
         )
 
-        # Needs special handling for find_longest_cache_hit if eagle is enabled
-        self.use_eagle = use_eagle
+        # KV cache group indices that get the EAGLE last-block drop.
+        self.eagle_group_ids: set[int] = {
+            i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
+        }
+        # Conservatively fall back to flag all groups when no group is flagged.
+        if use_eagle and not self.eagle_group_ids:
+            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -357,7 +363,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            use_eagle=0 in self.eagle_group_ids,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -450,6 +456,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         block_sizes = [spec.block_size for spec, _, _ in attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
+        # Attention-group indices (into ``self.attention_groups``) that
+        # contain at least one EAGLE/MTP KV cache group.
+        self.eagle_attn_group_indices: set[int] = {
+            i
+            for i, (_, group_ids, _) in enumerate(self.attention_groups)
+            if any(gid in self.eagle_group_ids for gid in group_ids)
+        }
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -485,49 +499,62 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
-        # Full attn is always first if it exists. This avoids EAGLE drops
-        # being applied multiple times to non-full-attn groups.
-        # FIXME (yifan): However, for complex hybrid models with multiple attn
-        # groups, we still have the EAGLE spiral block dropping problem. See
-        # discussion in issue https://github.com/vllm-project/vllm/issues/32802.
+        # Full attn is always first if it exists.
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
         )
 
+        # Attention-group indices whose EAGLE drop is verified at the current
+        # ``curr_hit_length``. Each eagle group applies the drop at most once
+        # per candidate length (see issue #32802).
+        eagle_verified: set[int] = set()
+
         while True:
             curr_hit_length = hit_length
 
-            for spec, group_ids, manager_cls in self.attention_groups:
-                is_full_attn = isinstance(spec, FullAttentionSpec)
-
-                # Full attention: reuse cached blocks (downward-closed property)
+            for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
-                if is_full_attn and cached_blocks is not None:
-                    # For full attention, we only need to compute the cache hit
-                    # length once. Starting from the second iteration, if the
-                    # curr_hit_length is reduced by other groups, we can simply
-                    # keep the first (curr_hit_length // block_size) blocks from
-                    # the last iteration.
-                    num_blocks = curr_hit_length // spec.block_size
-                    curr_hit_length = num_blocks * spec.block_size
-                else:
-                    hit_blocks = manager_cls.find_longest_cache_hit(
-                        block_hashes=_get_block_hashes(spec),
-                        max_length=curr_hit_length,
-                        kv_cache_group_ids=group_ids,
-                        block_pool=self.block_pool,
-                        kv_cache_spec=spec,
-                        use_eagle=self.use_eagle,
-                        alignment_tokens=self.lcm_block_size,
+                if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
+                    # Full attention is downward-closed: we only need to look
+                    # up cached blocks once; on subsequent iterations just trim
+                    # to the (reduced) current hit length.
+                    curr_hit_length = (
+                        curr_hit_length // spec.block_size * spec.block_size
                     )
-                    curr_hit_length = len(hit_blocks[0]) * spec.block_size
-                    for group_id, blocks in zip(group_ids, hit_blocks):
-                        hit_blocks_by_group[group_id] = blocks
+                    continue
+
+                use_eagle = (
+                    idx in self.eagle_attn_group_indices and idx not in eagle_verified
+                )
+
+                _max_length = curr_hit_length
+                if use_eagle:
+                    # Eagle needs to match one more block and then pop the last.
+                    _max_length = min(
+                        curr_hit_length + spec.block_size, max_cache_hit_length
+                    )
+                hit_blocks = manager_cls.find_longest_cache_hit(
+                    block_hashes=_get_block_hashes(spec),
+                    max_length=_max_length,
+                    kv_cache_group_ids=group_ids,
+                    block_pool=self.block_pool,
+                    kv_cache_spec=spec,
+                    use_eagle=use_eagle,
+                    alignment_tokens=self.lcm_block_size,
+                )
+                _new_hit_length = len(hit_blocks[0]) * spec.block_size
+                if use_eagle:
+                    eagle_verified.add(idx)
+                elif _new_hit_length < curr_hit_length:
+                    # length shrunk; invalidate previous eagle verifications
+                    eagle_verified.clear()
+                curr_hit_length = _new_hit_length
+                for group_id, blocks in zip(group_ids, hit_blocks):
+                    hit_blocks_by_group[group_id] = blocks
 
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
-            # Simple hybrid: exit after one iteration
             if is_simple_hybrid:
                 break
 
