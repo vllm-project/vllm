@@ -11,8 +11,8 @@ generic or metadata-focused siblings:
 Related siblings:
 - ``tests/kernels/rocm/aiter/test_rocm_aiter_mla_variants.py`` covers backend
   metadata and import/name contracts
-- ``tests/v1/attention/test_sparse_mla_backends.py`` covers the generic sparse
-  MLA backend behavior on CUDA
+- ``tests/v1/attention/test_sparse_mla_backends.py`` covers the sparse MLA
+  backend behavior
 """
 
 from types import SimpleNamespace
