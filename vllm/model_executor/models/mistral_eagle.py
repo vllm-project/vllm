@@ -57,7 +57,8 @@ class EagleMistralModel(MistralModel):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
-        self.quant_config = vllm_config.quant_config
+        # Get drafter's quantization config
+        self.quant_config = get_draft_quant_config(vllm_config)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
@@ -125,8 +126,6 @@ class EagleMistralForCausalLM(MistralForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        # Get drafter's quantization config
-        self.quant_config = get_draft_quant_config(vllm_config)
         self.model = EagleMistralModel(
             vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
         )
