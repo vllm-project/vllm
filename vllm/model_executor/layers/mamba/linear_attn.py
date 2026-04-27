@@ -396,10 +396,11 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens

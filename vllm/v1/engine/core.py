@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
@@ -44,6 +45,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -136,10 +138,8 @@ class EngineCore:
                 logger.warning("Disabling chunked prefill for model without KVCache")
                 vllm_config.scheduler_config.enable_chunked_prefill = False
 
-        scheduler_block_size = (
-            vllm_config.cache_config.block_size
-            * vllm_config.parallel_config.decode_context_parallel_size
-            * vllm_config.parallel_config.prefill_context_parallel_size
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
         )
 
         self.scheduler: SchedulerInterface = Scheduler(
@@ -149,6 +149,7 @@ class EngineCore:
             include_finished_set=include_finished_set,
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
@@ -206,7 +207,7 @@ class EngineCore:
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                scheduler_block_size, caching_hash_fn
+                hash_block_size, caching_hash_fn
             )
 
         self.step_fn = (
@@ -293,7 +294,6 @@ class EngineCore:
                 compile_time + encoder_compile_time,
                 compile_time,
                 encoder_compile_time,
-                scope="local",
             )
         elif compile_time > 0:
             logger.info_once(
@@ -301,13 +301,11 @@ class EngineCore:
                 "%.2f s (compilation: %.2f s)",
                 elapsed,
                 compile_time,
-                scope="local",
             )
         else:
             logger.info_once(
                 "init engine (profile, create kv cache, warmup model) took %.2f s",
                 elapsed,
-                scope="local",
             )
         return scheduler_kv_cache_config
 
@@ -576,6 +574,12 @@ class EngineCore:
             self.model_executor.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
+
+        # Undo the gc.freeze() from __init__ so that the objects allocated
+        # during engine startup (model weights, KV caches, etc.) become
+        # visible to the garbage collector again. Without this, deleting
+        # the engine in-process (e.g. unit tests) leaks GPU memory.
+        gc.unfreeze()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
