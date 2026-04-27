@@ -24,16 +24,16 @@ You can also test Qwen2.5-Omni on a single modality:
 
 ```bash
 # Process audio inputs
-python examples/offline_inference/audio_language.py \
+python examples/offline_inference/audio_language_offline.py \
     --model-type qwen2_5_omni
 
 # Process image inputs
-python examples/offline_inference/vision_language.py \
+python examples/offline_inference/vision_language_offline.py \
     --modality image \
     --model-type qwen2_5_omni
 
 # Process video inputs
-python examples/offline_inference/vision_language.py \
+python examples/offline_inference/vision_language_offline.py \
     --modality video \
     --model-type qwen2_5_omni
 ```
