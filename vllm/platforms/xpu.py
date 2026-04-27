@@ -216,7 +216,6 @@ class XPUPlatform(Platform):
         # Disable fusion passes not yet supported on XPU.
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_norm_quant": "RMSNorm + quant fusion",
             "fuse_act_quant": "Activation + quant fusion",
