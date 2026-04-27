@@ -118,8 +118,15 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # Cap warmup memory: tests use small max_model_len (1024) but the
         # engine default max_num_batched_tokens is 16384. Warming up large
-        # models (e.g. Llama-4-Scout-FP8) at 16384 tokens may trigger OOM.
+        # models at 16384 tokens may trigger OOM.
         model_kwargs.setdefault("max_num_batched_tokens", 8192)
+        if model_name == "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8":
+            # This case still OOMs on the H100 quick shard at 8192 during the
+            # engine warmup dummy run, so reduce the warmup token budget
+            # further without affecting the rest of the suite.
+            model_kwargs["max_num_batched_tokens"] = min(
+                model_kwargs["max_num_batched_tokens"], 4096
+            )
 
         # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
         # decompose_auto_functionalized when +rotary_embedding is forced into
