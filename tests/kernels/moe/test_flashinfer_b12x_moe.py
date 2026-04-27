@@ -180,12 +180,16 @@ def test_flashinfer_b12x_moe(
         num_experts_w1, m1, k1_sf = w1_blockscale.shape
         experts.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
             w1_blockscale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1, k=k1_sf * 16, num_groups=num_experts_w1,
+            m=m1,
+            k=k1_sf * 16,
+            num_groups=num_experts_w1,
         )
         num_experts_w2, m2, k2_sf = w2_blockscale.shape
         experts.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
             w2_blockscale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2, k=k2_sf * 16, num_groups=num_experts_w2,
+            m=m2,
+            k=k2_sf * 16,
+            num_groups=num_experts_w2,
         )
 
         kernel = mk.FusedMoEKernel(
