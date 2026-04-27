@@ -38,6 +38,7 @@ from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
     VllmInductorPass,
     VllmPatternMatcherPass,
+    VllmPatternReplacement,
 )
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
 
@@ -897,7 +898,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             destroy_fi_ar_workspace()
 
 
-class AiterAllreduceFusedRMSNormPattern(BasePattern):
+class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
     FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
 
     def __init__(
@@ -914,8 +915,9 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
         return [self.empty(5, 16), self.empty(16)]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
@@ -923,7 +925,11 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern):
 
             return rms, allreduce_output
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.empty_like(input)
@@ -935,17 +941,10 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern):
             )
             return allreduce[0], allreduce[1]
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
-        )
+        return _replacement
 
 
-class AiterAllreduceFusedAddRMSNormPattern(BasePattern):
+class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
     FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
 
     def __init__(
@@ -967,8 +966,9 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern):
 
         return [residual, input.to(self.dtype), weight]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
@@ -976,7 +976,11 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern):
 
             return rms, residual
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce = self.FUSED_AR_RMSNORM_OP(
@@ -987,14 +991,7 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern):
             )
             return allreduce[0], allreduce[1]
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
-        )
+        return _replacement
 
 
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
