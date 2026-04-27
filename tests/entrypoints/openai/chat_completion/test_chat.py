@@ -1002,6 +1002,63 @@ def test_chat_completion_request_n_parameter_default():
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
 
 
+@pytest.mark.parametrize(
+    ("thinking", "expected"),
+    [
+        ({"type": "enabled"}, True),
+        ({"type": "disabled"}, False),
+    ],
+)
+def test_chat_completion_request_maps_top_level_thinking_to_template_kwargs(
+    thinking,
+    expected,
+):
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        thinking=thinking,
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert chat_params.chat_template_kwargs["thinking"] is expected
+
+
+def test_chat_completion_request_preserves_existing_thinking_template_kwargs():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        chat_template_kwargs={"thinking": True, "enable_thinking": True},
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert chat_params.chat_template_kwargs["thinking"] is True
+    assert chat_params.chat_template_kwargs["enable_thinking"] is True
+
+
+def test_chat_completion_request_top_level_thinking_overrides_template_kwargs():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        chat_template_kwargs={"thinking": False},
+        thinking={"type": "enabled"},
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert chat_params.chat_template_kwargs["thinking"] is True
+
+
 def test_chat_completion_request_n_parameter_various_values():
     """Test n parameter with various values."""
     for n_value in [1, 2, 5, 10]:

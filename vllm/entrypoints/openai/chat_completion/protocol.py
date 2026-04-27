@@ -147,6 +147,10 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+class ChatCompletionThinkingParam(OpenAIBaseModel):
+    type: Literal["enabled", "disabled"]
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -265,6 +269,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "Additional keyword args to pass to the template renderer. "
             "Will be accessible by the chat template."
+        ),
+    )
+    thinking: ChatCompletionThinkingParam | None = Field(
+        default=None,
+        description=(
+            "Controls thinking mode for DeepSeek V4-style chat templates. "
+            "When set, this is mapped to the `thinking` chat template kwarg."
         ),
     )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
@@ -416,6 +427,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                     documents=self.documents,
                     reasoning_effort=self.reasoning_effort,
+                    thinking=None
+                    if self.thinking is None
+                    else self.thinking.type == "enabled",
                 ),
             ),
             media_io_kwargs=self.media_io_kwargs,
