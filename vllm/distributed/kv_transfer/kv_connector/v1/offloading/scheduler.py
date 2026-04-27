@@ -156,6 +156,9 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
+        # Job IDs to flush this batch (preempted reqs + fence hits in
+        # _build_store_jobs).
+        self._current_batch_jobs_to_flush: set[int] = set()
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[OffloadKey] | None = (
@@ -422,7 +425,6 @@ class OffloadingConnectorScheduler:
     def _build_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
-        jobs_to_flush: set[int],
     ) -> dict[int, TransferJob]:
         block_size_factor = self.config.block_size_factor
         store_jobs: dict[int, TransferJob] = {}
@@ -439,7 +441,7 @@ class OffloadingConnectorScheduler:
             if new_block_id_groups:
                 req_status.update_block_id_groups(new_block_id_groups)
                 # Fence new blocks against in-flight stores.
-                jobs_to_flush.update(
+                self._current_batch_jobs_to_flush.update(
                     jid
                     for new_blocks in new_block_id_groups
                     for bid in new_blocks
@@ -571,21 +573,21 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        jobs_to_flush: set[int] = set()
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
             if req_status is None or not req_status.transfer_jobs:
                 continue
             any_jid = next(iter(req_status.transfer_jobs))
             assert self._jobs[any_jid].is_store
-            jobs_to_flush.update(req_status.transfer_jobs)
+            self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=self._build_store_jobs(scheduler_output, jobs_to_flush),
-            jobs_to_flush=jobs_to_flush,
+            store_jobs=self._build_store_jobs(scheduler_output),
+            jobs_to_flush=self._current_batch_jobs_to_flush,
         )
         self._current_batch_load_jobs = {}
+        self._current_batch_jobs_to_flush = set()
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
