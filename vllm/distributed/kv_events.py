@@ -69,6 +69,7 @@ class BlockStored(KVCacheEvent):
 
     group_idx: int | None = None
     kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -82,6 +83,7 @@ class BlockStored(KVCacheEvent):
                 tuple(self.extra_keys) if self.extra_keys else None,
                 self.group_idx,
                 self.kv_cache_spec_kind,
+                self.kv_cache_spec_sliding_window,
             )
         )
 
@@ -91,6 +93,7 @@ class BlockRemoved(KVCacheEvent):
     medium: str | None
     group_idx: int | None = None
     kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -99,6 +102,7 @@ class BlockRemoved(KVCacheEvent):
                 self.medium,
                 self.group_idx,
                 self.kv_cache_spec_kind,
+                self.kv_cache_spec_sliding_window,
             )
         )
 
