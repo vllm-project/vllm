@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    SchedulerState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -218,6 +219,10 @@ class MultiConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def bind_scheduler_state(self, scheduler_state: SchedulerState):
+        for c in self._connectors:
+            c.bind_scheduler_state(scheduler_state)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
