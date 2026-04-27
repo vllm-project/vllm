@@ -12,29 +12,14 @@ from typing import Any, Final
 
 from fastapi import Request
 from openai.types.responses import (
-    ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent,
-    ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
-    ResponseFunctionToolCallItem,
     ResponseOutputItem,
-    ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
-    ResponseReasoningItem,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent,
     ResponseStatus,
-    ResponseTextDeltaEvent,
-    ResponseTextDoneEvent,
     response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
@@ -88,15 +73,15 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
-    ResponseReasoningPartAddedEvent,
-    ResponseReasoningPartDoneEvent,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
+    SimpleStreamingEventProcessor,
     StreamingState,
+    _StateType,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -1352,401 +1337,62 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        class _State:
-            NONE = 0
-            CONTENT = 1
-            REASONING = 2
-            TOOL_CALL = 3
-
-        current_state = _State.NONE
-        current_content_index = 0
-        current_output_index = 0
-        current_item_id = ""
-        accumulated_text = ""
-        current_tool_call_id = ""
-        current_tool_call_name = ""
-        current_tool_call_index: int | None = None
-        has_emitted_tool_call_delta = False
+        processor = SimpleStreamingEventProcessor()
         parser = self.parser(tokenizer, request.tools) if self.parser else None
 
-        def _close_current_state() -> list[StreamingResponsesResponse]:
-            nonlocal current_state, current_output_index
-            events: list[StreamingResponsesResponse] = []
-
-            if current_state == _State.CONTENT:
-                events.append(
-                    ResponseTextDoneEvent(
-                        type="response.output_text.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        content_index=current_content_index,
-                        text=accumulated_text,
-                        logprobs=[],
-                        item_id=current_item_id,
-                    )
-                )
-                part = ResponseOutputText(
-                    type="output_text",
-                    text=accumulated_text,
-                    annotations=[],
-                )
-                events.append(
-                    ResponseContentPartDoneEvent(
-                        type="response.content_part.done",
-                        sequence_number=-1,
-                        item_id=current_item_id,
-                        output_index=current_output_index,
-                        content_index=current_content_index,
-                        part=part,
-                    )
-                )
-                item = ResponseOutputMessage(
-                    id=current_item_id,
-                    type="message",
-                    role="assistant",
-                    content=[part] if accumulated_text else [],
-                    status="completed",
-                    summary=[],
-                )
-                events.append(
-                    ResponseOutputItemDoneEvent(
-                        type="response.output_item.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        item=item,
-                    )
-                )
-                current_output_index += 1
-
-            elif current_state == _State.REASONING:
-                events.append(
-                    ResponseReasoningTextDoneEvent(
-                        type="response.reasoning_text.done",
-                        item_id=current_item_id,
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        content_index=current_content_index,
-                        text=accumulated_text,
-                    )
-                )
-                part = ResponseReasoningTextContent(
-                    text=accumulated_text,
-                    type="reasoning_text",
-                )
-                events.append(
-                    ResponseReasoningPartDoneEvent(
-                        type="response.reasoning_part.done",
-                        sequence_number=-1,
-                        item_id=current_item_id,
-                        output_index=current_output_index,
-                        content_index=current_content_index,
-                        part=part,
-                    )
-                )
-                item = ResponseReasoningItem(
-                    type="reasoning",
-                    content=[part],
-                    status="completed",
-                    id=current_item_id,
-                    summary=[],
-                )
-                events.append(
-                    ResponseOutputItemDoneEvent(
-                        type="response.output_item.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        item=item,
-                    )
-                )
-                current_output_index += 1
-
-            elif current_state == _State.TOOL_CALL:
-                if has_emitted_tool_call_delta:
-                    events.append(
-                        ResponseFunctionCallArgumentsDoneEvent(
-                            type="response.function_call_arguments.done",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            arguments=accumulated_text,
-                            name=current_tool_call_name,
-                        )
-                    )
-                item = ResponseFunctionToolCall(
-                    type="function_call",
-                    name=current_tool_call_name,
-                    arguments=accumulated_text,
-                    status="completed",
-                    id=current_item_id,
-                    call_id=current_tool_call_id,
-                )
-                events.append(
-                    ResponseOutputItemDoneEvent(
-                        type="response.output_item.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        item=item,
-                    )
-                )
-                current_output_index += 1
-
-            current_state = _State.NONE
-            return events
-
-        def _open_content() -> list[StreamingResponsesResponse]:
-            nonlocal current_state, current_item_id
-            nonlocal current_content_index, accumulated_text
-            current_state = _State.CONTENT
-            current_item_id = random_uuid()
-            current_content_index = 0
-            accumulated_text = ""
-            return [
-                ResponseOutputItemAddedEvent(
-                    type="response.output_item.added",
-                    sequence_number=-1,
-                    output_index=current_output_index,
-                    item=ResponseOutputMessage(
-                        id=current_item_id,
-                        type="message",
-                        role="assistant",
-                        content=[],
-                        status="in_progress",
-                    ),
-                ),
-                ResponseContentPartAddedEvent(
-                    type="response.content_part.added",
-                    sequence_number=-1,
-                    output_index=current_output_index,
-                    item_id=current_item_id,
-                    content_index=current_content_index,
-                    part=ResponseOutputText(
-                        type="output_text",
-                        text="",
-                        annotations=[],
-                        logprobs=[],
-                    ),
-                ),
-            ]
-
-        def _open_reasoning() -> list[StreamingResponsesResponse]:
-            nonlocal current_state, current_item_id
-            nonlocal current_content_index, accumulated_text
-            current_state = _State.REASONING
-            current_item_id = random_uuid()
-            current_content_index = 0
-            accumulated_text = ""
-            return [
-                ResponseOutputItemAddedEvent(
-                    type="response.output_item.added",
-                    sequence_number=-1,
-                    output_index=current_output_index,
-                    item=ResponseReasoningItem(
-                        type="reasoning",
-                        id=current_item_id,
-                        summary=[],
-                        status="in_progress",
-                    ),
-                ),
-                ResponseReasoningPartAddedEvent(
-                    type="response.reasoning_part.added",
-                    sequence_number=-1,
-                    output_index=current_output_index,
-                    item_id=current_item_id,
-                    content_index=current_content_index,
-                    part=ResponseReasoningTextContent(
-                        text="",
-                        type="reasoning_text",
-                    ),
-                ),
-            ]
-
-        def _open_tool_call(
-            tool_call,
-        ) -> list[StreamingResponsesResponse]:
-            nonlocal current_state, current_item_id, accumulated_text
-            nonlocal current_tool_call_id, current_tool_call_name
-            nonlocal current_tool_call_index, has_emitted_tool_call_delta
-            current_state = _State.TOOL_CALL
-            current_item_id = random_uuid()
-            current_tool_call_id = f"call_{random_uuid()}"
-            current_tool_call_name = tool_call.function.name
-            current_tool_call_index = tool_call.index
-            accumulated_text = ""
-            has_emitted_tool_call_delta = False
-            return [
-                ResponseOutputItemAddedEvent(
-                    type="response.output_item.added",
-                    sequence_number=-1,
-                    output_index=current_output_index,
-                    item=ResponseFunctionToolCallItem(
-                        type="function_call",
-                        id=current_item_id,
-                        call_id=current_tool_call_id,
-                        name=current_tool_call_name,
-                        arguments="",
-                        status="in_progress",
-                    ),
-                ),
-            ]
+        def _get_logprobs(
+            output: CompletionOutput,
+        ) -> list[response_text_delta_event.Logprob]:
+            if not request.is_include_output_logprobs():
+                return []
+            return self._create_stream_response_logprobs(
+                token_ids=output.token_ids,
+                logprobs=output.logprobs,
+                tokenizer=tokenizer,
+                top_logprobs=request.top_logprobs,
+            )
 
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
-            if ctx.last_output is None:
+            if ctx.last_output is None or not ctx.last_output.outputs:
                 continue
-            if ctx.last_output.outputs:
-                output = ctx.last_output.outputs[0]
-                self._raise_if_error(output.finish_reason, request.request_id)
-                delta_text = output.text
-                delta_token_ids = as_list(output.token_ids)
 
-                if parser:
-                    delta_message = parser.parse_delta(
-                        delta_text=delta_text,
-                        delta_token_ids=delta_token_ids,
-                        request=request,
-                        prompt_token_ids=ctx.last_output.prompt_token_ids,
-                    )
-                else:
-                    delta_message = DeltaMessage(content=output.text)
-                if not delta_message:
-                    continue
+            output = ctx.last_output.outputs[0]
+            self._raise_if_error(output.finish_reason, request.request_id)
+            delta_text = output.text
+            delta_token_ids = as_list(output.token_ids)
 
-                if (
-                    delta_message.tool_calls
-                    and delta_message.tool_calls[0].function is not None
-                ):
-                    target_state = _State.TOOL_CALL
-                    tool_call = delta_message.tool_calls[0]
-                    tool_call_function = tool_call.function
-                elif delta_message.reasoning is not None:
-                    target_state = _State.REASONING
-                    tool_call = None
-                    tool_call_function = None
-                elif delta_message.content:
-                    target_state = _State.CONTENT
-                    tool_call = None
-                    tool_call_function = None
-                else:
-                    continue
-
-                needs_transition = current_state != target_state or (
-                    current_state == _State.TOOL_CALL
-                    and target_state == _State.TOOL_CALL
-                    and current_tool_call_index is not None
-                    and tool_call is not None
-                    and tool_call.index is not None
-                    and current_tool_call_index != tool_call.index
+            if parser:
+                delta_message = parser.parse_delta(
+                    delta_text=delta_text,
+                    delta_token_ids=delta_token_ids,
+                    request=request,
+                    prompt_token_ids=ctx.last_output.prompt_token_ids,
                 )
+            else:
+                delta_message = DeltaMessage(content=output.text)
 
-                pre_transition_state = current_state
-                if needs_transition:
-                    for event in _close_current_state():
-                        yield _increment_sequence_number_and_return(event)
-                    if target_state == _State.CONTENT:
-                        for event in _open_content():
-                            yield _increment_sequence_number_and_return(event)
-                    elif target_state == _State.REASONING:
-                        for event in _open_reasoning():
-                            yield _increment_sequence_number_and_return(event)
-                    elif target_state == _State.TOOL_CALL:
-                        for event in _open_tool_call(tool_call):
-                            yield _increment_sequence_number_and_return(event)
+            if not delta_message:
+                continue
 
-                if (
-                    pre_transition_state == _State.REASONING
-                    and delta_message.reasoning is not None
-                    and delta_message.content is not None
-                ):
-                    yield _increment_sequence_number_and_return(
-                        ResponseReasoningTextDeltaEvent(
-                            type="response.reasoning_text.delta",
-                            sequence_number=-1,
-                            content_index=current_content_index,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            delta=delta_message.reasoning,
-                        )
-                    )
-                    accumulated_text += delta_message.reasoning
-                    for event in _close_current_state():
-                        yield _increment_sequence_number_and_return(event)
-                    for event in _open_content():
-                        yield _increment_sequence_number_and_return(event)
-                    yield _increment_sequence_number_and_return(
-                        ResponseTextDeltaEvent(
-                            type="response.output_text.delta",
-                            sequence_number=-1,
-                            content_index=current_content_index,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            delta=delta_message.content,
-                            logprobs=(
-                                self._create_stream_response_logprobs(
-                                    token_ids=output.token_ids,
-                                    logprobs=output.logprobs,
-                                    tokenizer=tokenizer,
-                                    top_logprobs=request.top_logprobs,
-                                )
-                                if request.is_include_output_logprobs()
-                                else []
-                            ),
-                        )
-                    )
-                    accumulated_text = delta_message.content
-                    continue
+            target_state, tool_call = processor.resolve_target_state(
+                delta_message
+            )
+            if target_state == _StateType.NONE:
+                continue
 
-                if current_state == _State.TOOL_CALL and tool_call_function is not None:
-                    if tool_call_function.arguments:
-                        yield _increment_sequence_number_and_return(
-                            ResponseFunctionCallArgumentsDeltaEvent(
-                                type="response.function_call_arguments.delta",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                delta=tool_call_function.arguments,
-                            )
-                        )
-                        accumulated_text += tool_call_function.arguments
-                        has_emitted_tool_call_delta = True
-                elif (
-                    current_state == _State.REASONING
-                    and delta_message.reasoning is not None
-                ):
-                    yield _increment_sequence_number_and_return(
-                        ResponseReasoningTextDeltaEvent(
-                            type="response.reasoning_text.delta",
-                            sequence_number=-1,
-                            content_index=current_content_index,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            delta=delta_message.reasoning,
-                        )
-                    )
-                    accumulated_text += delta_message.reasoning
-                elif current_state == _State.CONTENT and delta_message.content:
-                    yield _increment_sequence_number_and_return(
-                        ResponseTextDeltaEvent(
-                            type="response.output_text.delta",
-                            sequence_number=-1,
-                            content_index=current_content_index,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            delta=delta_message.content,
-                            logprobs=(
-                                self._create_stream_response_logprobs(
-                                    token_ids=output.token_ids,
-                                    logprobs=output.logprobs,
-                                    tokenizer=tokenizer,
-                                    top_logprobs=request.top_logprobs,
-                                )
-                                if request.is_include_output_logprobs()
-                                else []
-                            ),
-                        )
-                    )
-                    accumulated_text += delta_message.content
+            if processor.needs_transition(target_state, tool_call):
+                for event in processor.close_current():
+                    yield _increment_sequence_number_and_return(event)
+                for event in processor.open(target_state, tool_call):
+                    yield _increment_sequence_number_and_return(event)
 
-        for event in _close_current_state():
+            for event in processor.emit_delta(
+                delta_message, output, _get_logprobs
+            ):
+                yield _increment_sequence_number_and_return(event)
+
+        for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
 
     async def _process_harmony_streaming_events(
