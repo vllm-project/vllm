@@ -16,6 +16,15 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
 )
 
+ROCM_BACKENDS = [
+    AttentionBackendEnum.ROCM_ATTN,
+    AttentionBackendEnum.ROCM_AITER_FA,
+    AttentionBackendEnum.ROCM_AITER_MLA,
+    AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+    AttentionBackendEnum.ROCM_AITER_MLA_SPARSE,
+    AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+]
+
 
 @pytest.fixture
 def mock_vllm_config():
@@ -353,3 +362,30 @@ def test_sparse_not_supported(mock_vllm_config):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
+
+
+def test_rocm_registry_entries_are_present():
+    """ROCm-specific backend enum names should remain public and available."""
+    for backend in ROCM_BACKENDS:
+        assert AttentionBackendEnum[backend.name] is backend
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [pytest.param(backend, id=backend.name.lower()) for backend in ROCM_BACKENDS],
+)
+def test_rocm_registry_entries_resolve_to_backend_classes(backend):
+    """Each ROCm backend enum entry should resolve to a distinct backend class."""
+    from vllm.v1.attention.backend import AttentionBackend
+
+    backend_cls = backend.get_class()
+
+    assert issubclass(backend_cls, AttentionBackend)
+    assert backend.get_path() == f"{backend_cls.__module__}.{backend_cls.__name__}"
+    assert backend.get_path(include_classname=False) == backend_cls.__module__
+
+
+def test_rocm_registry_paths_are_unique():
+    """ROCm backend entries should not silently alias the same registry path."""
+    paths = [backend.get_path() for backend in ROCM_BACKENDS]
+    assert len(paths) == len(set(paths))
