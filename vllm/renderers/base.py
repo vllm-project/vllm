@@ -112,7 +112,7 @@ class BaseRenderer(ABC, Generic[_T]):
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=self.get_executor_tokenizer(),
+                    tokenizer=self.executor_tokenizer,
                     cache=mm_processor_cache,
                 )
 
@@ -127,7 +127,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 with set_default_torch_num_threads():
                     self._readonly_mm_processor = mm_registry.create_processor(
                         config.model_config,
-                        tokenizer=self.get_executor_tokenizer(),
+                        tokenizer=self.executor_tokenizer,
                         cache=ro_cache,
                     )
 
