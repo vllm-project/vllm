@@ -2166,3 +2166,47 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        # Hybrid: SSM group (block_size=None) plus a regular attention
+        # group. Without the fix this hits min(None, 16) and crashes.
+        [
+            new_mamba_spec(block_size=None),
+            new_kv_cache_spec(block_size=16),
+        ],
+        # All-Mamba: every group has block_size=None. The fallback should
+        # still produce a sensible non-zero minimum.
+        [
+            new_mamba_spec(block_size=None),
+            new_mamba_spec(block_size=None),
+        ],
+    ],
+)
+def test_report_kv_cache_config_handles_none_block_size(monkeypatch, specs):
+    """_report_kv_cache_config should survive Mamba/SSM groups whose
+    block_size is None (the embedded min() used to crash)."""
+    model_config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        runner="generate",
+        dtype="float16",
+        max_model_len=4096,
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}"], spec) for i, spec in enumerate(specs)
+        ],
+    )
+
+    # Stub out the heavy helper; it isn't what this test exercises.
+    monkeypatch.setattr(
+        kv_cache_utils, "get_max_concurrency_for_kv_cache_config", lambda *a, **k: 1.0
+    )
+
+    # Should not raise. Without the fix, min([None, 16]) raises TypeError.
+    kv_cache_utils._report_kv_cache_config(vllm_config, kv_cache_config)

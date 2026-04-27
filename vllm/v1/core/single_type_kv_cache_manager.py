@@ -860,7 +860,12 @@ class MambaManager(SingleTypeKVCacheManager):
         # that we might actually need.
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
-        super().remove_skipped_blocks(request_id, num_computed_tokens)
+        if self.block_size is None:
+            # Mamba state is per-sequence; there's no per-token-block
+            # notion to skip on, so nothing to do here.
+            pass
+        else:
+            super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
             # The block allocated in the previous step is used to copy Mamba states
@@ -905,6 +910,14 @@ class MambaManager(SingleTypeKVCacheManager):
             # and don't schedule it in the current step.
             return self.block_pool.num_gpu_blocks + 1
         if self.mamba_cache_mode != "align":
+            if self.block_size is None:
+                # Mamba state is per-sequence with no token-block notion.
+                # First call: allocate one block for the SSM state plus
+                # any speculative blocks. Later calls for the same request
+                # need nothing.
+                if len(self.req_to_blocks.get(request_id, ())) > 0:
+                    return 0
+                return 1 + self.num_speculative_blocks
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -956,6 +969,17 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
+            if self.block_size is None:
+                # Mamba state is per-sequence: one block per request, total.
+                # (Plus speculative blocks if any.)
+                req_blocks = self.req_to_blocks[request_id]
+                if len(req_blocks) > 0:
+                    return []
+                new_blocks = self.block_pool.get_new_blocks(
+                    1 + self.num_speculative_blocks
+                )
+                req_blocks.extend(new_blocks)
+                return new_blocks
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -970,7 +994,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
-            req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            req_blocks = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
             num_required_blocks = (
