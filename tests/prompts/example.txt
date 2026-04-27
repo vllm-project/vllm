@@ -1,0 +1,8 @@
+vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.
+Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.
+Compare and contrast artificial intelligence with human intelligence in terms of processing information.
+Describe the basic components of a neural network and how it can be trained.
+Write a short story about a robot that dreams for the first time.
+Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.
+Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.
+Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'

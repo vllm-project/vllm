@@ -1,0 +1,5 @@
+model_name: "nm-testing/Meta-Llama-3-8B-Instruct-nonuniform-test"
+accuracy_threshold: 0.74
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 4096"

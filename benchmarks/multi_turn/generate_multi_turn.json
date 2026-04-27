@@ -1,0 +1,34 @@
+{
+    "filetype": "generate_conversations",
+    "num_conversations": 24,
+    "text_files": ["pg1184.txt"],
+    "print_stats": false,
+    "prompt_input": {
+        "num_turns": {
+            "distribution": "uniform",
+            "min": 12,
+            "max": 18
+        },
+        "common_prefix_num_tokens": {
+            "distribution": "constant",
+            "value": 500
+        },
+        "prefix_num_tokens": {
+            "distribution": "lognormal",
+            "average": 1000,
+            "max": 5000
+        },
+        "num_tokens": {
+            "distribution": "uniform",
+            "min": 120,
+            "max": 160
+        }
+    },
+    "prompt_output": {
+        "num_tokens": {
+            "distribution": "uniform",
+            "min": 80,
+            "max": 120
+        }
+    }
+}
