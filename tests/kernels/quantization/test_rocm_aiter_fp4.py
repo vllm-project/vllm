@@ -10,7 +10,7 @@ This file keeps the ROCm-specific FP4 coverage:
   paths
 
 Generic MXFP4 wrapper/reference checks already live in
-``tests/kernels/quantization/test_rocm_quark.py``.
+``tests/kernels/quantization/test_quark.py``.
 """
 
 import importlib
