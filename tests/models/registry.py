@@ -591,7 +591,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
     ),
-    "MiMoV2ProForCausalLM": _HfExamplesInfo("XXXXX", trust_remote_code=True),
+    "MiMoV2ProForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True, is_available_online=False
+    ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
 
@@ -1054,6 +1056,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
+    ),
+    "MiMoV2OmniForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni", trust_remote_code=True, is_available_online=False
     ),
     "MiniCPMO": _HfExamplesInfo(
         "openbmb/MiniCPM-o-2_6",
