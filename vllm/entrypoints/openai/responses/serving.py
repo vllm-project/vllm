@@ -718,9 +718,10 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice != "auto":
+        if request.tool_choice not in ("auto", "none"):
             raise NotImplementedError(
-                "Only 'auto' tool_choice is supported in response API with Harmony"
+                "Only 'auto' or 'none' tool_choice is supported "
+                "in response API with Harmony"
             )
 
         arrival_time = time.time()

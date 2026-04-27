@@ -744,10 +744,12 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
+        "vllm::deepseek_v4_attention",
     ]
 
     def compute_hash(self) -> str:
@@ -1146,6 +1148,25 @@ class CompilationConfig:
                     )
                     self.cudagraph_mode = CUDAGraphMode.FULL
                 self.splitting_ops = []
+
+        if (
+            not self.use_inductor_graph_partition
+            and (self.pass_config.enable_sp or self.pass_config.fuse_gemm_comms)
+            and self.splitting_ops
+        ):
+            logger.warning_once(
+                "Sequence parallelism requires full-graph compilation when "
+                "use_inductor_graph_partition is off. Setting splitting_ops "
+                "to an empty list to preserve SP and async TP."
+            )
+            self.splitting_ops = []
+            if self.cudagraph_mode.has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "Sequence parallelism is incompatible with piecewise "
+                    "cudagraph when use_inductor_graph_partition is off. "
+                    "Setting cudagraph_mode to FULL."
+                )
+                self.cudagraph_mode = CUDAGraphMode.FULL
 
         # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
         if (

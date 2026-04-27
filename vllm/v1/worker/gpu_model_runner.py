@@ -577,7 +577,9 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler, self.speculative_config, self.device
+            )
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
@@ -2155,6 +2157,7 @@ class GPUModelRunner(
             :num_reqs_padded
         ]
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
+        seq_lens_cpu_upper_bound = seq_lens_cpu
 
         # is_prefilling: True if request is still in prefill phase.
         # Used by mamba backends to distinguish actual decodes from
@@ -2172,6 +2175,7 @@ class GPUModelRunner(
             seq_lens=self.seq_lens[:num_reqs_padded],
             _seq_lens_cpu=seq_lens_cpu,
             _num_computed_tokens_cpu=num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -2180,6 +2184,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            positions=self.positions[:num_tokens_padded],
         )
 
         if self.dcp_world_size > 1:
@@ -2310,13 +2315,26 @@ class GPUModelRunner(
 
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
+
+            # Gemma4 bidi: skip ranges that exceed the sliding
+            # window. When image tokens > sliding_window, bidi causes
+            # early image tokens to attend to the entire image
+            # (e.g. 6 → 1092 targets), degrading spatial precision.
+            # Per-range filtering keeps bidi for small images/video
+            # frames while skipping oversized images.
+            hf_text_config = self.model_config.hf_text_config
+            _bidi_sw = getattr(hf_text_config, "sliding_window", None)
+
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
                 for mm_feature in req_state.mm_features:
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
-                    image_doc_ranges.extend(img_doc_range)
+                    for r in img_doc_range:
+                        if _bidi_sw is not None and (r[1] - r[0] + 1) > _bidi_sw:
+                            continue
+                        image_doc_ranges.append(r)
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
@@ -3345,7 +3363,6 @@ class GPUModelRunner(
         logits: torch.Tensor | None,
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
-        spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
@@ -3613,7 +3630,6 @@ class GPUModelRunner(
                     allow_microbatching=allow_microbatching,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
-                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
                     cudagraph_mode=cudagraph_mode.value,
                 )
             )
@@ -4291,7 +4307,6 @@ class GPUModelRunner(
                 logits,
                 hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
-                spec_decode_metadata,
             )
 
         if propose_drafts_after_bookkeeping:
@@ -4657,6 +4672,16 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). Safe to
+            # rebind here: hidden_states was already consumed for sampling
+            # above and is not used again in this branch.
+            alt = getattr(
+                self.get_model(), "get_mtp_target_hidden_states", lambda: None
+            )()
+            if alt is not None:
+                hidden_states = alt
+
             num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
@@ -4855,7 +4880,6 @@ class GPUModelRunner(
             "Model loading took %s GiB memory and %.6f seconds",
             format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
-            scope="local",
         )
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
@@ -4989,7 +5013,7 @@ class GPUModelRunner(
             )
 
         # begin loading weights
-        logger.info_once("Reloading weights inplace...", scope="local")
+        logger.info_once("Reloading weights inplace...")
         if is_checkpoint_format:
             # load weights from checkpoint/ original model format
             initialize_layerwise_reload(model)
@@ -5001,7 +5025,6 @@ class GPUModelRunner(
             logger.warning_once(
                 "Reloading with `is_checkpoint_format=True` requires that "
                 "weights be in kernel format and already sharded",
-                scope="local",
             )
             loaded_weights = set()
             for name, loaded_weight in weights_iterator:
@@ -5015,7 +5038,6 @@ class GPUModelRunner(
         logger.info_once(
             "Reloading and processing weights took %.2f seconds",
             diff_seconds,
-            scope="local",
         )
         if self.model_config.quantization is None and loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
@@ -5802,7 +5824,6 @@ class GPUModelRunner(
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
-                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
@@ -5875,6 +5896,20 @@ class GPUModelRunner(
             if should_freeze:
                 gc.unfreeze()
                 gc.collect()
+
+    def shutdown(self) -> None:
+        """Release GPU tensors (model weights, KV caches, workspace) so that
+        memory is reclaimable when running in the same process."""
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.v1.worker.workspace import reset_workspace_manager
+
+        # Calls torch.accelerator.synchronize()
+        self._cleanup_profiling_kv_cache()
+        self.compilation_config.static_forward_context.clear()
+        self.model = None  # type: ignore[assignment]
+        _ROPE_DICT.clear()
+
+        reset_workspace_manager()
 
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
@@ -6099,7 +6134,6 @@ class GPUModelRunner(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
             elapsed_time,
             cuda_graph_size / (1 << 30),
-            scope="local",
         )
         return cuda_graph_size
 
@@ -6528,7 +6562,6 @@ class GPUModelRunner(
 
     def _reshape_kv_cache_tensors(
         self,
-        kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: dict[str, torch.Tensor],
         kernel_block_sizes: list[int],
     ) -> dict[str, torch.Tensor]:
@@ -6536,7 +6569,6 @@ class GPUModelRunner(
         Reshape the KV cache tensors to the desired shape and dtype.
 
         Args:
-            kv_cache_config: The KV cache config
             kv_cache_raw_tensors: The KV cache buffer of each layer, with
                 correct size but uninitialized shape.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
@@ -6566,9 +6598,15 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
+                    # For MLA with compression, storage_block_size != block_size
+                    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                        shape_block_size = kv_cache_spec.storage_block_size
+                    else:
+                        shape_block_size = kernel_block_size
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
-                        kernel_block_size,
+                        shape_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
@@ -6592,12 +6630,31 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+
+                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    if kv_cache_spec.page_size_padded is not None:
+                        # Use strided view to handle page_size_bytes that
+                        # include padding. This follows
+                        # the same pattern as MambaSpec handling below.
+                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                        # (i.e. the first physical dimension is the block
+                        # index), which holds for MLA backends but NOT for
+                        # standard attention backends whose shape starts with
+                        # a K/V dimension of size 2.
+                        dtype_size = get_dtype_size(dtype)
+                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                        strides = list(torch.empty(kv_cache_shape).stride())
+                        strides[inv_order[0]] = page_stride
+                        kv_cache = torch.as_strided(
+                            raw_tensor,
+                            size=kv_cache_shape,
+                            stride=tuple(strides),
+                        )
+                    else:
+                        # No padding — safe to use a contiguous view.
+                        kv_cache = raw_tensor.view(kv_cache_shape)
+                    kv_caches[layer_name] = kv_cache.permute(*inv_order)
+
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -6700,7 +6757,7 @@ class GPUModelRunner(
 
             # Change the memory buffer to the desired shape
             kv_caches = self._reshape_kv_cache_tensors(
-                kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+                kv_cache_raw_tensors, kernel_block_sizes
             )
 
         # Set up cross-layer KV cache sharing
