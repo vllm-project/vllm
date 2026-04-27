@@ -83,6 +83,7 @@ class EagleMistralModel(MistralModel):
             bias=False,
             input_is_parallel=False,
             quant_config=self.quant_config,
+            prefix=maybe_prefix(prefix, "fc"),
             return_bias=False,
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
