@@ -1681,6 +1681,7 @@ steps:
       --ignore=kernels/attention/test_rocm_aiter_mla.py
       --ignore=kernels/attention/test_rocm_aiter_mla_sparse.py
       --ignore=kernels/attention/test_rocm_aiter_mla_variants.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
       --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels Core Operation Test # TBD
@@ -1774,6 +1775,7 @@ steps:
   - pytest -v -s kernels/attention/test_rocm_aiter_mla.py
       kernels/attention/test_rocm_aiter_mla_sparse.py
       kernels/attention/test_rocm_aiter_mla_variants.py
+      kernels/attention/test_rocm_aiter_mla_fp8_support.py
 
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
@@ -3015,6 +3017,7 @@ steps:
       --ignore=kernels/attention/test_rocm_aiter_mla.py
       --ignore=kernels/attention/test_rocm_aiter_mla_sparse.py
       --ignore=kernels/attention/test_rocm_aiter_mla_variants.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
       --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels MoE Test %N # TBD
@@ -3092,6 +3095,7 @@ steps:
   - pytest -v -s kernels/attention/test_rocm_aiter_mla.py
       kernels/attention/test_rocm_aiter_mla_sparse.py
       kernels/attention/test_rocm_aiter_mla_variants.py
+      kernels/attention/test_rocm_aiter_mla_fp8_support.py
 
 #----------------------------------------------------------  mi355 · models  -----------------------------------------------------------#
 
