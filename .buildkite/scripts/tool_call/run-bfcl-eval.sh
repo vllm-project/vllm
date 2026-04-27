@@ -204,6 +204,7 @@ gen_kwargs["model"] = [model]
 gen_kwargs["test_category"] = [c.strip() for c in test_category.split(",")]
 gen_kwargs["skip_server_setup"] = True
 gen_kwargs["num_threads"] = num_threads
+gen_kwargs["temperature"] = 0.0
 generate(**gen_kwargs)
 
 # ---- evaluate ----
