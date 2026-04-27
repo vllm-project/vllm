@@ -352,7 +352,10 @@ def generate_rotation_matrix(d: int, seed: int, device: str = "cpu") -> torch.Te
     gen = torch.Generator(device="cpu")
     gen.manual_seed(seed)
     G = torch.randn(d, d, generator=gen, device="cpu", dtype=torch.float32)
-    Q, R = torch.linalg.qr(G)
+    # torch.linalg.qr on CPU requires LAPACK, which some torch wheels
+    # (ROCm) ship without. Run QR on accelerator instead
+    qr_device = "cuda" if torch.cuda.is_available() else "cpu"
+    Q, R = torch.linalg.qr(G.to(qr_device))
     diag_sign = torch.sign(torch.diag(R))
     diag_sign[diag_sign == 0] = 1.0
     Q = Q * diag_sign.unsqueeze(0)
