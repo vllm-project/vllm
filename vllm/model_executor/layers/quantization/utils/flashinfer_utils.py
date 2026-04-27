@@ -256,20 +256,17 @@ def align_fp4_moe_weights_for_fi(
         padded_intermediate,
     )
 
-    up_mult = 2 if is_act_and_mul else 1
-    padded_gate_up_dim = up_mult * padded_intermediate
-
-    # Pad w13 and w2 along its intermediate dimension.
-    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size // 2))
-    padded_w13[:, : w13.shape[1], :] = w13
+    # Pad w13 and w2 along the intermediate dimension. Gated W13 tensors must
+    # pad each half separately because downstream gated layout handling treats
+    # the row dimension as [2, padded_intermediate, ...].
+    padded_w13 = _pad_w13_intermediate_dim(w13, padded_intermediate, is_act_and_mul)
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate // 2))
     padded_w2[:, :, : w2.shape[2]] = w2
 
-    padded_w13_scale = w13_scale.new_zeros(
-        (num_experts, padded_gate_up_dim, hidden_size // 16)
+    padded_w13_scale = _pad_w13_intermediate_dim(
+        w13_scale, padded_intermediate, is_act_and_mul
     )
-    padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
 
     padded_w2_scale = w2_scale.new_zeros(
         (num_experts, hidden_size, padded_intermediate // 16)
