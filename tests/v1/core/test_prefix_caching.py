@@ -557,19 +557,19 @@ def test_prefill_hybrid_model_eagle():
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == num_full_blocks
     assert computed_blocks.get_block_ids() == (
-        [1, 2, 3, 4],
-        [0, 9, 10, 11],
-        [0, 16, 17, 18],
+        [1, 2, 3, 4, 5],
+        [0, 0, 10, 11, 12],
+        [0, 0, 17, 18, 19],
     )
-    assert num_computed_tokens == 4 * block_size
+    assert num_computed_tokens == 5 * block_size
     num_new_tokens = len(all_token_ids) - num_computed_tokens
     blocks = manager.allocate_slots(
         req1, num_new_tokens, num_computed_tokens, computed_blocks
     )
     assert blocks is not None and blocks.get_block_ids() == (
-        [22, 23, 24],
-        [25, 26, 27],
-        [28, 29, 30],
+        [22, 23],
+        [24, 25],
+        [26, 27],
     )
     for block_per_group in computed_blocks.blocks:
         for block in block_per_group:
@@ -591,7 +591,7 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
         ],
-        4,
+        5,
     )
 
     # Evict the first block of full attention, makes total cache miss.
@@ -605,7 +605,7 @@ def test_prefill_hybrid_model_eagle():
         0,
     )
 
-    # Evict the last block of all layers, reduces the hit length to 3.
+    # Evict the last block of all layers, reduces the hit length to 4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -617,10 +617,10 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[-1], 1),
             make_block_hash_with_group_id(block_hashes[-1], 2),
         ],
-        3,
+        4,
     )
 
-    # Evict the last block of full attention, reduces the hit length to 3.
+    # Evict the last block of full attention, reduces the hit length to 4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -628,7 +628,7 @@ def test_prefill_hybrid_model_eagle():
         "5",
         all_token_ids,
         [make_block_hash_with_group_id(block_hashes[-1], 0)],
-        3,
+        4,
     )
 
     # Since the last block of full attention is dropped for eagle, evict
@@ -655,12 +655,11 @@ def test_prefill_hybrid_model_eagle():
         3,
     )
 
-    # Evict different set of blocks for full attention and sliding window makes
-    # total cache miss.
-    # The cache hit length of full attention is 4 * block_size.
-    # The cache hit length of sliding window is 3 * block_size.
-    # Then it is cache miss as the two type of layers
-    # have different hit length.
+    # Evict different set of blocks for full attention and sliding window.
+    # Full loses its last block so it drops to 4 full blocks after the eagle
+    # pop; SWA lost block 0 (outside the sliding window of the final hit),
+    # which is not required for the K+1 anchor at position 4. Coordinated
+    # single-drop aligns both groups at hit=4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -672,7 +671,7 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
         ],
-        0,
+        4,
     )
 
 
@@ -893,7 +892,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 # - 2 groups: 1 full + 1 other
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
-    pytest.param(["full", "sliding_window"], 2, id="2g-full+sw"),
+    pytest.param(["full", "sliding_window"], 3, id="2g-full+sw"),
 ]
 
 
@@ -2513,3 +2512,111 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
+    """Hybrid full+SWA model with a pool sized at the startup minimum should
+    admit a prompt longer than the SWA cap, because SlidingWindowManager
+    recycles blocks during chunked prefill (issue #39734)."""
+    block_size = 16
+    sliding_window = 4 * block_size  # 64 tokens
+    max_num_batched_tokens = 8 * block_size  # 128 tokens
+    max_model_len = 64 * block_size  # 1024 tokens — much larger than the SWA cap
+    # Startup pool sizing: full demands cdiv(max_model_len, bs) = 64 blocks,
+    # SWA demands cdiv(SW-1+max_batched, bs) + 1 = cdiv(191, 16) + 1 = 13.
+    # Pool minimum = 64 + 13 = 77; +1 for the null block.
+    num_blocks = 64 + 13 + 1
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    manager = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # A prompt that is shorter than max_model_len but longer than SW + chunk:
+    # cdiv(prompt_len, bs) = 32 blocks. Without the cap, admission would
+    # demand 32 (full) + 32 (SWA) = 64 blocks. With the cap, SWA contributes
+    # only 13, so total = 32 + 13 = 45 ≤ pool size.
+    prompt_len = 32 * block_size
+    req = make_request("long", list(range(prompt_len)), block_size, sha256)
+
+    assert manager.can_fit_full_sequence(req)
+
+
+def test_can_fit_full_sequence_full_attention_still_gates_oversized():
+    """The cap only loosens the SWA group; a prompt that exceeds the
+    full-attention pool capacity must still be rejected."""
+    block_size = 16
+    sliding_window = 4 * block_size
+    max_num_batched_tokens = 8 * block_size
+    max_model_len = 64 * block_size
+    # Provide a tiny pool — even a small prompt should be rejected.
+    num_blocks = 5
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    manager = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 16 blocks of full attention demand alone exceeds the 5-block pool.
+    prompt_len = 16 * block_size
+    req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
+
+    assert not manager.can_fit_full_sequence(req)
