@@ -1873,10 +1873,9 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
-            # TODO: support align mamba cache mode for model runner v2
-            assert not envs.VLLM_USE_V2_MODEL_RUNNER, (
-                "Model Runner V2 has not yet supported mamba_cache_mode='align'. "
-            )
+            # MRV2 supports align mode via dual-indexing: the SSM kernel
+            # reads from the committed block and writes per-token to staging
+            # blocks; postprocess copies the accepted state back.
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":

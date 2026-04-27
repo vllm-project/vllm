@@ -7,6 +7,7 @@ from typing import Any, ClassVar, TypeVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
@@ -73,6 +74,11 @@ class BaseMambaAttentionMetadata:
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
 
+    # When set, the SSM kernel reads from src_ssm_indices_tensor_d and writes
+    # to state_indices_tensor_d. This overrides the default behavior of reading
+    # and writing in-place to state_indices_tensor_d.
+    src_ssm_indices_tensor_d: torch.Tensor | None = None
+
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     metadata_cls: type[M]
@@ -106,13 +112,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
-        if self.vllm_config.cache_config.mamba_cache_mode == "all":
+        mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        self.is_mrv2_spec_decode_align_mode: bool = (
+            envs.VLLM_USE_V2_MODEL_RUNNER
+            and self.use_spec_decode
+            and mamba_cache_mode == "align"
+        )
+
+        if mamba_cache_mode == "all":
             max_num_blocks = cdiv(
                 self.vllm_config.model_config.max_model_len,
                 self.kv_cache_spec.block_size,
             )
-            # Speculative decoding not supported with prefix caching,
-            # so keep shape consistent with prefill buffer
             # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d: torch.Tensor = torch.empty(
                 (
@@ -144,6 +155,20 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.num_spec_tokens > 0:
             self.decode_num_accepted_tokens: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+
+        self.src_ssm_indices_tensor_d: torch.Tensor | None = None
+        if self.is_mrv2_spec_decode_align_mode:
+            # Dual-indexing is used by MRV2 for spec decode + prefix caching.
+            # The SSM reads from a "committed everywhere" tensor and writes
+            # per-token to staging blocks; the conv kernel uses the narrow
+            # window in-place with num_accepted_tokens for offset.
+            # "all" mode auto-selects to "align" when spec decode is active,
+            # so dual-indexing is only needed for "align" mode.
+            self.src_ssm_indices_tensor_d = torch.empty(
+                (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
                 dtype=torch.int32,
                 device=device,
             )
@@ -416,6 +441,35 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
+        src_ssm_indices_tensor_d = None
+        # Construct separate read tensor for the SSM kernel for
+        # MRV2 + spec decode + align mode.
+        if (
+            self.is_mrv2_spec_decode_align_mode
+            and num_decodes > 0
+            and num_accepted_tokens is not None
+        ):
+            if num_computed_tokens is None:
+                num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            # Get block containing last committed token.
+            committed_block_idx = torch.clamp(
+                (num_computed_tokens[:num_decodes] - 1)
+                // self.kv_cache_spec.block_size,
+                min=0,
+            ).to(torch.int64)
+            committed_phys = (
+                common_attn_metadata.block_table_tensor[:num_decodes]
+                .gather(1, committed_block_idx.unsqueeze(1))
+                .squeeze(1)
+            )
+            # Every column for the SSM read is the committed block
+            # physical ID.
+            src_ssm_indices_tensor_d = (
+                committed_phys.unsqueeze(1)
+                .expand_as(state_indices_tensor_d)
+                .contiguous()
+            )
+
         # Sometimes even with specdec enabled we get single-token prefill chunks that
         # should be treated as decodes but don't have num_accepted_tokens set.
         # These should be fine to process as non-spec decodes since there's only
@@ -466,6 +520,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
+            src_ssm_indices_tensor_d=src_ssm_indices_tensor_d,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -494,6 +549,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens = metadata.num_accepted_tokens
         block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
         block_idx_last_computed_token = metadata.block_idx_last_computed_token
+        src_ssm_indices_tensor_d = metadata.src_ssm_indices_tensor_d
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -536,6 +592,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     : metadata.num_decode_tokens
                 ]
 
+            if src_ssm_indices_tensor_d is not None:
+                assert self.src_ssm_indices_tensor_d is not None
+                self.src_ssm_indices_tensor_d[: metadata.num_decodes].copy_(
+                    src_ssm_indices_tensor_d, non_blocking=True
+                )
+                src_ssm_indices_tensor_d = self.src_ssm_indices_tensor_d[:padded_bs]
+                src_ssm_indices_tensor_d[metadata.num_decodes :] = NULL_BLOCK_ID
+
         return replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
@@ -543,6 +607,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_accepted_tokens=num_accepted_tokens,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
+            src_ssm_indices_tensor_d=src_ssm_indices_tensor_d,
         )
 
     def update_block_table(
