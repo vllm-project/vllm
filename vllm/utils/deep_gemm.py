@@ -584,8 +584,8 @@ def get_paged_mqa_logits_metadata(
     """Build scheduling metadata for paged MQA logits.
 
     Args:
-        context_lens: Tensor of shape [B, next_n], dtype int32; effective
-            context length per Q row.
+        context_lens: Tensor of shape [B] or [B, next_n], dtype int32;
+            effective context length per Q row.
         block_size: KV-cache block size in tokens (e.g., 64).
         num_sms: Number of SMs available. 132 for Hopper
         indices: Optional request index for each varlen row.
@@ -597,6 +597,8 @@ def get_paged_mqa_logits_metadata(
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
+    if context_lens.dim() == 1:
+        context_lens = context_lens.unsqueeze(-1)
     context_lens = context_lens.contiguous()
     next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
     num_slots = _paged_mqa_logits_schedule_slots(num_sms, next_n)
