@@ -205,6 +205,22 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         pass
 
 
+@pytest.mark.forked
+def test_torch_compile_disable(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    with (
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
+        vllm_runner(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
 def test_splitting_ops_dynamic():
     # Default config
     config = VllmConfig()
@@ -391,7 +407,7 @@ def test_should_split():
         (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # filtered out 15 due to SP
+        # SP forces full-graph compilation, sizes are filtered by TP
         ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # limited by the max_tokens
         ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
@@ -447,6 +463,123 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if not cudagraph mode supported",
+)
+@pytest.mark.parametrize(
+    (
+        "cudagraph_mode",
+        "use_inductor_graph_partition",
+        "expected_enable_sp",
+        "expected_cudagraph_mode",
+        "expected_piecewise_compile",
+        "expected_capture_sizes",
+        "expected_max_size",
+    ),
+    [
+        (CUDAGraphMode.PIECEWISE, False, True, CUDAGraphMode.FULL, False, [2, 4], 4),
+        (
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            False,
+            True,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            False,
+            [2, 4],
+            4,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            False,
+            True,
+            CUDAGraphMode.FULL,
+            False,
+            [2, 4],
+            4,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            True,
+            True,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            True,
+            [2, 4],
+            4,
+        ),
+    ],
+)
+def test_sequence_parallelism_requires_full_graph_compilation(
+    cudagraph_mode: CUDAGraphMode,
+    use_inductor_graph_partition: bool,
+    expected_enable_sp: bool,
+    expected_cudagraph_mode: CUDAGraphMode,
+    expected_piecewise_compile: bool,
+    expected_capture_sizes: list[int],
+    expected_max_size: int,
+):
+    with patch.object(current_platform, "device_count", return_value=2):
+        vllm_config = VllmConfig(
+            parallel_config=ParallelConfig(tensor_parallel_size=2),
+            scheduler_config=SchedulerConfig(
+                max_num_seqs=128,
+                max_num_batched_tokens=2048,
+                max_model_len=2048,
+                is_encoder_decoder=False,
+            ),
+        )
+        vllm_config.model_config = MagicMock(
+            dtype=torch.float16,
+            enforce_eager=False,
+            is_moe=False,
+            disable_cascade_attn=False,
+            get_hidden_size=MagicMock(return_value=4096),
+        )
+        vllm_config.compilation_config = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_capture_sizes=[1, 2, 4, 15],
+            max_cudagraph_capture_size=None,
+            compile_sizes=["cudagraph_capture_sizes"],
+            use_inductor_graph_partition=use_inductor_graph_partition,
+            pass_config=PassConfig(
+                enable_sp=True,
+                fuse_gemm_comms=True,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+                sp_min_token_num=512,
+            ),
+            cudagraph_mode=cudagraph_mode,
+        )
+        vllm_config.compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=vllm_config.parallel_config.all2all_backend,
+            data_parallel_size=1,
+        )
+        vllm_config._set_compile_ranges()
+        vllm_config._set_cudagraph_sizes()
+
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        == use_inductor_graph_partition
+    )
+    assert (
+        bool(vllm_config.compilation_config.splitting_ops) == expected_piecewise_compile
+    )
+    assert vllm_config.compilation_config.pass_config.enable_sp == expected_enable_sp
+    assert (
+        vllm_config.compilation_config.pass_config.fuse_gemm_comms == expected_enable_sp
+    )
+    assert vllm_config.compilation_config.cudagraph_mode == expected_cudagraph_mode
+    assert (
+        vllm_config.compilation_config.cudagraph_capture_sizes == expected_capture_sizes
+    )
+    assert (
+        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
+    )
+    assert (
+        511 in vllm_config.compilation_config.compile_ranges_endpoints
+    ) == expected_enable_sp
 
 
 def test_cached_compilation_config(default_vllm_config):

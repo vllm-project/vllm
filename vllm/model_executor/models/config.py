@@ -107,6 +107,31 @@ class Gemma4Config(VerifyAndUpdateConfig):
             )
 
 
+class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "fp8":
+            model_type = getattr(model_config.hf_config, "model_type", None)
+            if model_type == "deepseek_v4":
+                model_config.hf_config.quantization_config["quant_method"] = (
+                    "deepseek_v4_fp8"
+                )
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "fp8"
+        ):
+            model_type = getattr(model_config.hf_text_config, "model_type", None)
+            if model_type == "deepseek_v4":
+                model_config.hf_text_config.quantization_config["quant_method"] = (
+                    "deepseek_v4_fp8"
+                )
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -635,6 +660,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
+    "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,

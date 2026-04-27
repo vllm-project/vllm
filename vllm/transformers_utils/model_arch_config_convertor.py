@@ -47,6 +47,9 @@ class ModelArchConfigConvertorBase:
 
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
+            # special case for deepseek_v4
+            if hasattr(self.hf_text_config, "compress_ratios"):
+                return self.hf_text_config.head_dim
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
             if not envs.VLLM_MLA_DISABLE:
                 return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
@@ -222,6 +225,7 @@ class ModelArchConfigConvertorBase:
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
+            "deepseek_v4",
             "deepseek_mtp",
             "glm_moe_dsa",
             "glm4_moe_lite",
@@ -233,7 +237,11 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+            # check is deepseek_v4 model
+            if hasattr(self.hf_text_config, "compress_ratios"):
+                return getattr(self.hf_text_config, "head_dim", None) is not None
+            else:
+                return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
