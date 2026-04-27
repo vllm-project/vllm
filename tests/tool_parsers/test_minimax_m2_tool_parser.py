@@ -4,6 +4,7 @@
 import json
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
@@ -448,6 +449,55 @@ class TestLargeChunks:
         }
 
 
+class TestStreamingDeltaSemantics:
+    """Regression tests for incremental tool-call streaming."""
+
+    def test_emits_tool_name_before_argument_fragments(self, parser):
+        results = _feed(
+            parser,
+            [
+                "Let me check. ",
+                "<minimax:tool_call>",
+                '<invoke name="get_weather">',
+                '<parameter name="city">Sea',
+                "ttle</parameter>",
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        tool_deltas = [tc for result in results for tc in (result.tool_calls or [])]
+        assert _collect_content(results) == "Let me check. "
+        assert len(tool_deltas) == 4
+
+        assert tool_deltas[0].function.name == "get_weather"
+        assert tool_deltas[0].function.arguments is None
+
+        argument_fragments = [
+            tc.function.arguments
+            for tc in tool_deltas[1:]
+            if tc.function and tc.function.arguments
+        ]
+        assert argument_fragments == ['{"city":"Sea', 'ttle"', "}"]
+        assert "".join(argument_fragments) == '{"city":"Seattle"}'
+
+    def test_streams_partial_arguments_before_invoke_closes(self, parser):
+        results = _feed(
+            parser,
+            [
+                "<minimax:tool_call>",
+                '<invoke name="get_weather">',
+                '<parameter name="city">Sea',
+            ],
+        )
+
+        tool_deltas = [tc for result in results for tc in (result.tool_calls or [])]
+        assert len(tool_deltas) == 2
+        assert tool_deltas[0].function.name == "get_weather"
+        assert tool_deltas[0].function.arguments is None
+        assert tool_deltas[1].function.arguments == '{"city":"Sea'
+        assert parser.prev_tool_call_arr == []
+
+
 class TestAnyOfNullableParam:
     """Regression: anyOf nullable parameter parsing (PR #32342)."""
 
@@ -548,3 +598,38 @@ class TestAnyOfNullableParam:
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["config"] == {"theme": "dark", "fontSize": 14}
         assert isinstance(parsed["config"], dict)
+
+
+class TestResponsesFunctionToolSupport:
+    """Regression: Responses FunctionTool schemas are used for type coercion."""
+
+    def test_function_tool_properties_drive_type_conversion(self):
+        tools = [
+            FunctionTool(
+                type="function",
+                name="get_weather",
+                description="Get weather data",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer"},
+                    },
+                },
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="get_weather">'
+                '<parameter name="days">5</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["days"] == 5
+        assert isinstance(parsed["days"], int)
