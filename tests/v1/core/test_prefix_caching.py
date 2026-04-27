@@ -2512,3 +2512,111 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
+    """Hybrid full+SWA model with a pool sized at the startup minimum should
+    admit a prompt longer than the SWA cap, because SlidingWindowManager
+    recycles blocks during chunked prefill (issue #39734)."""
+    block_size = 16
+    sliding_window = 4 * block_size  # 64 tokens
+    max_num_batched_tokens = 8 * block_size  # 128 tokens
+    max_model_len = 64 * block_size  # 1024 tokens — much larger than the SWA cap
+    # Startup pool sizing: full demands cdiv(max_model_len, bs) = 64 blocks,
+    # SWA demands cdiv(SW-1+max_batched, bs) + 1 = cdiv(191, 16) + 1 = 13.
+    # Pool minimum = 64 + 13 = 77; +1 for the null block.
+    num_blocks = 64 + 13 + 1
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    manager = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # A prompt that is shorter than max_model_len but longer than SW + chunk:
+    # cdiv(prompt_len, bs) = 32 blocks. Without the cap, admission would
+    # demand 32 (full) + 32 (SWA) = 64 blocks. With the cap, SWA contributes
+    # only 13, so total = 32 + 13 = 45 ≤ pool size.
+    prompt_len = 32 * block_size
+    req = make_request("long", list(range(prompt_len)), block_size, sha256)
+
+    assert manager.can_fit_full_sequence(req)
+
+
+def test_can_fit_full_sequence_full_attention_still_gates_oversized():
+    """The cap only loosens the SWA group; a prompt that exceeds the
+    full-attention pool capacity must still be rejected."""
+    block_size = 16
+    sliding_window = 4 * block_size
+    max_num_batched_tokens = 8 * block_size
+    max_model_len = 64 * block_size
+    # Provide a tiny pool — even a small prompt should be rejected.
+    num_blocks = 5
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    manager = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 16 blocks of full attention demand alone exceeds the 5-block pool.
+    prompt_len = 16 * block_size
+    req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
+
+    assert not manager.can_fit_full_sequence(req)
