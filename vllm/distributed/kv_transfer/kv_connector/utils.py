@@ -190,8 +190,20 @@ def copy_kv_blocks(
     src_block_ids: list[int],
     dst_block_ids: list[int],
     direction: Literal["h2d", "d2h"],
+    *,
+    block_dim: int | None = None,
 ) -> None:
-    """Copy kv blocks between different buffers."""
+    """Copy kv blocks between different buffers.
+
+    Args:
+        block_dim: The tensor dimension that indexes blocks. When provided
+            (typically via ``functools.partial`` in the NIXL connector),
+            layout-aware ``index_select`` / ``index_copy_`` is used so that
+            backends whose block dimension is not 1 (e.g. Triton, FlashInfer)
+            are handled correctly. When *None* the legacy platform helpers
+            ``insert_blocks_to_device`` / ``swap_out_blocks_to_host`` are
+            used (they assume block dim 1).
+    """
     if (
         not src_kv_caches
         or not dst_kv_caches
@@ -211,14 +223,27 @@ def copy_kv_blocks(
         dst_device=dst_device,
     )
 
-    if direction == "h2d":
-        copy_fn = current_platform.insert_blocks_to_device
+    if block_dim is not None:
+        # Layout-aware copy using the block dimension determined from the
+        # attention backend via AttentionBackend.get_kv_cache_block_dim().
+        for layer_name in src_kv_caches:
+            src = src_kv_caches[layer_name]
+            dst = dst_kv_caches[layer_name]
+            selected = torch.index_select(
+                src, block_dim, src_indices.to(src.device))
+            dst.index_copy_(
+                block_dim, dst_indices.to(dst.device),
+                selected.to(dst.device))
     else:
-        copy_fn = current_platform.swap_out_blocks_to_host
-    for layer_name in src_kv_caches:
-        src_tensor = src_kv_caches[layer_name]
-        dst_tensor = dst_kv_caches[layer_name]
-        copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+        # Fallback to platform helpers (assumes block dim 1).
+        if direction == "h2d":
+            copy_fn = current_platform.insert_blocks_to_device
+        else:
+            copy_fn = current_platform.swap_out_blocks_to_host
+        for layer_name in src_kv_caches:
+            src_tensor = src_kv_caches[layer_name]
+            dst_tensor = dst_kv_caches[layer_name]
+            copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
