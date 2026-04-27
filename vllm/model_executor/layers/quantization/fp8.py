@@ -535,7 +535,29 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         assert not self.block_quant
 
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
+
+        # Fused modules (QKV, gate_up) have shards with different magnitude
+        # ranges. Quantize each shard independently so the smaller components
+        # keep precision, then expand to per-channel for the kernels.
+        if len(layer.logical_widths) > 1:
+            from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+                convert_to_channelwise,
+            )
+            qweight = torch.empty_like(layer.weight,
+                                       dtype=torch.float8_e4m3fn)
+            shard_scales = []
+            offset = 0
+            for width in layer.logical_widths:
+                q_shard, s = ops.scaled_fp8_quant(
+                    layer.weight[offset:offset + width], scale=None)
+                qweight[offset:offset + width] = q_shard
+                shard_scales.append(s)
+                offset += width
+            weight_scale = convert_to_channelwise(
+                torch.cat(shard_scales), layer.logical_widths)
+        else:
+            qweight, weight_scale = ops.scaled_fp8_quant(
+                layer.weight, scale=None)
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.data)
