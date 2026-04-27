@@ -31,6 +31,7 @@ DIRECT_NUM_BLOCKS = [2048, 32768]
 DIRECT_NUM_HEADS = (8, 2)
 DIRECT_HEAD_SIZE = 128
 DIRECT_DTYPE = torch.bfloat16
+HEAD_SIZE_TEST_NUM_HEADS_PAIRS = [(16, 16), (16, 4)]
 # Prefill seq lens: (query_len, kv_len). Exclude single-token decode (q=1)
 # because flash_attn_varlen_func is a prefill kernel; q_len=1 with short kv
 # triggers kernel limitations (MAE > 0.1 for head != 128 in BF16, all heads in FP16).
@@ -369,6 +370,109 @@ def test_aiter_mha_platform_gate_matches_install_and_arch():
 
 
 # Kernel path tests -------------------------------------------------------
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("num_heads", HEAD_SIZE_TEST_NUM_HEADS_PAIRS)
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+def test_aiter_fa_head_sizes(head_size, dtype, num_heads, seq_lens):
+    """AITER flash attention should stay accurate across supported head sizes.
+
+    This is the backend-owned head-size matrix for ``rocm_aiter_fa``. The
+    mixed ROCm head-size file now keeps only ``rocm_attn`` and ``triton_attn``
+    coverage.
+    """
+    atol = 1.5e-2
+    rtol = 1e-2
+    _assert_aiter_supported()
+    import aiter
+
+    from vllm.v1.attention.backends.rocm_aiter_fa import cp_mha_gather_cache
+
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    num_q_heads, num_kv_heads = num_heads
+    query_len, kv_len = seq_lens
+    scale = head_size**-0.5
+
+    query = torch.randn(query_len, num_q_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        NUM_BLOCKS, BLOCK_SIZE, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0, query_len], dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    cu_seq_lens = torch.tensor([0, kv_len], dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    max_num_blocks = (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_tables = torch.randint(0, NUM_BLOCKS, (1, max_num_blocks), dtype=torch.int32)
+
+    token_to_batch = torch.zeros(kv_len, dtype=torch.int32)
+    seq_starts = torch.zeros(1, dtype=torch.int32)
+    gathered_key = torch.empty(kv_len, num_kv_heads, head_size, dtype=dtype)
+    gathered_value = torch.empty_like(gathered_key)
+
+    cp_mha_gather_cache(
+        key_cache=key_cache,
+        value_cache=value_cache,
+        key=gathered_key,
+        value=gathered_value,
+        block_tables=block_tables,
+        k_scales=torch.ones(1, dtype=torch.float32),
+        v_scales=torch.ones(1, dtype=torch.float32),
+        cu_seqlens_kv=cu_seq_lens,
+        token_to_batch=token_to_batch,
+        seq_starts=seq_starts,
+        dequant=False,
+        kv_cache_layout="NHD",
+        total_tokens=kv_len,
+    )
+
+    output = torch.empty_like(query)
+    aiter.flash_attn_varlen_func(
+        q=query,
+        k=gathered_key,
+        v=gathered_value,
+        cu_seqlens_q=cu_query_lens,
+        cu_seqlens_k=cu_seq_lens,
+        max_seqlen_q=query_len,
+        max_seqlen_k=kv_len,
+        min_seqlen_q=1,
+        dropout_p=0.0,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        alibi_slopes=None,
+        return_lse=False,
+        out=output,
+    )
+
+    ref = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[query_len],
+        kv_lens=[kv_len],
+        block_tables=block_tables,
+        scale=scale,
+    )
+
+    _print_close_stats(
+        "head_sizes "
+        f"dtype={dtype} head_size={head_size} "
+        f"num_heads={num_heads} seq_lens={seq_lens}",
+        output,
+        ref,
+        atol=atol,
+        rtol=rtol,
+    )
+    torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+
+
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("num_heads", NUM_HEADS_PAIRS)
