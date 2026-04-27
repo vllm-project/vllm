@@ -181,7 +181,6 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
-        self.failed_recving_kv_req_ids: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1493,7 +1492,6 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             
-        # TODO(Soya) Directly finish requests that failed to load KV blocks, without waiting for them to be scheduled again.
         if failed_kv_load_req_ids:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
@@ -1817,7 +1815,6 @@ class Scheduler(SchedulerInterface):
                     request.request_id not in self.finished_recving_kv_req_ids
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
-                self.failed_recving_kv_req_ids.discard(request.request_id)
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
@@ -2048,20 +2045,14 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        if request.request_id in self.failed_recving_kv_req_ids:
-            # NOTE: Directly free the blocks, since we have removed per-block error handling
-            # TODO(Soya): Check if this is right
-            self.kv_cache_manager.free(request)
-            self.failed_recving_kv_req_ids.remove(request.request_id)
-        else:
-            # Now that the blocks are ready, actually cache them.
-            # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+        # Now that the blocks are ready, actually cache them.
+        # This will cache the blocks iff caching is enabled.
+        self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
-            # on a full prompt hit, we need to re-compute the last token
-            # in order to be able to sample the next token
-            if request.num_computed_tokens == request.num_tokens:
-                request.num_computed_tokens = request.num_tokens - 1
+        # on a full prompt hit, we need to re-compute the last token
+        # in order to be able to sample the next token
+        if request.num_computed_tokens == request.num_tokens:
+            request.num_computed_tokens = request.num_tokens - 1
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
@@ -2203,8 +2194,8 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 marked_invalid_block = True
-                # Truncate the computed tokens at the first failed block
-                request.num_computed_tokens = idx * self.block_size
+                # Set num_computed_tokens to 0
+                request.num_computed_tokens = 0
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -2241,11 +2232,11 @@ class Scheduler(SchedulerInterface):
         """
         
         # handle async KV loads (not cached yet, evict_blocks=False)
-        async_load_reqs = (
+        async_load_reqs = [
             req
             for req in self.skipped_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        )
+        ]
         async_failed_req_ids, _, _ = (
             self._update_requests_with_invalid_blocks(
                 async_load_reqs,
