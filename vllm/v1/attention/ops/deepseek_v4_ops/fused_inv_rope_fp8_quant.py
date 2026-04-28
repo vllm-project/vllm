@@ -9,7 +9,7 @@ INT32-packed UE8M0 on SM100) so fp8_einsum skips transform_sf_into_required_layo
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import maybe_launch_pdl, tl, triton
 
 
 @triton.jit
@@ -224,7 +224,9 @@ def fused_inv_rope_fp8_quant(
         HALF_ROPE=rope_dim // 2,
         TMA_ALIGNED_SCALES=tma_aligned_scales,
         num_stages=1,
-        launch_pdl=False,
+        # PDL is a NVIDIA Hopper-only Triton launch attribute; omit on
+        # other backends (e.g. ROCm) to avoid KeyError in JITKernel.
+        **maybe_launch_pdl(),
     )
 
     grid = (tma_aligned_T, n_groups * heads_per_group)

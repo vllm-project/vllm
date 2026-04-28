@@ -153,8 +153,10 @@ class DeepseekV4FP8Config(Fp8Config):
             except Exception:
                 # vllm_config not yet set; defer the decision until a
                 # later call lands inside set_current_vllm_config.
-                return "fp4"
-            expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
+                #return "fp4"
+                return "fp8"
+            #expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
+            expert_dtype = getattr(hf_config, "expert_dtype", "fp8")
             if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
                 raise ValueError(
                     f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "
@@ -1507,14 +1509,16 @@ class DeepseekV4ForCausalLM(nn.Module):
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
-    hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+    #hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+    hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp8")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         self.config = config
-        expert_dtype = getattr(config, "expert_dtype", "fp4")
+        #expert_dtype = getattr(config, "expert_dtype", "fp4")
+        expert_dtype = "fp8"
         if expert_dtype != "fp4":
             self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
 

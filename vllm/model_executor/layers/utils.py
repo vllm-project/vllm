@@ -303,7 +303,16 @@ def cublas_gemm_bf16_bf16_fp32(
     x: torch.Tensor,
     weight: torch.Tensor,
 ):
-    return ops.router_gemm_bf16_fp32(x, weight)
+    # The fused C++ op (csrc/moe/router_gemm.cu, registered via
+    # torch_bindings.cpp's `router_gemm_bf16_fp32`) is gated behind
+    # `#ifndef USE_ROCM` and is only compiled into _moe_C.so on CUDA builds.
+    # On other backends (e.g. ROCm) we fall back to a torch GEMM with the
+    # same bf16-in / fp32-out contract. rocBLAS already does fp32 accumulation
+    # internally for bf16 GEMMs on MI300X, so casting the bf16 output to fp32
+    # matches the cuBLAS bf16 x bf16 -> fp32 path numerically.
+    if current_platform.is_cuda():
+        return ops.router_gemm_bf16_fp32(x, weight)
+    return torch.nn.functional.linear(x, weight).to(torch.float32)
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:

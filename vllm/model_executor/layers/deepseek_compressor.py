@@ -16,7 +16,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import maybe_launch_pdl, tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -329,7 +329,10 @@ class DeepseekCompressor(nn.Module):
             TRITON_BLOCK_SIZE=triton.next_power_of_2(kv.shape[-1]),
             STATE_WIDTH=state_width,
             COMPRESS_RATIO=self.compress_ratio,
-            launch_pdl=False,
+            # PDL is a NVIDIA Hopper-only Triton launch attribute; omit
+            # on other backends (e.g. ROCm) to avoid KeyError in
+            # JITKernel. See note above re: read-after-write race.
+            **maybe_launch_pdl(),
         )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
@@ -378,7 +381,7 @@ class DeepseekCompressor(nn.Module):
             SCALE_DIM=self._scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
             num_warps=self._num_warps,
-            launch_pdl=False,
+            **maybe_launch_pdl(),
         )
 
 

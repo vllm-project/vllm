@@ -425,6 +425,7 @@ class RocmPlatform(Platform):
         "fp8_per_block",
         "online",
         "gpt_oss_mxfp4",
+        "deepseek_v4_fp8",
     ]
 
     @classmethod
