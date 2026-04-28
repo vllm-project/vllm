@@ -1338,13 +1338,17 @@ class GPUModelRunner(
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
-                # Add new_token_ids to token_ids_cpu.
-                start_token_index = num_computed_tokens
-                end_token_index = num_computed_tokens + len(new_token_ids)
-                self.input_batch.token_ids_cpu[
-                    req_index, start_token_index:end_token_index
-                ] = new_token_ids
-                self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+                num_new_tokens = (
+                    num_computed_tokens + len(new_token_ids) - req_state.num_tokens
+                )
+                if new_token_ids and num_new_tokens > 0:
+                    # Add new_token_ids to token_ids_cpu.
+                    start_token_index = self.input_batch.num_tokens_no_spec[req_index]
+                    end_token_index = start_token_index + len(new_token_ids)
+                    self.input_batch.token_ids_cpu[
+                        req_index, start_token_index:end_token_index
+                    ] = new_token_ids
+                    self.input_batch.num_tokens_no_spec[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
