@@ -787,8 +787,13 @@ class OpenAIServingChat(OpenAIServing):
                                     tool_call_array_index=i,
                                 )
                             )
-                            history_tool_call_cnt += 1
-                            tools_streamed[i] = True
+                            if (
+                                delta_message
+                                and delta_message.tool_calls
+                                and delta_message.tool_calls[0].id is not None
+                            ):
+                                history_tool_call_cnt += 1
+                                tools_streamed[i] = True
 
                     # Skip when tool_choice_uses_parser so it falls through
                     # to the auto tool_parser branches below.

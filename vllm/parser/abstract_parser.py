@@ -426,6 +426,17 @@ class DelegatingParser(Parser):
 
         return outputs
 
+    def _get_function_name(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> str:
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            return request.tool_choice.name
+        if request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            return request.tool_choice.function.name
+        raise ValueError("Invalid tool_choice for function name extraction.")
+
     def _parse_tool_calls(
         self,
         request: ResponsesRequest,
@@ -443,21 +454,14 @@ class DelegatingParser(Parser):
         """
         function_calls: list[FunctionCall] = []
 
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
-            # Forced Function Call (Responses API style)
-            assert content is not None
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            return function_calls, None  # Clear content since tool is called.
-
         if request.tool_choice and isinstance(
-            request.tool_choice, ChatCompletionNamedToolChoiceParam
+            request.tool_choice,
+            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         ):
-            # Forced Function Call (Chat Completion API style)
+            # Forced Function Call
             assert content is not None
             function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+                FunctionCall(name=self._get_function_name(request), arguments=content)
             )
             return function_calls, None  # Clear content since tool is called.
 
@@ -582,10 +586,13 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+        if request.tool_choice and isinstance(
+            request.tool_choice,
+            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        ):
             delta_message, function_name_returned = extract_named_tool_call_streaming(
                 delta_text=delta_text,
-                function_name=request.tool_choice.name,
+                function_name=self._get_function_name(request),
                 function_name_returned=function_name_returned,
                 tool_call_idx=tool_call_idx,
                 tool_call_id_type=tool_call_id_type,
