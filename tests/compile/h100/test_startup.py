@@ -34,7 +34,7 @@ def _run_vllm(vllm_runner):
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.NONE,
         ),
-        num_gpu_blocks_override=8,
+        num_gpu_blocks_override=16,
     ):
         pass
 
@@ -190,7 +190,7 @@ def _run_model(vllm_runner, spec: ModelStartupSpec):
             cudagraph_mode=CUDAGraphMode.NONE,
             pass_config=PassConfig(fuse_allreduce_rms=False),
         ),
-        num_gpu_blocks_override=8,
+        num_gpu_blocks_override=16,
     ):
         pass
 
