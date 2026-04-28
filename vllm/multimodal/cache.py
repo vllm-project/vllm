@@ -511,11 +511,24 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
             self._p0_cache[mm_hash] = prompt_updates
             return self.address_as_item(address, monotonic_id), prompt_updates
-        except (ValueError, MemoryError) as e:
-            # put may fail if the object is too large or
-            # the cache is full.
-            # In this case we log the error and keep the original mm_input.
-            logger.debug("Failed to cache mm_input with hash %s: %s", mm_hash, e)
+        except ValueError as e:
+            # Item exceeds `mm_shm_cache_max_object_size_mb`. Subsequent
+            # UUID-only requests for this item will fail with a cache miss.
+            logger.warning_once(
+                "mm_input %s too large to cache; "
+                "raise --mm-shm-cache-max-object-size-mb. (%s)",
+                mm_hash,
+                e,
+            )
+            return mm_item
+        except MemoryError as e:
+            # Cache full and protected items prevent eviction.
+            logger.debug(
+                "mm_input %s not cached; shm cache full, "
+                "consider raising --mm-processor-cache-gb. (%s)",
+                mm_hash,
+                e,
+            )
             return mm_item
 
     @override
