@@ -3,16 +3,16 @@
 """
 Validates the loading of a model saved with the sharded_state format.
 This script demonstrates how to load a model that was previously saved
-using save_sharded_state.py and validates it by running inference.
+using save_sharded_state_offline.py and validates it by running inference.
 Example usage:
 (First need to save a sharded_state mode)
 
-python save_sharded_state.py \
+python save_sharded_state_offline.py \
     --model /path/to/load \
     --tensor-parallel-size 8 \
     --output /path/to/save/sharded/model
 
-python load_sharded_state.py \
+python load_sharded_state_offline.py \
     --model /path/to/saved/sharded/model \
     --load-format sharded_state \
     --tensor-parallel-size 8 \

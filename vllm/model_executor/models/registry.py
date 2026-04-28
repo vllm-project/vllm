@@ -172,7 +172,7 @@ _TEXT_GENERATION_MODELS = {
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
     "MiMoV2FlashForCausalLM": ("mimo_v2", "MiMoV2FlashForCausalLM"),
-    "MiMoV2ProForCausalLM": ("mimo_v2", "MiMoV2ProForCausalLM"),
+    "MiMoV2ForCausalLM": ("mimo_v2", "MiMoV2ForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
