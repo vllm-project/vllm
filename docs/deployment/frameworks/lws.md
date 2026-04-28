@@ -12,10 +12,10 @@ vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kuber
 
 ## Deploy and Serve
 
-Deploy the following yaml file `lws.yaml`
+Deploy the following yaml file `lws.yaml` (MP Mode as default, Ray Mode is supported as well)
 
 ??? code "Yaml"
-    === "MP (default)"
+    === "Multi-Processing Mode (default)"
         ```yaml
         apiVersion: leaderworkerset.x-k8s.io/v1
         kind: LeaderWorkerSet
@@ -109,7 +109,7 @@ Deploy the following yaml file `lws.yaml`
           type: ClusterIP
         ```
 
-    === "Ray"
+    === "Ray Mode"
         ```yaml
         apiVersion: leaderworkerset.x-k8s.io/v1
         kind: LeaderWorkerSet

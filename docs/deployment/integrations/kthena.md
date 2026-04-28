@@ -72,10 +72,10 @@ Key points from the example YAML:
 
 Image: `vllm/vllm-openai:latest` (matches upstream vLLM images).
 
-Command examples (MP/Ray):
+Command examples (Multi-Processing/Ray):
 
 ??? code "Yaml"
-    === "MP (default)"
+    === "MP Mode(default)"
         ```yaml
         # leader
         command:
@@ -104,7 +104,7 @@ Command examples (MP/Ray):
               --headless
         ```
 
-    === "Ray"
+    === "Ray Mode"
         ```yaml
         # leader
         command:
