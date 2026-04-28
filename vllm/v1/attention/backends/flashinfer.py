@@ -448,11 +448,11 @@ class FIDecode:
 
 @dataclass
 class FISpecDecode:
-    """Metadata for native FlashInfer spec-decode verification (non-TRTLLM).
+    """Native FlashInfer metadata for uniform multi-token decode.
 
-    Used when the decode bucket has uniform query_len > 1 (1 + num_spec_tokens)
-    and TRTLLM decode attention is unavailable. Routes through the prefill
-    wrapper in cudagraph mode with zero_rows padding for padded request slots.
+    Spec-decode verification is decode-shaped to vLLM, but prefill-shaped to
+    FlashInfer because query_len > 1 needs causal masking within the query
+    chunk.
     """
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper
@@ -1244,16 +1244,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                # require_uniform=True (see split_decodes_and_prefills above)
-                # guarantees every decode-bucket request has the same
-                # query_len, except padded slots which carry zero-length rows
-                # under the zero_rows CG padding strategy. Derive query_len
-                # from per-request qo_indptr deltas instead of
-                # num_decode_tokens / num_decodes — the aggregate form
-                # misroutes mixed real+padded batches (e.g. [5, 5, 0] gives
-                # 10 % 3 == 1, falsely selecting the FIDecode path).
-                # Defensive: scan all rows in case a padded zero row
-                # precedes a real row.
+                # FULL CG padding may add zero-length request rows, so infer
+                # the decode-bucket query length from nonzero qo_indptr deltas
+                # rather than num_decode_tokens / num_decodes.
                 decode_query_lens = (
                     qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
                 )
@@ -1302,22 +1295,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
                     attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
                 else:
-                    # Spec-decode: uniform query_len > 1 in the decode bucket.
-                    # Route through the prefill wrapper in cudagraph mode.
-                    # zero_rows padding: when the batch is padded for CG,
-                    # trailing request slots have duplicate qo_indptr /
-                    # paged_kv_indptr entries and last_page_len == 0, which
-                    # FlashInfer accepts with bit-identical real-row numerics
-                    # (verified via flashinfer_padded_cg_repro.py).
-                    #
-                    # FlashInfer enforces ``q.shape[0] == qo_indptr[-1]`` —
-                    # the real query-token total. Override num_decode_tokens
-                    # so that forward()'s ``query[:num_decode_tokens]`` slice
-                    # matches that contract: split_decodes_and_prefills
-                    # returns num_decode_tokens == num_actual_tokens for
-                    # uniform decode batches, and num_actual_tokens may be
-                    # padded under full CG (see CommonAttentionMetadata
-                    # docstring).
+                    # FlashInfer prefill requires q.shape[0] == qo_indptr[-1].
+                    # For FULL CG, num_decode_tokens may include padded token
+                    # capacity, so trim it back to the real query-token total
+                    # before forward() slices query/output.
                     real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
                     attn_metadata.num_decode_tokens = real_decode_tokens
                     spec_wrapper = self._get_spec_decode_prefill_wrapper(
@@ -1738,10 +1719,8 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if isinstance(attn_metadata.decode, FISpecDecode):
-                    # Spec-decode verification through the prefill wrapper.
-                    # Non-DCP only: get_cudagraph_support returns
-                    # UNIFORM_SINGLE_TOKEN_DECODE under DCP, which forces the
-                    # decode bucket to query_len==1.
+                    # DCP downgrades to single-token decode, so this path is
+                    # non-DCP only.
                     assert not use_dcp, (
                         "FISpecDecode is not supported under DCP; "
                         "get_cudagraph_support should have downgraded."

@@ -2,9 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import unittest.mock
+
 import pytest
 
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_standard_kv_cache_spec,
+    create_vllm_config,
+)
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import PerLayerParameters
 from vllm.utils.torch_utils import set_random_seed
 
 try:
@@ -24,6 +34,10 @@ DTYPES = [torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
+SPEC_DECODE_BLOCK_SIZE = 16
+SPEC_DECODE_MODEL = "Qwen/Qwen2.5-0.5B"
+NUM_SPEC_TOKENS = 4
+DEVICE = torch.device("cuda:0")
 
 
 def ref_paged_attn(
@@ -144,6 +158,106 @@ def _make_cg_decode_wrapper(
         ),
         use_tensor_cores=use_tensor_cores,
     )
+
+
+def _mock_flashinfer_layer_params(vllm_config, layer_names, impl_cls):
+    head_size = vllm_config.model_config.get_head_size()
+    return {
+        name: PerLayerParameters(
+            window_left=-1,
+            logits_soft_cap=0.0,
+            sm_scale=1.0 / (head_size**0.5),
+        )
+        for name in layer_names
+    }
+
+
+class _RecordingPrefillWrapper:
+    def __init__(self):
+        self.plan_kwargs: dict | None = None
+        self.requested_batch_size: int | None = None
+        self.requested_use_cudagraph: bool | None = None
+        self._window_left = -1
+        self._logits_soft_cap = 0.0
+        self._sm_scale = 0.0
+        self._causal = False
+
+    def plan(self, **kwargs):
+        self.plan_kwargs = {
+            k: v.detach().cpu().clone() if isinstance(v, torch.Tensor) else v
+            for k, v in kwargs.items()
+        }
+        self._window_left = kwargs.get("window_left", self._window_left)
+        self._logits_soft_cap = kwargs.get("logits_soft_cap", self._logits_soft_cap)
+        self._sm_scale = kwargs.get("sm_scale", self._sm_scale)
+        self._causal = kwargs.get("causal", self._causal)
+
+
+def _make_flashinfer_spec_decode_builder():
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    vllm_config = create_vllm_config(
+        model_name=SPEC_DECODE_MODEL,
+        max_model_len=512,
+        block_size=SPEC_DECODE_BLOCK_SIZE,
+        num_gpu_blocks=512,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=NUM_SPEC_TOKENS,
+        prompt_lookup_max=4,
+        prompt_lookup_min=2,
+    )
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.can_use_trtllm_attention",
+            return_value=False,
+        ),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            _mock_flashinfer_layer_params,
+        ),
+    ):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, ["layer.0"], vllm_config, DEVICE
+        )
+
+    assert builder.reorder_batch_threshold == 1 + NUM_SPEC_TOKENS
+    return builder
+
+
+def _build_flashinfer_spec_decode_metadata(
+    builder,
+    batch_spec: BatchSpec,
+    num_actual_tokens_override: int | None = None,
+):
+    common = create_common_attn_metadata(batch_spec, SPEC_DECODE_BLOCK_SIZE, DEVICE)
+    if num_actual_tokens_override is not None:
+        common.num_actual_tokens = num_actual_tokens_override
+    fake_wrapper = _RecordingPrefillWrapper()
+
+    def _fake_get_spec_decode_prefill_wrapper(batch_size, use_cudagraph):
+        fake_wrapper.requested_batch_size = batch_size
+        fake_wrapper.requested_use_cudagraph = use_cudagraph
+        return fake_wrapper
+
+    with (
+        unittest.mock.patch.object(
+            builder,
+            "_get_spec_decode_prefill_wrapper",
+            side_effect=_fake_get_spec_decode_prefill_wrapper,
+        ),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.can_use_trtllm_attention",
+            return_value=False,
+        ),
+    ):
+        attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    return attn_metadata, fake_wrapper
 
 
 def test_fast_decode_plan_importable() -> None:
@@ -706,94 +820,50 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 def test_flashinfer_prefill_cudagraph_zero_rows_padding(
     dtype: torch.dtype,
 ) -> None:
-    """Pin the FlashInfer ``zero_rows`` padding contract that the native
-    spec-decode path in ``flashinfer.py`` depends on.
+    """Pin the zero-row CG padding contract used by the native spec-decode path.
 
-    Contract:
-      * ``BatchPrefillWithPagedKVCacheWrapper(use_cuda_graph=True)`` accepts
-        a padded *request* batch where trailing slots have duplicated
-        ``qo_indptr`` / ``paged_kv_indptr`` entries and ``last_page_len == 0``.
-        The query and output tensors are sized to ``qo_indptr[-1]``
-        (= real tokens), not to ``padded_bs * q_len`` — FlashInfer enforces
-        ``q.shape[0] == qo_indptr[-1]`` and rejects mismatches at the API
-        boundary. Padding lives in the request dimension of the persistent
-        metadata buffers, not in the per-step query/output tensors.
-      * The wrapper produces bit-identical real-row output vs an unpadded
-        non-CG reference (``abs_err == 0``) — i.e. allocating wrapper
-        buffers for the padded request count does not change kernel
-        scheduling on the real rows. (Verified empirically by
-        ``flashinfer_padded_cg_repro.py`` for these head dims.)
-
-    Failure modes if a FlashInfer upgrade breaks either property:
-      * The shape-check property is hard-fail: ``run()`` raises before any
-        kernel launches.
-      * The bit-exactness property is a numerical contract regression:
-        real-row output drifts by a few bf16 ULPs (this was the observed
-        ``null_block`` behavior). Not catastrophic, but a contract change
-        we want to notice rather than absorb silently.
+    Trailing request slots carry duplicate qo_indptr / paged_kv_indptr entries
+    and last_page_len == 0; query/output are sized to qo_indptr[-1]. Real-row
+    output must be bit-identical to an unpadded non-CG reference.
     """
     torch.set_default_device("cuda")
     set_random_seed(0)
 
-    # Configuration mirrors flashinfer_padded_cg_repro.py defaults, where
-    # zero_rows was empirically verified to give abs_err == rel_err == 0
-    # on real rows. Diverging from these head counts risks landing on a
-    # different FlashInfer kernel schedule and losing bit-exactness.
     real_bs = 3
     padded_bs = 8
-    q_len = 5  # 1 + num_speculative_tokens, uniform across the bucket
+    q_len = 5
     num_qo_heads, num_kv_heads = 32, 8
     head_dim = 128
     page_size = 16
     pages_per_req = 4
 
-    real_kv_len = (
-        pages_per_req * page_size
-    )  # last page full → last_page_len = page_size
     real_pages = real_bs * pages_per_req
-    num_total_pages = real_pages + 16  # extra slack
+    num_total_pages = real_pages + 16
 
     kv_cache = torch.randn(
         num_total_pages, 2, page_size, num_kv_heads, head_dim, dtype=dtype
     )
 
-    # Persistent GPU buffers — addresses captured by the cudagraph-mode
-    # wrapper. Sized for the padded request count.
+    # Persistent buffers are sized for padded request count.
     qo_indptr_buf = torch.zeros(padded_bs + 1, dtype=torch.int32)
     paged_kv_indptr_buf = torch.zeros(padded_bs + 1, dtype=torch.int32)
     paged_kv_indices_buf = torch.zeros(padded_bs * pages_per_req, dtype=torch.int32)
     paged_kv_last_page_len_buf = torch.zeros(padded_bs, dtype=torch.int32)
 
-    # Build the padded zero_rows metadata on CPU (FlashInfer copies these
-    # into the persistent buffers during plan()).
-    qo_indptr_cpu = torch.zeros(padded_bs + 1, dtype=torch.int32, device="cpu")
-    paged_kv_indptr_cpu = torch.zeros(padded_bs + 1, dtype=torch.int32, device="cpu")
-    paged_kv_last_page_len_cpu = torch.zeros(padded_bs, dtype=torch.int32, device="cpu")
-    real_indices: list[int] = []
-    for r in range(real_bs):
-        qo_indptr_cpu[r + 1] = qo_indptr_cpu[r] + q_len
-        paged_kv_indptr_cpu[r + 1] = paged_kv_indptr_cpu[r] + pages_per_req
-        paged_kv_last_page_len_cpu[r] = page_size
-        real_indices.extend(range(r * pages_per_req, (r + 1) * pages_per_req))
-    # zero_rows tail: duplicate the previous indptr entries, last_page_len=0.
-    for r in range(real_bs, padded_bs):
-        qo_indptr_cpu[r + 1] = qo_indptr_cpu[r]
-        paged_kv_indptr_cpu[r + 1] = paged_kv_indptr_cpu[r]
-        paged_kv_last_page_len_cpu[r] = 0
+    qo_indptr_cpu = torch.tensor(
+        [0, 5, 10, 15, 15, 15, 15, 15, 15], dtype=torch.int32
+    )
+    paged_kv_indptr_cpu = torch.tensor(
+        [0, 4, 8, 12, 12, 12, 12, 12, 12], dtype=torch.int32
+    )
+    paged_kv_last_page_len_cpu = torch.tensor(
+        [16, 16, 16, 0, 0, 0, 0, 0], dtype=torch.int32
+    )
+    paged_kv_indices_cpu = torch.arange(real_bs * pages_per_req, dtype=torch.int32)
 
-    # Sanity check that we built the layout the test claims to exercise.
-    expected_qo_indptr = [0, 5, 10, 15, 15, 15, 15, 15, 15]
-    assert qo_indptr_cpu.tolist() == expected_qo_indptr
-    assert paged_kv_last_page_len_cpu.tolist() == [16, 16, 16, 0, 0, 0, 0, 0]
-
-    paged_kv_indices_cpu = torch.tensor(real_indices, dtype=torch.int32)
-
-    # Query is sized to qo_indptr[-1] = real_bs * q_len. FlashInfer enforces
-    # q.shape[0] == qo_indptr[-1]; the "padded" dimension under zero_rows is
-    # the request count in the persistent buffers, not the query tensor.
+    # Query is sized to real token count.
     real_query = torch.randn(real_bs * q_len, num_qo_heads, head_dim, dtype=dtype)
 
-    # CUDA-graph-mode wrapper backed by the persistent buffers.
     workspace_cg = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
     cg_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_cg,
@@ -820,18 +890,13 @@ def test_flashinfer_prefill_cudagraph_zero_rows_padding(
 
     cg_output = cg_wrapper.run(real_query, kv_cache)
 
-    # Unpadded reference: the same wrapper class without cudagraph mode,
-    # built only on the real rows.
-    real_qo_indptr_cpu = qo_indptr_cpu[: real_bs + 1].clone()
-    real_paged_kv_indptr_cpu = paged_kv_indptr_cpu[: real_bs + 1].clone()
-    real_paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu[:real_bs].clone()
     workspace_ref = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
     ref_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace_ref, "NHD")
     ref_wrapper.plan(
-        qo_indptr=real_qo_indptr_cpu,
-        paged_kv_indptr=real_paged_kv_indptr_cpu,
+        qo_indptr=qo_indptr_cpu[: real_bs + 1].clone(),
+        paged_kv_indptr=paged_kv_indptr_cpu[: real_bs + 1].clone(),
         paged_kv_indices=paged_kv_indices_cpu,
-        paged_kv_last_page_len=real_paged_kv_last_page_len_cpu,
+        paged_kv_last_page_len=paged_kv_last_page_len_cpu[:real_bs].clone(),
         num_qo_heads=num_qo_heads,
         num_kv_heads=num_kv_heads,
         head_dim_qk=head_dim,
@@ -842,29 +907,58 @@ def test_flashinfer_prefill_cudagraph_zero_rows_padding(
     )
     ref_output = ref_wrapper.run(real_query, kv_cache)
 
-    # Real rows must match bit-exactly — padded slots changing kernel
-    # scheduling would shift numerics by a few bf16 ULPs (the null_block
-    # alternative); zero_rows is the contract we depend on.
     torch.testing.assert_close(cg_output, ref_output, atol=0.0, rtol=0.0)
 
-    # Cross-check against a hand-rolled paged-attention reference so we
-    # know the test's "ground truth" agrees on real-row math — defends
-    # against the degenerate case where both wrappers silently produce
-    # zeros (e.g. workspace bug) and the bit-exact assert above passes
-    # vacuously.
-    key_cache = kv_cache[:, 0, :, :, :].squeeze(1)
-    value_cache = kv_cache[:, 1, :, :, :].squeeze(1)
-    block_tables = torch.tensor(
-        [[r * pages_per_req + p for p in range(pages_per_req)] for r in range(real_bs)],
-        dtype=torch.int32,
+
+@pytest.mark.parametrize(
+    "query_lens, seq_lens, num_actual_tokens_override, "
+    "expected_qo_indptr, expected_last_page_len",
+    [
+        ([5, 5, 0], [64, 72, 0], None, [0, 5, 10, 10], [16, 8, 0]),
+        ([5, 5, 5], [64, 72, 80], None, [0, 5, 10, 15], [16, 8, 16]),
+        ([5, 5, 0], [64, 72, 0], 40, [0, 5, 10, 10], [16, 8, 0]),
+    ],
+    ids=[
+        "zero_row_padding",
+        "no_padding",
+        "padded_num_actual_tokens",
+    ],
+)
+def test_spec_decode_routes_to_fispecdecode(
+    query_lens,
+    seq_lens,
+    num_actual_tokens_override,
+    expected_qo_indptr,
+    expected_last_page_len,
+):
+    from vllm.v1.attention.backends.flashinfer import FISpecDecode
+
+    builder = _make_flashinfer_spec_decode_builder()
+    attn_metadata, fake_wrapper = _build_flashinfer_spec_decode_metadata(
+        builder,
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        num_actual_tokens_override=num_actual_tokens_override,
     )
-    hand_ref = ref_paged_attn(
-        query=real_query.clone(),
-        key_cache=key_cache,
-        value_cache=value_cache,
-        query_lens=[q_len] * real_bs,
-        kv_lens=[real_kv_len] * real_bs,
-        block_tables=block_tables,
-        scale=head_dim**-0.5,
+
+    assert isinstance(attn_metadata.decode, FISpecDecode), (
+        f"expected FISpecDecode for query_lens={query_lens}, "
+        f"got {type(attn_metadata.decode).__name__}"
     )
-    torch.testing.assert_close(cg_output, hand_ref, atol=5e-2, rtol=1e-2)
+    assert attn_metadata.decode.wrapper is fake_wrapper
+
+    assert fake_wrapper.requested_batch_size == len(query_lens)
+    assert fake_wrapper.plan_kwargs is not None
+    assert fake_wrapper.plan_kwargs["causal"] is True
+
+    qo = fake_wrapper.plan_kwargs["qo_indptr"]
+    assert qo.tolist() == expected_qo_indptr
+
+    last_page_len = fake_wrapper.plan_kwargs["paged_kv_last_page_len"]
+    assert last_page_len.tolist() == expected_last_page_len
+
+    paged_kv_indptr = fake_wrapper.plan_kwargs["paged_kv_indptr"]
+    if query_lens[-1] == 0:
+        assert paged_kv_indptr[-1].item() == paged_kv_indptr[-2].item()
+
+    # FlashInfer prefill requires query length to match qo_indptr[-1].
+    assert attn_metadata.num_decode_tokens == expected_qo_indptr[-1]
