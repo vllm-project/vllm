@@ -752,6 +752,14 @@ class ParallelConfig:
             "numa_bind",
             "numa_bind_nodes",
             "numa_bind_cpus",
+            # NIC binding is per-rank host-side networking locality (sets
+            # NCCL_IB_HCA / UCX_NET_DEVICES); it does not affect
+            # collective-communication semantics. When nic_bind is enabled
+            # with auto-detection, each DP rank stores its own RDMA device
+            # spec in nic_bind_devices (see vllm/utils/nic_utils.py), which
+            # would otherwise diverge the DP hash.
+            "nic_bind",
+            "nic_bind_devices",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

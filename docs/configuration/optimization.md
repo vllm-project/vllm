@@ -228,6 +228,17 @@ unchanged. For UCX, vLLM expands the pattern against InfiniBand devices visible
 in `/sys/class/infiniband/` to produce an explicit device list, since UCX does
 not support NCCL's pattern matching.
 
+!!! warning
+    Some communication libraries already manage multiple NICs themselves —
+    for example, Mooncake's transfer engine stripes traffic across all
+    available RDMA NICs to maximize aggregate bandwidth. Restricting such a
+    library to a single NIC via `--nic-bind` can **reduce performance instead
+    of improving it**. Before enabling NIC binding, confirm that every
+    communication library in your deployment (NCCL, UCX, NIXL, Mooncake, …)
+    actually benefits from per-worker NIC pinning rather than from using all
+    NICs in aggregate. When in doubt, benchmark with and without `--nic-bind`
+    on a representative workload before rolling it out.
+
 `--nic-bind-devices` takes one NCCL_IB_HCA device spec per visible GPU, in the
 same order as the GPU indices. Each spec supports NCCL matching syntax:
 
