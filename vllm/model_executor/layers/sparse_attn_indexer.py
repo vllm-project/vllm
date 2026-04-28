@@ -96,6 +96,9 @@ def sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
+    topk_lens_buffer: torch.Tensor | None,
+    page_table_block_size: int,
+    fuse_decode_page_table_transform: bool,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
 ) -> torch.Tensor:
@@ -138,6 +141,9 @@ def sparse_attn_indexer(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
+            topk_lens_buffer,
+            page_table_block_size,
+            fuse_decode_page_table_transform,
             skip_k_cache_insert,
             use_fp4_cache,
         )
@@ -319,8 +325,52 @@ def sparse_attn_indexer(
         )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        fused_page_table_metadata = None
+        if fuse_decode_page_table_transform:
+            # DeepSeek V4 C4A indexer metadata is keyed by
+            # "...attn.indexer.k_cache"; the compressed MLA attention page
+            # table lives under the sibling "...attn" metadata.
+            mla_prefix = k_cache_prefix.removesuffix(".indexer.k_cache")
+            fused_page_table_metadata = attn_metadata.get(mla_prefix)
+        fused_block_table = (
+            None
+            if fused_page_table_metadata is None
+            else getattr(fused_page_table_metadata, "block_table", None)
+        )
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
+        can_fuse_decode_page_table_transform = (
+            topk_lens_buffer is not None
+            and current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+            and not decode_metadata.requires_padding
+            # Plain decode only: token rows then match block-table rows.
+            and num_padded_tokens == batch_size
+            and num_padded_tokens <= 4
+            and page_table_block_size > 0
+            and fused_block_table is not None
+            and fused_block_table.shape[0] >= num_padded_tokens
+        )
+
+        if can_fuse_decode_page_table_transform:
+            assert topk_lens_buffer is not None
+            assert fused_block_table is not None
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.persistent_topk_with_page_table(
+                logits,
+                seq_lens,
+                topk_indices,
+                topk_lens_buffer[:num_padded_tokens],
+                topk_workspace,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+                fused_block_table[:num_padded_tokens],
+                slot_mapping[:num_padded_tokens],
+                page_table_block_size,
+            )
+        elif current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -386,6 +436,9 @@ def sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    topk_lens_buffer: torch.Tensor | None,
+    page_table_block_size: int,
+    fuse_decode_page_table_transform: bool,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
 ) -> torch.Tensor:
@@ -395,7 +448,7 @@ def sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer",
     op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
+    mutates_args=["topk_indices_buffer", "topk_lens_buffer"],
     fake_impl=sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -424,6 +477,9 @@ class SparseAttnIndexer(CustomOp):
         max_model_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
+        topk_lens_buffer: torch.Tensor | None = None,
+        page_table_block_size: int = 0,
+        fuse_decode_page_table_transform: bool = False,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
     ):
@@ -436,6 +492,9 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
+        self.topk_lens_buffer = topk_lens_buffer
+        self.page_table_block_size = page_table_block_size
+        self.fuse_decode_page_table_transform = fuse_decode_page_table_transform
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
         if current_platform.is_cuda() and not has_deep_gemm():
@@ -488,6 +547,9 @@ class SparseAttnIndexer(CustomOp):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            self.topk_lens_buffer,
+            self.page_table_block_size,
+            self.fuse_decode_page_table_transform,
             self.skip_k_cache_insert,
             self.use_fp4_cache,
         )
