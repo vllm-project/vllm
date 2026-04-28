@@ -366,12 +366,15 @@ class IterationStats:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
 
-            first_token_latency = self._time_since(req_stats.arrival_time)
-            non_cached_input_len = prompt_len - output.num_cached_tokens
-            self.time_to_first_tokens_iter.append(
-                (first_token_latency, non_cached_input_len)
-            )
-            req_stats.first_token_latency = first_token_latency
+                first_token_latency = self._time_since(req_stats.arrival_time)
+                non_cached_input_len = (
+                    output.prefill_stats.num_prompt_tokens
+                    - output.prefill_stats.num_cached_tokens
+                )
+                self.time_to_first_tokens_iter.append(
+                    (first_token_latency, non_cached_input_len)
+                )
+                req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
