@@ -1668,9 +1668,7 @@ class DPEngineCoreProc(EngineCoreProc):
         if mode not in ("keep", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
 
-        def engine_idle_callback(
-            engine: "DPEngineCoreProc", future: Future[Any]
-        ) -> None:
+        def engine_idle_callback(engine: "DPEngineCoreProc", future: Future[Any]) -> None:
             if clear_cache:
                 engine._reset_caches()
             future.set_result(None)
@@ -1837,10 +1835,7 @@ class DPEngineCoreProc(EngineCoreProc):
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
-            self.dp_group,
-            has_unfinished=local_unfinished,
-            pending_pause=self.pending_pause,
-            dp_size=self.dp_size,
+            self.dp_group, has_unfinished=local_unfinished, pending_pause=self.pending_pause
         )
 
         if pause_consensus:
