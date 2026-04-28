@@ -132,6 +132,13 @@ _sync_hip_cuda_env_vars()
 # Turn on hipBLASLt online tuning if use AITER hipBLASLt GEMM.
 if envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM:
     os.environ["HIP_ONLINE_TUNING"] = "1"
+    # hipBMM requires aiter enabled, and disabling non-hipBMM linear
+    # avoids the +quant_fp8 custom op that triggers fuse_norm_quant,
+    # which fails with Float tensors. Rmsnorm requires composable_kernel
+    # submodule which may not be initialized, so disable it too.
+    os.environ["VLLM_ROCM_USE_AITER"] = "1"
+    os.environ["VLLM_ROCM_USE_AITER_LINEAR"] = "0"
+    os.environ["VLLM_ROCM_USE_AITER_RMSNORM"] = "0"
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,

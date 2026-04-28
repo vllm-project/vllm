@@ -617,7 +617,7 @@ def _rocm_aiter_hipb_mm_fp8_fake(
     output_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     m = A.shape[0]
-    n = B.shape[1]
+    n = B.shape[0]
     return torch.empty(m, n, dtype=output_dtype, device=A.device)
 
 
