@@ -49,7 +49,7 @@ if [[ -n "${BUILDKITE:-}" || -n "${BUILDKITE_COMMIT:-}" ]]; then
   fi
 else
   image_ref="${VLLM_IMAGE_REF:-local/vllm-openai:dev}"
-  staging_image_ref="${VLLM_STAGING_IMAGE_REF:-${image_ref}}"
+  staging_image_ref="${image_ref}"
 fi
 
 emit_arg() {
@@ -62,5 +62,4 @@ emit_arg VLLM_BUILD_PIPELINE "${VLLM_BUILD_PIPELINE:-${BUILDKITE_PIPELINE_SLUG:-
 emit_arg VLLM_BUILD_COMMIT "${build_commit}"
 emit_arg VLLM_BUILD_URL "${VLLM_BUILD_URL:-${BUILDKITE_BUILD_URL:-}}"
 emit_arg VLLM_IMAGE_REF "${image_ref}"
-emit_arg VLLM_STAGING_IMAGE_REF "${staging_image_ref}"
 printf -- "--tag %s " "${staging_image_ref}"

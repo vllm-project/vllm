@@ -51,10 +51,6 @@ variable "VLLM_IMAGE_REF" {
   default = "local/vllm-openai:dev"
 }
 
-variable "VLLM_STAGING_IMAGE_REF" {
-  default = ""
-}
-
 # Groups
 
 group "default" {
@@ -79,8 +75,7 @@ target "_common" {
     VLLM_BUILD_PIPELINE  = VLLM_BUILD_PIPELINE
     VLLM_BUILD_COMMIT    = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
     VLLM_BUILD_URL       = VLLM_BUILD_URL
-    VLLM_IMAGE_REF         = VLLM_IMAGE_REF
-    VLLM_STAGING_IMAGE_REF = VLLM_STAGING_IMAGE_REF
+    VLLM_IMAGE_REF       = VLLM_IMAGE_REF
   }
 }
 
@@ -100,7 +95,6 @@ target "_labels" {
     "ai.vllm.build.commit"                 = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
     "ai.vllm.build.url"                    = VLLM_BUILD_URL
     "ai.vllm.image.ref"                    = VLLM_IMAGE_REF
-    "ai.vllm.image.staging-ref"            = VLLM_STAGING_IMAGE_REF
   }
   annotations = [
     "index,manifest:org.opencontainers.image.revision=${VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")}",

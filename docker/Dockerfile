@@ -773,7 +773,6 @@ ARG VLLM_BUILD_PIPELINE
 ARG VLLM_BUILD_COMMIT
 ARG VLLM_BUILD_URL
 ARG VLLM_IMAGE_REF
-ARG VLLM_STAGING_IMAGE_REF
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -816,7 +815,6 @@ ENV VLLM_BUILD_KIND=${VLLM_BUILD_KIND:-local} \
     VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
     VLLM_BUILD_URL=${VLLM_BUILD_URL:-} \
     VLLM_IMAGE_REF=${VLLM_IMAGE_REF:-local/vllm-openai:dev} \
-    VLLM_STAGING_IMAGE_REF=${VLLM_STAGING_IMAGE_REF:-} \
     VLLM_BUILD_CUDA_VERSION=${CUDA_VERSION} \
     VLLM_BUILD_UBUNTU_VERSION=${UBUNTU_VERSION} \
     VLLM_BUILD_BASE_IMAGE=${BUILD_BASE_IMAGE} \
@@ -834,7 +832,6 @@ LABEL org.opencontainers.image.source="${VLLM_BUILD_REPO}" \
       ai.vllm.build.commit="${VLLM_BUILD_COMMIT}" \
       ai.vllm.build.url="${VLLM_BUILD_URL}" \
       ai.vllm.image.ref="${VLLM_IMAGE_REF}" \
-      ai.vllm.image.staging-ref="${VLLM_STAGING_IMAGE_REF}" \
       ai.vllm.build.cuda-version="${VLLM_BUILD_CUDA_VERSION}" \
       ai.vllm.build.ubuntu-version="${VLLM_BUILD_UBUNTU_VERSION}" \
       ai.vllm.build.torch-cuda-arch-list="${VLLM_BUILD_TORCH_CUDA_ARCH_LIST}" \
