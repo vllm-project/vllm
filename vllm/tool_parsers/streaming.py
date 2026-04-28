@@ -25,13 +25,26 @@ else:
 
 
 def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
-    """Calculate the current level of nested brackets in a string."""
+    """Calculate the current level of nested brackets in a string,
+    ignoring brackets inside strings."""
     level = 0
+    in_string = False
+    escaped = False
     for char in s:
-        if char == opening:
-            level += 1
-        elif char == closing:
-            level -= 1
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\':
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if char == opening:
+                level += 1
+            elif char == closing:
+                level -= 1
     return level
 
 
@@ -43,18 +56,57 @@ def filter_delta_text(
     bracket_level = _bracket_level(previous_text)
     updated_delta = ""
     passed_zero = False
+
+    # We need to know if the previous_text ended inside a string
+    # to correctly continue the state.
+    def _is_in_string(s: str) -> bool:
+        in_string = False
+        escaped = False
+        for char in s:
+            if escaped:
+                escaped = False
+                continue
+            if char == '\\':
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+        return in_string
+
+    in_string = _is_in_string(previous_text)
+    escaped = False  # Note: assuming previous_text doesn't end in a trailing backslash
+
     for char in delta_text:
-        if char == "{":
-            bracket_level += 1
-            passed_zero = bracket_level == 0
-        elif char == "}":
-            bracket_level -= 1
-            passed_zero = bracket_level == 0
+        if escaped:
+            escaped = False
+            if bracket_level != 0:
+                updated_delta += char
+            continue
+
+        if char == '\\':
+            escaped = True
+            if bracket_level != 0:
+                updated_delta += char
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            if bracket_level != 0:
+                updated_delta += char
+            continue
+
+        if not in_string:
+            if char == "{":
+                bracket_level += 1
+                passed_zero = bracket_level == 0
+            elif char == "}":
+                bracket_level -= 1
+                passed_zero = bracket_level == 0
 
         if bracket_level != 0:
             updated_delta += char
         else:
-            if char == ",":
+            if not in_string and char == ",":
                 break
     return updated_delta, passed_zero
 
@@ -146,7 +198,7 @@ def extract_required_tool_call_streaming(
             if not function_name_returned:
                 # get partly generated arguments from the latest tool call
                 param_match = re.search(
-                    r'.*"parameters":\s*(.*)', current_text, re.DOTALL
+                    r'.*?"parameters":\s*(.*)', current_text, re.DOTALL
                 )
                 arguments = param_match.group(1) if param_match else ""
                 arguments, _ = filter_delta_text(arguments, previous_text)
@@ -155,7 +207,12 @@ def extract_required_tool_call_streaming(
                 # new incomplete tool is already generated, take the
                 # previous from the list
                 if finishes_previous_tool and "parameters" not in current_tool_call:
-                    current_tool_call = obj[-2]
+                    if len(obj) > 1:
+                        current_tool_call = obj[-2]
+                    else:
+                        # If we have only one tool call and it's incomplete,
+                        # we can't emit a completed tool call delta yet.
+                        return None, function_name_returned
 
                 function_name_returned = True
                 tool_call_id = make_tool_call_id(
