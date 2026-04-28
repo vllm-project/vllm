@@ -227,6 +227,11 @@ def _test_processing_correctness(
     # (set after because ModelConfig would set it to 0 for encoder-decoder models)
     model_config.multimodal_config.mm_processor_cache_gb = 2048
 
+    # dither in Cohere ASR causes random variation in the output,
+    # so we set it to 0 for testing purposes
+    if model_id_or_arch == "CohereAsrForConditionalGeneration":
+        model_config.hf_config.preprocessor["dither"] = 0.0
+
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = model_cls._processor_factory
     ctx = InputProcessingContext(
