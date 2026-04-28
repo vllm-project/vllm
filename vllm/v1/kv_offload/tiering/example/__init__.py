@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-DummySecondaryTier: A simple in-memory secondary tier for testing.
+ExampleSecondaryTier: A simple in-memory secondary tier for testing.
 
 This implementation provides a minimal secondary tier that stores blocks
 in memory (using a dictionary) and simulates async transfers with immediate
@@ -32,21 +32,21 @@ class _JobMetadata:
     is_store: bool  # True for store jobs, False for load jobs
 
 
-class DummyLoadStoreSpec(LoadStoreSpec):
+class ExampleLoadStoreSpec(LoadStoreSpec):
     """
-    Minimal LoadStoreSpec for DummySecondaryTier testing.
+    Minimal LoadStoreSpec for ExampleSecondaryTier testing.
 
-    This spec is never actually used for I/O since DummySecondaryTier
+    This spec is never actually used for I/O since ExampleSecondaryTier
     stores blocks in memory. It exists to provide proper type semantics
     and serve as a template for real secondary tier implementations.
     """
 
     @staticmethod
     def medium() -> str:
-        return "Dummy"
+        return "Example"
 
 
-class DummySecondaryTier(SecondaryTierManager):
+class ExampleSecondaryTier(SecondaryTierManager):
     """
     A simple in-memory secondary tier for testing.
 
@@ -63,7 +63,7 @@ class DummySecondaryTier(SecondaryTierManager):
         simulate_async: bool = False,
     ):
         """
-        Initialize the dummy secondary tier.
+        Initialize the example secondary tier.
 
         Args:
             max_blocks: Maximum number of blocks this tier can store
@@ -262,7 +262,7 @@ class DummySecondaryTier(SecondaryTierManager):
 
     @staticmethod
     def get_tier_type() -> str:
-        return "dummy"
+        return "example"
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""

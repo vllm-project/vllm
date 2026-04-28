@@ -159,7 +159,7 @@ class SecondaryTierManager(ABC):
     @abstractmethod
     def get_tier_type() -> str:
         """
-        Get the type identifier of this tier (e.g., "dummy", "storage").
+        Get the type identifier of this tier (e.g., "example", "storage").
 
         Must match the "type" field in the tier config dict.
 

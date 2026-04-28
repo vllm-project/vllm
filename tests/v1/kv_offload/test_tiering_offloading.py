@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for TieringOffloadingManager and DummySecondaryTier.
+Unit tests for TieringOffloadingManager and ExampleSecondaryTier.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
@@ -24,7 +24,7 @@ from vllm.v1.kv_offload.abstract import (
 )
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import JobMetadata
-from vllm.v1.kv_offload.tiering.dummy import DummySecondaryTier
+from vllm.v1.kv_offload.tiering.example import ExampleSecondaryTier
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -54,12 +54,12 @@ def count_hits(manager, keys: list[OffloadKey]) -> int | None:
     return count
 
 
-class TestDummySecondaryTier:
-    """Tests for DummySecondaryTier implementation."""
+class TestExampleSecondaryTier:
+    """Tests for ExampleSecondaryTier implementation."""
 
     def test_basic_store_and_lookup(self):
         """Test basic store and lookup operations."""
-        tier = DummySecondaryTier(max_blocks=10)
+        tier = ExampleSecondaryTier(max_blocks=10)
 
         # Initially empty
         blocks = to_keys(range(3))
@@ -78,7 +78,7 @@ class TestDummySecondaryTier:
 
     def test_in_flight_blocks_return_none(self):
         """Test that in-flight blocks cause lookup to return None."""
-        tier = DummySecondaryTier(max_blocks=10)
+        tier = ExampleSecondaryTier(max_blocks=10)
 
         blocks = to_keys(range(3))
 
@@ -91,7 +91,7 @@ class TestDummySecondaryTier:
 
     def test_lru_eviction(self):
         """Test LRU eviction policy."""
-        tier = DummySecondaryTier(max_blocks=3)
+        tier = ExampleSecondaryTier(max_blocks=3)
 
         # Fill tier to capacity
         blocks = to_keys(range(3))
@@ -129,7 +129,7 @@ class TestDummySecondaryTier:
 
     def test_async_simulation(self):
         """Test simulated async behavior."""
-        tier = DummySecondaryTier(max_blocks=10, simulate_async=True)
+        tier = ExampleSecondaryTier(max_blocks=10, simulate_async=True)
 
         blocks = to_keys(range(2))
 
@@ -172,8 +172,8 @@ class TestTieringOffloadingManager:
         self.primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
 
         # Create secondary tiers
-        self.secondary_tier1 = DummySecondaryTier(max_blocks=10)
-        self.secondary_tier2 = DummySecondaryTier(max_blocks=10)
+        self.secondary_tier1 = ExampleSecondaryTier(max_blocks=10)
+        self.secondary_tier2 = ExampleSecondaryTier(max_blocks=10)
 
         # Create tiered manager
         self.manager = TieringOffloadingManager(
@@ -353,8 +353,8 @@ class TestTieringOffloadingManager:
     def test_multiple_secondary_tiers_independent_eviction(self):
         """Test that secondary tiers manage their own evictions."""
         # Create tier with small capacity
-        small_tier = DummySecondaryTier(max_blocks=5, simulate_async=False)
-        large_tier = DummySecondaryTier(max_blocks=10, simulate_async=False)
+        small_tier = ExampleSecondaryTier(max_blocks=5, simulate_async=False)
+        large_tier = ExampleSecondaryTier(max_blocks=10, simulate_async=False)
 
         # Create a fresh primary tier for this test
         primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=10)

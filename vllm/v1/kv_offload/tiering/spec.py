@@ -13,7 +13,7 @@ Configuration via kv_connector_extra_config:
     "arc" (default: "lru")
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
-      - type: (required) Type of secondary tier (e.g., "dummy", "storage", "network")
+      - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -24,8 +24,8 @@ Example configuration:
     "eviction_policy": "lru",
     "secondary_tiers": [
         {
-            "type": "dummy",
-            # Tier-specific parameters (for DummySecondaryTier):
+            "type": "example",
+            # Tier-specific parameters (for ExampleSecondaryTier):
             "max_blocks": 10000,
             "simulate_async": False
         }

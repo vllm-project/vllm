@@ -5,9 +5,9 @@ Factory for creating secondary tier implementations.
 """
 
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
-from vllm.v1.kv_offload.tiering.dummy import DummySecondaryTier
+from vllm.v1.kv_offload.tiering.example import ExampleSecondaryTier
 
-SUPPORTED_TIERS: tuple[type[SecondaryTierManager], ...] = (DummySecondaryTier,)
+SUPPORTED_TIERS: tuple[type[SecondaryTierManager], ...] = (ExampleSecondaryTier,)
 
 _TIER_REGISTRY: dict[str, type[SecondaryTierManager]] = {
     cls.get_tier_type(): cls for cls in SUPPORTED_TIERS
@@ -20,7 +20,7 @@ def create_secondary_tier(tier_config: dict) -> SecondaryTierManager:
 
     Args:
         tier_config: Dictionary with tier configuration containing:
-            - type (required): Type of secondary tier (e.g., "dummy")
+            - type (required): Type of secondary tier (e.g., "example")
             - Additional tier-specific parameters are passed directly
               to the tier constructor
 
