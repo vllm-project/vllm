@@ -307,6 +307,9 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    # Execution time in milliseconds (for profiling-based chunk sizing)
+    execution_time_ms: float = 0.0
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
