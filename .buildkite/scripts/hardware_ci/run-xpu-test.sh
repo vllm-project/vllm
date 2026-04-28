@@ -12,9 +12,7 @@ docker build -t "${image_name}" -f docker/Dockerfile.xpu .
 
 # Setup cleanup
 remove_docker_container() {
-  docker rm -f "${container_name}" || true;
-  docker image rm -f "${image_name}" || true;
-  docker system prune -f || true;
+  docker rm -f "${container_name}" || true
 }
 trap remove_docker_container EXIT
 

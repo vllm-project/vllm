@@ -339,6 +339,8 @@ def rocm_fp8_paged_mqa_logits(
             device="cuda",
             dtype=torch.float32,
         )
+        # TODO: 1. Replace _stage1 and out_qk.sum with another fused variant;
+        #       2. Remove ChunkQ when AITER PR #2891 merged
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -347,6 +349,7 @@ def rocm_fp8_paged_mqa_logits(
             context_lens,
             block_tables,
             max_model_len,
+            ChunkQ=heads,
         )
         return out_qk.sum(dim=0)
     else:

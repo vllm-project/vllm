@@ -55,9 +55,8 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
@@ -137,7 +136,7 @@ class OpenAIServingRender:
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.render_chat(request)
+        result = await self.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -185,6 +184,8 @@ class OpenAIServingRender:
     async def render_chat(
         self,
         request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -253,7 +254,7 @@ class OpenAIServingRender:
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
-                skip_mm_cache=True,
+                skip_mm_cache=skip_mm_cache,
                 reasoning_parser=self.reasoning_parser,
             )
         else:
@@ -277,7 +278,7 @@ class OpenAIServingRender:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        result = await self.render_completion(request)
+        result = await self.render_completion(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
         generate_requests: list[GenerateRequest] = []
@@ -323,6 +324,8 @@ class OpenAIServingRender:
     async def render_completion(
         self,
         request: CompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput] | ErrorResponse:
         """Core preprocessing logic for completion requests (no model/engine check).
 
@@ -345,7 +348,7 @@ class OpenAIServingRender:
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
-            skip_mm_cache=True,
+            skip_mm_cache=skip_mm_cache,
         )
 
         return engine_inputs
@@ -582,7 +585,7 @@ class OpenAIServingRender:
             tool_choice = getattr(request, "tool_choice", "none")
             tokenizer = renderer.get_tokenizer()
             is_mistral_grammar_eligible = (
-                issubclass(tool_parser, MistralToolParser)
+                is_mistral_tool_parser(tool_parser)
                 and is_mistral_tokenizer(tokenizer)
                 and tokenizer.supports_grammar
             )
