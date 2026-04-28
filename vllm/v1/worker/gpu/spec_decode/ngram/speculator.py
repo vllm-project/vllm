@@ -69,9 +69,10 @@ class _NgramKernel(nn.Module):
             window_pos = torch.arange(num_windows, device=device)
             matches = matches & (window_pos.unsqueeze(0) <= max_valid_pos.unsqueeze(1))
 
-            idx = matches.int().argmax(dim=1)
+            matched_indices = torch.where(matches, window_pos.unsqueeze(0), -1)
+            idx = matched_indices.argmax(dim=1)
             has_match = matches[batch_idx, idx]
-            first_match_pos[:, i] = torch.where(has_match, idx.long(), -1)
+            first_match_pos[:, i] = torch.where(has_match, idx, -1)
 
         best_i = (first_match_pos >= 0).int().flip(dims=[1]).argmax(dim=1)
         best_i = self.num_sizes - 1 - best_i
