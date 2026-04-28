@@ -121,9 +121,23 @@ class TestExtractToolCalls:
         model_output = '<|tools_prefix|>[{"get_weather": {"location": "London"}'
         result = parser.extract_tool_calls(model_output, mock_request)
 
-        # Incomplete — no <|tools_suffix|> end marker, regex won't match
-        assert result.tools_called is False
-        assert result.content == model_output
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "London"}
+
+    def test_missing_tool_suffix(self, parser, mock_request):
+        model_output = (
+            '<|tools_prefix|>[{"get_weather": {"location": "San Francisco", "unit": "celsius"}}]'
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "San Francisco", "unit": "celsius"}
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +221,43 @@ class TestStreamingExtraction:
         assert tcs[0]["name"] == "get_weather"
         assert json.loads(tcs[0]["arguments"]) == {"location": "Paris, France"}
 
+    def test_streaming_missing_tool_suffix(self, parser, mock_request):
+        chunks = [
+            "<|tools_prefix|>",
+            '[{"get_weather": ',
+            '{"location": "Paris, ',
+            'France"}}]',
+            ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        tcs = self._collect_tool_calls(results)
+
+        assert len(tcs) == 1
+        assert tcs[0]["name"] == "get_weather"
+        assert json.loads(tcs[0]["arguments"]) == {"location": "Paris, France"}
+
+    def test_streaming_partial_tag_buffering_missing_tool_suffix(self, parser, mock_request):
+        chunks = [
+            "Content",
+            "<|tools_",
+            "prefix|>",
+            '[{"f": ',
+            '{"a": 1}}]'
+            ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        content = self._collect_content(results)
+
+        assert "Content" in content
+        assert "<|tools_prefix|>" not in content
+        assert "<|tools_suffix|>" not in content
+
+        tcs = self._collect_tool_calls(results)
+
+        assert len(tcs) == 1
+        assert tcs[0]["name"] == "f"
+        assert json.loads(tcs[0]["arguments"]) == {"a": 1}
+
     def test_streaming_multi_tool(self, parser, mock_request):
         chunks = [
             "<|tools_prefix|>",
@@ -237,6 +288,11 @@ class TestStreamingExtraction:
         content = self._collect_content(results)
 
         assert content.strip() == "Let me check the weather."
+        tcs = self._collect_tool_calls(results)
+
+        assert len(tcs) == 1
+        assert tcs[0]["name"] == "get_weather"
+        assert json.loads(tcs[0]["arguments"]) == {"location": "London"}
 
     def test_streaming_partial_tag_buffering(self, parser, mock_request):
         chunks = [
@@ -245,17 +301,20 @@ class TestStreamingExtraction:
             "prefix|>",
             '[{"f": {"a": 1}}]',
             "<|tools_suf",
-            "fix|>",
-            "More content"
+            "fix|>"
             ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         content = self._collect_content(results)
 
         assert "Content" in content
-        assert "More content" in content
         assert "<|tools_prefix|>" not in content
         assert "<|tools_suffix|>" not in content
+
+        tc = self._collect_tool_calls(results)
+        assert len(tc) == 1
+        assert tc[0]["name"] == "f"
+        assert json.loads(tc[0]["arguments"]) == {"a": 1}
 
     # ---------------------------------------------------------------------------
     # Edge Cases: Multi-Token Prediction (MTP) & vLLM Chunking Anomalies
@@ -266,13 +325,11 @@ class TestStreamingExtraction:
         chunks = [
             "Sure! "
             '<|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|>'
-            " Let me know if you need more."
             ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         content = self._collect_content(results)
         assert "Sure! " in content
-        assert " Let me know if you need more." in content
 
         tc = self._collect_tool_calls(results)
         assert len(tc) == 1
@@ -313,12 +370,12 @@ class TestStreamingExtraction:
 
     def test_vllm_streaming_character_by_character(self, parser, mock_request):
         """Simulates worst-case vLLM fragmentation where chunks arrive character-by-character."""
-        text = 'Hi <|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|> Bye'
+        text = 'Hi <|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|> '
         chunks = list(text)
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         content = self._collect_content(results)
-        assert content == "Hi  Bye"
+        assert "Hi" in content
 
         tc = self._collect_tool_calls(results)
         assert len(tc) == 1

@@ -81,10 +81,9 @@ class ApertusToolParser(ToolParser):
                     "The model tokenizer must be passed to the ToolParser "
                     "constructor during construction."
                     )
-
-        # Regex for non-streaming: extract complete tool calls.
+        # Regex to extract tool calls block (suffix is optional for incomplete outputs)
         self.tool_call_regex = re.compile(
-                rf"{re.escape(TOOL_CALLS_PREFIX)}(.*?){re.escape(TOOL_CALLS_SUFFIX)}",
+                rf"{re.escape(TOOL_CALLS_PREFIX)}(.*?)(?:{re.escape(TOOL_CALLS_SUFFIX)}|$)",
                 re.DOTALL,
                 )
 
@@ -194,9 +193,21 @@ class ApertusToolParser(ToolParser):
                     )
 
         try:
-            parsed_json = json.loads(match.group(1).strip())
+            # group(1) might contain trailing text if the suffix is missing
+            matched_text = match.group(1)
+            stripped_text = matched_text.lstrip()
+
+            try:
+                # Use raw_decode to robustly isolate the valid JSON array from any trailing garbage
+                parsed_json, idx = json.JSONDecoder().raw_decode(stripped_text)
+                trailing_in_group = stripped_text[idx:]
+            except json.JSONDecodeError:
+                # Fallback sequentially to partial parser for token-truncated requests
+                parsed_json, _ = partial_json_loads(matched_text, Allow.ALL)
+                trailing_in_group = ""
+
             if not isinstance(parsed_json, list):
-                parsed_json = [parsed_json]
+                parsed_json = [parsed_json] if parsed_json else []
 
             tool_calls: list[ToolCall] = []
             for obj in parsed_json:
@@ -213,13 +224,24 @@ class ApertusToolParser(ToolParser):
                                     )
                             )
 
-            # Content is any generated text prior to the tool block
-            content = model_output[:match.start()].strip() or None
+            # Content combines any generated text prior to and safely after the tool block
+            content_str = model_output[:match.start()].strip()
+
+            # Surface any hallucinated text inside the regex group (due to missing suffix)
+            if trailing_in_group.strip():
+                trailing = trailing_in_group.replace(TOOL_CALLS_SUFFIX, "").strip()
+                if trailing:
+                    content_str = (content_str + "\n" + trailing).strip()
+
+            # Surface text natively generated after the explicit suffix
+            after_suffix = model_output[match.end():].replace(TOOL_CALLS_SUFFIX, "").strip()
+            if after_suffix:
+                content_str = (content_str + "\n" + after_suffix).strip()
 
             return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content,
+                    content=content_str if content_str else None,
                     )
 
         except Exception:
@@ -291,7 +313,23 @@ class ApertusToolParser(ToolParser):
         suffix_idx = current_text.rfind(TOOL_CALLS_SUFFIX)
 
         is_inside_tools = prefix_idx > suffix_idx
-        just_finished = TOOL_CALLS_SUFFIX in delta_text
+
+        json_completed = False
+        json_end_idx = None
+
+        # Check if the JSON array successfully closed implicitly
+        if is_inside_tools:
+            json_start = prefix_idx + len(TOOL_CALLS_PREFIX)
+            s = current_text[json_start:].lstrip()
+            try:
+                # If raw_decode succeeds, the JSON array is fully formed and implicitly closed
+                _, idx = json.JSONDecoder().raw_decode(s)
+                json_end_idx = len(current_text) - len(s) + idx
+                json_completed, is_inside_tools = True, False
+            except Exception:
+                pass
+
+        just_finished = (TOOL_CALLS_SUFFIX in delta_text) or json_completed
 
         # 1. Fast path: Output normal text immediately if we are completely outside tool block constraints
         if not is_inside_tools and not just_finished:
@@ -301,13 +339,22 @@ class ApertusToolParser(ToolParser):
         # 2. Extract leading and trailing normal text directly adjacent to tool blocks
         content_str = ""
         if TOOL_CALLS_PREFIX in delta_text:
-            content_str += delta_text.split(TOOL_CALLS_PREFIX)[0]
+            content_str += delta_text.split(TOOL_CALLS_PREFIX)[0].replace(TOOL_CALLS_SUFFIX, "")
+
         if just_finished:
-            content_str += delta_text.split(TOOL_CALLS_SUFFIX)[-1]
+            if json_completed:
+                # The tool block finished in this chunk via implicit JSON completion
+                # Ensure we strictly isolate and extract only trailing text that is part of `delta_text`
+                delta_start_idx = len(current_text) - len(delta_text)
+                content_start = max(json_end_idx, delta_start_idx)
+                if content_start < len(current_text):
+                    content_str += current_text[content_start:].replace(TOOL_CALLS_SUFFIX, "")
+            else:
+                content_str += delta_text.split(TOOL_CALLS_SUFFIX)[-1]
 
         # 3. Extract the isolated JSON array string for the active block
         json_start = prefix_idx + len(TOOL_CALLS_PREFIX)
-        json_end = suffix_idx if not is_inside_tools else None
+        json_end = suffix_idx if suffix_idx > prefix_idx else json_end_idx
         json_str = current_text[json_start:json_end]
 
         tool_calls = self._parse_and_diff_json(json_str, is_final=not is_inside_tools)
