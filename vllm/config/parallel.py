@@ -672,6 +672,7 @@ class ParallelConfig:
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
         torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
         return has_unfinished_global, pause_count == dp_size
