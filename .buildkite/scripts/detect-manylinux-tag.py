@@ -34,7 +34,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from auditwheel.error import NonPlatformWheelError, WheelToolsError
+from auditwheel.error import (
+    AuditwheelError,
+    NonPlatformWheelError,
+    WheelToolsError,
+)
 from auditwheel.wheel_abi import analyze_wheel_abi
 from auditwheel.wheeltools import get_wheel_architecture, get_wheel_libc
 
@@ -108,10 +112,23 @@ def main() -> int:
         print(f"error: {wheel_path} is not a file", file=sys.stderr)
         return 1
 
-    new_tag = detect_platform_tag(wheel_path)
-    print(f"detected platform tag: {new_tag}", file=sys.stderr)
+    # Catch the things that ``analyze_wheel_abi`` and ``rename_wheel`` can
+    # raise: any subclass of ``AuditwheelError`` (pure-Python wheels,
+    # invalid libc, malformed wheels), filesystem errors, or our own
+    # ``ValueError`` for an unrecognised wheel filename. Print a single
+    # ``ERROR_TYPE: message`` line to stderr instead of a Python
+    # traceback, which is much friendlier in CI logs.
+    try:
+        new_tag = detect_platform_tag(wheel_path)
+        print(f"detected platform tag: {new_tag}", file=sys.stderr)
+        new_path = rename_wheel(wheel_path, new_tag)
+    except (AuditwheelError, ValueError, OSError) as e:
+        print(
+            f"error: failed to retag {wheel_path.name}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 2
 
-    new_path = rename_wheel(wheel_path, new_tag)
     if new_path != wheel_path:
         print(f"renamed {wheel_path.name} -> {new_path.name}", file=sys.stderr)
     else:

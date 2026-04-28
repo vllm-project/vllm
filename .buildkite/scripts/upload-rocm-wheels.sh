@@ -15,9 +15,6 @@
 
 set -ex
 
-# shellcheck source=lib/manylinux.sh
-source .buildkite/scripts/lib/manylinux.sh
-
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
@@ -47,6 +44,16 @@ fi
 
 echo "Using python interpreter: $PYTHON"
 echo "Python version: $($PYTHON --version)"
+
+# Source the manylinux helper *after* Python detection above so the venv
+# it builds (for auditwheel) uses an interpreter we know is available
+# directly on the agent. The Docker-wrapped fallback above can run the
+# index-generation script, but ``python3 -m venv`` would create the venv
+# inside the throwaway container, so we deliberately don't reuse it
+# here. Override with ``MANYLINUX_PYTHON=`` if the agent's default
+# ``python3`` is too old (auditwheel requires >= 3.10).
+# shellcheck source=lib/manylinux.sh
+source .buildkite/scripts/lib/manylinux.sh
 
 # ======== Part 1: Collect and prepare wheels ========
 
