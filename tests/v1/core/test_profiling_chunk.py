@@ -191,18 +191,16 @@ class TestProfilingChunkManager(unittest.TestCase):
 
 
 # ===================================================================
-# ProfilingChunkScheduler
+# Scheduler
 # ===================================================================
 
 
-class TestProfilingChunkScheduler(unittest.TestCase):
+class TestScheduler(unittest.TestCase):
 
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     def create_scheduler(self):
-        from vllm.v1.core.sched.scheduler_profiling_chunk import (
-            ProfilingChunkScheduler,
-        )
+        from vllm.v1.core.sched.scheduler import Scheduler
 
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
@@ -277,7 +275,7 @@ class TestProfilingChunkScheduler(unittest.TestCase):
         kv_cache_config.hash_block_size = BLOCK_SIZE
         cache_config.num_gpu_blocks = 10000
 
-        scheduler = ProfilingChunkScheduler(
+        scheduler = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             block_size=BLOCK_SIZE,

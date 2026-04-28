@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 import itertools
 import time
 from collections import defaultdict, deque
@@ -299,6 +300,38 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # Profiling-based dynamic chunk sizing (for Pipeline Parallelism).
+        self.profiling_chunk_manager: "ProfilingChunkManager | None" = None
+        self._profiling_initialized = False
+        additional_config = vllm_config.additional_config
+        profiling_cfg = (
+            additional_config.get("profiling_chunk_config", {})
+            if isinstance(additional_config, dict)
+            else {}
+        )
+        if profiling_cfg.get("enabled", False):
+            from vllm.v1.core.sched.profiling_chunk_predictor import (
+                ProfilingChunkManager,
+            )
+
+            base_chunk = self.max_num_scheduled_tokens
+            smooth_factor = float(profiling_cfg.get("smooth_factor", 0.8))
+            min_chunk = int(profiling_cfg.get("min_chunk", 4096))
+            self.profiling_chunk_manager = ProfilingChunkManager(
+                base_chunk_size=base_chunk,
+                page_size=self.cache_config.block_size,
+                smooth_factor=smooth_factor,
+                min_chunk=min_chunk,
+            )
+            logger.info(
+                "[ProfilingChunk] Scheduler initialized. base_chunk=%d, "
+                "page_size=%d, smooth_factor=%.2f, min_chunk=%d",
+                base_chunk,
+                self.cache_config.block_size,
+                smooth_factor,
+                min_chunk,
+            )
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -373,6 +406,12 @@ class Scheduler(SchedulerInterface):
             # Do not schedule any requests when paused.
             token_budget = 0
 
+        # Profiling chunk: time budget for dynamic chunk sizing.
+        profiling_mgr = self.profiling_chunk_manager
+        time_budget = (
+            0.01 if profiling_mgr is not None else float("inf")
+        )
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -386,7 +425,7 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
             request = self.running[req_index]
 
             if (
@@ -437,6 +476,20 @@ class Scheduler(SchedulerInterface):
                     encoder_compute_budget,
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
+
+            # Profiling chunk: dynamic chunk sizing for RUNNING requests.
+            if (
+                profiling_mgr is not None
+                and profiling_mgr.is_ready
+                and num_new_tokens > 1
+                and request.num_computed_tokens > 0
+            ):
+                predicted_chunk = profiling_mgr.predict_chunk_size(
+                    num_computed_tokens=request.num_computed_tokens,
+                    target_time=time_budget,
+                )
+                if predicted_chunk is not None and predicted_chunk > 0:
+                    num_new_tokens = min(predicted_chunk, num_new_tokens)
 
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
@@ -519,6 +572,10 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if profiling_mgr is not None:
+                time_budget -= profiling_mgr.predict_time(
+                    num_new_tokens, request.num_computed_tokens
+                )
             req_index += 1
 
             # Speculative decode related.
@@ -568,7 +625,7 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -678,6 +735,20 @@ class Scheduler(SchedulerInterface):
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
+
+                    # Profiling chunk: dynamic chunk sizing for WAITING.
+                    if (
+                        profiling_mgr is not None
+                        and profiling_mgr.is_ready
+                        and num_new_tokens > 1
+                        and request.num_computed_tokens > 0
+                    ):
+                        predicted_chunk = profiling_mgr.predict_chunk_size(
+                            num_computed_tokens=num_computed_tokens,
+                            target_time=time_budget,
+                        )
+                        if predicted_chunk is not None and predicted_chunk > 0:
+                            num_new_tokens = min(num_new_tokens, predicted_chunk)
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -836,6 +907,10 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                if profiling_mgr is not None:
+                    time_budget -= profiling_mgr.predict_time(
+                        num_new_tokens, request.num_computed_tokens
+                    )
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Encoder-related.
@@ -1299,6 +1374,140 @@ class Scheduler(SchedulerInterface):
             scheduler_output.scheduled_spec_decode_tokens,
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
+
+    # ------------------------------------------------------------------
+    # Profiling-based dynamic chunk sizing
+    # ------------------------------------------------------------------
+
+    def run_profiling_chunk_init(self, model_executor) -> None:
+        """Profile prefill latency using real model forward passes.
+
+        Called by EngineCore after model_executor is ready. Collects latency
+        samples at different chunk sizes and fits the quadratic model.
+        """
+        if self._profiling_initialized:
+            return
+        self._profiling_initialized = True
+
+        if self.profiling_chunk_manager is None:
+            return
+
+        if model_executor is None:
+            logger.warning(
+                "[ProfilingChunk] No model_executor provided, "
+                "skipping profiling"
+            )
+            return
+
+        logger.info(
+            "[ProfilingChunk] Running startup profiling "
+            "with real model forward..."
+        )
+
+        seq_lens: list[int] = []
+        latencies: list[float] = []
+
+        base_chunk_size = self.profiling_chunk_manager.base_chunk_size
+        num_samples = 64
+        rpc_kwargs = self._build_rpc_kwargs(model_executor)
+
+        total_steps = num_samples + 1
+        log_interval = max(1, total_steps // 10)
+        t_start = time.perf_counter()
+
+        for i in range(total_steps):
+            chunk_size = int(
+                base_chunk_size
+                - (i - 1) * (base_chunk_size / num_samples)
+            )
+            if chunk_size <= 0:
+                break
+
+            if i % log_interval == 0 or i == total_steps - 1:
+                elapsed = time.perf_counter() - t_start
+                logger.info(
+                    "[ProfilingChunk] Profiling: %d/%d samples "
+                    "(chunk=%d, elapsed=%.1fs)",
+                    max(i - 1, 0),
+                    num_samples,
+                    chunk_size,
+                    elapsed,
+                )
+
+            try:
+                result = model_executor.collective_rpc(
+                    "profile_prefill_latency",
+                    args=(chunk_size,),
+                    **rpc_kwargs,
+                )
+                if i == 0:
+                    continue  # warm-up
+                latency_ms = self._extract_latency(result)
+                if latency_ms is None:
+                    continue
+                seq_lens.append(chunk_size)
+                latencies.append(latency_ms)
+            except Exception as e:
+                logger.debug(
+                    "[ProfilingChunk] Forward failed for chunk=%d: %s",
+                    chunk_size,
+                    e,
+                )
+                continue
+
+        if len(seq_lens) < 8:
+            logger.warning(
+                "[ProfilingChunk] Profiling failed: only %d samples",
+                len(seq_lens),
+            )
+            return
+
+        logger.info(
+            "[ProfilingChunk] Collected %d samples. "
+            "Latency range: [%.2f, %.2f] ms",
+            len(seq_lens),
+            min(latencies),
+            max(latencies),
+        )
+
+        predictor = self.profiling_chunk_manager.predictor
+        if not predictor.fit(seq_lens, latencies):
+            return
+
+        predictor.set_target_latency(base_chunk_size)
+        predictor.is_ready = True
+        self.profiling_chunk_manager._profiling_done = True
+        logger.info("[ProfilingChunk] Profiling completed successfully")
+
+    @staticmethod
+    def _build_rpc_kwargs(model_executor) -> dict:
+        """Build kwargs for collective_rpc, handling PP unique_reply_rank."""
+        kwargs: dict = {}
+        if not hasattr(model_executor, "collective_rpc"):
+            return kwargs
+        sig = inspect.signature(model_executor.collective_rpc)
+        if "unique_reply_rank" not in sig.parameters:
+            return kwargs
+        try:
+            pc = model_executor.vllm_config.parallel_config
+            output_rank = (
+                pc.world_size
+                - pc.tensor_parallel_size
+                * pc.prefill_context_parallel_size
+            )
+            kwargs["unique_reply_rank"] = output_rank
+        except AttributeError:
+            pass
+        return kwargs
+
+    @staticmethod
+    def _extract_latency(result) -> float | None:
+        """Extract latency value from collective_rpc result."""
+        if isinstance(result, (int, float)):
+            return float(result)
+        if isinstance(result, list) and len(result) > 0:
+            return float(result[0])
+        return None
 
     def update_from_output(
         self,
