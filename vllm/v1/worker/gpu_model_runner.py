@@ -4078,6 +4078,7 @@ class GPUModelRunner(
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
+                    additional_kwargs={"req_ids": self.input_batch.req_ids.copy()},
                 skip_compiled=has_encoder_input,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
@@ -5570,6 +5571,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    additional_kwargs={"req_ids": self.input_batch.req_ids.copy()},
                 ),
             ):
                 outputs = self.model(

@@ -5,6 +5,7 @@ import importlib
 from importlib.util import find_spec
 
 import torch
+import torch.nn.functional as F
 
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
@@ -232,6 +233,39 @@ def fp8_paged_mqa_logits_torch(
 
     fp8_dtype = current_platform.fp8_dtype()
     batch_size, next_n, _, dim = q.size()
+    if next_n == 1:
+        block_size = kv_cache.shape[1]
+        logits = torch.full(
+            [batch_size, max_model_len],
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        if context_lens.dim > 1:
+            context_lens = context_lens.squeeze(-1)
+        kv_cache_flat = kv_cache.view(-1, block_size * (dim + 4))
+        for i in range(batch_size):
+            q_i = q[i, 0].to(torch.float32)
+            q_scale = weights[i]
+            seq_len = int(context_lens[i].item())
+            assert seq_len <= max_model_len
+            num_pages = cdiv(seq_len, block_size)
+            padded_seq_len = num_pages * block_size
+            pages = block_tables[i, :num_pages]
+            cache = kv_cache_flat[pages]
+            scale_offset = block_size * dim
+            cache_value = cache[..., :scale_offset].view(dtype=fp8_dtype).to(torch.float32)
+            cache_scale = cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
+            cache_value = cache_value.view(padded_seq_len, dim)
+            cache_scale = cache_scale.view(padded_seq_len)
+            score = F.linear(cache_value, q_i)
+            score = F.relu(score)
+            score *= q_scale[None, :]
+            score = score.sum(dim=1)
+            score *= cache_scale
+            logits[i, :seq_len] = score[:seq_len]
+        return logits
+
     kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
     scale = scale.contiguous().view(torch.float)
     q = q.float()
@@ -243,20 +277,30 @@ def fp8_paged_mqa_logits_torch(
         device=q.device,
         dtype=torch.float32,
     )
-    context_lens = context_lens.tolist()
     for i in range(batch_size):
         context_len = context_lens[i]
-        q_offsets = torch.arange(context_len - next_n, context_len, device="cuda")
+        if context_len.ndim == 0:
+            context_len_i = int(context_len.item())
+            q_offsets = torch.arange(
+                context_len_i - next_n, context_len_i, device=q.device
+            )
+            context_limit = torch.full(
+                (next_n,), context_len_i, dtype=torch.int32, device=q.device
+            )
+        else:
+            context_limit = context_len.to(device=q.device, dtype=torch.int32)
+            q_offsets = context_limit - 1
         weight_slice = (
             weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
         )
-        for block_rk in range(cdiv(context_len, block_size)):
+        max_context_len = int(context_limit.max().item())
+        for block_rk in range(cdiv(max_context_len, block_size)):
             block_idx = block_tables[i][block_rk]
             qx, kx = q[i], kv_cache[block_idx]
             k_offsets = torch.arange(
-                block_rk * block_size, (block_rk + 1) * block_size, device="cuda"
+                block_rk * block_size, (block_rk + 1) * block_size, device=q.device
             )
-            mask = (k_offsets[None, :] < context_len) & (
+            mask = (k_offsets[None, :] < context_limit[:, None]) & (
                 k_offsets[None, :] <= q_offsets[:, None]
             )
             s = torch.where(
@@ -461,6 +505,27 @@ def rocm_fp8_mqa_logits(
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
+def _topk_indices_torch(logits: torch.Tensor, topk_tokens: int) -> torch.Tensor:
+    k = min(topk_tokens, logits.shape[-1])
+    values, indices = torch.topk(logits, k=k, dim=-1)
+    indices = indices.to(torch.int32)
+    indices = torch.where(
+        values == float("-inf"),
+        torch.full_like(indices, -1, dtype=torch.int32),
+        indices,
+    )
+    if k == topk_tokens:
+        return indices
+    padded = torch.full(
+        (logits.shape[0], topk_tokens),
+        -1,
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    padded[:, :k] = indices
+    return padded
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -479,8 +544,9 @@ def rocm_aiter_sparse_attn_indexer_fake(
     # profile run
     # NOTE(Chen): create the max possible flattened_kv. So that
     # profile_run can get correct memory usage.
+    device = hidden_states.device if k is None else k.device
     _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
+        [total_seq_lens, head_dim + 4], device=device, dtype=torch.uint8
     )
     fp8_dtype = current_platform.fp8_dtype()
     _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
@@ -488,7 +554,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     return topk_indices_buffer
 
 
-def rocm_aiter_sparse_attn_indexer(
+def rocm_aiter_sparse_attn_indexer_native(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
@@ -502,6 +568,7 @@ def rocm_aiter_sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -534,19 +601,24 @@ def rocm_aiter_sparse_attn_indexer(
     has_decode = layer_attn_metadata.num_decodes > 0
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
+    device = hidden_states.device if k is None else k.device
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
     num_tokens = slot_mapping.shape[0]
-    k = k[:num_tokens]
+    if k is not None:
+        k = k[:num_tokens]
+    elif not skip_k_cache_insert:
+        raise ValueError("k must be provided when skip_k_cache_insert is False")
 
-    ops.indexer_k_quant_and_cache(
-        k,
-        kv_cache,
-        slot_mapping,
-        quant_block_size,
-        scale_fmt,
-    )
+    if not skip_k_cache_insert:
+        ops.indexer_k_quant_and_cache(
+            k,
+            kv_cache,
+            slot_mapping,
+            quant_block_size,
+            scale_fmt,
+        )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -555,12 +627,12 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = torch.empty(
                 [chunk.total_seq_lens, head_dim],
-                device=k.device,
+                device=device,
                 dtype=fp8_dtype,
             )
             k_scale = torch.empty(
                 [chunk.total_seq_lens, 4],
-                device=k.device,
+                device=device,
                 dtype=torch.uint8,
             )
 
@@ -579,21 +651,10 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
-            num_rows = logits.shape[0]
-            assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            topk_indices.copy_(_topk_indices_torch(logits, topk_tokens))
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -630,19 +691,8 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=max_model_len,
         )
 
-        num_rows = logits.shape[0]
-        assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
+        topk_indices.copy_(_topk_indices_torch(logits, topk_tokens)[:num_decode_tokens])
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
@@ -656,3 +706,36 @@ def rocm_aiter_sparse_attn_indexer(
             )
 
     return topk_indices_buffer
+
+
+def rocm_aiter_sparse_attn_indexer(
+    hidden_states: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    kv_cache: torch.Tensor,
+    q_fp8: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    quant_block_size: int,
+    scale_fmt: str | None,
+    topk_tokens: int,
+    head_dim: int,
+    max_model_len: int,
+    total_seq_lens: int,
+    topk_indices_buffer: torch.Tensor | None,
+) -> torch.Tensor:
+    return rocm_aiter_sparse_attn_indexer_native(
+        hidden_states,
+        k_cache_prefix,
+        kv_cache,
+        q_fp8,
+        k,
+        weights,
+        quant_block_size,
+        scale_fmt,
+        topk_tokens,
+        head_dim,
+        max_model_len,
+        total_seq_lens,
+        topk_indices_buffer,
+        skip_k_cache_insert=False,
+    )
