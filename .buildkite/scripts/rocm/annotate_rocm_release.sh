@@ -18,7 +18,7 @@ if [ -z "${RELEASE_VERSION}" ]; then
   RELEASE_VERSION="1.0.0.dev"
 fi
 
-ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
+ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/rocm/cache_rocm_base_wheels.sh key)
 
 # S3 URLs
 S3_BUCKET="${S3_BUCKET:-vllm-wheels}"
