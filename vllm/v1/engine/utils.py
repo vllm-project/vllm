@@ -952,7 +952,7 @@ def get_engine_zmq_addresses(
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
-    # examples/offline_inference/data_parallel.py.
+    # examples/features/data_parallel/data_parallel_offline.py.
     offline_mode = local_start_index is not None
 
     # client_local_only = True for cases where this front-end
