@@ -456,6 +456,7 @@ class EngineArgs:
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
+    data_parallel_rank_local: int | None = None
     data_parallel_start_rank: int | None = None
     data_parallel_size_local: int | None = None
     data_parallel_address: str | None = None
@@ -963,6 +964,15 @@ class EngineArgs:
             type=int,
             help="Data parallel rank of this instance. "
             "When set, enables external load balancer mode.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-rank-local",
+            type=int,
+            help="Local data parallel rank of this instance, within the set "
+            "of GPUs visible to this process. Only applies in external load "
+            "balancer mode. If unset, defaults to 0, in which case the user "
+            "must narrow CUDA_VISIBLE_DEVICES (or equivalent) per rank so "
+            "that each rank sees only its own GPU(s).",
         )
         parallel_group.add_argument(
             "--data-parallel-start-rank",
@@ -1803,9 +1813,19 @@ class EngineArgs:
                 "data_parallel_size_local must be 1 or None when data_parallel_rank "
                 "is set"
             )
+            if self.data_parallel_rank_local is not None:
+                assert 0 <= self.data_parallel_rank_local <= self.data_parallel_rank, (
+                    f"data_parallel_rank_local ({self.data_parallel_rank_local}) "
+                    f"must be in [0, data_parallel_rank ({self.data_parallel_rank})]."
+                )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
+        elif self.data_parallel_rank_local is not None:
+            raise ValueError(
+                "--data-parallel-rank-local is only valid in external LB mode "
+                "(set via --data-parallel-rank or --data-parallel-external-lb)."
+            )
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
@@ -1889,6 +1909,7 @@ class EngineArgs:
             prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
+            data_parallel_rank_local=self.data_parallel_rank_local,
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
             master_addr=self.master_addr,

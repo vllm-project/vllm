@@ -953,7 +953,11 @@ def get_engine_zmq_addresses(
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
     # examples/features/data_parallel/data_parallel_offline.py.
-    offline_mode = local_start_index is not None
+    # External LB also sets data_parallel_rank_local (when the user passes
+    # --data-parallel-rank-local), but that's not offline mode.
+    offline_mode = (
+        local_start_index is not None and not parallel_config.data_parallel_external_lb
+    )
 
     # client_local_only = True for cases where this front-end
     # sends requests only to colocated engines.
@@ -1001,7 +1005,11 @@ def launch_core_engines(
     host = parallel_config.data_parallel_master_ip
     local_engines_only = parallel_config.local_engines_only
 
-    offline_mode = local_start_index is not None
+    # External LB also sets data_parallel_rank_local (when the user passes
+    # --data-parallel-rank-local), but that's not offline mode.
+    offline_mode = (
+        local_start_index is not None and not parallel_config.data_parallel_external_lb
+    )
 
     # Create a single tensor IPC queue for sharing multimodal tensors between
     # API servers and engine core. Returns a single queue since we only support
@@ -1093,24 +1101,6 @@ def launch_core_engines(
         local_handshake_address = handshake_address
         client_handshake_address = None
 
-    # In external-LB mode, each rank is a separate `vllm serve` process and
-    # data_parallel_rank_local is unset. Historically this means the engine
-    # subprocess always selects cuda:0 of whatever the user made visible, so
-    # users had to narrow CUDA_VISIBLE_DEVICES per rank. If instead the user
-    # has all DP-world GPUs for this rank visible, derive the local index from
-    # the global DP rank — matching how internal/hybrid LB shifts the device
-    # in the engine subprocess.
-    spawn_local_start_index = local_start_index
-    if (
-        spawn_local_start_index is None
-        and parallel_config.data_parallel_external_lb
-        and dp_rank > 0
-        and current_platform.is_cuda_alike()
-        and (dp_rank + 1) * parallel_config.world_size
-        <= current_platform.device_count()
-    ):
-        spawn_local_start_index = dp_rank
-
     with zmq_socket_ctx(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
@@ -1125,7 +1115,7 @@ def launch_core_engines(
                 local_client=True,
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
-                local_start_index=spawn_local_start_index or 0,
+                local_start_index=local_start_index or 0,
                 tensor_queue=tensor_queue,
             )
         else:

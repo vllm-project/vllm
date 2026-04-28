@@ -24,7 +24,14 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 
 class ExternalLBServerManager:
     """Manages data parallel vLLM server instances for external
-    load balancer testing."""
+    load balancer testing.
+
+    device_mode controls how each rank's GPU is selected:
+      - "narrow_cvd": legacy — per-rank CUDA_VISIBLE_DEVICES narrowed to that
+        rank's GPU(s).
+      - "explicit_local_rank": all DP-world GPUs visible to every rank, with
+        --data-parallel-rank-local naming this rank's GPU slot.
+    """
 
     def __init__(
         self,
@@ -33,14 +40,15 @@ class ExternalLBServerManager:
         api_server_count: int,
         base_server_args: list,
         tp_size: int = TP_SIZE,
-        narrow_visible_devices: bool = True,
+        device_mode: str = "narrow_cvd",
     ):
+        assert device_mode in ("narrow_cvd", "explicit_local_rank")
         self.model_name = model_name
         self.dp_size = dp_size
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.narrow_visible_devices = narrow_visible_devices
+        self.device_mode = device_mode
         self.servers: list[tuple[RemoteOpenAIServer, list[str]]] = []
         self.server_threads: list[threading.Thread] = []
 
@@ -75,13 +83,15 @@ class ExternalLBServerManager:
                 ]
             )
 
-            if self.narrow_visible_devices:
+            if self.device_mode == "narrow_cvd":
                 visible_devices = ",".join(
                     str(current_platform.device_id_to_physical_device_id(i))
                     for i in range(rank * self.tp_size, (rank + 1) * self.tp_size)
                 )
             else:
+                # explicit_local_rank
                 visible_devices = full_visible_devices
+                server_args.extend(["--data-parallel-rank-local", str(rank)])
 
             # Use a thread to start each server to allow parallel initialization
             def start_server(r: int, sargs: list[str], cvd: str):
@@ -151,20 +161,20 @@ def default_server_args():
 @pytest.fixture(
     scope="module",
     params=[
-        pytest.param((1, True), id="api_count=1-narrow_cvd"),
-        pytest.param((4, True), id="api_count=4-narrow_cvd"),
-        pytest.param((1, False), id="api_count=1-full_cvd"),
-        pytest.param((4, False), id="api_count=4-full_cvd"),
+        pytest.param((1, "narrow_cvd"), id="api_count=1-narrow_cvd"),
+        pytest.param((4, "narrow_cvd"), id="api_count=4-narrow_cvd"),
+        pytest.param((1, "explicit_local_rank"), id="api_count=1-explicit_local_rank"),
+        pytest.param((4, "explicit_local_rank"), id="api_count=4-explicit_local_rank"),
     ],
 )
 def server_manager(request, default_server_args):
-    api_server_count, narrow_visible_devices = request.param
+    api_server_count, device_mode = request.param
     server_manager = ExternalLBServerManager(
         MODEL_NAME,
         DP_SIZE,
         api_server_count,
         default_server_args,
-        narrow_visible_devices=narrow_visible_devices,
+        device_mode=device_mode,
     )
 
     with server_manager:
