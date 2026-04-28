@@ -31,3 +31,11 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Not needed in Docker builds
+docs/
+.github/
+.pre-commit-config.yaml
+.clang-format
+.gitattributes
+format.sh

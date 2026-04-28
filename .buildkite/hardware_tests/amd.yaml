@@ -1,22 +1,48 @@
-group: Hardware - AMD Build 
+group: Hardware - AMD Build
 steps:
-  - label: "AMD: :docker: build image"
-    key: image-build-amd
+  # Ensure ci_base is up-to-date before building the test image.
+  # Compares a content hash of ci_base-affecting files against the remote
+  # image label. If hashes match the build is skipped (< 30 s); if they
+  # differ ci_base is rebuilt and pushed automatically.
+  - label: "AMD: :docker: ensure ci_base"
+    key: ensure-ci-base-amd
     depends_on: []
     device: amd_cpu
     no_plugin: true
     commands:
-    - >
-      docker build
-      --build-arg max_jobs=16
-      --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-      -f docker/Dockerfile.rocm
-      --target test
-      --no-cache
-      --progress plain .
-    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base not found yet, building it now"
+      - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
     env:
       DOCKER_BUILDKIT: "1"
+      IMAGE_TAG: "rocm/vllm-dev:ci_base"
+      CI_BASE_IMAGE_TAG: "rocm/vllm-dev:ci_base"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/${VLLM_CI_BRANCH:-main}/docker/ci-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
+      CI_BASE_CONTENT_FILES: "requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tests/vllm_test_utils"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
+  - label: "AMD: :package: build test artifacts"
+    key: image-build-amd
+    depends_on:
+      - ensure-ci-base-amd
+    device: amd_cpu
+    no_plugin: true
+    commands:
+      - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base pull failed, continuing with ci-bake-rocm.sh"
+      - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
+    env:
+      DOCKER_BUILDKIT: "1"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/${VLLM_CI_BRANCH:-main}/docker/ci-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
