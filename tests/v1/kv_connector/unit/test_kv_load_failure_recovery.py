@@ -255,10 +255,10 @@ def test_sync_load_failure_with_shared_blocks(
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # req_id -> num_computed_tokens
-    # all the common prefix blocks will be computed by request1
+    # expected_computed_tokens after failure: both requests should have 0 computed tokens since the failure happens in the shared blocks.
     expected_computed_tokens = {
         request1.request_id: 0,
-        request2.request_id: common_prefix_len,
+        request2.request_id: 0,
     }
 
     assert len(scheduler.finished_req_ids) == 2
