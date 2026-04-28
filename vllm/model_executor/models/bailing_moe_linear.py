@@ -17,11 +17,15 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fla.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -208,7 +212,6 @@ class BailingMoeV25MLAAttention(nn.Module):
             max_position=max_position,
             is_neox_style=False,
             rope_parameters=rope_parameters or None,
-            dtype=torch.float32,
         )
 
         # Build MLAModules for MultiHeadLatentAttentionWrapper
@@ -351,14 +354,13 @@ class BailingMoeV25(nn.Module):
         else:
             self.shared_experts = None
 
-        # Routed experts using SharedFusedMoE
-        self.experts = SharedFusedMoE(
+        # Routed experts using FusedMoE
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -368,6 +370,8 @@ class BailingMoeV25(nn.Module):
             topk_group=self.topk_group,
             use_grouped_topk=self.use_grouped_topk,
             router_logits_dtype=self.router_dtype,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -382,22 +386,6 @@ class BailingMoeV25(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        # Handle tuple return from SharedFusedMoE
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = final_hidden_states
-        else:
-            shared_output = None
-
-        final_hidden_states *= self.routed_scaling_factor
-
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
 
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -437,13 +425,17 @@ class BailingGroupRMSNormGate(RMSNormGated):
         param.data.copy_(loaded_weight[shard].contiguous())
 
 
-class BailingMoELinearAttention(nn.Module, MambaBase):
-    """
-    Bailing MoE Linear Attention implementation using minimax backend.
+# --8<-- [start:bailing_moe_linear_attention]
+@PluggableLayer.register("bailing_moe_linear_attention")
+class BailingMoELinearAttention(PluggableLayer, MambaBase):
+    """Pluggable Bailing MoE Linear Attention layer which allows OOT backends
+    to add custom implementations.
 
-    This implements the linear attention mechanism from sglang, adapted for vLLM's
-    v1 engine with MambaBase interface support.
+    This implements the linear attention mechanism from sglang, adapted for
+    vLLM's v1 engine with MambaBase interface support.
     """
+
+    # --8<-- [end:bailing_moe_linear_attention]
 
     @property
     def mamba_type(self) -> str:
@@ -581,7 +573,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             self.head_dim,
             max_position=self.max_position_embeddings,
             is_neox_style=True,
-            dtype=torch.float32,
             rope_parameters=rope_parameters or None,
         )
 
@@ -766,8 +757,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_prefills = attn_metadata.num_prefills
         hidden = linear_attention_decode(
             q,
             k,
@@ -775,10 +764,10 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             kv_cache,
             self.tp_slope,
             state_indices_tensor,
-            q_start=num_prefill_tokens,
-            q_end=None,
-            slot_start=num_prefills,
-            slot_end=None,
+            q_start=0,
+            q_end=attn_metadata.num_decode_tokens,
+            slot_start=0,
+            slot_end=attn_metadata.num_decodes,
             block_size=32,
         )
         return hidden
@@ -1005,7 +994,7 @@ class BailingMoeV25Model(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """Get expert parameter mapping for MoE layers."""
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1161,6 +1150,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:

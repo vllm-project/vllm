@@ -4,6 +4,7 @@
 
 import pytest
 
+from vllm import PoolingParams
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
     CohereEmbedContent,
@@ -218,6 +219,7 @@ class TestPreProcessCohereOnline:
     def _make_context(**request_kwargs) -> PoolingServeContext[CohereEmbedRequest]:
         return PoolingServeContext(
             request=CohereEmbedRequest(model="test", **request_kwargs),
+            pooling_params=PoolingParams(),
             model_name="test",
             request_id="embd-test",
         )
@@ -233,13 +235,13 @@ class TestPreProcessCohereOnline:
         ctx = self._make_context(texts=["hello"])
         calls: list[tuple[str, object]] = []
 
-        def preprocess_completion(request, prompt_input, prompt_embeds):
+        def preprocess_cmpl_online(request, prompt_input, prompt_embeds):
             calls.append(("completion", prompt_input))
             return ["completion"]
 
         handler._get_task_instruction_prefix = lambda _input_type: None
         handler._has_chat_template = lambda: False
-        handler._preprocess_completion_online = preprocess_completion
+        handler._preprocess_cmpl_online = preprocess_cmpl_online
         handler._batch_render_chat = lambda *_args, **_kwargs: (
             pytest.fail("text-only request should not require chat rendering")
         )
@@ -254,7 +256,7 @@ class TestPreProcessCohereOnline:
         ctx = self._make_context(texts=["hello"], input_type="query")
         calls: list[tuple[str, object]] = []
 
-        def preprocess_completion(request, prompt_input, prompt_embeds):
+        def preprocess_cmpl(request, prompt_input, prompt_embeds):
             calls.append(("completion", prompt_input))
             return ["fallback"]
 
@@ -263,7 +265,7 @@ class TestPreProcessCohereOnline:
         handler._batch_render_chat = lambda *_args, **_kwargs: (
             pytest.fail("chat rendering should be skipped without a template")
         )
-        handler._preprocess_completion_online = preprocess_completion
+        handler._preprocess_cmpl_online = preprocess_cmpl
 
         handler._pre_process_cohere_online(ctx)
 
@@ -297,7 +299,7 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: True
         handler._batch_render_chat = batch_render_chat
-        handler._preprocess_completion_online = lambda *_args, **_kwargs: (
+        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: (
             pytest.fail("completion path should be skipped when a template exists")
         )
 

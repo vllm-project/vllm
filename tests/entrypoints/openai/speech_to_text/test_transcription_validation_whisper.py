@@ -6,7 +6,6 @@ import asyncio
 import io
 import json
 
-import librosa
 import numpy as np
 import openai
 import pytest
@@ -14,6 +13,7 @@ import pytest_asyncio
 import soundfile as sf
 
 from tests.utils import RemoteOpenAIServer
+from vllm.multimodal.media.audio import load_audio
 from vllm.platforms import current_platform
 
 MODEL_NAME = "openai/whisper-large-v3-turbo"
@@ -134,7 +134,7 @@ async def test_bad_requests(mary_had_lamb, whisper_client):
 @pytest.mark.asyncio
 async def test_long_audio_request(mary_had_lamb, whisper_client):
     mary_had_lamb.seek(0)
-    audio, sr = librosa.load(mary_had_lamb)
+    audio, sr = load_audio(mary_had_lamb)
     # Add small silence after each audio for repeatability in the split process
     audio = np.pad(audio, (0, 1600))
     repeated_audio = np.tile(audio, 10)

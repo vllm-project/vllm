@@ -22,6 +22,7 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -77,6 +78,21 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
+
+
+def _make_control_bundle(node_ip: str) -> dict[str, float]:
+    # The engine actor is scheduled on the final CPU-only bundle. Keep that
+    # bundle colocated with the group's first GPU bundle so the actor does not
+    # float to an unrelated node and reorder worker ranks away from the
+    # advertised DP bootstrap host.
+    return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+
+def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
+    for key in bundle:
+        if key.startswith("node:"):
+            return key.split(":", 1)[1]
+    raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
 
 
 class CoreEngineProcManager:
@@ -141,13 +157,33 @@ class CoreEngineProcManager:
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
                 # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                device_control_context: contextlib.AbstractContextManager[None] = (
+                    contextlib.nullcontext()
+                )
                 if is_dp and (
                     not current_platform.is_cuda_alike()
                     or vllm_config.parallel_config.use_ray
                 ):
-                    with set_device_control_env_var(vllm_config, local_dp_rank):
-                        proc.start()
-                else:
+                    device_control_context = set_device_control_env_var(
+                        vllm_config, local_dp_rank
+                    )
+
+                with (
+                    device_control_context,
+                    numa_utils.configure_subprocess(
+                        # EngineCore itself does not have a TP/PP-local rank.
+                        # When DP is enabled, set_device_control_env_var()
+                        # narrows visible devices to this DP shard first, so
+                        # local_rank=0 means "the first local GPU in this
+                        # shard". The actual TP/PP worker processes spawned by
+                        # the executor are bound separately with their own
+                        # local_rank values.
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
+                    ),
+                ):
                     proc.start()
         finally:
             # Kill other procs if not all are running.
@@ -576,10 +612,20 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    control_node_ip = _get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        _make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
-                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+                    # STRICT_PACK already keeps every bundle in the placement
+                    # group on one node, so the explicit node affinity on the
+                    # control bundle is redundant for correctness here. Keep it
+                    # anyway for consistency with the span path and to preserve
+                    # intent if this scheduling strategy changes later.
+                    bundles = device_bundle * world_size + [
+                        _make_control_bundle(node_ip)
+                    ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
@@ -906,7 +952,7 @@ def get_engine_zmq_addresses(
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
-    # examples/offline_inference/data_parallel.py.
+    # examples/features/data_parallel/data_parallel_offline.py.
     offline_mode = local_start_index is not None
 
     # client_local_only = True for cases where this front-end
@@ -1191,19 +1237,6 @@ def wait_for_engine_startup(
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
-            # Setup KV cache config with initialization state from
-            # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg["num_gpu_blocks"]
-            cache_config.num_gpu_blocks = num_gpu_blocks
-
-            # In external DP LB mode, the coordinator address that the
-            # front-end procs connect to is obtained from rank 0 via
-            # one of the engine handshakes, and passed to the local
-            # front-end process in the response from the other.
-            if addresses.frontend_stats_publish_address is None:
-                addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
-
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
