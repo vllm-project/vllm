@@ -495,10 +495,16 @@ class Worker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
-        tp_rank = get_tp_group().rank_in_group
-        pp_rank = get_pp_group().rank_in_group
+        tp_group = get_tp_group()
+        pp_group = get_pp_group()
+        tp_rank = tp_group.rank_in_group
+        if pp_group is None:
+            return {tp_rank: metadata}
+
+        pp_rank = pp_group.rank_in_group
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        return {pp_rank * tp_size + tp_rank: metadata}
+        global_worker_index = pp_rank * tp_size + tp_rank
+        return {global_worker_index: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

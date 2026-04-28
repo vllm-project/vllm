@@ -619,27 +619,25 @@ class TransferTopology:
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
     def get_all_pp_tp_targets(
-        self, remote_tp_size: int, remote_pp_size: int
+        self,
+        remote_tp_size: int,
+        remote_pp_size: int,
     ) -> list[int]:
-        """Return global worker indices across all PP stages for PP KV transfer.
+        """Return global remote worker indices across all PP stages.
 
-        When Prefill uses Pipeline Parallelism (pp_size > 1), Decode must
-        connect to workers in ALL PP stages to cover every layer range.
-        global_idx = pp_rank * remote_tp_size + tp_rank_in_stage.
-
-        Example (D_TP=8, remote PP2+TP4):
-          D_rank=0 -> [0, 4]  (PP0_TP0 and PP1_TP0)
-          D_rank=2 -> [1, 5]
-          D_rank=6 -> [3, 7]
-
-        PP=1 degenerates to handshake_target_ranks (backward compatible).
+        For each TP target rank selected by ``handshake_target_ranks()``, expand
+        it across every remote PP stage using the global worker index formula:
+        ``tp_rank + pp_rank * remote_tp_size``.
         """
-        local_tp_targets = self.handshake_target_ranks(remote_tp_size)
-        result = []
-        for pp_rank in range(remote_pp_size):
-            for tp_rank in local_tp_targets:
-                result.append(tp_rank + pp_rank * remote_tp_size)
-        return result
+        tp_targets = self.handshake_target_ranks(remote_tp_size)
+        if remote_pp_size <= 1:
+            return tp_targets
+
+        all_targets: list[int] = []
+        for tp_rank in tp_targets:
+            for pp_rank in range(remote_pp_size):
+                all_targets.append(tp_rank + pp_rank * remote_tp_size)
+        return all_targets
 
     def target_remote_ranks(self, remote_engine_id: EngineId) -> list[int]:
         """Get the remote TP rank(s) that the current local TP rank will
