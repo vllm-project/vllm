@@ -181,7 +181,7 @@ class TestSideChannelPortPP:
     BASE_PORT = 9100
 
     def _current_port(self, dp_index: int) -> int:
-        """Current formula (from nixl_connector.py:557-560)."""
+        """Current formula (from nixl/scheduler.py)."""
         return self.BASE_PORT + dp_index
 
     def _fixed_port(self, dp_index: int, pp_rank: int, tp_size: int) -> int:
@@ -242,15 +242,15 @@ class TestSideChannelPortPP:
 
 
 # ===========================================================================
-# Tests: TpKVTopology.get_all_pp_tp_targets (Wave 2.2)
+# Tests: TransferTopology.get_all_pp_tp_targets (Wave 2.2)
 # ===========================================================================
 
-class TestTpKVTopologyPP:
+class TestTransferTopologyPP:
     """
-    TpKVTopology needs a new method get_all_pp_tp_targets that returns
+    TransferTopology needs a get_all_pp_tp_targets method that returns
     global worker indices across ALL PP stages for a given local D rank.
 
-    Current get_target_remote_ranks(remote_tp_size=4):
+    Current handshake_target_ranks(remote_tp_size=4):
       D_rank 0,1 -> [0]  (only PP0_TP0, PP1 never reached)
 
     Required get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2):
@@ -259,33 +259,34 @@ class TestTpKVTopologyPP:
       D_rank 4,5 -> [2, 6]
       D_rank 6,7 -> [3, 7]
 
-    Formula: for each tp_rank in get_target_remote_ranks(tp_size):
+    Formula: for each tp_rank in handshake_target_ranks(tp_size):
                [tp_rank + pp_rank * tp_size for pp_rank in range(pp_size)]
     """
 
     def _make_topology(self, d_tp_rank: int, d_tp_size: int, engine_id="prefill"):
-        from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
+        from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
         from unittest.mock import MagicMock
 
         mock_backend = MagicMock()
         mock_backend.get_kv_cache_shape.return_value = (1, 16, 4, 1, 1)
         mock_backend.get_kv_cache_stride_order.side_effect = NotImplementedError
 
-        return TpKVTopology(
+        return TransferTopology(
             tp_rank=d_tp_rank,
+            tp_size=d_tp_size,
+            block_size=16,
             engine_id=engine_id,
-            remote_tp_size={engine_id: d_tp_size},
-            remote_block_size={engine_id: 16},
             is_mla=True,
+            is_mamba=False,
             total_num_kv_heads=4,
             attn_backends=[mock_backend],
             tensor_shape=None,
         )
 
     def test_pp1_identical_to_existing_method(self):
-        """PP=1: get_all_pp_tp_targets must equal get_target_remote_ranks (backward compat)."""
+        """PP=1: get_all_pp_tp_targets must equal handshake_target_ranks (backward compat)."""
         topo = self._make_topology(d_tp_rank=0, d_tp_size=8)
-        existing = topo.get_target_remote_ranks(remote_tp_size=4)
+        existing = topo.handshake_target_ranks(remote_tp_size=4)
         pp1_result = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=1)
         assert pp1_result == existing
 
@@ -342,14 +343,14 @@ class TestNixlConnectorPPWiring:
     2. NixlConnectorMetadata._add_new_req reads pp_size from kv_transfer_params.
     3. NixlConnectorScheduler.request_finished includes pp_size in the returned dict.
     4. NixlConnectorWorker._nixl_handshake receives remote_pp_size and uses
-       get_all_pp_tp_targets instead of get_target_remote_ranks.
+       get_all_pp_tp_targets instead of handshake_target_ranks.
     """
 
     # --- [FAILS_NOW] ReqMeta.pp_size field ---
 
     def test_req_meta_has_pp_size_field(self):
         """[FAILS_NOW] ReqMeta must have a pp_size field (default 1)."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import ReqMeta
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
         import dataclasses
 
         fields = {f.name for f in dataclasses.fields(ReqMeta)}
@@ -360,7 +361,7 @@ class TestNixlConnectorPPWiring:
 
     def test_req_meta_pp_size_default_is_1(self):
         """[FAILS_NOW] ReqMeta.pp_size must default to 1 (backward compat)."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import ReqMeta
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
 
         req = ReqMeta(
             local_block_ids=[],
@@ -374,7 +375,7 @@ class TestNixlConnectorPPWiring:
 
     def test_add_new_req_reads_pp_size_from_params(self):
         """[FAILS_NOW] _add_new_req must read pp_size from kv_transfer_params."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
             NixlConnectorMetadata,
         )
 
@@ -390,7 +391,7 @@ class TestNixlConnectorPPWiring:
 
     def test_add_new_req_pp_size_defaults_to_1(self):
         """[FAILS_NOW] _add_new_req pp_size=1 when not in kv_transfer_params."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
             NixlConnectorMetadata,
         )
 
@@ -406,7 +407,7 @@ class TestNixlConnectorPPWiring:
     def test_request_finished_kv_transfer_params_includes_pp_size(self):
         """[FAILS_NOW] kv_transfer_params returned by request_finished must include pp_size."""
         from unittest.mock import MagicMock, patch
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
             NixlConnectorScheduler,
         )
         from vllm.v1.kv_cache_interface import (
@@ -435,7 +436,7 @@ class TestNixlConnectorPPWiring:
         )
 
         with patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform"
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform"
         ) as mock_platform:
             mock_platform.device_type = "cpu"
             sched = NixlConnectorScheduler(cfg, "engine-0", kv_cache_config)
@@ -464,22 +465,23 @@ class TestNixlConnectorPPWiring:
 
     def test_nixl_handshake_uses_get_all_pp_tp_targets_for_pp2(self):
         """[FAILS_NOW] With remote_pp_size=2, _nixl_handshake must request
-        global indices from get_all_pp_tp_targets (not get_target_remote_ranks).
+        global indices from get_all_pp_tp_targets (not handshake_target_ranks).
 
         Verifies that the method calls get_all_pp_tp_targets when remote_pp_size > 1.
         """
-        from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
+        from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 
         mock_backend = MagicMock()
         mock_backend.get_kv_cache_shape.return_value = (1, 16, 4, 1, 1)
         mock_backend.get_kv_cache_stride_order.side_effect = NotImplementedError
 
-        topo = TpKVTopology(
+        topo = TransferTopology(
             tp_rank=0,
+            tp_size=8,
+            block_size=16,
             engine_id="prefill",
-            remote_tp_size={"prefill": 8},
-            remote_block_size={"prefill": 16},
             is_mla=True,
+            is_mamba=False,
             total_num_kv_heads=4,
             attn_backends=[mock_backend],
             tensor_shape=None,
@@ -487,7 +489,7 @@ class TestNixlConnectorPPWiring:
 
         # With remote PP2+TP4, D_rank=0 must query global indices [0, 4]
         targets_pp2 = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2)
-        targets_pp1 = topo.get_target_remote_ranks(remote_tp_size=4)
+        targets_pp1 = topo.handshake_target_ranks(remote_tp_size=4)
 
         # PP2 must return more targets than PP1
         assert len(targets_pp2) > len(targets_pp1), (
