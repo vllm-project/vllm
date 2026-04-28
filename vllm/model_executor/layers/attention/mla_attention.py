@@ -2341,6 +2341,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 prefill_tokens_with_context=prefill_metadata.chunked_context.prefill_tokens_with_context,
             )
         else:
+            assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)
 
