@@ -594,6 +594,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
     ),
+    "MiMoV2ProForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True, is_available_online=False
+    ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
 
@@ -961,6 +964,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom Isaac code is not compatible with Transformers v5. "
+                "The model should be upstreamed to Transformers for "
+                "long-term support."
+            ),
+            "hf": (
+                "Isaac's remote model and processor code import or configure "
+                "APIs that changed in Transformers v5."
+            ),
+        },
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1",
@@ -1056,6 +1071,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
+    ),
+    "MiMoV2OmniForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni", trust_remote_code=True, is_available_online=False
     ),
     "MiniCPMO": _HfExamplesInfo(
         "openbmb/MiniCPM-o-2_6",
@@ -1539,6 +1557,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-7B-RL",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
+    ),
+    "MiMoV2MTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Pro",
+        is_available_online=False,
+    ),
+    "MiMoV2OmniMTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
         "nvidia/Nemotron-Super-Placeholder",
