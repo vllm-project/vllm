@@ -22,7 +22,7 @@ def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
         return True
 
     keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
-    ignored_layers = []
+    ignored_layers: list[str] = []
     for key in keys:
         ignored_layers = config.get(key, []) or []
         if not ignored_layers:

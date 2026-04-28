@@ -394,7 +394,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def is_supported_config(
-        cls: type[mk.FusedMoEExperts],
+        cls: type["HummingExpertsBase"],
         moe_config: FusedMoEConfig,
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
