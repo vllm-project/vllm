@@ -1526,10 +1526,12 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
                 # prefill_query may be non-contiguous or have degenerate strides
-                # First ensure memory contiguity, then fix degenerate strides
-                # with reshape. contiguous() alone doesn't fix degenerate
-                # strides when a dimension has size 1.
-                prefill_query = prefill_query.contiguous().reshape(prefill_query.shape)
+                # on size=1 dims. contiguous() ensures memory layout; then
+                # canonicalize_singleton_dim_strides fixes any remaining
+                # degenerate strides on size=1 dims for TMA alignment.
+                prefill_query = canonicalize_singleton_dim_strides(
+                    prefill_query.contiguous()
+                )
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
@@ -1667,12 +1669,14 @@ class FlashInferImpl(AttentionImpl):
                         out=output[:num_decode_tokens],
                     )
             else:
-                # decode_query may be non-contiguous or have degenerate strides
                 assert isinstance(attn_metadata.decode, TRTLLMDecode)
-                # First ensure memory contiguity, then fix degenerate strides
-                # with reshape. contiguous() alone doesn't fix degenerate
-                # strides when a dimension has size 1.
-                decode_query = decode_query.contiguous().reshape(decode_query.shape)
+                # decode_query may be non-contiguous or have degenerate strides
+                # on size=1 dims. contiguous() ensures memory layout; then
+                # canonicalize_singleton_dim_strides fixes any remaining
+                # degenerate strides on size=1 dims for TMA alignment.
+                decode_query = canonicalize_singleton_dim_strides(
+                    decode_query.contiguous()
+                )
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
