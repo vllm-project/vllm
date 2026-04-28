@@ -267,20 +267,26 @@ class QuarkOCP_MX(QuarkScheme):
     def get_min_capability(cls) -> int:
         return 70
 
+    def process_dynamic_mxfp4_weights_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+        layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
+        layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         if self.emulate:
-            layer.weight_scale = torch.nn.Parameter(
-                layer.weight_scale.data, requires_grad=False
-            )
+            if self.dynamic_mxfp4_quant:
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data, requires_grad=False
+                )
         else:
             if self.dynamic_mxfp4_quant:
-                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-                layer.weight_scale = torch.nn.Parameter(
-                    w_s.T.contiguous(), requires_grad=False
-                )
-                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
             elif self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
@@ -370,11 +376,15 @@ class QuarkOCP_MX(QuarkScheme):
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
-        else:
-            return torch.ops.vllm.gemm_with_dynamic_quant(
-                x,
-                layer.weight,
-                layer.weight_scale,
-                self.rocm_use_aiter_fp4_asm_gemm,
-                self.out_dtype,
-            )
+        y = torch.ops.vllm.gemm_with_dynamic_quant(
+            x,
+            layer.weight,
+            layer.weight_scale,
+            self.rocm_use_aiter_fp4_asm_gemm,
+            self.out_dtype,
+        )
+        # gemm_with_dynamic_quant has no bias argument; add it here so the
+        # native path matches F.linear (e.g. qkv_proj with qkv_bias=True).
+        if bias is not None:
+            y = y + bias
+        return y

@@ -15,6 +15,7 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -41,6 +42,11 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "turboquant_k8v4": torch.uint8,
+    "turboquant_4bit_nc": torch.uint8,
+    "turboquant_k3v4_nc": torch.uint8,
+    "turboquant_3bit_nc": torch.uint8,
+    "nvfp4": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -54,17 +60,19 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
-    # TODO: Add more modelopt kv cache dtype
-    # mappings here when it supported by some attention backend
-    # (for example supports nvfp4).
     "fp8": "fp8_e4m3",
+    "nvfp4": "nvfp4",
 }
 
 T = TypeVar("T")
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8") or kv_cache_dtype.endswith("per_token_head")
+    return (
+        kv_cache_dtype.startswith("fp8")
+        or kv_cache_dtype.endswith("per_token_head")
+        or kv_cache_dtype == "nvfp4"
+    )
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
@@ -294,6 +302,8 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
                 and kv_algo.get("type") == "float"
             ):
                 kv_algo = "fp8"
+            elif kv_algo.get("num_bits") == 4 and kv_algo.get("type") == "float":
+                kv_algo = "nvfp4"
             else:
                 # Unknown/unsupported format - return "auto" as safe fallback
                 logger.warning(
@@ -365,8 +375,98 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        from vllm.platforms import current_platform
+
+        current_platform.manual_seed_all(seed)
+
+
+def nvfp4_kv_cache_full_dim(head_size: int) -> int:
+    """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
+    return head_size // 2 + head_size // 16
+
+
+def _nvfp4_split_data_scale(
+    kv_side: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a single NVFP4 KV-side buffer into data and scale views.
+
+    The input is a 4D tensor for one KV side (K or V) whose last
+    dimension is ``full_dim = data_dim + scale_dim``.  The physical
+    layout within each side is [data | scale], both packed contiguously.
+
+    Args:
+        kv_side: 4D uint8 tensor with shape
+            ``(num_pages, dim_1, dim_2, full_dim)``.
+            May be in any permutation order (NHD or HND).
+
+    Returns:
+        ``(data, scale)`` where
+        ``data`` is a uint8 view with shape
+        ``(num_pages, dim_1, dim_2, data_dim)``.
+        ``scale`` is a float8_e4m3fn view with shape
+        ``(num_pages, dim_1, dim_2, scale_dim)``.
+    """
+    num_pages = kv_side.shape[0]
+    dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
+    full_dim = kv_side.shape[3]
+    data_dim = full_dim * 8 // 9
+    scale_dim = full_dim - data_dim
+
+    data_per_kv = dim_1 * dim_2 * data_dim
+    page_bytes = kv_side.stride(0)
+
+    # Derive inner strides from the kv_side strides, scaling by the
+    # ratio of the target dim to full_dim.  This preserves the physical
+    # layout (NHD vs HND) encoded in the input tensor's strides.
+    s1 = kv_side.stride(1) * data_dim // full_dim
+    s2 = kv_side.stride(2) * data_dim // full_dim
+    data_shape = (num_pages, dim_1, dim_2, data_dim)
+    data_strides = (page_bytes, s1, s2, 1)
+
+    s1_s = kv_side.stride(1) * scale_dim // full_dim
+    s2_s = kv_side.stride(2) * scale_dim // full_dim
+    scale_shape = (num_pages, dim_1, dim_2, scale_dim)
+    scale_strides = (page_bytes, s1_s, s2_s, 1)
+
+    base = kv_side.storage_offset()
+    data = torch.as_strided(kv_side, data_shape, data_strides, storage_offset=base)
+    scale = torch.as_strided(
+        kv_side, scale_shape, scale_strides, storage_offset=base + data_per_kv
+    ).view(torch.float8_e4m3fn)
+
+    return data, scale
+
+
+def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+    """Split an NVFP4 KV cache tensor into data and scale views.
+
+    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
+    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
+
+    Per-page layout: [K_data | K_scale | V_data | V_scale].
+    Each KV side is self-contained (data followed by its scale), so the
+    5D case simply splits each side independently.
+
+    The returned views are in the same dim order as the input (NHD or
+    HND), so callers get views matching whichever order they passed in.
+
+    Args:
+        kv_cache: 5D or 4D uint8 tensor where the last dimension is
+            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
+
+    Returns:
+        For 5D input:
+            ``(k_data, v_data), (k_scale, v_scale)``
+        For 4D input (single KV side):
+            ``(data,), (scale,)``
+    """
+    if kv_cache.dim() == 4:
+        data, scale = _nvfp4_split_data_scale(kv_cache)
+        return (data,), (scale,)
+
+    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
+    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
+    return (k_data, v_data), (k_scale, v_scale)
 
 
 def create_kv_caches_with_random_flash(
@@ -395,15 +495,31 @@ def create_kv_caches_with_random_flash(
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(
-            size=kv_cache_allocation_shape, dtype=dtype, device=device
-        ).permute(*stride_order)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
-            key_value_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
-            _generate_random_fp8(key_value_cache, -scale, scale)
+        if cache_dtype == "nvfp4":
+            # Full page dim: fp4 data + fp8 block scales per head.
+            # Per page layout: [K_data | K_scale | V_data | V_scale]
+            # Returns [:, 0] and [:, 1] like all other dtypes.
+            full_dim = nvfp4_kv_cache_full_dim(head_size)
+            nvfp4_shape = (num_blocks, 2, block_size, num_heads, full_dim)
+            nvfp4_phys = tuple(nvfp4_shape[i] for i in stride_order)
+            inv = [stride_order.index(i) for i in range(len(stride_order))]
+            key_value_cache = torch.randint(
+                0,
+                256,
+                nvfp4_phys,
+                dtype=dtype,
+                device=device,
+            ).permute(*inv)
         else:
-            raise ValueError(f"Does not support key cache of type {cache_dtype}")
+            key_value_cache = torch.empty(
+                size=kv_cache_allocation_shape, dtype=dtype, device=device
+            ).permute(*stride_order)
+            if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+                key_value_cache.uniform_(-scale, scale)
+            elif cache_dtype == "fp8":
+                _generate_random_fp8(key_value_cache, -scale, scale)
+            else:
+                raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -708,37 +824,62 @@ def is_torch_equal(target: str) -> bool:
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
+# Allow toggling LayerName usage via environment variable.
+# Defaults to True on torch >= 2.11, False otherwise.
+# Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
+_USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
+
 if HAS_OPAQUE_TYPE:
     from torch._opaque_base import OpaqueBase
 else:
     OpaqueBase = object  # type: ignore[misc, assignment]
 
 
-class ModuleName(OpaqueBase):  # type: ignore[misc]
+class LayerName(OpaqueBase):  # type: ignore[misc]
     """Wraps a module name string for use as a torch opaque type.
 
     When torch >= 2.11, this is registered as a hoisted value-type opaque
     object so that torch.compile lifts it as a graph input instead of baking
-    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    it as a constant.  This avoids per-layer recompilation for custom ops
+    that accept layer name strings (attention, MOE, KV cache, etc.).
     """
 
     def __init__(self, value: str):
         self.value = value
 
     def __eq__(self, other):
-        return isinstance(other, ModuleName) and self.value == other.value
+        return isinstance(other, LayerName) and self.value == other.value
 
     def __hash__(self):
         return hash(self.value)
 
     def __fx_repr__(self):
-        return (f"ModuleName({self.value!r})", {ModuleName})
+        return (f"LayerName({self.value!r})", {"LayerName": LayerName})
 
 
 if HAS_OPAQUE_TYPE:
     from torch._library.opaque_object import register_opaque_type
 
-    register_opaque_type(ModuleName, typ="value", hoist=True)
+    register_opaque_type(LayerName, typ="value", hoist=True)
+
+# On torch >= 2.11 (with VLLM_USE_LAYERNAME enabled), custom op
+# layer_name parameters use LayerName; otherwise they remain plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    LayerNameType: TypeAlias = str | LayerName
+else:
+    LayerNameType = LayerName if _USE_LAYERNAME else str
+
+
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
+    """Unwrap a LayerName to str, or return str unchanged."""
+    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
+
+
+def _encode_layer_name(layer_name: str) -> str | LayerName:
+    """Wrap a str layer name as LayerName when enabled."""
+    return LayerName(layer_name) if _USE_LAYERNAME else layer_name
 
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform

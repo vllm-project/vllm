@@ -50,7 +50,7 @@ class IrOpPriorityConfig:
             name: {
                 provider: IrOp.registry[name].impls[provider].uuid() for provider in p
             }
-            for name, p in asdict(self).items()
+            for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
         return hash_factors(factors)
@@ -68,13 +68,16 @@ class IrOpPriorityConfig:
     def set_priority(self):
         """
         Context manager to set the IR op priority for all op members.
-        It also imports vllm.kernels to ensure all implementations are made available.
+        It also imports IR kernel implementations for the current platform
+        to ensure all implementations are made available.
         """
-        import vllm.kernels  # noqa: F401, registers IR op implementations
         from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
 
         with contextlib.ExitStack() as stack:
-            for field in fields(self):
+            for field in fields(self):  # type: ignore[arg-type]
                 op_priority = getattr(self, field.name)
                 assert op_priority is not None, (
                     f"IR op priority for {field.name} must be set"
@@ -95,7 +98,7 @@ class IrOpPriorityConfig:
         A helper to create an IrOpPriorityConfig where fields not specified in kwargs
         use the given default list.
         """
-        for field in fields(cls):
+        for field in fields(cls):  # type: ignore[arg-type]
             if field.name not in kwargs:
                 kwargs[field.name] = list(default)
 
@@ -106,12 +109,14 @@ MoEBackend = Literal[
     "auto",
     "triton",
     "deep_gemm",
+    "deep_gemm_mega_moe",
     "cutlass",
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "marlin",
     "aiter",
+    "emulation",
 ]
 
 
@@ -132,14 +137,18 @@ class KernelConfig:
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
-    - "triton": Use Triton-based fused MoE kernels
+    - "triton": Use Triton-based fused MoE kernels 
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
+    - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "marlin": Use Marlin kernels (weight-only quantization)
-    - "aiter": Use AMD AITer kernels (ROCm only)"""
+    - "aiter": Use AMD AITer kernels (ROCm only)
+    - "emulation": use BF16/FP16 GEMM, dequantizing weights and
+                   running QDQ on activations.
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod

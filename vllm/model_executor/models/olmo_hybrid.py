@@ -68,6 +68,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -429,7 +430,13 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
         self_kv_cache = self.kv_cache
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        # conv_state must be (..., dim, width-1) for the conv kernels.
+        # DS layout stores it that way directly; SD layout needs a transpose.
+        conv_state = (
+            self_kv_cache[0]
+            if is_conv_state_dim_first()
+            else self_kv_cache[0].transpose(-1, -2)
+        )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens

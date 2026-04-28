@@ -42,7 +42,12 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import is_quantized_kv_cache, is_strictly_contiguous
+from vllm.utils.torch_utils import (
+    is_quantized_kv_cache,
+    is_strictly_contiguous,
+    nvfp4_kv_cache_full_dim,
+    nvfp4_kv_cache_split_views,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -63,7 +68,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVQuantMode,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
@@ -315,7 +324,6 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -352,6 +360,10 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        if cache_dtype_str == "nvfp4":
+            # Packed layout: fp4 data + fp8 block scales in last dim
+            last_dim = nvfp4_kv_cache_full_dim(head_size)
+            return (num_blocks, 2, block_size, num_kv_heads, last_dim)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -601,12 +613,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.head_dim = self.kv_cache_spec.head_size
         self.page_size = self.kv_cache_spec.block_size
 
-        self.cache_dtype = self.cache_config.cache_dtype
-        if is_quantized_kv_cache(self.cache_dtype):
-            self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                self.cache_dtype
-            )
+        if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
+            self.cache_dtype = self.cache_config.cache_dtype
+            # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
+            # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
+            self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
+            if self.is_kvcache_nvfp4:
+                # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
+                # which is passed to FlashInferImpl
+                self.kv_cache_dtype = self.cache_dtype
+                raise NotImplementedError("nvfp4 KV cache is not yet supported")
+            else:
+                self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    self.cache_dtype
+                )
         else:
+            self.cache_dtype = "auto"
+            self.is_kvcache_nvfp4 = False
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
@@ -620,7 +643,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         ):
-            self.q_data_type = self.kv_cache_dtype
+            if self.is_kvcache_nvfp4:
+                # NVFP4 KV cache uses FP8 quantized queries
+                self.q_data_type = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    "fp8_e4m3"
+                )
+            else:
+                self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
 
@@ -891,9 +920,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         all_uses_trtllm = (num_prefills == 0 or prefill_use_trtllm) and (
             num_decodes == 0 or decode_use_trtllm
         )
-        is_only_trtllm_decode = num_prefills == 0 and (
-            num_decodes > 0 and decode_use_trtllm
-        )
 
         if not all_uses_trtllm:
             if self.has_sinks:
@@ -939,7 +965,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
-        needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
+        # When all attention (both prefill and decode) uses TRTLLM,
+        # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
+        # (block_tables, seq_lens) directly.
+        needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
@@ -977,7 +1006,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_blocks_np -= num_common_kv_blocks
 
         # Compute paged_kv_indices if necessary
-        needs_paged_kv_indices = use_cascade or not is_only_trtllm_decode
+        # paged_kv_indices is only needed for FlashInfer native paths;
+        # TRTLLM paths use block_tables directly on GPU.
+        needs_paged_kv_indices = use_cascade or not all_uses_trtllm
         if needs_paged_kv_indices:
             assert num_blocks_np is not None
             assert seq_lens_np is not None
@@ -1054,9 +1085,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_prefill_gpu = (
                     qo_indptr[prefill_start:] - qo_indptr[prefill_start]
                 )
+                # Compute cum_seq_lens_kv on GPU to avoid CPU sync.
+                # This is the cumulative sum of the number of KV cache
+                # blocks per prefill request.
+                prefill_seq_lens = seq_lens[prefill_start:]
+                num_blocks_per_req = (prefill_seq_lens + page_size - 1) // page_size
                 paged_kv_indptr_prefill_gpu = self.paged_kv_indptr.gpu[
                     prefill_start : num_reqs + 1
                 ]
+                paged_kv_indptr_prefill_gpu[0] = 0
+                torch.cumsum(
+                    num_blocks_per_req,
+                    dim=0,
+                    out=paged_kv_indptr_prefill_gpu[1:],
+                )
                 # Compute max_q_len for prefill requests
                 query_lens_prefill_cpu = (
                     qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
@@ -1222,6 +1264,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window[0] if self.sliding_window is not None else -1
         )
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -1286,7 +1330,7 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1303,8 +1347,6 @@ class FlashInferImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
-
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
@@ -1402,7 +1444,16 @@ class FlashInferImpl(AttentionImpl):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
-        kv_cache_permute = kv_cache.permute(*stride_order)
+        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
+
+        # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
+        # Split into correctly-strided data and scale views.
+        nvfp4_kv_data = None
+        nvfp4_kv_block_scales = None
+        if self.is_kvcache_nvfp4:
+            nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
+                kv_cache_permute
+            )
 
         use_dcp = self.dcp_world_size > 1
 
@@ -1486,8 +1537,20 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
-                if attn_metadata.q_data_type != FP8_DTYPE and is_quantized_kv_cache(
-                    self.kv_cache_dtype
+                prefill_kv_block_scales = None
+                if self.is_kvcache_nvfp4:
+                    # NVFP4 trtllm-gen kernel requires FP8 query.
+                    assert attn_metadata.q_data_type == FP8_DTYPE, (
+                        "NVFP4 KV cache requires FP8 quantized queries for "
+                        "trtllm-gen prefill. Set "
+                        "disable_flashinfer_q_quantization=False."
+                    )
+                    mock_kv_cache = nvfp4_kv_data
+                    mock_block_table = block_tables_prefill
+                    prefill_kv_block_scales = nvfp4_kv_block_scales  # noqa: F841
+                elif (
+                    attn_metadata.q_data_type != FP8_DTYPE
+                    and self.kv_cache_dtype.startswith("fp8")
                 ):
                     # TRTLLM prefill attention does not support BF16 Q
                     # and fp8 kv cache. So to enable prefill attention
@@ -1632,7 +1695,9 @@ class FlashInferImpl(AttentionImpl):
 
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
-                    kv_cache=kv_cache_permute,
+                    kv_cache=nvfp4_kv_data
+                    if self.is_kvcache_nvfp4
+                    else kv_cache_permute,
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
@@ -1663,11 +1728,13 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
+            k_cache = kv_cache[:, 0]
+            v_cache = kv_cache[:, 1]
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
+                k_cache,
+                v_cache,
                 slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,

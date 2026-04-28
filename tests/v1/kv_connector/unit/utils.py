@@ -476,7 +476,7 @@ def make_nixl_scheduler(has_mamba: bool = False, is_hma_required: bool = False):
 
     Only sets the two flags needed by the N-1 prefill logic.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
 
