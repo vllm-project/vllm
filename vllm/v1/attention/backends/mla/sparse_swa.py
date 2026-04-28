@@ -152,6 +152,8 @@ class DeepseekSparseSWAMetadata:
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
     decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, window_size]
     decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
+    prefill_swa_indices: torch.Tensor | None = None
+    prefill_swa_lens: torch.Tensor | None = None
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
@@ -163,19 +165,17 @@ class DeepseekSparseSWAMetadata:
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
 
-    # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
-    # per present DeepseekV4 layer type, shared across all ~60 layers of that type
-    # within a decode step. The first forward call of a given type triggers
-    # the in-kernel planner (which also allocates tile_scheduler_metadata and
-    # num_splits via PyTorch's graph-aware allocator); subsequent same-type
-    # calls skip planning and reuse the plan. Fresh instance per build(), so
-    # have_initialized is always False at the start of a step and the plan
-    # is re-derived from current seq_lens / topk_length on replay.
-    # None for layer types the model does not use (or when num_decode_tokens
-    # is zero).
+    # Per-layer-type FlashMLA tile-scheduler metadata. Decode and direct
+    # prefill use separate FlashMLASchedMeta objects because their batch shapes
+    # differ, but same-type layers share the object within a step. The first
+    # forward call of a given type triggers the in-kernel planner; subsequent
+    # same-type calls reuse the populated plan.
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
+    prefill_tile_sched_swaonly: "FlashMLASchedMeta | None" = None
+    prefill_tile_sched_c4a: "FlashMLASchedMeta | None" = None
+    prefill_tile_sched_c128a: "FlashMLASchedMeta | None" = None
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
@@ -227,6 +227,10 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self._layer_types: set[str] = set()
         for ratio in compress_ratios:
             self._layer_types.add(_layer_type_for(int(ratio)))
+        attention_config = self.vllm_config.attention_config
+        self.use_flashmla_direct_kvcache_prefill = (
+            attention_config.use_deepseek_v4_flashmla_direct_kvcache_prefill
+        )
 
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_indices = torch.zeros(
@@ -290,9 +294,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         is_valid_token.copy_(slot_mapping >= 0)
 
-        if num_decode_tokens > 0:
-            self.decode_swa_lens[num_decode_tokens:] = 0
-            _compute_swa_indices_and_lens_kernel[(num_decode_tokens,)](
+        num_swa_tokens = num_decode_tokens
+        if self.use_flashmla_direct_kvcache_prefill:
+            num_swa_tokens += num_prefill_tokens
+
+        if num_swa_tokens > 0:
+            self.decode_swa_lens[num_swa_tokens:] = 0
+            _compute_swa_indices_and_lens_kernel[(num_swa_tokens,)](
                 self.decode_swa_indices,
                 self.decode_swa_indices.stride(0),
                 self.decode_swa_lens,
@@ -307,6 +315,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 TRITON_BLOCK_SIZE=1024,
             )
 
+        prefill_swa_indices = None
+        prefill_swa_lens = None
+        if self.use_flashmla_direct_kvcache_prefill and num_prefill_tokens > 0:
+            prefill_end = num_decode_tokens + num_prefill_tokens
+            prefill_swa_indices = self.decode_swa_indices[num_decode_tokens:prefill_end]
+            prefill_swa_lens = self.decode_swa_lens[num_decode_tokens:prefill_end]
+
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
         deepseek_v4_fields = self._build_deepseek_v4_metadata(
             num_decodes,
@@ -320,6 +335,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # each type triggers the planner and all same-type layers reuse the
         # resulting plan for the rest of the step.
         tile_sched = self.build_tile_scheduler(num_decode_tokens)
+        prefill_tile_sched = self.build_tile_scheduler(
+            num_prefill_tokens if self.use_flashmla_direct_kvcache_prefill else 0
+        )
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
@@ -331,6 +349,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             token_to_req_indices=token_to_req_indices,
             decode_swa_indices=self.decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
+            prefill_swa_indices=prefill_swa_indices,
+            prefill_swa_lens=prefill_swa_lens,
             block_size=self.block_size,
             num_decodes=num_decodes,
             num_prefills=num_prefills,
@@ -339,29 +359,32 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
+            prefill_tile_sched_swaonly=prefill_tile_sched[_LAYER_TYPE_SWAONLY],
+            prefill_tile_sched_c4a=prefill_tile_sched[_LAYER_TYPE_C4A],
+            prefill_tile_sched_c128a=prefill_tile_sched[_LAYER_TYPE_C128A],
             **deepseek_v4_fields,
         )
 
     def build_tile_scheduler(
-        self, num_decode_tokens: int
+        self, num_tokens: int
     ) -> dict[str, FlashMLASchedMeta | None]:
         """Allocate one empty ``FlashMLASchedMeta`` per present DeepseekV4 layer type.
 
         Returned instances have ``tile_scheduler_metadata`` / ``num_splits``
-        set to ``None``; the FlashMLA C++ decode path will allocate them and
-        run the tile-scheduler planner on the first ``flash_mla_with_kvcache``
-        call of each type. Subsequent same-type calls reuse the plan because
-        the tensors (and ``have_initialized``) are populated on the struct.
+        set to ``None``; the FlashMLA C++ path will allocate them and run the
+        tile-scheduler planner on the first ``flash_mla_with_kvcache`` call of
+        each type. Subsequent same-type calls reuse the plan because the
+        tensors (and ``have_initialized``) are populated on the struct.
 
-        Returns all-``None`` when there are no decode tokens this step, so
-        ``_forward_decode`` sees a clean sentinel.
+        Returns all-``None`` when there are no tokens for that phase, so callers
+        see a clean sentinel.
         """
         out: dict[str, FlashMLASchedMeta | None] = {
             _LAYER_TYPE_SWAONLY: None,
             _LAYER_TYPE_C4A: None,
             _LAYER_TYPE_C128A: None,
         }
-        if num_decode_tokens == 0 or current_platform.is_rocm():
+        if num_tokens == 0 or current_platform.is_rocm():
             return out
         for layer_type in self._layer_types:
             # get_mla_metadata() is the official FlashMLA entry point that
@@ -455,6 +478,13 @@ def _compute_swa_indices_and_lens_kernel(
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
         tl.store(swa_lens_ptr + token_idx, 0)
+        for i in range(0, window_size, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + token_idx * swa_indices_stride + offset,
+                -1,
+                mask=offset < window_size,
+            )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
