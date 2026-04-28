@@ -15,7 +15,7 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct \
   --enable-prompt-embeds
 
 Run the client:
-python examples/online_serving/prompt_embed_inference_with_openai_client.py
+python examples/features/prompt_embed/prompt_embed_inference_with_openai_client.py
 
 Model: meta-llama/Llama-3.2-1B-Instruct
 Note: This model is gated on Hugging Face Hub.
