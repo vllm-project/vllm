@@ -1381,7 +1381,9 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     block_size=spec.block_size,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
+                    head_size_v=spec.head_size_v,
                     dtype=spec.dtype,
+                    kv_quant_mode=spec.kv_quant_mode,
                     sliding_window=spec.sliding_window,
                     page_size_padded=spec.page_size_padded,
                 )
