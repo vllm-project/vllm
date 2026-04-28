@@ -66,6 +66,13 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+if Version(version("transformers")) < Version("5.0.0"):
+    logger.warning(
+        "Support for Transformers v4 is deprecated. The Transformers v4 codepath will "
+        "become unmaintained in vLLM v0.22.0 and will be removed in vLLM v0.24.0. "
+        "Please upgrade to Transformers v5: pip install --upgrade transformers"
+    )
+
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -89,6 +96,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    deepseek_v4="DeepseekV4Config",
     flex_olmo="FlexOlmoConfig",
     fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",

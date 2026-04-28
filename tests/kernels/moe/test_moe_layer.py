@@ -1632,6 +1632,7 @@ def _parallel_worker(
                 if all2all_manager is not None:
                     all2all_manager.destroy()
             total = total + 1
+            torch.distributed.barrier()
 
     skipped = total - (passed + failed)
 
