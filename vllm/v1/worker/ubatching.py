@@ -187,8 +187,7 @@ def dbo_register_recv_hook(recv_hook):
     if len(_THREAD_ID_TO_CONTEXT) > 0:
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
-        if next_ctx is not None:
-            next_ctx.recv_hook = recv_hook
+        next_ctx.recv_hook = recv_hook
 
 
 def dbo_get_previous_event(func, *args, **kwargs):
