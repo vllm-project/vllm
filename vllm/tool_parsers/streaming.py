@@ -68,7 +68,7 @@ def extract_named_tool_call_streaming(
     tool_call_id_type: str,
     tokenizer: "TokenizerLike",
     tool_call_array_index: int = 0,
-) -> tuple[DeltaMessage, bool]:
+) -> tuple[DeltaMessage | None, bool]:
     """Build a streaming tool-call delta for forced named tool choice."""
     if function_name_returned:
         delta_tool_call = DeltaToolCall(
