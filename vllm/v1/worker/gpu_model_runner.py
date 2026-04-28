@@ -3072,21 +3072,27 @@ class GPUModelRunner(
         is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
 
         # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
+        # across tensor parallel ranks. Place it at the rank-specific offset in
+        # the persistent buffer so the compiled graph's rank-aware slice can
+        # extract the correct portion.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
                 is_scattered = k == "residual" and is_rs
-                copy_len = num_tokens // tp if is_scattered else num_tokens
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
-                )
+                if is_scattered:
+                    local_len = num_tokens // tp
+                    tp_rank = get_tp_group().rank_in_group
+                    offset = tp_rank * local_len
+                    self.intermediate_tensors[k][offset:offset + local_len]\
+                        .copy_(v[:local_len], non_blocking=True)
+                else:
+                    self.intermediate_tensors[k][:num_tokens].copy_(
+                        v[:num_tokens], non_blocking=True
+                    )
 
         return IntermediateTensors(
             {
-                k: v[: num_tokens // tp]
-                if k == "residual" and is_rs
-                else v[:num_tokens]
+                k: v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             }
         )
