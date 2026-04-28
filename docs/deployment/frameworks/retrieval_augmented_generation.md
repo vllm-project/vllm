@@ -36,7 +36,7 @@ pip install -U vllm \
     vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
     ```
 
-1. Use the script: [examples/examples/applications/rag/retrieval_augmented_generation_with_langchain.py](../../../examples/applications/rag/retrieval_augmented_generation_with_langchain.py)
+1. Use the script: [examples/applications/rag/retrieval_augmented_generation_with_langchain.py](../../../examples/applications/rag/retrieval_augmented_generation_with_langchain.py)
 
 1. Run the script
 
