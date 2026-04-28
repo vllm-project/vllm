@@ -953,35 +953,36 @@ def get_vllm_version() -> str:
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
-    if _no_device():
-        if envs.VLLM_TARGET_DEVICE == "empty":
-            version += f"{sep}empty"
-    elif _is_cuda():
-        if USE_PRECOMPILED_EXTENSIONS and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
-            version += f"{sep}precompiled"
+    if not envs.VLLM_SKIP_VERSION_SUFFIX:
+        if _no_device():
+            if envs.VLLM_TARGET_DEVICE == "empty":
+                version += f"{sep}empty"
+        elif _is_cuda():
+            if USE_PRECOMPILED_EXTENSIONS and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
+                version += f"{sep}precompiled"
+            else:
+                cuda_version = str(get_nvcc_cuda_version())
+                if cuda_version != envs.VLLM_MAIN_CUDA_VERSION:
+                    cuda_version_str = cuda_version.replace(".", "")[:3]
+                    # skip this for source tarball, required for pypi
+                    if "sdist" not in sys.argv:
+                        version += f"{sep}cu{cuda_version_str}"
+        elif _is_hip():
+            # Get the Rocm Version
+            rocm_version = get_rocm_version() or torch.version.hip
+            if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
+                version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
+        elif _is_tpu():
+            version += f"{sep}tpu"
+        elif _is_cpu():
+            # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+            # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+            if VLLM_TARGET_DEVICE == "cpu":
+                version += f"{sep}cpu"
+        elif _is_xpu():
+            version += f"{sep}xpu"
         else:
-            cuda_version = str(get_nvcc_cuda_version())
-            if cuda_version != envs.VLLM_MAIN_CUDA_VERSION:
-                cuda_version_str = cuda_version.replace(".", "")[:3]
-                # skip this for source tarball, required for pypi
-                if "sdist" not in sys.argv:
-                    version += f"{sep}cu{cuda_version_str}"
-    elif _is_hip():
-        # Get the Rocm Version
-        rocm_version = get_rocm_version() or torch.version.hip
-        if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
-            version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
-    elif _is_tpu():
-        version += f"{sep}tpu"
-    elif _is_cpu():
-        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
-        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
-        if VLLM_TARGET_DEVICE == "cpu":
-            version += f"{sep}cpu"
-    elif _is_xpu():
-        version += f"{sep}xpu"
-    else:
-        raise RuntimeError("Unknown runtime environment")
+            raise RuntimeError("Unknown runtime environment")
 
     return version
 
