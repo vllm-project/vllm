@@ -8,11 +8,9 @@ then runs in the parent with clean in-memory state but populated caches.
 """
 
 import multiprocessing as mp
-import platform
 import subprocess
 import sys
 
-import pytest
 from torch._dynamo.utils import counters
 
 from vllm.compilation.counter import compilation_counter
@@ -137,13 +135,9 @@ def test_warm_up_compile_pool_oom_fallback(monkeypatch):
     )
 
 
-@pytest.mark.skipif(
-    platform.system() != "Linux",
-    reason="RLIMIT_AS cannot be lowered on macOS",
-)
-def test_warm_pool_real_oom_linux():
+def test_warm_pool_real_oom():
     """Verify that AsyncCompile.warm_pool() raises an exception under
-    memory pressure on Linux (where RLIMIT_AS can be enforced)."""
+    memory pressure when RLIMIT_AS is enforced."""
     probe_code = """
 import resource
 # Restrict virtual memory to 500MB
