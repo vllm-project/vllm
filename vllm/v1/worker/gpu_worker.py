@@ -254,6 +254,13 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.accelerator.set_device_index(self.device)
 
+            if (
+                current_platform.is_cuda()
+                and "expandable_segments"
+                not in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+            ):
+                torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
             # Initialize the distributed environment BEFORE taking
