@@ -6,6 +6,7 @@ from collections.abc import Generator
 
 import pytest
 from openai.types.responses.function_tool import FunctionTool
+from xgrammar import StructuralTag
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -1146,3 +1147,56 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     args = json.loads(raw_arguments)
     assert args["message"] == "hello world"
     assert '\\"hello world\\"' not in raw_arguments
+
+
+def test_support_builtin_structural_tag(qwen3_tool_parser: Qwen3CoderToolParser):
+    assert qwen3_tool_parser.support_structural_tag() is True
+
+
+def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    tag = qwen3_tool_parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("include_reasoning", [True, False])
+def test_adjust_request_auto_structural_tag_is_json_string(
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+    include_reasoning: bool,
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+        include_reasoning=include_reasoning,
+    )
+    out = qwen3_tool_parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None
+    assert isinstance(out.structured_outputs.structural_tag, str)
+    loaded = json.loads(out.structured_outputs.structural_tag)
+    assert isinstance(loaded, dict)
+
+
+def test_adjust_request_required_uses_json_schema_not_structural_tag(
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+    out = qwen3_tool_parser.adjust_request(req)
+    assert out.structured_outputs.structural_tag is None

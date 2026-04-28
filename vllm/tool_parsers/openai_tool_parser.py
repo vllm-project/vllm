@@ -20,6 +20,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 
+from xgrammar import StructuralTag, get_builtin_structural_tag
+
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
 else:
@@ -111,4 +113,20 @@ class OpenAIToolParser(ToolParser):
     ) -> DeltaMessage | None:
         raise NotImplementedError(
             "Not being used, manual parsing in serving_chat.py"  # noqa: E501
+        )
+
+    def support_structural_tag(self) -> bool:
+        return True
+
+    def get_structural_tag(
+        self, request: ChatCompletionRequest
+    ) -> StructuralTag:
+        # Config for xgrammar's built-in structural tagging.
+        dict_tools = [tool.model_dump() for tool in request.tools]
+        thinking_mode = request.include_reasoning
+        return get_builtin_structural_tag(
+            model="harmony",
+            reasoning=True,
+            tools=dict_tools,
+            force_empty_reasoning=not thinking_mode,
         )

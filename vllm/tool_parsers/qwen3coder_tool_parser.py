@@ -11,6 +11,7 @@ import regex as re
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -26,6 +27,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.tool_parsers.utils import find_tool_properties
+
+from xgrammar import StructuralTag, get_builtin_structural_tag
 
 logger = init_logger(__name__)
 
@@ -681,3 +684,20 @@ class Qwen3CoderToolParser(ToolParser):
                 return result
 
         return None
+    
+    
+    def support_structural_tag(self) -> bool:
+        return True
+
+    def get_structural_tag(
+        self, request: ChatCompletionRequest
+    ) -> StructuralTag:
+        # Config for xgrammar's built-in structural tagging.
+        dict_tools = [tool.model_dump() for tool in request.tools]
+        thinking_mode = request.include_reasoning
+        return get_builtin_structural_tag(
+            model="qwen_coder",
+            reasoning=True,
+            tools=dict_tools,
+            force_empty_reasoning=not thinking_mode,
+        )

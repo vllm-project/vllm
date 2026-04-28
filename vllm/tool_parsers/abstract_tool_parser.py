@@ -5,6 +5,9 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+import json
+
+from xgrammar import StructuralTag
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -83,17 +86,19 @@ class ToolParser:
         return self.model_tokenizer.get_vocab()
 
     def adjust_request(
-        self, request: ChatCompletionRequest | ResponsesRequest
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """
-        Static method that used to adjust the request parameters.
-        """
+
+        # If there are no tools, return the request as is.
         if not request.tools:
             return request
+
+        # Step 1: set structured output params when tool constraints are derived
+        # from the tool schema.
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
-        # Set structured output params for tool calling
         if json_schema_from_tool is not None:
             if isinstance(request, ChatCompletionRequest):
                 # tool_choice: "Forced Function" or "required" will override
@@ -118,8 +123,31 @@ class ToolParser:
                         strict=True,
                     )
                 )
+                
+            return request
 
+        # Only ChatCompletionRequest is supported for Step 2.
+        if not isinstance(request, ChatCompletionRequest):
+            return request
+
+
+        # Step 2: apply xgrammar's built-in tool calling support.
+        if self.support_structural_tag() and request.tool_choice == "auto":
+            structure_tag = self.get_structural_tag(request)
+            request.structured_outputs = StructuredOutputsParams(
+                structural_tag=json.dumps(structure_tag.model_dump()),
+            )
         return request
+
+    def get_structural_tag(
+        self, request: ChatCompletionRequest
+    ) -> StructuralTag:
+        raise NotImplementedError(
+            "ToolParser.get_xgrammar_builtin_structural_tag is not implemented"
+        )
+
+    def support_structural_tag(self) -> bool:
+        return False
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
