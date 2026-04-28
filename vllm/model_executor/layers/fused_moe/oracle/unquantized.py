@@ -121,7 +121,7 @@ def backend_to_kernel_cls(
         return BatchedTritonExperts
 
     elif backend == UnquantizedMoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExperts
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
 
         return XPUExperts
 
@@ -213,19 +213,6 @@ def select_unquantized_moe_backend(
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
-
-    # LoRA needs Triton's unfused activation/reduction hooks. Selecting the
-    # backend here ensures weights stay in a LoRA-compatible layout instead of
-    # being permuted for a backend like FlashInfer or AITER during load.
-    if moe_config.is_lora_enabled:
-        backend = UnquantizedMoeBackend.TRITON
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-            backend = UnquantizedMoeBackend.BATCHED_TRITON
-        return _return_or_raise(
-            backend,
-            moe_config,
-            activation_format,
-        )
 
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":

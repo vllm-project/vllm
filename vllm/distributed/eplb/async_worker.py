@@ -4,7 +4,6 @@
 The async worker that transfers experts in the background.
 """
 
-import asyncio
 import threading
 from typing import TYPE_CHECKING
 
@@ -36,21 +35,15 @@ def start_async_worker(
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
         cuda_stream = torch.cuda.Stream(device=device_index)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(
-                transfer_run_periodically(
-                    state=state,
-                    eplb_group=eplb_group,
-                    cuda_stream=cuda_stream,
-                    is_profile=is_profile,
-                )
+            transfer_run_periodically(
+                state=state,
+                eplb_group=eplb_group,
+                cuda_stream=cuda_stream,
+                is_profile=is_profile,
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
-        finally:
-            loop.close()
 
     thread = threading.Thread(target=thread_target, daemon=True)
     thread.start()
@@ -83,7 +76,7 @@ def run_rebalance_experts(
     return new_physical_to_logical_map
 
 
-async def transfer_run_periodically(
+def transfer_run_periodically(
     state: "EplbState",
     eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
@@ -118,7 +111,7 @@ async def transfer_run_periodically(
             # model_state.expert_buffer, which will be consumed by the main thread in
             # move_to_workspace
             while model_state.rebalanced and layer_idx < num_layers:
-                transfer_metadata = await transfer_layer(
+                transfer_metadata = transfer_layer(
                     old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
                     expert_weights=model_state.model.expert_weights[layer_idx],

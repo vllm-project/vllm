@@ -116,6 +116,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
 
+        # Cap warmup memory: tests use small max_model_len (1024) but the
+        # engine default max_num_batched_tokens is 16384. Warming up large
+        # models (e.g. Llama-4-Scout-FP8) at 16384 tokens may trigger OOM.
+        model_kwargs.setdefault("max_num_batched_tokens", 8192)
+
         # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
         # decompose_auto_functionalized when +rotary_embedding is forced into
         # the compile graph. Disable qk_norm+rope fusion (which auto-enables
@@ -189,7 +194,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # TODO: Remove log counting in unit tests
             # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            if match_name != "attn_quant_fusion":
+            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
@@ -250,6 +255,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"entries (SP took precedence), found: {log_matches}"
                 )
 
+            elif match_name == "act_quant_fusion":
+                actual_match = match_table.get("activation_quant_fusion_pass", 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
+                )
             elif match_name == "attn_quant_fusion":
                 actual_match = match_table.get(
                     "attn_quant_fusion", 0
