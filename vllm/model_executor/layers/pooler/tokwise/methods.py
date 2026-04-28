@@ -100,7 +100,7 @@ class StepPool(AllPool):
         ):
             # for unfinished chunked prefill
             if data is None:
-                pass
+                pooled_data.append(None)
             else:
                 step_tag_id = pooling_param.step_tag_id
                 returned_token_ids = pooling_param.returned_token_ids
@@ -111,7 +111,7 @@ class StepPool(AllPool):
                 if step_tag_id is not None:
                     data = data[token_id == step_tag_id]
 
-            pooled_data.append(data)
+                pooled_data.append(data)
 
         return pooled_data
 

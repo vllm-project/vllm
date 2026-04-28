@@ -9,7 +9,7 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
-DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
+DEFAULT_VARIANT_ALIAS="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 PYTHON="${PYTHON_PROG:-python3}" # try to read from env var, otherwise use python3
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
@@ -19,7 +19,7 @@ has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12)
 if [[ "$has_new_python" -eq 0 ]]; then
     # use new python from docker
     docker pull python:3-slim
-    PYTHON="docker run --rm -v $(pwd):/app -w /app python:3-slim python3"
+    PYTHON="docker run --rm -u $(id -u):$(id -g) -v $(pwd):/app -w /app python:3-slim python3"
 fi
 
 echo "Using python interpreter: $PYTHON"

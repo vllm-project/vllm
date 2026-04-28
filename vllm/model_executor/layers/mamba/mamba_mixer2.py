@@ -31,10 +31,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
@@ -44,7 +44,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -536,7 +541,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         torch.ops.vllm.mamba_mixer2(
             projected_states,
             ssm_output,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # 4. gated MLP
@@ -567,14 +572,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        attn_metadata_raw = forward_context.attn_metadata
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
             # conv_state must be (..., dim, width-1) for the conv kernels.
             # DS layout stores it that way directly; SD layout needs a
@@ -703,6 +710,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # 3. State Space Model sequence transformation
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
+                assert state_indices_tensor_p is not None
                 kernel_ssm_indices = state_indices_tensor_p
                 if is_mamba_cache_all:
                     kernel_ssm_indices = state_indices_tensor_p.gather(
@@ -741,6 +749,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
 
             if is_mamba_cache_all:
+                assert mamba_block_size is not None
+                assert state_indices_tensor_p is not None
+                assert block_idx_first_scheduled_token_p is not None
+                assert block_idx_last_scheduled_token_p is not None
+                assert last_chunk_indices_p is not None
+                assert num_computed_tokens_p is not None
+
                 # The chunk_stride is the number of chunks per mamba block
                 # e.g., if mamba_block_size = 512 and chunk_size = 256,
                 # then chunk_stride = 2
@@ -805,6 +820,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ssm_state[cache_blocks_to_fill] = from_where
 
                 # For all seqs, store the last state (note: might be partial):
+                assert state_indices_tensor_p is not None
                 ssm_state[
                     state_indices_tensor_p.gather(
                         1, block_idx_last_scheduled_token_p.unsqueeze(1)
@@ -815,10 +831,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
+                assert state_indices_tensor_p is not None
                 ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests
         if has_decode:
+            assert state_indices_tensor_d is not None
             if is_mamba_cache_all:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
@@ -885,8 +903,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 B_d,
                 C_d,
                 D_d,
-                z=None,
-                dt_bias=dt_bias,
+                dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
@@ -894,8 +911,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
-                enable_stochastic_rounding=self.cache_config.enable_mamba_cache_stochastic_rounding,
-                cache_philox_rounds=self.cache_config.mamba_cache_philox_rounds,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
@@ -927,8 +942,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self.conv_ssm_forward(projected_states=projected_states, output=output)
@@ -937,7 +953,7 @@ def mamba_mixer2(
 def mamba_mixer2_fake(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 

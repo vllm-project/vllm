@@ -36,7 +36,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl"]
+EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -90,6 +90,7 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
     - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
     """
@@ -623,6 +624,18 @@ class ParallelConfig:
         )
 
     @property
+    def use_batched_dp_moe(self) -> bool:
+        return (
+            self.all2all_backend
+            in (
+                "deepep_low_latency",
+                "nixl_ep",
+            )
+            and self.enable_expert_parallel
+            and self.data_parallel_size > 1
+        )
+
+    @property
     def node_rank_within_dp(self) -> int:
         return self.node_rank % self.nnodes_within_dp
 
@@ -727,6 +740,14 @@ class ParallelConfig:
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
+            # NUMA binding is per-rank host-side memory locality; it does
+            # not affect collective-communication semantics. When numa_bind
+            # is enabled with auto-detection, each DP rank stores its own
+            # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
+            # `_get_numa_node`), which would otherwise diverge the DP hash.
+            "numa_bind",
+            "numa_bind_nodes",
+            "numa_bind_cpus",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
