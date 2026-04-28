@@ -116,6 +116,7 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
     __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
     _mm256_mask_storeu_epi16(ptr, mask, reg);
 #else
+    // Fallback for lack of 16-bit masked store
     int16_t tmp[VEC_ELEM_NUM];
     _mm256_storeu_si256((__m256i*)tmp, reg);
     for (int i = 0; i < elem_num; ++i)
@@ -162,6 +163,7 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
     _mm256_mask_storeu_epi16(ptr, mask, reg);
 #else
+    // Fallback for lack of 16-bit masked store
     int16_t tmp[VEC_ELEM_NUM];
     _mm256_storeu_si256((__m256i*)tmp, reg);
     for (int i = 0; i < elem_num; ++i)
@@ -616,6 +618,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   void save(float* ptr, const int elem_num) const {
+    // Partial store: cmpgt produces a sign-bit mask (0xFFFFFFFF/0 per lane)
+    // for the first elem_num lanes, applied across the two 8-wide halves.
     if (elem_num <= 8) {
       __m256i mask =
           _mm256_cmpgt_epi32(_mm256_set1_epi32(elem_num),
@@ -647,6 +651,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                      _mm256_min_ps(reg_high, b.reg_high));
   }
 
+  // Partial element-wise min over the first elem_num lanes only (tail path).
+  // Scalar via AliasReg: AVX2 has no masked vminps, so we spill, loop, reload.
   FP32Vec16 min(const FP32Vec16& b, const int elem_num) const {
     AliasReg ar_this_low, ar_this_high, ar_b_low, ar_b_high;
     ar_this_low.reg = reg_low;
@@ -662,6 +668,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(ar_this_low.reg, ar_this_high.reg);
   }
 
+  // Partial element-wise max over the first elem_num lanes only (tail path).
+  // Scalar via AliasReg: AVX2 has no masked vmaxps, so we spill, loop, reload.
   FP32Vec16 max(const FP32Vec16& b, const int elem_num) const {
     AliasReg ar_this_low, ar_this_high, ar_b_low, ar_b_high;
     ar_this_low.reg = reg_low;
