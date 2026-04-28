@@ -28,13 +28,11 @@ def _make_block_stored(
 
 def _make_block_removed(
     group_idx: int | None = None,
-    kv_cache_spec_sliding_window: int | None = None,
 ) -> BlockRemoved:
     return BlockRemoved(
         block_hashes=[_FAKE_HASH],
         medium="GPU",
         group_idx=group_idx,
-        kv_cache_spec_sliding_window=kv_cache_spec_sliding_window,
     )
 
 
@@ -82,8 +80,7 @@ def test_block_removed_hash_same_for_equal_group_idx():
     assert hash(event_a) == hash(event_b)
 
 
-@pytest.mark.parametrize("event_factory", [_make_block_stored, _make_block_removed])
-def test_event_hash_differs_by_sliding_window(event_factory):
-    event_a = event_factory(group_idx=1, kv_cache_spec_sliding_window=128)
-    event_b = event_factory(group_idx=1, kv_cache_spec_sliding_window=256)
+def test_block_stored_hash_differs_by_sliding_window():
+    event_a = _make_block_stored(group_idx=1, kv_cache_spec_sliding_window=128)
+    event_b = _make_block_stored(group_idx=1, kv_cache_spec_sliding_window=256)
     assert hash(event_a) != hash(event_b)

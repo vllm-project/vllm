@@ -1948,8 +1948,8 @@ def test_kv_cache_events(blocks_to_cache: int):
     events = manager.take_events()
 
     for blocks in events[:-1]:
+        assert isinstance(blocks, BlockRemoved)
         assert blocks.block_hashes[0] in stored_block_hash
-        assert blocks.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
     assert (
@@ -1979,8 +1979,6 @@ def test_null_parent_block_hash():
         enable_caching=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
-        kv_cache_spec_kinds=[KVCacheSpecKind.FULL_ATTENTION.value],
-        kv_cache_spec_sliding_windows=[None],
     )
 
     req = make_request(
@@ -2027,7 +2025,7 @@ def test_null_parent_block_hash():
     ]
     assert event.block_hashes == expected_new_hashes
     assert event.group_idx == kv_cache_group_id
-    assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
+    assert event.kv_cache_spec_kind is None
     assert event.kv_cache_spec_sliding_window is None
 
     # Ensure we didn't accidentally assign a hash to the null block.
@@ -2102,18 +2100,14 @@ def test_block_stored_event_group_idx(group_id: int):
     block_size = 4
     num_tokens = block_size * 2
 
-    pool = BlockPool(
-        num_gpu_blocks=5,
+    manager = KVCacheManager(
+        make_kv_cache_config_three_types(block_size, num_blocks=5),
+        max_model_len=8192,
         enable_caching=True,
-        hash_block_size=block_size,
         enable_kv_cache_events=True,
-        kv_cache_spec_kinds=[
-            KVCacheSpecKind.FULL_ATTENTION.value,
-            KVCacheSpecKind.SLIDING_WINDOW.value,
-            KVCacheSpecKind.MAMBA.value,
-        ],
-        kv_cache_spec_sliding_windows=[None, 128, None],
+        hash_block_size=block_size,
     )
+    pool = manager.block_pool
 
     req = make_request(
         "req_grp_idx",
@@ -2132,7 +2126,7 @@ def test_block_stored_event_group_idx(group_id: int):
         kv_cache_group_id=group_id,
     )
 
-    events = pool.take_events()
+    events = manager.take_events()
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == group_id
@@ -2144,7 +2138,11 @@ def test_block_stored_event_group_idx(group_id: int):
             KVCacheSpecKind.MAMBA.value,
         ][group_id]
     )
-    assert events[0].kv_cache_spec_sliding_window == [None, 128, None][group_id]
+    assert events[0].kv_cache_spec_sliding_window == [
+        None,
+        2 * block_size,
+        None,
+    ][group_id]
 
 
 def test_block_stored_event_group_idx_multiple_groups():
@@ -2159,18 +2157,38 @@ def test_block_stored_event_group_idx_multiple_groups():
     block_size = 4
     num_tokens = block_size * 2
 
-    # null block + 4 usable (2 per group)
-    pool = BlockPool(
-        num_gpu_blocks=5,
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=5,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer1"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["layer2"],
+                    SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=128,
+                    ),
+                ),
+            ],
+        ),
+        max_model_len=8192,
         enable_caching=True,
-        hash_block_size=block_size,
         enable_kv_cache_events=True,
-        kv_cache_spec_kinds=[
-            KVCacheSpecKind.FULL_ATTENTION.value,
-            KVCacheSpecKind.SLIDING_WINDOW.value,
-        ],
-        kv_cache_spec_sliding_windows=[None, 128],
+        hash_block_size=block_size,
     )
+    pool = manager.block_pool
 
     req = make_request(
         "req_multi_grp",
@@ -2201,7 +2219,7 @@ def test_block_stored_event_group_idx_multiple_groups():
         kv_cache_group_id=1,
     )
 
-    events = pool.take_events()
+    events = manager.take_events()
     assert len(events) == 2
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == 0
@@ -2229,12 +2247,6 @@ def test_block_removed_event_group_idx(group_id: int):
         enable_caching=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
-        kv_cache_spec_kinds=[
-            KVCacheSpecKind.FULL_ATTENTION.value,
-            KVCacheSpecKind.SLIDING_WINDOW.value,
-            KVCacheSpecKind.MAMBA.value,
-        ],
-        kv_cache_spec_sliding_windows=[None, 128, None],
     )
 
     req = make_request(
@@ -2270,15 +2282,6 @@ def test_block_removed_event_group_idx(group_id: int):
     assert len(removed_events) == 2
     for event in removed_events:
         assert event.group_idx == group_id
-        assert (
-            event.kv_cache_spec_kind
-            == [
-                KVCacheSpecKind.FULL_ATTENTION.value,
-                KVCacheSpecKind.SLIDING_WINDOW.value,
-                KVCacheSpecKind.MAMBA.value,
-            ][group_id]
-        )
-        assert event.kv_cache_spec_sliding_window == [None, 128, None][group_id]
 
 
 def test_eagle_enabled_removes_last_block():
