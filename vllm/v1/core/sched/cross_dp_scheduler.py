@@ -77,12 +77,6 @@ class RequestManager:
             max_length=long_request_threshold)
 
     def select_dp(self, request: Request, is_long: bool) -> list[int] | None:
-        if len(request.cp_ranks) > 0:
-            if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]):
-                return request.cp_ranks
-            else:
-                return None
-        
         if is_long:
             return [
                 i for i in range(self.cp_world_size)
@@ -90,6 +84,11 @@ class RequestManager:
         else:
             # Get the the dp with the least number of requests
             best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
+            if rank_budgets[best_dp] < num_new_tokens:
+                max_budget = max(rank_budgets)
+                if num_new_tokens > max_budget:
+                    return None
+                best_dp = rank_budgets.index(max_budget)
             return [best_dp]
 
     def add_req(self, request: Request) -> None:
@@ -820,7 +819,7 @@ class CrossDPScheduler(Scheduler):
 
                     for rank in preempted_req.cp_ranks:
                         preempted_reqs[rank].append(preempted_req)
-
+                    preempted_req.cp_ranks = []
                     # preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -977,7 +976,7 @@ class CrossDPScheduler(Scheduler):
                         # we can stop the scheduling here.
                         break
 
-                    if num_new_tokens <= 0 and self.waiting.is_long_request(request):
+                    if effective_budget <= 0 and self.waiting.is_long_request(request):
                         # CP request too large — skip it and keep
                         # looking for shorter DP requests.
                         self.waiting.pop_request()
@@ -1017,15 +1016,15 @@ class CrossDPScheduler(Scheduler):
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
-                        # num_new_tokens,
-                        # rank_budgets,
+                        num_new_tokens,
+                        rank_budgets,
                     )
                 else:
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
-                        # num_new_tokens,
-                        # rank_budgets,
+                        num_new_tokens,
+                        rank_budgets,
                     )
                 if selected_dp is None:
                     break
