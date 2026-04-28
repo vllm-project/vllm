@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 import json
 
-from xgrammar import StructuralTag
+from xgrammar import StructuralTag, get_model_structural_tag
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -132,19 +132,52 @@ class ToolParser:
 
 
         # Step 2: apply xgrammar's built-in tool calling support.
-        if self.support_structural_tag() and request.tool_choice == "auto":
+        # XGrammar will support tool_choice="none" in the future. Currently, we only support tool_choice="auto" and tool_choice="required".
+        need_tool_calling = request.tool_choice == "auto" or request.tool_choice == "required"
+        if self.support_structural_tag() and need_tool_calling:
             structure_tag = self.get_structural_tag(request)
             request.structured_outputs = StructuredOutputsParams(
                 structural_tag=json.dumps(structure_tag.model_dump()),
             )
         return request
+    
+    def get_model_structural_tag_id(self) -> str:
+        """
+        Return the model ID for the builtin structural tag.
+        """
+        raise NotImplementedError()
+
+    def empty_thinking_as_non_thinking(self) -> bool:
+        """
+        It decides how to handle non-thinking mode. If True, non-thinking mode will force the
+        LLM output an empty thinking. If False, thinking tags like <think> or </think> are not
+        allowed and will not be output by the LLM.
+        """
+        return True
 
     def get_structural_tag(
         self, request: ChatCompletionRequest
     ) -> StructuralTag:
-        raise NotImplementedError(
-            "ToolParser.get_xgrammar_builtin_structural_tag is not implemented"
-        )
+        
+        model_id = self.get_model_structural_tag_id()
+        thinking_mode = request.include_reasoning
+        
+        if thinking_mode:
+            return get_model_structural_tag(
+                model=model_id,
+                tools=request.tools,
+                tool_choice=request.tool_choice,
+                reasoning=True,
+                force_empty_reasoning=False,
+            )
+        else:
+            return get_model_structural_tag(
+                model=model_id,
+                tools=request.tools,
+                tool_choice=request.tool_choice,
+                reasoning=not self.empty_thinking_as_non_thinking(),
+                force_empty_reasoning=self.empty_thinking_as_non_thinking(),
+            )
 
     def support_structural_tag(self) -> bool:
         return False
