@@ -38,7 +38,10 @@ from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
+from vllm.tool_parsers.streaming import (
+    extract_named_tool_call_streaming,
+    extract_required_tool_call_streaming,
+)
 from vllm.tool_parsers.utils import Tool
 from vllm.utils import random_uuid
 
@@ -572,17 +575,24 @@ class DelegatingParser(Parser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
         # The following parameters are used for "required" tool choice parsing and are
         # tracked in StreamState for streaming parsing.
         tool_call_idx: int | None = None,
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
-        if request.tool_choice and isinstance(
-            request.tool_choice, ChatCompletionNamedToolChoiceParam
-        ):
-            return None, False
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            delta_message, function_name_returned = extract_named_tool_call_streaming(
+                delta_text=delta_text,
+                function_name=request.tool_choice.name,
+                function_name_returned=function_name_returned,
+                tool_call_idx=tool_call_idx,
+                tool_call_id_type=tool_call_id_type,
+                tokenizer=self.model_tokenizer,
+            )
+            return delta_message, function_name_returned
+
         if request.tool_choice == "required":
             delta_message, function_name_returned = (
                 extract_required_tool_call_streaming(
@@ -602,7 +612,7 @@ class DelegatingParser(Parser):
             previous_token_ids,
             current_token_ids,
             delta_token_ids,
-            request,
+            request,  # type: ignore[arg-type]
         ), False
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
