@@ -5,7 +5,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadKey, ReqContext
@@ -19,7 +19,7 @@ class JobMetadata:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
-    keys: list[OffloadKey]
+    keys: Sequence[OffloadKey]
     spec: LoadStoreSpec
     req_context: ReqContext = field(default_factory=ReqContext)
 

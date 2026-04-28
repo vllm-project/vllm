@@ -10,7 +10,7 @@ requiring actual storage or network backends.
 """
 
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from vllm.v1.kv_offload.abstract import OffloadKey, ReqContext
@@ -28,7 +28,7 @@ class _JobMetadata:
     """Internal metadata for tracking job details."""
 
     job_id: JobId
-    keys: list[OffloadKey]
+    keys: Sequence[OffloadKey]
     is_store: bool  # True for store jobs, False for load jobs
 
 
@@ -101,20 +101,20 @@ class ExampleSecondaryTier(SecondaryTierManager):
                           spec for reading blocks from the primary tier.
         """
         job_id = job_metadata.job_id
-        keys_list = list(job_metadata.keys)
+        keys = job_metadata.keys
         primary_read_spec = job_metadata.spec
 
         # Validate spec type and consistency
         assert isinstance(primary_read_spec, CPULoadStoreSpec), (
             f"Expected CPULoadStoreSpec, got {type(primary_read_spec)}"
         )
-        assert len(keys_list) == len(primary_read_spec.block_ids), (
-            f"Length mismatch: {len(keys_list)} keys but "
+        assert len(keys) == len(primary_read_spec.block_ids), (
+            f"Length mismatch: {len(keys)} keys but "
             f"{len(primary_read_spec.block_ids)} block_ids in spec"
         )
 
         # Filter out blocks already present
-        blocks_to_store = [bh for bh in keys_list if bh not in self.blocks]
+        blocks_to_store = [bh for bh in keys if bh not in self.blocks]
 
         if not blocks_to_store:
             # All blocks already present
@@ -128,7 +128,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
         evicted = []
         if num_blocks_to_evict > 0:
             # Collect eviction candidates first (LRU order), then delete atomically
-            protected = set(keys_list)
+            protected = set(keys)
             for key in self.blocks:
                 if key not in protected and key not in self.in_flight:
                     evicted.append(key)
@@ -165,31 +165,29 @@ class ExampleSecondaryTier(SecondaryTierManager):
                           spec for writing blocks into the primary tier.
         """
         job_id = job_metadata.job_id
-        keys_list = list(job_metadata.keys)
+        keys = job_metadata.keys
         primary_write_spec = job_metadata.spec
 
         # Validate spec type and consistency
         assert isinstance(primary_write_spec, CPULoadStoreSpec), (
             f"Expected CPULoadStoreSpec, got {type(primary_write_spec)}"
         )
-        assert len(keys_list) == len(primary_write_spec.block_ids), (
-            f"Length mismatch: {len(keys_list)} keys but "
+        assert len(keys) == len(primary_write_spec.block_ids), (
+            f"Length mismatch: {len(keys)} keys but "
             f"{len(primary_write_spec.block_ids)} block_ids in spec"
         )
 
         # Verify all blocks exist
-        for key in keys_list:
+        for key in keys:
             if key not in self.blocks:
                 return
 
         # Mark blocks as in-flight
-        for key in keys_list:
+        for key in keys:
             self.in_flight[key] = job_id
 
         # Create internal job metadata
-        internal_job_metadata = _JobMetadata(
-            job_id=job_id, keys=keys_list, is_store=False
-        )
+        internal_job_metadata = _JobMetadata(job_id=job_id, keys=keys, is_store=False)
 
         if self.simulate_async:
             # Job will complete on next get_finished() call
