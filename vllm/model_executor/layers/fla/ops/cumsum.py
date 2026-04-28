@@ -7,7 +7,6 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-import warnings
 
 import torch
 
@@ -163,6 +162,7 @@ def chunk_local_cumsum_scalar(
     chunk_size: int,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
@@ -173,10 +173,9 @@ def chunk_local_cumsum_scalar(
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), (
         "chunk_size must be a power of 2"
     )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     BT = chunk_size
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
@@ -200,6 +199,7 @@ def chunk_local_cumsum_vector(
     chunk_size: int,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
@@ -207,16 +207,13 @@ def chunk_local_cumsum_vector(
         B, H, T, S = g.shape
     else:
         B, T, H, S = g.shape
-    BT = chunk_size
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), (
         "chunk_size must be a power of 2"
     )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    BT = chunk_size
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
 
@@ -248,29 +245,34 @@ def chunk_local_cumsum(
     chunk_size: int,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
-    if not head_first and g.shape[1] < g.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({g.shape[1]}) < num_heads ({g.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-            stacklevel=2,
-        )
     if cu_seqlens is not None:
         assert g.shape[0] == 1, (
             "Only batch size 1 is supported when cu_seqlens are provided"
         )
     if len(g.shape) == 3:
         return chunk_local_cumsum_scalar(
-            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype
+            g,
+            chunk_size,
+            reverse,
+            cu_seqlens,
+            chunk_indices,
+            head_first,
+            output_dtype,
         )
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(
-            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype
+            g,
+            chunk_size,
+            reverse,
+            cu_seqlens,
+            chunk_indices,
+            head_first,
+            output_dtype,
         )
     else:
         raise ValueError(

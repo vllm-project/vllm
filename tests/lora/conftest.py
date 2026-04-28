@@ -3,6 +3,7 @@
 
 import tempfile
 from collections import OrderedDict
+from importlib import reload
 from unittest.mock import MagicMock
 
 import pytest
@@ -41,6 +42,18 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
         cleanup_dist_env_and_memory(shutdown_ray=True)
+
+
+@pytest.fixture
+def maybe_enable_lora_dual_stream(monkeypatch: pytest.MonkeyPatch):
+    if current_platform.is_cuda():
+        monkeypatch.setenv("VLLM_LORA_ENABLE_DUAL_STREAM", "1")
+        import vllm.lora.layers.base_linear
+
+        if not hasattr(vllm.lora.layers.base_linear, "lora_linear_async"):
+            # Reload the module to ensure the environment variable takes effect.
+            reload(vllm.lora.layers.base_linear)
+    yield
 
 
 @pytest.fixture
@@ -287,6 +300,21 @@ def llama32_lora_huggingface_id():
 @pytest.fixture(scope="session")
 def llama32_lora_files(llama32_lora_huggingface_id):
     return snapshot_download(repo_id=llama32_lora_huggingface_id)
+
+
+@pytest.fixture(scope="session")
+def whisper_lora_files():
+    return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_text_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
 
 
 @pytest.fixture

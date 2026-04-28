@@ -2,21 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
-import json
 import os
 import platform
 import subprocess
 import sys
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import psutil
-import regex as re
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import is_quantized_kv_cache
+from vllm.utils.cpu_resource_utils import (
+    DEVICE_CONTROL_ENV_VAR,
+    get_memory_node_info,
+)
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -39,43 +39,13 @@ def get_max_threads(pid=0):
         raise NotImplementedError("Unsupported OS")
 
 
-@dataclass
-class LogicalCPUInfo:
-    id: int = -1
-    physical_core: int = -1
-    numa_node: int = -1
-
-    @classmethod
-    def _int(cls, value: str) -> int:
-        try:
-            int_value = int(value)
-        except Exception:
-            int_value = -1
-        return int_value
-
-    @staticmethod
-    def json_decoder(obj_dict: dict):
-        id = obj_dict.get("cpu")
-        physical_core = obj_dict.get("core")
-        numa_node = obj_dict.get("node")
-
-        if not (id is None or physical_core is None or numa_node is None):
-            return LogicalCPUInfo(
-                id=LogicalCPUInfo._int(id),
-                physical_core=LogicalCPUInfo._int(physical_core),
-                numa_node=LogicalCPUInfo._int(numa_node),
-            )
-        else:
-            return obj_dict
-
-
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
-    device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
+    device_control_env_var = DEVICE_CONTROL_ENV_VAR
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -93,30 +63,7 @@ class CpuPlatform(Platform):
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
-            # Workaround for Issue #25655: RISC-V scheduler bug with float16
-            #
-            # Background:
-            # - RISC-V currently uses scalar code path
-            # - There is a latent bug in the vLLM scheduler that provides
-            # invalid
-            #   physical_block_idx values under certain conditions
-            # - This bug causes segmentation faults when using float16
-            # dtype on RISC-V
-            # - Testing shows that forcing float32 successfully bypasses
-            # this issue
-            #
-            # Technical details:
-            # - The bug manifests as out-of-bounds physical_block_idx in
-            # block_tables
-            # - Only occurs on RISC-V hardware
-            # tested on Sophgo SG2044
-            # - Does not reproduce on x86 or other architectures
-            # - Root cause is in Python-level scheduling logic,
-            # not C++ kernels
-            #
-            # This is a temporary workaround until the scheduler bug is fixed.
-            # See: https://github.com/vllm-project/vllm/issues/25655
-            return [torch.float32]
+            return [torch.bfloat16, torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
@@ -141,29 +88,9 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        from vllm.utils.mem_constants import GiB_bytes
-        from vllm.utils.mem_utils import format_gib
+        meminfo = get_memory_node_info(device_id)
 
-        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
-        node_dir = "/sys/devices/system/node"
-        if kv_cache_space is None:
-            nodes = (
-                [d for d in os.listdir(node_dir) if d.startswith("node")]
-                if os.path.exists(node_dir)
-                else []
-            )
-            num_numa_nodes = len(nodes) or 1
-            free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
-            DEFAULT_CPU_MEM_UTILIZATION = 0.5
-            kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
-            logger.warning_once(
-                "VLLM_CPU_KVCACHE_SPACE not set. Using %s GiB for KV cache.",
-                format_gib(kv_cache_space),
-            )
-        else:
-            kv_cache_space *= GiB_bytes
-
-        return kv_cache_space
+        return meminfo.total_memory
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -171,6 +98,10 @@ class CpuPlatform(Platform):
         Set the device for the current platform.
         """
         torch.cpu.set_device(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass
 
     @classmethod
     def inference_mode(cls):
@@ -185,7 +116,7 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if cache_config.block_size is None:
+        if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
         if cache_config.block_size % 32 != 0:
@@ -193,6 +124,12 @@ class CpuPlatform(Platform):
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
             )
+
+        # Lagecy setting
+        env_key = "VLLM_CPU_KVCACHE_SPACE"
+        if env_key in os.environ and os.environ[env_key] != "":
+            kv_cache_space = int(os.environ[env_key])
+            cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
 
         scheduler_config = vllm_config.scheduler_config
         # async scheduling is not required on CPU
@@ -206,34 +143,16 @@ class CpuPlatform(Platform):
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(cache_config.cache_dtype):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
             cache_config.cache_dtype = "auto"
 
-        cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
-
-        # reserve at least one core for nixl_connector under p/d case
-        if vllm_config.kv_transfer_config and (
-            envs.VLLM_CPU_NUM_OF_RESERVED_CPU == 0
-            or envs.VLLM_CPU_NUM_OF_RESERVED_CPU is None
-        ):
-            os.environ["VLLM_CPU_NUM_OF_RESERVED_CPU"] = "1"
-
         parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.world_size > 1
-            and parallel_config.distributed_executor_backend is not None
-            and parallel_config.distributed_executor_backend != "mp"
-        ):
-            logger.warning(
-                (
-                    "%s is not supported on CPU, fallback to mp "
-                    "distributed executor backend."
-                ),
-                parallel_config.distributed_executor_backend,
-            )
+        # OMP requires the MP executor to function correctly, UniProc is not
+        # supported as it is not possible to set the OMP environment correctly
+        if parallel_config.distributed_executor_backend == "uni":
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
@@ -269,11 +188,22 @@ class CpuPlatform(Platform):
                     "size_asserts": False,
                     "nan_asserts": False,
                     "epilogue_fusion": True,
+                    "cpp.dynamic_threads": True,
                 }
             )
+            compilation_config.ir_enable_torch_wrap = False
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
+
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu" not in compilation_config.custom_ops
+            and "-gelu" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu")
+
+        vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
         assert vllm_config.device_config.device_type == "cpu"
 
@@ -287,38 +217,27 @@ class CpuPlatform(Platform):
         # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
-        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
-            # Set default threads num for OpenMP parallel
-            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
-        else:
-            # In this case, setting the OpenMP configuration via
-            # OMP_NUM_THREADS is up to the user.
-            logger.info("Disabling binding processes to CPU cores...")
-
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-        # Intel OpenMP setting
+        # Avoid inductor generates num_thread() and breaks the thread binding
+        os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
+
         ld_preload_str = os.getenv("LD_PRELOAD", "")
-        if "libiomp5.so" in ld_preload_str:
-            # The time(milliseconds) that a thread should wait after
-            # completing the execution of a parallel region, before sleeping.
-            os.environ["KMP_BLOCKTIME"] = "1"
-            # Prevents the CPU to run into low performance state
-            os.environ["KMP_TPAUSE"] = "0"
-            # Provides fine granularity parallelism
-            os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-            os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-            os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
+        cpu_architecture = Platform.get_cpu_architecture()
 
         if (
             platform.system() == "Linux"
-            and Platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
-            and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
+            and cpu_architecture
+            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC, CpuArchEnum.X86)
+            and not (
+                "libomp" in ld_preload_str
+                or "libgomp" in ld_preload_str
+                or "libiomp" in ld_preload_str
+            )
         ):
             # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
             # one core will be properly utilized when we thread-bind
@@ -329,7 +248,8 @@ class CpuPlatform(Platform):
             # We need to find the location of PyTorch's libgomp
             torch_pkg = os.path.dirname(torch.__file__)
             site_root = os.path.dirname(torch_pkg)
-            # Search both torch.libs and torch/lib - See: https://github.com/vllm-project/vllm/issues/30470
+            # Search both torch.libs and torch/lib - See:
+            # https://github.com/vllm-project/vllm/issues/30470
             torch_libs_paths = [
                 os.path.join(site_root, "torch.libs"),
                 os.path.join(torch_pkg, "lib"),
@@ -344,6 +264,30 @@ class CpuPlatform(Platform):
                 if ld_preload_str:
                     ld_preload_str += ":"
                 ld_preload_str += pytorch_libgomp_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
+
+        # LD_PRELOAD libtcmalloc, bundled under vllm/libs to reduce
+        # memory allocation overhead
+        if (
+            platform.system() == "Linux"
+            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.X86)
+            and "libtcmalloc" not in ld_preload_str
+        ):
+            vllm_pkg = os.path.dirname(os.path.dirname(__file__))
+            tcmalloc_so = None
+            for pattern in ("libtcmalloc_minimal*.so*", "libtcmalloc.so*"):
+                tcmalloc_so_candidates = glob.glob(
+                    os.path.join(vllm_pkg, "libs", pattern)
+                )
+                if tcmalloc_so_candidates:
+                    tcmalloc_so = tcmalloc_so_candidates[0]
+                    break
+
+            if tcmalloc_so is not None:
+                if ld_preload_str:
+                    ld_preload_str = f"{tcmalloc_so}:{ld_preload_str}"
+                else:
+                    ld_preload_str = tcmalloc_so
                 os.environ["LD_PRELOAD"] = ld_preload_str
 
         os.environ["LOCAL_WORLD_SIZE"] = str(
@@ -362,46 +306,10 @@ class CpuPlatform(Platform):
             )
 
     @classmethod
-    def get_allowed_cpu_core_node_list(cls) -> tuple[list[int], list[LogicalCPUInfo]]:
-        assert platform.system() == "Linux"
-
-        # Init LogicalCPUInfo from lscpu
-        lscpu_output = subprocess.check_output(
-            "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
-        )
-        lscpu_output = re.sub(r'"node":\s*-\s*(,|\n)', r'"node": 0\1', lscpu_output)
-        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
-            lscpu_output, object_hook=LogicalCPUInfo.json_decoder
-        )["cpus"]
-
-        # Filter CPUs with invalid attributes
-        logical_cpu_list = [
-            x
-            for x in logical_cpu_list
-            if -1 not in (x.id, x.physical_core, x.numa_node)
-        ]
-
-        # Filter allowed CPUs
-        if hasattr(os, "sched_getaffinity"):
-            allowed_cpu_id_list = os.sched_getaffinity(0)
-        else:
-            raise NotImplementedError("Unsupported OS")
-        logical_cpu_list = [x for x in logical_cpu_list if x.id in allowed_cpu_id_list]
-
-        # Get allowed NUMA nodes
-        allowed_numa_nodes = set()
-        for x in logical_cpu_list:
-            allowed_numa_nodes.add(x.numa_node)  # type: ignore
-        allowed_numa_nodes_list = sorted(allowed_numa_nodes)
-
-        env_key = CpuPlatform.device_control_env_var
-        if env_key in os.environ and os.environ[env_key] != "":
-            visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
-            allowed_numa_nodes_list = [
-                x for x in sorted(list(set(visible_nodes))) if x in allowed_numa_nodes
-            ]
-
-        return allowed_numa_nodes_list, logical_cpu_list
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: CPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
@@ -487,23 +395,74 @@ class CpuPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
-            if torch._C._cpu._is_avx512_supported():
-                try:
-                    import vllm._C  # noqa: F401
-                except ImportError as e:
-                    logger.warning("Failed to import from vllm._C: %r", e)
+            # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
+            # This will cause a exception "dynamic module does define
+            # module export function". But the library is imported
+            # successfully. So ignore the exception for now, until we find
+            # a solution.
+            ignored_msg = "dynamic module does not define module export function"
+            if torch.cpu._is_avx512_supported():
+                if torch.cpu._is_avx512_bf16_supported():
+                    try:
+                        import vllm._C  # noqa: F401
+                    except ImportError as e:
+                        logger.warning("Failed to import from vllm._C: %r", e)
+                else:
+                    try:
+                        import vllm._C_AVX512  # noqa: F401
+                    except ImportError as e:
+                        if ignored_msg not in e.msg:
+                            logger.warning(
+                                "Failed to import from vllm._C_AVX512: %r", e
+                            )
             else:
-                # Note: The lib name is _C_AVX2, but the module name is _C.
-                # This will cause a exception "dynamic module does define
-                # module export function". But the library is imported
-                # successfully. So ignore the exception for now, until we find
-                # a solution.
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
-                    logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                    if ignored_msg not in e.msg:
+                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
                 logger.warning("Failed to import from vllm._C: %r", e)
+
+    @classmethod
+    def pack_kv_cache(
+        cls,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_ids: list[int],
+        indices: torch.Tensor,
+    ) -> None:
+        """
+        Rewrite the kv cache shape for the current platform.
+        """
+        # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
+        # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
+        from vllm._custom_ops import cpu_attn_reshape_and_cache
+        from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
+
+        dtype = key.dtype
+        # For CPU_ATTN, the shape is [N, num_kv_heads, block_size, head_size]
+        _, _, block_size, head_size = key_cache.shape
+        key = key.permute(0, 2, 1, 3).flatten(0, 1)
+        value = value.permute(0, 2, 1, 3).flatten(0, 1)
+
+        isa = _get_attn_isa(dtype, block_size, head_size)
+        block_offsets = torch.arange(block_size, device="cpu", dtype=torch.long)
+        num_blocks = len(block_ids)
+        slot_mapping = (
+            block_offsets.reshape(1, block_size)
+            + indices.reshape(num_blocks, 1) * block_size
+        ).flatten()
+        cpu_attn_reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            isa,
+        )

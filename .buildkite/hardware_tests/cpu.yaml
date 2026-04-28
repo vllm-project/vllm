@@ -3,7 +3,6 @@ depends_on: []
 steps:
 - label: CPU-Kernel Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -14,16 +13,30 @@ steps:
   - tests/kernels/attention/test_cpu_attn.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/test_onednn.py
+  - tests/kernels/test_awq_int4_to_int8.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
       pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
       pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
-      pytest -x -v -s tests/kernels/test_onednn.py"
+      pytest -x -v -s tests/kernels/test_onednn.py
+      pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py"
+
+- label: CPU-Compatibility Tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - cmake/cpu_extension.cmake
+  - setup.py
+  - vllm/platforms/cpu.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-compatibility-test.sh"
 
 - label: CPU-Language Generation and Pooling Model Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -33,13 +46,12 @@ steps:
   - tests/models/language/pooling/
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model"
 
 - label: CPU-Quantization Model Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -59,7 +71,6 @@ steps:
       
 - label: CPU-Distributed Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -78,7 +89,6 @@ steps:
 
 - label: CPU-Multi-Modal Model Tests %N
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -89,11 +99,11 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
       pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
-  parallelism: 2
+  parallelism: 3
 
 - label: "Arm CPU Test"
   depends_on: []
-  soft_fail: true
+  soft_fail: false
   device: arm_cpu
   no_plugin: true
   commands: 

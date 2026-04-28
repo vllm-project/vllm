@@ -5,7 +5,6 @@
 
 import numpy as np
 import torch
-from transformers import AutoProcessor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
@@ -225,6 +224,3 @@ def split_image_into_patch_blocks(
     patches = img.reshape(-1, 3, patch_size, patch_size)
 
     return patches
-
-
-AutoProcessor.register("HunYuanVLProcessor", HunYuanVLProcessor)

@@ -127,7 +127,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
 
 
 def _adjust_kernel_inputs(
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
@@ -141,7 +141,7 @@ def _adjust_kernel_inputs(
     else:
         stride_tl = sorted_token_ids.stride(0)
         stride_el = expert_ids.stride(0)
-        grid_lora_dim = num_active_loras
+        grid_lora_dim = num_active_loras.item()
     return grid_lora_dim, stride_tl, stride_el
 
 
@@ -379,7 +379,11 @@ def _fused_moe_lora_kernel(
             )
             a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        accumulator += tl.dot(a, b)
+        # Cast operands to matching dtype for tl.dot. On ROCm, Triton's
+        # compiler may infer different types for a and b when merging
+        # if/else branches (TMA desc path returns fp32, tl.load returns
+        # the pointer's element type).
+        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -444,7 +448,7 @@ def _fused_moe_lora_shrink(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
@@ -562,7 +566,7 @@ def _fused_moe_lora_expand(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
@@ -683,7 +687,7 @@ def _fused_moe_lora(
     max_lora_rank: int,
     top_k_num: int,
     lora_ids: torch.Tensor,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
@@ -871,7 +875,7 @@ def _fused_moe_lora_fake(
     max_lora_rank: int,
     top_k_num: int,
     lora_ids: torch.Tensor,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
@@ -921,7 +925,7 @@ def _fused_moe_lora_shrink_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
@@ -958,7 +962,7 @@ def _fused_moe_lora_expand_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,

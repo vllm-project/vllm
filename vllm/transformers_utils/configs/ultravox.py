@@ -43,7 +43,6 @@ class UltravoxConfig(transformers.PretrainedConfig):
             use `False`, but v0.5 and above use `True`.
     """
 
-    wrapped_model_config: transformers.PretrainedConfig
     model_type = "ultravox"
     audio_token = "<|audio|>"
     is_composition = False
@@ -75,6 +74,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.num_projector_layers = num_projector_layers
 
         # N.B. May set the wrapped_model_config below.
+        self.wrapped_model_config: transformers.PretrainedConfig
         self.text_model_id = text_model_id
         if text_model_id is None:
             text_config = text_config or {}

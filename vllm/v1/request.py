@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from typing_extensions import deprecated
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -21,6 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -103,7 +103,7 @@ class Request:
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if self.structured_output_request is not None:
-                self.status = RequestStatus.WAITING_FOR_FSM
+                self.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
@@ -146,9 +146,6 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -160,8 +157,7 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # The number of tokens that have been computed remotely.
-        self.num_external_computed_tokens = 0
+        self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
@@ -176,17 +172,6 @@ class Request:
         self.resumable = resumable
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
-
-    @property
-    @deprecated(
-        "Request.eos_token_id will be removed in v0.18. "
-        "Please use Request.sampling_params.eos_token_id instead."
-    )
-    def eos_token_id(self) -> int | None:
-        if self.sampling_params is None:
-            return None
-
-        return self.sampling_params.eos_token_id
 
     @classmethod
     def from_engine_core_request(
@@ -290,6 +275,13 @@ class Request:
         events, self.events = self.events, []
         return events
 
+    def take_prefill_stats(self) -> PrefillStats | None:
+        if self.prefill_stats is None:
+            return None
+        prefill_stats = self.prefill_stats
+        self.prefill_stats = None
+        return prefill_stats
+
     def __lt__(self, other: "Request") -> bool:
         """
         Compare two requests based on priority, arrival time, and request ID.
@@ -308,7 +300,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
 
     WAITING = enum.auto()
-    WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
@@ -320,6 +312,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
+    FINISHED_REPETITION = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -344,4 +337,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
 }

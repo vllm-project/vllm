@@ -107,12 +107,11 @@ class KVConnectorFactory:
         if connector_name is None:
             raise ValueError("Connector name is not set in KVTransferConfig")
         compat_sig = False
-        if connector_name in cls._registry:
-            connector_cls = cls._registry[connector_name]()
-        else:
-            connector_module_path = kv_transfer_config.kv_connector_module_path
-            if connector_module_path is None:
-                raise ValueError(f"Unsupported connector type: {connector_name}")
+        connector_module_path = kv_transfer_config.kv_connector_module_path
+        if connector_module_path is not None and not connector_module_path:
+            raise ValueError("kv_connector_module_path cannot be an empty string.")
+        if connector_module_path:
+            # External module path takes priority over internal registry.
             connector_module = importlib.import_module(connector_module_path)
             try:
                 connector_cls = getattr(connector_module, connector_name)
@@ -128,6 +127,10 @@ class KVConnectorFactory:
                     "Please update to include kv_cache_config as the second argument.",
                     connector_cls.__name__,
                 )
+        elif connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+        else:
+            raise ValueError(f"Unsupported connector type: {connector_name}")
         return connector_cls, compat_sig
 
     @classmethod
@@ -150,6 +153,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "ExampleHiddenStatesConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector",
+    "ExampleHiddenStatesConnector",
+)
+
+KVConnectorFactory.register_connector(
     "P2pNcclConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector",
     "P2pNcclConnector",
@@ -169,7 +178,7 @@ KVConnectorFactory.register_connector(
 
 KVConnectorFactory.register_connector(
     "NixlConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl",
     "NixlConnector",
 )
 
@@ -196,8 +205,24 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
     "DecodeBenchConnector",
 )
+
 KVConnectorFactory.register_connector(
     "MooncakeConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector",
     "MooncakeConnector",
+)
+KVConnectorFactory.register_connector(
+    "FlexKVConnectorV1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",
+    "FlexKVConnectorV1",
+)
+KVConnectorFactory.register_connector(
+    "SimpleCPUOffloadConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector",
+    "SimpleCPUOffloadConnector",
+)
+KVConnectorFactory.register_connector(
+    "HF3FSKVConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector",
+    "HF3FSKVConnector",
 )

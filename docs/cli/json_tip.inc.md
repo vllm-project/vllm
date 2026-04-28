@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD041 -->
 When passing JSON CLI arguments, the following sets of arguments are equivalent:
 
 - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`

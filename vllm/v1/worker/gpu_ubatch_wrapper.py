@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.deep_gemm import set_num_sms as deep_gemm_set_num_sms
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
@@ -73,8 +74,8 @@ class SMControlContextManager:
         assert current_platform.is_cuda(), (
             "SM control is currently only supported on CUDA"
         )
-
-        total_sms = num_compute_units(torch.cuda.current_device())
+        device = torch.accelerator.current_device_index()
+        total_sms = num_compute_units(device)
 
         assert comm_sms < total_sms
         self.total_sms = total_sms
@@ -112,15 +113,26 @@ class UBatchWrapper:
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
-        self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode
             )
-            self.graph_pool = current_platform.get_global_graph_pool()
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
+
+    @property
+    def graph_pool(self):
+        if self.cudagraph_wrapper is not None:
+            return self.cudagraph_wrapper.graph_pool
+        return None
+
+    def clear_graphs(self) -> None:
+        self.cudagraphs.clear()
+        if self.cudagraph_wrapper is not None:
+            self.cudagraph_wrapper.clear_graphs()
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -147,9 +159,7 @@ class UBatchWrapper:
         # TODO(lucas): support other kernels besides DeepGEMM
         set_compute_sms = lambda sms: None
         if has_deep_gemm() and comm_sms > 0:
-            import deep_gemm as dg
-
-            set_compute_sms = lambda sms: dg.set_num_sms(sms)
+            set_compute_sms = lambda sms: deep_gemm_set_num_sms(sms)
 
         return SMControlContextManager(
             comm_sms=comm_sms,
@@ -161,10 +171,12 @@ class UBatchWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(
-            f"Attribute {key} not exists in the runnable of "
-            f"cudagraph wrapper: {self.runnable}"
-        )
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of "
+                f"cudagraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
@@ -195,7 +207,7 @@ class UBatchWrapper:
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
-            torch.cuda.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             ubatch_context = ubatch_metadata.context
             with torch.cuda.stream(ubatch_context.compute_stream):
                 _ = torch.cuda.current_blas_handle()
@@ -376,16 +388,20 @@ class UBatchWrapper:
         inputs_embeds,
         intermediate_tensors,
     ):
-        sliced_input_ids = input_ids[tokens_slice]
+        sliced_input_ids = input_ids[tokens_slice] if input_ids is not None else None
         # if we are using mrope. Mrope adds an additional dimension to the
         # positions tensor
         if positions.ndim == 2:
             sliced_positions = positions[:, tokens_slice]
         else:
             sliced_positions = positions[tokens_slice]
-        sliced_inputs_embeds = inputs_embeds[tokens_slice] if inputs_embeds else None
+        sliced_inputs_embeds = (
+            inputs_embeds[tokens_slice] if inputs_embeds is not None else None
+        )
         sliced_intermediate_tensors = (
-            intermediate_tensors[tokens_slice] if intermediate_tensors else None
+            intermediate_tensors[tokens_slice]
+            if intermediate_tensors is not None
+            else None
         )
 
         return (
@@ -465,7 +481,7 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             with self.sm_control:
-                return self._capture_ubatches(ubatch_metadata, self.model)
+                return self._capture_ubatches(ubatch_metadata, self.runnable)
         elif (
             num_tokens in self.cudagraphs
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
@@ -491,4 +507,4 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             with self.sm_control:
-                return self._run_ubatches(ubatch_metadata, self.model)
+                return self._run_ubatches(ubatch_metadata, self.runnable)

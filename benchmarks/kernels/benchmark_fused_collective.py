@@ -25,6 +25,7 @@ import pandas as pd
 import torch  # type: ignore
 import torch.distributed as dist  # type: ignore
 
+from vllm._custom_ops import create_fp4_output_tensors
 from vllm.config.vllm import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_reduce,
@@ -46,7 +47,7 @@ RMS_NORM_STATIC_FP8_QUANT_OP = torch.ops._C.rms_norm_static_fp8_quant
 FUSED_ADD_RMS_NORM_STATIC_FP8_QUANT_OP = (
     torch.ops._C.fused_add_rms_norm_static_fp8_quant
 )
-SCALED_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant
+SCALED_FP4_QUANT_OUT_OP = torch.ops._C.scaled_fp4_quant.out
 
 logger = init_logger(__name__)
 
@@ -334,13 +335,23 @@ class VllmFusedAllreduce:
         output_scale: torch.Tensor,
     ):
         allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-        rms_out = self.rms_norm(allreduce_out, residual)
+        rms_output = self.rms_norm(allreduce_out, residual)
         if residual is None:
-            SCALED_FP4_QUANT_OP(quant_out, rms_out, output_scale, input_global_scale)
+            rms_out = rms_output
+        else:
+            rms_out, residual_out = rms_output
+
+        SCALED_FP4_QUANT_OUT_OP(
+            rms_out,
+            input_global_scale,
+            True,
+            output=quant_out,
+            output_scale=output_scale,
+        )
+
+        if residual is None:
             return quant_out, output_scale
         else:
-            rms_out, residual_out = rms_out
-            SCALED_FP4_QUANT_OP(quant_out, rms_out, output_scale, input_global_scale)
             return quant_out, residual_out, output_scale
 
 
@@ -362,8 +373,9 @@ def create_test_tensors(
     scale_fp4 = torch.tensor(1.0, dtype=torch.float32)
     quant_out_fp8 = torch.empty_like(input_tensor, dtype=FP8_DTYPE)
     # Pre-allocate FP4 output tensors (to avoid allocation overhead in benchmarks)
-    fp4_quant_out = torch.empty((num_tokens, hidden_dim // 2), dtype=torch.uint8)
-    fp4_output_scale = torch.empty((128, 4), dtype=torch.int32)
+    fp4_quant_out, fp4_output_scale = create_fp4_output_tensors(
+        num_tokens, hidden_dim, input_tensor.device, True
+    )
 
     return (
         input_tensor,
@@ -385,32 +397,32 @@ def benchmark_operation(
     # Warmup before graph capture
     for _ in range(warmup):
         operation_func(*args, **kwargs)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Create CUDA graph
     graph = torch.cuda.CUDAGraph()
     num_op_per_cudagraph = 10
 
     # Use vLLM's graph_capture to make tensor_model_parallel_all_reduce graph-safe
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    device = torch.device(f"cuda:{torch.accelerator.current_device_index()}")
     with graph_capture(device=device), torch.cuda.graph(graph):
         for _ in range(num_op_per_cudagraph):
             operation_func(*args, **kwargs)
 
     # Graph warmup
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     for _ in range(warmup):
         graph.replay()
 
     # Benchmark with CUDA graph
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.perf_counter()
 
     for _ in range(trials // num_op_per_cudagraph):
         # operation_func(*args, **kwargs)
         graph.replay()
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.perf_counter()
 
     avg_time_ms = ((end_time - start_time) / trials) * 1000
@@ -984,7 +996,7 @@ def main():
     world_size = int(os.environ["WORLD_SIZE"])
 
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     init_distributed_environment()

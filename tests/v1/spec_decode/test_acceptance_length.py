@@ -141,7 +141,7 @@ def get_attention_backend_params() -> list[str]:
 
 
 def get_tp_size_params() -> list[pytest.param]:
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    num_gpus = torch.accelerator.device_count() if torch.cuda.is_available() else 1
     return [pytest.param(tp, id=f"tp{tp}") for tp in TP_SIZES if tp <= num_gpus]
 
 
@@ -165,6 +165,7 @@ def get_mt_bench_prompts(
         no_stream=True,
         disable_shuffle=False,
         skip_chat_template=False,
+        trust_remote_code=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -210,8 +211,8 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 
 @large_gpu_mark(min_gb=40)
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="This test is only supported on CUDA platform.",
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
 )
 @pytest.mark.parametrize(
     "model_config",

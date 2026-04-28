@@ -15,7 +15,7 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct", tensor_parallel_size=2)
 ```
 
 !!! warning
-    To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. [torch.cuda.set_device][])
+    To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. [torch.accelerator.set_device_index][])
     before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
     To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.

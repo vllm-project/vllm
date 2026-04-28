@@ -87,7 +87,7 @@ MSGS = [
     {
         "role": "user",
         "content": "Could you please rewrite the below article? \n\n My English needs "
-        "improvving, maybe I make errors.",
+        "improving, maybe I make errors.",
     },
     {
         "role": "assistant",
@@ -98,7 +98,7 @@ MSGS = [
                 "type": "function",
                 "function": {
                     "name": "rewrite",
-                    "arguments": '{"text":"My English needs improvving, maybe '
+                    "arguments": '{"text":"My English needs improving, maybe '
                     'I make errors."}',
                 },
             }

@@ -13,14 +13,17 @@ import io
 import time
 from statistics import mean, median
 
-import librosa
 import pytest
 import soundfile
 import torch
 from datasets import load_dataset
 from evaluate import load
-from transformers import AutoTokenizer
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
+from vllm.multimodal.audio import get_audio_duration
+from vllm.tokenizers import get_tokenizer
+
+from ....models.registry import HF_EXAMPLE_MODELS
 from ....utils import RemoteOpenAIServer
 
 
@@ -29,6 +32,16 @@ def to_bytes(y, sr):
     soundfile.write(buffer, y, sr, format="WAV")
     buffer.seek(0)
     return buffer
+
+
+# not all models have a normalizer so use the one from whisper as a standard option
+normalizer_model_info = HF_EXAMPLE_MODELS.find_hf_info("openai/whisper-large-v3")
+normalizer_tokenizer = get_tokenizer(
+    "openai/whisper-large-v3",
+    tokenizer_mode=normalizer_model_info.tokenizer_mode,
+    trust_remote_code=normalizer_model_info.trust_remote_code,
+)
+normalizer = EnglishTextNormalizer(normalizer_tokenizer.english_spelling_normalizer)
 
 
 async def transcribe_audio(client, tokenizer, y, sr):
@@ -56,18 +69,22 @@ async def bound_transcribe(sem, client, tokenizer, audio, reference):
     async with sem:
         result = await transcribe_audio(client, tokenizer, *audio)
         # Normalize *english* output/reference for evaluation.
-        out = tokenizer.normalize(result[2])
-        ref = tokenizer.normalize(reference)
+        out = normalizer(result[2])
+        ref = normalizer(reference)
         return result[:2] + (out, ref)
 
 
 async def process_dataset(model, client, data, concurrent_request):
     sem = asyncio.Semaphore(concurrent_request)
 
-    # Load tokenizer once outside the loop
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    tokenizer = get_tokenizer(
+        model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+    )
 
-    # Warmup call as the first `librosa.load` server-side is quite slow.
+    # Warmup call as the first `load_audio` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
@@ -101,7 +118,7 @@ def print_performance_metrics(results, total_time):
 
 def add_duration(sample):
     y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
-    sample["duration_ms"] = librosa.get_duration(y=y, sr=sr) * 1000
+    sample["duration_ms"] = get_audio_duration(y=y, sr=sr) * 1000
     return sample
 
 
@@ -144,20 +161,36 @@ def run_evaluation(
 
 
 # alternatives "openai/whisper-large-v2", "openai/whisper-large-v3-turbo"..
-@pytest.mark.parametrize("model_name", ["openai/whisper-large-v3"])
+# NOTE: Expected WER measured with equivalent hf.transformers args:
+# whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        ("openai/whisper-large-v3", 12.744980),
+        # TODO (ekagra): turn on after asr release
+        # CohereASR is used to test the variable encoder length code paths
+        # ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+    ],
+)
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
 @pytest.mark.parametrize(
     "dataset_repo", ["D4nt3/esb-datasets-earnings22-validation-tiny-filtered"]
 )
-# NOTE: Expected WER measured with equivalent hf.transformers args:
-# whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.
-@pytest.mark.parametrize("expected_wer", [12.744980])
 def test_wer_correctness(
-    model_name, dataset_repo, expected_wer, n_examples=-1, max_concurrent_request=None
+    model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
+    model_name, expected_wer = model_config
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     # TODO refactor to use `ASRDataset`
+    server_args = [
+        "--enforce-eager",
+        f"--tokenizer_mode={model_info.tokenizer_mode}",
+    ]
+    if model_info.trust_remote_code:
+        server_args.append("--trust-remote-code")
     with RemoteOpenAIServer(
-        model_name, ["--enforce-eager"], max_wait_seconds=480
+        model_name,
+        server_args,
     ) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 
@@ -167,7 +200,14 @@ def test_wer_correctness(
 
         client = remote_server.get_async_client()
         wer = run_evaluation(
-            model_name, client, dataset, max_concurrent_request, n_examples
+            model_name,
+            client,
+            dataset,
+            max_concurrent_request,
+            n_examples,
         )
+
+        print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
+
         if expected_wer:
             torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)

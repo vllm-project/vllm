@@ -19,8 +19,6 @@ from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
-TOL = 0.08  # Absolute tolerance for accuracy comparison
-
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
     """Run GSM8K evaluation using our isolated script."""
@@ -64,6 +62,16 @@ def test_gsm8k_correctness(config_filename):
             "Marlin kernels are not supported."
         )
 
+    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
+    if current_platform.is_rocm() and (
+        "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
+        or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
+            "due to agent pool disk space issues and pod evictions."
+        )
+
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
@@ -99,20 +107,20 @@ def test_gsm8k_correctness(config_filename):
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]
+        tol = eval_config.get("tolerance", 0.08)
 
         print(f"GSM8K Results for {eval_config['model_name']}:")
         print(f"  Measured metric: {measured_metric:.4f}")
         print(f"  Expected metric: {expected_metric:.4f}")
-        print(f"  Tolerance: {TOL:.4f}")
+        print(f"  Tolerance: {tol:.4f}")
         print(f"  Questions: {results['num_questions']}")
         print(f"  Invalid rate: {results['invalid_rate']:.3f}")
         print(f"  Latency: {results['latency']:.1f}s")
         print(f"  QPS: {results['questions_per_second']:.1f}")
 
-        # Verify metric is within tolerance
-        assert measured_metric >= expected_metric - TOL, (
+        assert measured_metric >= expected_metric - tol, (
             f"GSM8K metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {TOL:.4f} = {expected_metric - TOL:.4f}"
+            f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
         )
 
         print(f"✅ GSM8K test passed for {eval_config['model_name']}")

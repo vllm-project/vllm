@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
+from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -15,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -32,20 +35,27 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
+    "mimo_v2_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
     "ernie_mtp",
     "nemotron_h_mtp",
     "exaone_moe_mtp",
+    "exaone4_5_mtp",
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "hy_v3_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+NgramGPUTypes = Literal["ngram_gpu"]
+DFlashModelTypes = Literal["dflash"]
+EagleModelTypes = Literal[
+    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -53,7 +63,10 @@ SpeculativeMethod = Literal[
     "draft_model",
     "suffix",
     EagleModelTypes,
+    NgramGPUTypes,
 ]
+RejectionSampleMethod = Literal["standard", "synthetic"]
+DraftSampleMethod = Literal["greedy", "gumbel"]
 
 
 @config
@@ -63,7 +76,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)
+    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -85,10 +98,19 @@ class SpeculativeConfig:
     warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
-    quantization: me_quant.QuantizationMethods | None = None
+    quantization: me_quant.QuantizationMethods | str | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
+    moe_backend: MoEBackend | None = None
+    """MoE backend to use for the draft model. When `None`, the draft model
+    inherits the target model's `--moe-backend` setting. Useful when the
+    drafter and generator require different MoE kernels (e.g. quantized
+    generator with unquantized drafter)."""
+    attention_backend: AttentionBackendEnum | None = None
+    """Attention backend to use for the draft model. When `None`, the backend is
+    automatically selected. Useful when the drafter requires a different attention
+    backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -168,6 +190,79 @@ class SpeculativeConfig:
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
 
+    rejection_sample_method: RejectionSampleMethod = "standard"
+    """The rejection sampling method to use. 'standard' uses probabilistic
+    rejection sampling (with or without cached draft logits, controlled by
+    draft_sample_method). 'synthetic' accepts draft tokens with a decaying
+    probability calibrated to synthetic_acceptance_rate."""
+
+    synthetic_acceptance_rates: list[float] | None = None
+    """Per-position *unconditional* acceptance rates for synthetic rejection
+    sampling. Position i's entry is the marginal probability that the first
+    i+1 draft tokens are all accepted; the list must have length
+    num_speculative_tokens, each entry in [0, 1], and be monotonically
+    non-increasing. Only valid when rejection_sample_method is 'synthetic'.
+    Mutually exclusive with synthetic_acceptance_length."""
+
+    synthetic_acceptance_length: float | None = None
+    """Target mean acceptance length for synthetic rejection sampling, in
+    [1, num_speculative_tokens + 1]. Resolved internally to
+    synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
+    Mutually exclusive with synthetic_acceptance_rates."""
+
+    @staticmethod
+    def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
+        """Mean acceptance length to unconditional per-position rates, using
+        the minimum-variance schedule."""
+        num_drafts = length - 1  # expected number of accepted draft tokens
+        num_full = int(num_drafts)
+        return (
+            [1.0] * num_full + [num_drafts - num_full] + [0.0] * (n - num_full - 1)
+        )[:n]
+
+    @staticmethod
+    def _resolve_synthetic_acceptance_rates(
+        n: int,
+        rates: list[float] | None,
+        length: float | None,
+    ) -> list[float]:
+        """Return per-position unconditional acceptance rates from exactly one
+        of `rates` or `length` (validates range, length, and monotonicity)."""
+        if (rates is None) == (length is None):
+            raise ValueError(
+                "rejection_sample_method='synthetic' requires exactly one of "
+                "synthetic_acceptance_rates or synthetic_acceptance_length."
+            )
+        if rates is not None:
+            if len(rates) != n:
+                raise ValueError(
+                    f"synthetic_acceptance_rates must have length {n}, got {rates}."
+                )
+            if not all(0.0 <= r <= 1.0 for r in rates):
+                raise ValueError(
+                    f"synthetic_acceptance_rates entries must be in [0, 1], "
+                    f"got {rates}."
+                )
+            if any(rates[i] > rates[i - 1] for i in range(1, n)):
+                raise ValueError(
+                    f"synthetic_acceptance_rates must be non-increasing, got {rates}."
+                )
+            return list(rates)
+        assert length is not None
+        if not 1.0 <= length <= float(n + 1):
+            raise ValueError(
+                f"synthetic_acceptance_length must be in [1, {n + 1}], got {length}."
+            )
+        return SpeculativeConfig._acceptance_length_to_rates(length, n)
+
+    draft_sample_method: DraftSampleMethod = "greedy"
+    """How the draft model samples tokens. 'greedy' always picks the argmax
+    token, and the draft probabilities are treated as one-hot during rejection
+    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
+    draft logits are used for the probability ratio test during rejection
+    sampling. This comes at the cost of additional GPU memory usage. This
+    parameter currently only applies to Model Runner V2."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -181,21 +276,48 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
+        # Eagle3 and extract_hidden_states affect the computation graph because
+        # they return intermediate hidden states in addition to the final hidden state.
+        uses_aux_hidden_states = self.method in (
+            "eagle3",
+            "extract_hidden_states",
+            "dflash",
+        )
+        factors.append(uses_aux_hidden_states)
+
+        # The specific layers used also affect the computation graph
+        if uses_aux_hidden_states and self.draft_model_config is not None:
+            layer_ids = getattr(
+                self.draft_model_config.hf_config,
+                "eagle_aux_hidden_state_layer_ids",
+                None,
+            )
+            if layer_ids is not None:
+                # Convert to tuple to make it hashable
+                factors.append(tuple(layer_ids))
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "glm_moe_dsa"):
+        if hf_config.model_type in (
+            "deepseek_v3",
+            "deepseek_v32",
+            "glm_moe_dsa",
+        ):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+            )
+        if hf_config.model_type == "deepseek_v4":
+            hf_config.model_type = "deepseek_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["DeepSeekV4MTPModel"]}
             )
         if hf_config.model_type in ("pangu_ultra_moe"):
             hf_config.model_type = "pangu_ultra_moe_mtp"
@@ -213,6 +335,48 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["MiMoMTPModel"],
+                }
+            )
+
+        if (arch := hf_config.architectures[0]) in (
+            "MiMoV2ForCausalLM",
+            "MiMoV2OmniForCausalLM",
+        ):
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS,
+            )
+
+            mtp_arch_maps = {
+                "MiMoV2ForCausalLM": "MiMoV2MTPModel",
+                "MiMoV2OmniForCausalLM": "MiMoV2OmniMTPModel",
+            }
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": [mtp_arch_maps[arch]],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
                 }
             )
 
@@ -256,8 +420,12 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
+        if hf_config.architectures[0] == "NemotronH_Super_Omni_Reasoning_V3":
+            # Promote VLM's text_config so MTP detection below fires correctly
+            hf_config = hf_config.text_config
+
         if (
-            hf_config.model_type == "nemotron_h"
+            hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
             and hf_config.num_nextn_predict_layers > 0
         ):
@@ -284,7 +452,13 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
-
+        if "exaone4_5" in hf_config.model_type:
+            hf_config.model_type = "exaone4_5_mtp"
+        if hf_config.model_type == "exaone4_5_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
+            )
         if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
             is_moe = hf_config.model_type == "qwen3_5_moe"
             hf_config.model_type = "qwen3_5_mtp"
@@ -309,6 +483,13 @@ class SpeculativeConfig:
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+
+        if hf_config.model_type == "hy_v3":
+            hf_config.model_type = "hy_v3_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
+            )
 
         return hf_config
 
@@ -350,16 +531,21 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "ngram_gpu":
+                self.model = "ngram_gpu"
             elif self.method == "suffix":
                 self.model = "suffix"
+            elif self.method == "extract_hidden_states":
+                self.model = "extract_hidden_states"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
 
         if self.method in ("ngram", "[ngram]"):
-            # Unified to "ngram" internally
             self.method = "ngram"
+
+        if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
             if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
                 # TODO(woosuk): Tune these values. They are arbitrarily chosen.
@@ -394,6 +580,34 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "extract_hidden_states":
+            from vllm.transformers_utils.configs.extract_hidden_states import (
+                ExtractHiddenStatesConfig,
+            )
+
+            # ExtractHiddenStatesModel is instantiated manually in load_model()
+            # We just need to store the target model config for KV cache shape info
+            self.model = "extract_hidden_states"
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+
+            if hasattr(self.draft_model_config, "hf_config"):
+                hf_config = self.draft_model_config.hf_config.to_dict()
+            elif (
+                isinstance(self.draft_model_config, dict)
+                and "hf_config" in self.draft_model_config
+            ):
+                hf_config = self.draft_model_config["hf_config"]
+            else:
+                hf_config = {}
+
+            self.draft_model_config = copy.copy(self.target_model_config)
+            self.draft_model_config.hf_config = ExtractHiddenStatesConfig(
+                self.draft_model_config.hf_config, **hf_config
+            )
+            self.update_arch_()
+            self.draft_parallel_config = self.target_parallel_config
+
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -421,7 +635,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "dflash"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -431,6 +645,8 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif "dflash" in self.draft_model_config.model.lower():
+                    self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -463,9 +679,11 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
+                if self.method in ("eagle", "eagle3", "dflash"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,
@@ -478,23 +696,11 @@ class SpeculativeConfig:
                             method=self.method,
                             model_type="eagle",
                         )
-                        # EAGLEConfig primarily updates architectures, so update
-                        # all architectures-related fields in draft_model_config
                         self.draft_model_config.hf_config = eagle_config
-                        self.draft_model_config.hf_text_config = get_hf_text_config(
-                            self.draft_model_config.hf_config
-                        )
-                        self.draft_model_config.model_arch_config = (
-                            self.draft_model_config.get_model_arch_config()
-                        )
-                        model_info, arch = (
-                            self.draft_model_config.registry.inspect_model_cls(
-                                self.draft_model_config.architectures,
-                                self.draft_model_config,
-                            )
-                        )
-                        self.draft_model_config._model_info = model_info
-                        self.draft_model_config._architecture = arch
+                        self.update_arch_()
+
+                if self.method == "dflash":
+                    self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -671,6 +877,24 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    def update_arch_(self):
+        """
+        EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
+        architectures-related fields in self.draft_model_config
+        """
+        self.draft_model_config.hf_text_config = get_hf_text_config(
+            self.draft_model_config.hf_config
+        )
+        self.draft_model_config.model_arch_config = (
+            self.draft_model_config.get_model_arch_config()
+        )
+        model_info, arch = self.draft_model_config.registry.inspect_model_cls(
+            self.draft_model_config.architectures,
+            self.draft_model_config,
+        )
+        self.draft_model_config._model_info = model_info
+        self.draft_model_config._architecture = arch
+
     @staticmethod
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
@@ -691,6 +915,15 @@ class SpeculativeConfig:
         )
 
         return draft_parallel_config
+
+    @field_validator("attention_backend", mode="before")
+    @classmethod
+    def _parse_attention_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
+            return AttentionBackendEnum[value.upper()]
+        return value
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
@@ -713,12 +946,29 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+        if self.rejection_sample_method == "synthetic":
+            # Consolidate to per-position rates
+            self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
+                self.num_speculative_tokens,
+                self.synthetic_acceptance_rates,
+                self.synthetic_acceptance_length,
+            )
+            self.synthetic_acceptance_length = None
+        elif (
+            self.synthetic_acceptance_rates is not None
+            or self.synthetic_acceptance_length is not None
+        ):
+            raise ValueError(
+                "synthetic_acceptance_rates / synthetic_acceptance_length "
+                "are only valid with rejection_sample_method='synthetic'."
+            )
+
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config
             )
 
-        eagle3_target_supported = [
+        aux_hidden_states_supported = [
             "llama",
             "qwen",
             "minicpm",
@@ -727,18 +977,24 @@ class SpeculativeConfig:
             "hunyuan_v1_dense",
             "afmoe",
             "nemotron_h",
+            "deepseek_v2",
+            "deepseek_v3",
+            "kimi_k2",
+            "kimi_k25",
+            "minimax_m2",
+            "gemma4",
         ]
         if (
-            self.method == "eagle3"
+            self.method in ("eagle3", "extract_hidden_states", "dflash")
             and self.target_model_config
             and not any(
                 supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in eagle3_target_supported
+                for supported_model in aux_hidden_states_supported
             )
         ):
             raise ValueError(
-                f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
-                f"Got {self.target_model_config.hf_text_config.model_type=}"
+                f"{self.method} is only supported for {aux_hidden_states_supported}"
+                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
         return self
@@ -777,13 +1033,26 @@ class SpeculativeConfig:
         return slots_per_req
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash")
+
+    def use_dflash(self) -> bool:
+        return self.method == "dflash"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
+    def uses_extract_hidden_states(self) -> bool:
+        return self.method == "extract_hidden_states"
+
+    def use_ngram_gpu(self) -> bool:
+        return self.method == "ngram_gpu"
+
     def __repr__(self) -> str:
         method = self.method
-        model = None if method in ("ngram", "suffix") else self.draft_model_config.model
+        model = (
+            None
+            if method in ("ngram", "suffix", "extract_hidden_states")
+            else self.draft_model_config.model
+        )
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

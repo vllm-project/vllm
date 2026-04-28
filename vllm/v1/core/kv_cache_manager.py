@@ -84,6 +84,18 @@ class KVCacheBlocks:
         assert len(self.blocks) == 1, "Only one group is supported"
         return [block.block_id for block in self.blocks[0] if block.block_hash is None]
 
+    def get_unhashed_block_ids_all_groups(self) -> list[list[int]]:
+        """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        # Skip padding blocks.
+        return [
+            [
+                block.block_id
+                for block in group
+                if block.block_hash is None and not block.is_null
+            ]
+            for group in self.blocks
+        ]
+
     def new_empty(self) -> "KVCacheBlocks":
         """
         Creates a new KVCacheBlocks instance with no blocks.
@@ -97,6 +109,7 @@ class KVCacheManager:
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         hash_block_size: int,
+        max_num_batched_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -106,6 +119,11 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
+        # When unset, fall back to `max_model_len` so the recycling-aware cap
+        # collapses to the prior (uncapped) admission behavior. The scheduler
+        # always supplies the real value at runtime.
+        if max_num_batched_tokens is None:
+            max_num_batched_tokens = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -119,6 +137,7 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -202,6 +221,45 @@ class KVCacheManager:
             )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+
+    def can_fit_full_sequence(
+        self,
+        request: Request,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_external_computed_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> bool:
+        """Check if the KV cache has enough free blocks to hold the full
+        sequence, accounting for prefix cache hits and sliding window.
+
+        This is used as an admission gate to prevent over-admitting requests
+        when chunked prefill would otherwise only check the first chunk.
+        """
+        if new_computed_blocks is not None:
+            new_computed_block_list = new_computed_blocks.blocks
+        else:
+            new_computed_block_list = self.empty_kv_cache_blocks.blocks
+
+        num_local_computed_tokens = (
+            request.num_computed_tokens + num_new_computed_tokens
+        )
+        total_computed_tokens = min(
+            num_local_computed_tokens + num_external_computed_tokens,
+            self.max_model_len,
+        )
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=full_num_tokens,
+            new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=full_num_tokens,
+        )
+
+        return num_blocks_to_allocate <= self.block_pool.get_num_free_blocks()
 
     def allocate_slots(
         self,
@@ -488,6 +546,13 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
+
+    def take_new_block_ids(self) -> list[int]:
+        """Drain and return new attention block IDs for zeroing."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            ids.extend(mgr.take_new_block_ids())
+        return ids
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""

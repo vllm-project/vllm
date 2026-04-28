@@ -72,7 +72,7 @@ class BadWordsState:
     def apply_bad_words(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
@@ -84,7 +84,7 @@ class BadWordsState:
 
         apply_bad_words(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             self.bad_word_token_ids.gpu,
             self.bad_word_offsets.gpu,
             self.num_bad_words.gpu,
@@ -114,17 +114,17 @@ def _bad_words_kernel(
     input_ids_ptr,
     expanded_local_pos_ptr,
 ):
-    logit_idx = tl.program_id(0)
+    token_idx = tl.program_id(0)
     bw_idx = tl.program_id(1)
 
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     num_bad_words = tl.load(num_bad_words_ptr + req_state_idx)
 
     if bw_idx >= num_bad_words:
         return
 
-    pos = tl.load(expanded_local_pos_ptr + logit_idx)
-    cur_req_first_pos = logit_idx - pos
+    pos = tl.load(expanded_local_pos_ptr + token_idx)
+    cur_req_first_pos = token_idx - pos
 
     prompt_len = tl.load(prompt_len_ptr + req_state_idx)
     total_len = tl.load(total_len_ptr + req_state_idx)
@@ -159,7 +159,7 @@ def _bad_words_kernel(
         match = match & (expected == actual)
 
     if match:
-        tl.store(logits_ptr + logit_idx * logits_stride + last_token, -float("inf"))
+        tl.store(logits_ptr + token_idx * logits_stride + last_token, -float("inf"))
 
 
 def apply_bad_words(
@@ -175,8 +175,8 @@ def apply_bad_words(
     expanded_local_pos: torch.Tensor,
     max_num_bad_words: int,
 ) -> None:
-    total_num_tokens = logits.shape[0]
-    _bad_words_kernel[(total_num_tokens, max_num_bad_words)](
+    num_tokens = logits.shape[0]
+    _bad_words_kernel[(num_tokens, max_num_bad_words)](
         logits,
         logits.stride(0),
         expanded_idx_mapping,
