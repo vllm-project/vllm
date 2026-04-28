@@ -155,12 +155,15 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    @staticmethod
     @abstractmethod
-    def get_tier_name(self) -> str:
+    def get_tier_type() -> str:
         """
-        Get the name of this tier (e.g., "Storage", "Network").
+        Get the type identifier of this tier (e.g., "dummy", "storage").
+
+        Must match the "type" field in the tier config dict.
 
         Returns:
-            Tier name string.
+            Tier type string.
         """
         pass

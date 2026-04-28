@@ -166,7 +166,7 @@ class TieringOffloadingManager(OffloadingManager):
         3. For completed loads (secondary→primary): calls primary.complete_write()
            to make blocks available
         """
-        for tier in self.secondary_tiers:
+        for i, tier in enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished():
                 job_id = completed_job.job_id
 
@@ -186,9 +186,11 @@ class TieringOffloadingManager(OffloadingManager):
                 else:
                     # Job ID not found in either dictionary - this shouldn't happen
                     logger.error(
-                        "Received finished job for unknown job_id %d from tier %s",
+                        "Received finished job for unknown job_id %d"
+                        " from tier #%d (%s)",
                         job_id,
-                        tier.get_tier_name(),
+                        i,
+                        tier.get_tier_type(),
                     )
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:

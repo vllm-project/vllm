@@ -59,7 +59,6 @@ class DummySecondaryTier(SecondaryTierManager):
 
     def __init__(
         self,
-        tier_name: str = "DummyStorage",
         max_blocks: int = 1000,
         simulate_async: bool = False,
     ):
@@ -67,12 +66,10 @@ class DummySecondaryTier(SecondaryTierManager):
         Initialize the dummy secondary tier.
 
         Args:
-            tier_name: Name of this tier (for identification)
             max_blocks: Maximum number of blocks this tier can store
             simulate_async: If True, jobs complete on next get_finished() call.
                           If False, jobs complete immediately.
         """
-        self.tier_name = tier_name
         self.max_blocks = max_blocks
         self.simulate_async = simulate_async
 
@@ -263,14 +260,9 @@ class DummySecondaryTier(SecondaryTierManager):
             if key in self.blocks:
                 self.blocks.move_to_end(key)
 
-    def get_tier_name(self) -> str:
-        """
-        Get the name of this tier.
-
-        Returns:
-            Tier name string.
-        """
-        return self.tier_name
+    @staticmethod
+    def get_tier_type() -> str:
+        return "dummy"
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""

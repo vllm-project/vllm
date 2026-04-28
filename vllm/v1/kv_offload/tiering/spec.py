@@ -14,7 +14,6 @@ Configuration via kv_connector_extra_config:
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
       - type: (required) Type of secondary tier (e.g., "dummy", "storage", "network")
-      - tier_name: (required) Name for this tier (used for logging and identification)
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -26,7 +25,6 @@ Example configuration:
     "secondary_tiers": [
         {
             "type": "dummy",
-            "tier_name": "TestStorage",
             # Tier-specific parameters (for DummySecondaryTier):
             "max_blocks": 10000,
             "simulate_async": False
@@ -125,14 +123,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             # Create secondary tiers
             secondary_tiers = []
-            for tier_config in self.secondary_tier_configs:
+            for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
                     tier = create_secondary_tier(tier_config)
                     secondary_tiers.append(tier)
                     logger.info(
-                        "Created secondary tier: %s (type: %s)",
-                        tier.get_tier_name(),
-                        tier_config.get("type"),
+                        "Created secondary tier #%d (%s)",
+                        i,
+                        tier.get_tier_type(),
                     )
                 except Exception as e:
                     logger.error(
