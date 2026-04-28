@@ -135,7 +135,7 @@ class Scheduler(SchedulerInterface):
             kv_load_failure_policy = (
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
-            self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
+            assert kv_load_failure_policy != "recompute", "recompute policy is not supported, see https://github.com/vllm-project/vllm/issues/35780"
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
