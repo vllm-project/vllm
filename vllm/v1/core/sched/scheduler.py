@@ -2159,15 +2159,22 @@ class Scheduler(SchedulerInterface):
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size
 
-            is_affected = any(
-                block_id in invalid_block_ids
-                for block_id in req_block_ids[:req_num_computed_blocks]
+            first_invalid_idx = next(
+                (
+                    idx
+                    for idx, block_id in enumerate(
+                        req_block_ids[:req_num_computed_blocks]
+                    )
+                    if block_id in invalid_block_ids
+                ),
+                None,
             )
+            is_affected = first_invalid_idx is not None
 
             if is_affected:
                 request.num_computed_tokens = 0
                 if evict_blocks:
-                    blocks_to_evict.update(req_block_ids)
+                    blocks_to_evict.update(req_block_ids[first_invalid_idx:])
                 affected_req_ids.add(req_id)
 
         return affected_req_ids, blocks_to_evict
