@@ -28,6 +28,14 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningParser",
     ),
+    "deepseek_v4": (
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningParser",
+    ),
+    "poolside_v1": (
+        "poolside_v1_reasoning_parser",
+        "PoolsideV1ReasoningParser",
+    ),
     "ernie45": (
         "ernie45_reasoning_parser",
         "Ernie45ReasoningParser",
@@ -55,6 +63,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "hunyuan_a13b": (
         "hunyuan_a13b_reasoning_parser",
         "HunyuanA13BReasoningParser",
+    ),
+    "hy_v3": (
+        "hy_v3_reasoning_parser",
+        "HYV3ReasoningParser",
     ),
     "kimi_k2": (
         "kimi_k2_reasoning_parser",
