@@ -235,6 +235,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -602,6 +603,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )

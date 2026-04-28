@@ -46,8 +46,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     EngineTransferPlan,
     ReadSpec,
+    _build_gather_read_specs,
     _is_attention_spec,
     _is_ssm_spec,
+    _remap_remote_blocks_to_subdesc_ids,
+    build_fa_local_descs_for_gather_read,
     build_fa_local_regions,
     build_mamba_local_regions,
     generate_dense_plan,
@@ -180,9 +183,26 @@ class NixlConnectorWorker:
     ) -> list[ReadSpec]:
         """Compute read specs from plan.
 
-        For each source rank, includes only the groups whose
-        source_ranks_per_group contains that rank.
+        Dispatches to the correct remapping strategy:
+
+        - **Gather-read** (``local_to_remote_page_ratio > 1``): per-rank
+          local sub-desc remapping via ``_build_gather_read_specs``.
+        - **Split-read** (``remote_to_local_page_ratio > 1``):
+          rank-independent remote sub-desc remapping via
+          ``_remap_remote_blocks_to_subdesc_ids``.
+        - **Standard**: direct per-rank group filtering.
         """
+        if plan.local_to_remote_page_ratio > 1:
+            return _build_gather_read_specs(
+                plan, local_block_ids, remote_block_ids
+            )
+
+        remote_block_ids, local_block_ids = (
+            _remap_remote_blocks_to_subdesc_ids(
+                plan, remote_block_ids, local_block_ids
+            )
+        )
+
         num_groups = len(local_block_ids)
         return [
             ReadSpec(
@@ -491,6 +511,9 @@ class NixlConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
+        # Gather-read local handles: local blocks split into sub-descs
+        # matching remote page size.  Keyed by engine_id.
+        self._gather_read_handles: dict[EngineId, int] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
@@ -1278,12 +1301,37 @@ class NixlConnectorWorker:
 
         plan = self._transfer_plans[engine_id]
 
-        ### (Optional) Register local agent memory regions. MLA is not split.
+        ### (Optional) Register local agent memory regions.
         if (
+            plan.local_to_remote_page_ratio > 1
+            and engine_id not in self._gather_read_handles
+        ):
+            # Gather-read: local page > remote page.  Register local descs
+            # with sub-descriptors matching the remote block size.
+            assert self.transfer_topo is not None
+            local_base_addresses = self.kv_caches_base_addr[
+                self.engine_id
+            ][self.tp_rank]
+            gather_blocks_data = build_fa_local_descs_for_gather_read(
+                base_addresses=local_base_addresses,
+                device_id=self.device_id,
+                num_blocks=self.num_blocks,
+                block_len_per_layer=self.block_len_per_layer,
+                is_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
+                gather_page_ratio=plan.local_to_remote_page_ratio,
+            )
+            descs = self.nixl_wrapper.get_xfer_descs(
+                gather_blocks_data, self.nixl_memory_type
+            )
+            self._gather_read_handles[engine_id] = (
+                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+            )
+        elif (
             tp_ratio < 0
             and not self.use_mla
             and tp_ratio not in self.src_xfer_handles_by_tp_ratio
         ):
+            # MLA is not split.
             # Remote tp_size > local tp_size: read from multiple remote ranks.
             # Logically "split" own regions into |tp_ratio| chunks. Mind that
             # we only do this once per remote tp_size (replica-friendly).
@@ -1871,7 +1919,10 @@ class NixlConnectorWorker:
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and not self.use_mla:
+            if engine_id in self._gather_read_handles:
+                # Gather-read: local sub-desc handle matches remote page size.
+                local_xfer_side_handle = self._gather_read_handles[engine_id]
+            elif tp_ratio < 0 and not self.use_mla:
                 assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
@@ -1994,30 +2045,41 @@ class NixlConnectorWorker:
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        # Partial prefix cache hit: just read uncomputed blocks.
+        # Partial prefix cache hit: trim to the shorter of local/remote.
         # Skip mamba groups — their blocks represent full state (conv+ssm),
         # not per-token data, so trimming would corrupt the transfer.
+        # For standard and split-read: remote >= local (trim remote).
+        # For gather-read: local sub-descs may exceed remote (trim local).
         remote_block_ids = list(remote_block_ids)
+        local_block_ids = list(local_block_ids)
         group_specs = self.kv_cache_config.kv_cache_groups
-        for i, remote_group in enumerate(remote_block_ids):
-            num_remote_blocks = len(remote_group)
-            num_local_blocks = len(local_block_ids[i])
+        for i in range(len(remote_block_ids)):
             is_mamba = isinstance(group_specs[i].kv_cache_spec, MambaSpec)
-            if not is_mamba:
-                assert num_local_blocks <= num_remote_blocks
-            if num_local_blocks < num_remote_blocks and not is_mamba:
-                remote_block_ids[i] = remote_group[-num_local_blocks:]
+            if is_mamba:
+                continue
+            n_local = len(local_block_ids[i])
+            n_remote = len(remote_block_ids[i])
+            n = min(n_local, n_remote)
+            if n_local > n:
+                local_block_ids[i] = local_block_ids[i][-n:]
+            if n_remote > n:
+                remote_block_ids[i] = remote_block_ids[i][-n:]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
-        # For HeteroTP (page_ratio > 1), each remote block is registered as
-        # multiple descriptors, so scale the descriptor-space block count.
+        # For split-read (page_ratio > 1), each remote block is registered as
+        # multiple descriptors, so scale the remote descriptor-space count.
+        # For gather-read, scale the local descriptor-space count instead.
         remote_desc_blocks = (
             self.dst_num_blocks[dst_engine_id] * plan.remote_to_local_page_ratio
         )
+        local_desc_blocks = self.dst_num_blocks[self.engine_id]
+        if plan.local_to_remote_page_ratio > 1:
+            local_desc_blocks *= plan.local_to_remote_page_ratio
+
         remote_block_descs_ids = self._compute_desc_ids_from_plan(
             plan,
             block_ids=remote_block_ids,
@@ -2028,7 +2090,7 @@ class NixlConnectorWorker:
         local_block_descs_ids = self._compute_desc_ids_from_plan(
             plan,
             block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
+            dst_num_blocks=local_desc_blocks,
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
         )
@@ -2188,6 +2250,9 @@ class NixlConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_tp_ratio.clear()
+        for handle in self._gather_read_handles.values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        self._gather_read_handles.clear()
         for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
             for dst_xfer_side_handle in dst_xfer_side_handles.values():
                 self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)

@@ -776,3 +776,211 @@ class TestGemma4DescIds:
 
         # Both have same length → can be paired for transfer
         assert len(remote_ids) == len(local_ids)
+
+
+# ======================================================================
+# Gemma4 Gather-Read tests (local page > remote page)
+# ======================================================================
+
+
+def _make_gemma4_gather_plan_params(
+    tp_rank: int = 0,
+    tp_size: int = 2,
+    remote_tp_size: int = 4,
+) -> dict:
+    """Build kwargs for generate_gemma4_plan at 4p2d (gather-read).
+
+    Gemma4-26B at P_TP=4, D_TP=2:
+      SWA: K=8, head_dim=256, P_tpb=16, D_tpb=16  → concat (2 P ranks)
+      FA:  K=2, head_dim=512, P_tpb=16, D_tpb=32  → gather (2P→1D block)
+
+    page_size: P=32768, D=65536 → local_to_remote_page_ratio=2.
+    """
+    d_page = 65536
+    p_page = 32768
+    num_layers = 2
+
+    return dict(
+        transfer_topo=_make_fake_topo(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            is_mla=False,
+            total_num_kv_heads=8,
+            block_size=16,
+            is_blocks_first=False,
+        ),
+        block_len_per_layer=[d_page] * num_layers,
+        remote_info=EngineTransferInfo(
+            remote_tp_size=remote_tp_size,
+            remote_block_size=16,
+            remote_block_len=p_page,
+            remote_physical_blocks_per_logical=1,
+        ),
+        remote_meta=_make_nixl_meta(
+            base_addrs=[0x10000 * (i + 1) for i in range(num_layers)],
+            num_blocks=500,
+            block_lens=[p_page] * num_layers,
+            block_size=16,
+        ),
+        group_kinds=(GroupKind.SWA, GroupKind.FA),
+        total_num_kv_heads_per_group=(8, 2),
+        local_tokens_per_block=(16, 32),
+        remote_tokens_per_block=(16, 16),
+    )
+
+
+class TestGemma4GatherReadPlanStructure:
+    """Verify plan structure for gather-read (4p2d)."""
+
+    def test_plan_fields_4p2d_rank0(self):
+        """D rank 0 at 4p2d: gather_ratio=2, SWA concat, FA gather."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params(tp_rank=0))
+
+        assert plan.local_to_remote_page_ratio == 2
+        assert plan.remote_to_local_page_ratio == 1
+        assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
+        assert plan.remote_blocks_per_local_block == (1, 2)
+        assert plan.local_blocks_per_remote_block == (1, 1)
+        # SWA: D rank 0 reads from P rank 0 and P rank 1
+        assert (0,) in plan.source_ranks_per_group[0] or \
+            len(plan.source_ranks_per_group[0]) == 2
+        # FA: after GQA dedup, D rank 0 reads from P rank 0 only
+        assert len(plan.source_ranks_per_group[1]) == 1
+
+    def test_no_assertion_error(self):
+        """4p2d should NOT crash (old code had assert page_ratio >= 1)."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params())
+        assert plan is not None
+
+    def test_fa_regions_standard_descs(self):
+        """Gather-read: FA regions have descs_per_block=1 (standard)."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params())
+
+        for region in plan.fa_regions:
+            assert region.descs_per_block == 1
+            assert region.descriptor_bytes == 32768  # remote page size
+
+
+class TestGemma4GatherReadRemoteDescs:
+    """Verify remote descriptor building for gather-read."""
+
+    def test_standard_descs_per_block(self):
+        """Gather-read: 1 desc per block (no remote sub-descs)."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params())
+        meta = _make_nixl_meta(
+            base_addrs=[0x10000, 0x20000],
+            num_blocks=500,
+            block_lens=[32768, 32768],
+        )
+        descs = build_remote_descs_from_plan(plan, meta)
+
+        # 2 layers × 1 region/layer × 500 blocks × 1 desc/block = 1000
+        assert len(descs) == 2 * 500 * 1
+
+    def test_desc_bytes_match_remote_page(self):
+        """Each remote desc should be remote_page_size bytes."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params())
+        meta = _make_nixl_meta(
+            base_addrs=[0x10000, 0x20000],
+            num_blocks=500,
+            block_lens=[32768, 32768],
+        )
+        descs = build_remote_descs_from_plan(plan, meta)
+
+        for _, length, _ in descs:
+            assert length == 32768
+
+
+class TestGemma4GatherReadSpecs:
+    """Verify read spec computation for gather-read."""
+
+    def test_gather_read_specs_4p2d_rank0(self):
+        """4p2d rank 0: SWA from 2 ranks, FA from 1 rank (gather)."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params(tp_rank=0))
+
+        # D has 2 SWA blocks and 1 FA block (32 tokens)
+        local_swa = [10, 11]
+        local_fa = [20]
+        # P has 2 SWA blocks per rank and 2 FA blocks (16 tokens each)
+        remote_swa = [5, 6]
+        remote_fa = [30, 31]
+
+        specs = compute_read_specs_from_plan(
+            plan,
+            local_block_ids=(local_swa, local_fa),
+            remote_block_ids=(remote_swa, remote_fa),
+        )
+
+        # SWA reads from 2 P ranks → 2 specs
+        assert len(specs) == 2
+
+        # Spec 0 (P rank 0):
+        # SWA: local sub-desc slot 0 → [10*2+0, 11*2+0] = [20, 22]
+        # FA: expanded → [20*2+0, 20*2+1] = [40, 41]
+        spec0 = specs[0]
+        assert list(spec0.local_block_ids[0]) == [20, 22]  # SWA slot 0
+        assert list(spec0.local_block_ids[1]) == [40, 41]  # FA gather
+        assert list(spec0.remote_block_ids[0]) == [5, 6]   # SWA blocks
+        assert list(spec0.remote_block_ids[1]) == [30, 31]  # FA blocks
+
+        # Spec 1 (P rank 1):
+        # SWA: local sub-desc slot 1 → [10*2+1, 11*2+1] = [21, 23]
+        # FA: empty (rank 1 not in FA source_ranks after GQA dedup)
+        spec1 = specs[1]
+        assert list(spec1.local_block_ids[0]) == [21, 23]  # SWA slot 1
+        assert list(spec1.remote_block_ids[0]) == [5, 6]   # SWA blocks
+        assert spec1.local_block_ids[1] == []  # FA empty for rank 1
+        assert spec1.remote_block_ids[1] == []
+
+    def test_gather_read_desc_ids_match(self):
+        """Local and remote desc IDs should have same length for NIXL."""
+        plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params(tp_rank=0))
+
+        local_swa = [10, 11]
+        local_fa = [20]
+        remote_swa = [5, 6]
+        remote_fa = [30, 31]
+
+        specs = compute_read_specs_from_plan(
+            plan,
+            local_block_ids=(local_swa, local_fa),
+            remote_block_ids=(remote_swa, remote_fa),
+        )
+
+        for spec in specs:
+            # Remote desc IDs: standard (no sub-descs), num_blocks=500
+            remote_ids = compute_desc_ids_from_plan(
+                plan,
+                block_ids=spec.remote_block_ids,
+                dst_num_blocks=500,
+            )
+            # Local desc IDs: gather sub-descs, num_blocks=1000*gather_ratio
+            local_ids = compute_desc_ids_from_plan(
+                plan,
+                block_ids=spec.local_block_ids,
+                dst_num_blocks=1000 * 2,  # local_num_blocks * gather_ratio
+            )
+            assert len(remote_ids) == len(local_ids), (
+                f"Desc ID length mismatch for rank {spec.remote_rank}: "
+                f"remote={len(remote_ids)}, local={len(local_ids)}"
+            )
+
+
+class TestGemma4GatherReadPlan4p1d:
+    """Verify gather-read for 4p1d (D_TP=1, P_TP=4)."""
+
+    def test_4p1d_no_crash(self):
+        """4p1d should not crash."""
+        params = _make_gemma4_gather_plan_params(
+            tp_rank=0, tp_size=1, remote_tp_size=4
+        )
+        # D_TP=1: D_page = 131072 (8 heads * 256 * 2 * 16 * 2 for SWA)
+        # P_TP=4: P_page = 32768
+        params["block_len_per_layer"] = [131072, 131072]
+        params["local_tokens_per_block"] = (16, 32)
+        params["remote_tokens_per_block"] = (16, 16)
+        plan = generate_gemma4_plan(**params)
+
+        assert plan.local_to_remote_page_ratio == 4
+        assert plan.remote_to_local_page_ratio == 1
+        assert plan.remote_blocks_per_local_block == (1, 2)
