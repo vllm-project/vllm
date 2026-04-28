@@ -374,7 +374,13 @@ class Qwen3ASRForConditionalGeneration(
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_output_lengths,
         )
-        return audio_features.split(audio_output_lengths.tolist())
+        # `.tolist()` on GPU output lengths forces a D2H sync; split sizes are
+        # data-dependent so this is unavoidable.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+        with gpu_sync_allowed():
+            split_sizes = audio_output_lengths.tolist()
+        return audio_features.split(split_sizes)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
