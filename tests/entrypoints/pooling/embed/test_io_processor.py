@@ -316,6 +316,7 @@ class TestPreProcessCohereOnline:
     def _make_handler():
         handler = object.__new__(EmbedIOProcessor)
         handler._validate_input_type = lambda _input_type: None
+        handler._should_inline_task_prefix = lambda: False
         return handler
 
     def test_text_only_without_task_prefix_uses_completion_path(self):
@@ -405,7 +406,7 @@ class TestPreProcessCohereOnline:
                                 content=[CohereEmbedContent(type="text", text="hello")]
                             ),
                             task_prefix="query: ",
-                            inline_task_prefix=True,
+                            inline_task_prefix=False,
                         )
                     ],
                     "truncate_prompt_tokens": -1,
@@ -413,3 +414,136 @@ class TestPreProcessCohereOnline:
                 },
             )
         ]
+
+    def test_text_only_with_single_message_template_inlines_task_prefix(self):
+        handler = self._make_handler()
+        ctx = self._make_context(texts=["hello"], input_type="query")
+        calls: list[tuple[str, object]] = []
+
+        def batch_render_chat(
+            request,
+            all_messages,
+            truncate_prompt_tokens,
+            truncation_side,
+        ):
+            calls.append(("chat", all_messages))
+            return ["chat"]
+
+        handler._get_task_instruction_prefix = lambda _input_type: "query: "
+        handler._has_chat_template = lambda: True
+        handler._should_inline_task_prefix = lambda: True
+        handler._batch_render_chat = batch_render_chat
+        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: (
+            pytest.fail("completion path should be skipped when a template exists")
+        )
+
+        handler._pre_process_cohere_online(ctx)
+
+        assert ctx.engine_inputs == ["chat"]
+        assert calls == [
+            (
+                "chat",
+                [
+                    handler._mixed_input_to_messages(
+                        CohereEmbedInput(
+                            content=[CohereEmbedContent(type="text", text="hello")]
+                        ),
+                        task_prefix="query: ",
+                        inline_task_prefix=True,
+                    )
+                ],
+            )
+        ]
+
+    def test_inputs_with_single_message_template_inlines_task_prefix(self):
+        handler = self._make_handler()
+        ctx = self._make_context(
+            inputs=[
+                CohereEmbedInput(
+                    content=[
+                        CohereEmbedContent(type="text", text="machine learning"),
+                        CohereEmbedContent(type="text", text="the cat sat on the mat"),
+                    ]
+                )
+            ],
+            input_type="query",
+        )
+        calls: list[tuple[str, object]] = []
+
+        def batch_render_chat(
+            request,
+            all_messages,
+            truncate_prompt_tokens,
+            truncation_side,
+        ):
+            calls.append(("chat", all_messages))
+            return ["chat"]
+
+        handler._get_task_instruction_prefix = lambda _input_type: "query: "
+        handler._should_inline_task_prefix = lambda: True
+        handler._batch_render_chat = batch_render_chat
+
+        handler._pre_process_cohere_online(ctx)
+
+        assert ctx.engine_inputs == ["chat"]
+        assert calls == [
+            (
+                "chat",
+                [
+                    handler._mixed_input_to_messages(
+                        ctx.request.inputs[0],
+                        task_prefix="query: ",
+                        inline_task_prefix=True,
+                    )
+                ],
+            )
+        ]
+
+
+class TestShouldInlineTaskPrefix:
+    """Unit tests for EmbedIOProcessor._should_inline_task_prefix."""
+
+    @staticmethod
+    def _make_handler(chat_template: str | None):
+        handler = object.__new__(EmbedIOProcessor)
+
+        class _Tokenizer:
+            def get_chat_template(self, *_args, **_kwargs):
+                return chat_template
+
+        class _Renderer:
+            tokenizer = _Tokenizer()
+
+        class _ModelConfig:
+            trust_remote_code = False
+
+            class hf_config:
+                model_type = "test"
+
+        handler.renderer = _Renderer()
+        handler.chat_template = chat_template
+        handler.model_config = _ModelConfig()
+        return handler
+
+    def test_template_with_single_message_guard_inlines(self):
+        handler = self._make_handler(
+            "{%- if messages | length > 1 -%}"
+            "{{ raise_exception('only one message') }}"
+            "{%- endif -%}"
+        )
+
+        assert handler._should_inline_task_prefix()
+
+    def test_regular_template_keeps_system_message(self):
+        handler = self._make_handler(
+            "{%- for message in messages -%}"
+            "{{ message['role'] }}: {{ message['content'] }}"
+            "{%- endfor -%}"
+        )
+
+        assert not handler._should_inline_task_prefix()
+
+    def test_template_without_raise_exception_keeps_system_message(self):
+        handler = self._make_handler("{{ messages | length > 1 }}")
+
+        assert not handler._should_inline_task_prefix()

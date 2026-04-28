@@ -428,17 +428,18 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 )
                 return
 
-            all_messages = [
-                self._mixed_input_to_messages(
-                    CohereEmbedInput(
-                        content=[CohereEmbedContent(type="text", text=text)]
-                    ),
-                    task_prefix=task_prefix,
-                    inline_task_prefix=True,
-                )
-                for text in texts
-            ]
             if self._has_chat_template():
+                inline_task_prefix = self._should_inline_task_prefix()
+                all_messages = [
+                    self._mixed_input_to_messages(
+                        CohereEmbedInput(
+                            content=[CohereEmbedContent(type="text", text=text)]
+                        ),
+                        task_prefix=task_prefix,
+                        inline_task_prefix=inline_task_prefix,
+                    )
+                    for text in texts
+                ]
                 ctx.engine_inputs = self._batch_render_chat(
                     request,
                     all_messages,
@@ -455,11 +456,14 @@ class EmbedIOProcessor(PoolingIOProcessor):
             return
 
         task_prefix = self._get_task_instruction_prefix(input_type)
+        inline_task_prefix = (
+            task_prefix is not None and self._should_inline_task_prefix()
+        )
         all_messages = [
             self._mixed_input_to_messages(
                 inp,
                 task_prefix=task_prefix,
-                inline_task_prefix=True,
+                inline_task_prefix=inline_task_prefix,
             )
             for inp in input
         ]
@@ -477,6 +481,18 @@ class EmbedIOProcessor(PoolingIOProcessor):
             )
             is not None
         )
+
+    def _should_inline_task_prefix(self) -> bool:
+        chat_template = resolve_chat_template(
+            self.renderer.tokenizer,
+            chat_template=self.chat_template,
+            tools=None,
+            model_config=self.model_config,
+        )
+        if chat_template is None or "raise_exception" not in chat_template:
+            return False
+
+        return "messages|length>1" in "".join(chat_template.split())
 
     def _preprocess_cohere_text_completion(
         self,
