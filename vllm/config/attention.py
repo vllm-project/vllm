@@ -142,7 +142,7 @@ class AttentionConfig:
                     "instead."
                 )
 
-        if self.disable_flashinfer_prefill is True and not deprecated_flag_used:
+        if self.disable_flashinfer_prefill and not deprecated_flag_used:
             # disable_flashinfer_prefill means "use FLASH_ATTN instead"
             # This is only relevant if no other backend was explicitly selected
             self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
