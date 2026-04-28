@@ -1002,6 +1002,16 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         *,
         skip_mm_cache: bool = False,
     ) -> TokensInput | MultiModalInput:
+        """Pre-expand `prompt_embeds` sentinels before delegating to the MM
+        processor, then attach `prompt_embeds` modality data to the result.
+
+        Mixed mode only: the `_prompt_embeds` stash is set by
+        `render_messages` when `prompt_embeds` co-exist with other MM data
+        (images, audio, …).  We expand each 1-token sentinel to an N-token
+        span *before* calling `super()._process_tokens()` so the MM
+        processor records all placeholder offsets in the final (post-expansion)
+        coordinate space, no offset shifting needed afterwards.
+        """
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
             tensors, placeholder_token_id = prompt_embeds_info
@@ -1026,6 +1036,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         *,
         skip_mm_cache: bool = False,
     ) -> TokensInput | MultiModalInput:
+        """Async equivalent of `_process_tokens`."""
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
             tensors, placeholder_token_id = prompt_embeds_info
