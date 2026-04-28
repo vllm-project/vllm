@@ -46,7 +46,7 @@ class AttentionConfig:
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
 
-    disable_flashinfer_prefill: bool = True
+    disable_flashinfer_prefill: bool | None = None
     """Whether to disable flashinfer prefill."""
 
     disable_flashinfer_q_quantization: bool = False
@@ -142,7 +142,7 @@ class AttentionConfig:
                     "instead."
                 )
 
-        if self.disable_flashinfer_prefill and not deprecated_flag_used:
+        if self.disable_flashinfer_prefill is True and not deprecated_flag_used:
             # disable_flashinfer_prefill means "use FLASH_ATTN instead"
             # This is only relevant if no other backend was explicitly selected
             self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN

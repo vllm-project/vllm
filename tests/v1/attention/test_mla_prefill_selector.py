@@ -179,13 +179,8 @@ class TestGetMLAPrefillBackend:
                 backend = get_mla_prefill_backend(vllm_config)
                 assert backend.get_name() == "FLASH_ATTN_PREFILL"
 
-    def test_explicit_backend_invalid_falls_back_to_auto(self):
-        """Test that invalid explicit backend falls back to auto-selection."""
-        try:
-            flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
-        except ImportError:
-            pytest.skip("FLASH_ATTN backend not available")
-
+    def test_explicit_backend_invalid_raises_error(self):
+        """Test that invalid explicit backend raises ValueError."""
         vllm_config = _make_vllm_config(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASHINFER,
         )
@@ -196,15 +191,8 @@ class TestGetMLAPrefillBackend:
                 major=9, minor=0
             )
 
-            # FlashInfer will fail validation on Hopper, should fall back
-            with patch.object(
-                flash_attn_cls,
-                "validate_configuration",
-                return_value=[],
-            ):
-                backend = get_mla_prefill_backend(vllm_config)
-                # Should fall back to FLASH_ATTN since it's the only option on Hopper
-                assert backend.get_name() == "FLASH_ATTN_PREFILL"
+            with pytest.raises(ValueError, match="is not valid"):
+                get_mla_prefill_backend(vllm_config)
 
     def test_auto_selection_on_hopper(self):
         """Test auto-selection on Hopper returns FlashAttention."""
@@ -527,3 +515,59 @@ class TestBackendValidation:
 
         # Unsupported dtype
         assert not FlashAttnPrefillBackend.supports_dtype(torch.float32)
+
+
+class TestDeprecatedFlagMigration:
+    """Tests for _migrate_deprecated_mla_prefill_flags in AttentionConfig."""
+
+    def test_no_deprecated_flags_leaves_backend_none(self):
+        """No deprecated flags set means mla_prefill_backend stays None."""
+        config = AttentionConfig()
+        assert config.mla_prefill_backend is None
+
+    def test_use_cudnn_prefill_migrates_to_cudnn(self):
+        """use_cudnn_prefill=True migrates to CUDNN backend."""
+        config = AttentionConfig(use_cudnn_prefill=True)
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.CUDNN
+
+    def test_use_trtllm_ragged_migrates_to_trtllm_ragged(self):
+        """use_trtllm_ragged_deepseek_prefill=True migrates to TRTLLM_RAGGED."""
+        config = AttentionConfig(use_trtllm_ragged_deepseek_prefill=True)
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
+
+    def test_disable_flashinfer_prefill_migrates_to_flash_attn(self):
+        """disable_flashinfer_prefill=True migrates to FLASH_ATTN."""
+        config = AttentionConfig(disable_flashinfer_prefill=True)
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
+
+    def test_explicit_backend_ignores_deprecated_flags(self):
+        """mla_prefill_backend takes precedence over deprecated flags."""
+        config = AttentionConfig(
+            mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
+            use_cudnn_prefill=True,
+        )
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
+
+    def test_cudnn_takes_priority_over_trtllm(self):
+        """use_cudnn_prefill wins over use_trtllm_ragged_deepseek_prefill."""
+        config = AttentionConfig(
+            use_cudnn_prefill=True,
+            use_trtllm_ragged_deepseek_prefill=True,
+        )
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.CUDNN
+
+    def test_cudnn_takes_priority_over_disable_flashinfer(self):
+        """use_cudnn_prefill wins over disable_flashinfer_prefill."""
+        config = AttentionConfig(
+            use_cudnn_prefill=True,
+            disable_flashinfer_prefill=True,
+        )
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.CUDNN
+
+    def test_trtllm_takes_priority_over_disable_flashinfer(self):
+        """use_trtllm_ragged takes priority over disable_flashinfer."""
+        config = AttentionConfig(
+            use_trtllm_ragged_deepseek_prefill=True,
+            disable_flashinfer_prefill=True,
+        )
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED

@@ -115,15 +115,19 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
 
         self._prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
-
-        if layer_names is not None:
-            from vllm.model_executor.layers.attention.mla_attention import (
-                MLACommonImpl,
+        if layer_names is None:
+            raise ValueError(
+                "FlashInferPrefillImpl requires layer_names to "
+                "initialize global hyperparameters."
             )
 
-            self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
-            )
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLACommonImpl,
+        )
+
+        self._global_hyperparameters = infer_global_hyperparameters(
+            get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
+        )
 
     def prepare_metadata(
         self,

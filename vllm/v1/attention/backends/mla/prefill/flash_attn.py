@@ -62,7 +62,7 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
         v_head_dim: int,
         vllm_config: "VllmConfig",
         device: torch.device,
-        **kwargs,
+        layer_names: list[str] | None = None,
     ) -> None:
         super().__init__(
             num_heads=num_heads,
@@ -73,6 +73,7 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
             device=device,
+            layer_names=layer_names,
         )
 
         # Handle the differences between the flash_attn_varlen from

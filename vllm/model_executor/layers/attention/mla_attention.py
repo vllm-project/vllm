@@ -1128,9 +1128,6 @@ def dynamic_per_batched_tensor_quant(
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
-logger = init_logger(__name__)
-
-
 @CustomOp.register(
     "mla_decode_concat_quant_fp8",
     dynamic_arg_dims={"decode_ql_nope": 0, "decode_q_pe": 0},
@@ -1351,15 +1348,12 @@ def backend_supports_prefill_query_quantization() -> bool:
 
     from vllm.config import get_current_vllm_config
     from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-    from vllm.v1.attention.backends.mla.prefill.registry import (
-        MLAPrefillBackendEnum,
-    )
 
     vllm_config = get_current_vllm_config()
-    backend_enum = get_mla_prefill_backend(vllm_config)
-    return backend_enum in (
-        MLAPrefillBackendEnum.FLASHINFER,
-        MLAPrefillBackendEnum.TRTLLM_RAGGED,
+    backend_cls = get_mla_prefill_backend(vllm_config)
+    return backend_cls.get_name() in (
+        "FLASHINFER_PREFILL",
+        "TRTLLM_RAGGED_PREFILL",
     )
 
 
