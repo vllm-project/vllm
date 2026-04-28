@@ -25,7 +25,10 @@ from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
@@ -179,7 +182,7 @@ class MoEMixin(MixtureOfExperts):
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
-                FusedMoE.make_expert_params_mapping(
+                fused_moe_make_expert_params_mapping(
                     self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
