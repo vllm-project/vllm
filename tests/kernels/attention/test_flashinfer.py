@@ -699,3 +699,172 @@ def test_flashinfer_decode_with_paged_fp8_kv(
         torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode
+def test_flashinfer_prefill_cudagraph_zero_rows_padding(
+    dtype: torch.dtype,
+) -> None:
+    """Pin the FlashInfer ``zero_rows`` padding contract that the native
+    spec-decode path in ``flashinfer.py`` depends on.
+
+    Contract:
+      * ``BatchPrefillWithPagedKVCacheWrapper(use_cuda_graph=True)`` accepts
+        a padded *request* batch where trailing slots have duplicated
+        ``qo_indptr`` / ``paged_kv_indptr`` entries and ``last_page_len == 0``.
+        The query and output tensors are sized to ``qo_indptr[-1]``
+        (= real tokens), not to ``padded_bs * q_len`` — FlashInfer enforces
+        ``q.shape[0] == qo_indptr[-1]`` and rejects mismatches at the API
+        boundary. Padding lives in the request dimension of the persistent
+        metadata buffers, not in the per-step query/output tensors.
+      * The wrapper produces bit-identical real-row output vs an unpadded
+        non-CG reference (``abs_err == 0``) — i.e. allocating wrapper
+        buffers for the padded request count does not change kernel
+        scheduling on the real rows. (Verified empirically by
+        ``flashinfer_padded_cg_repro.py`` for these head dims.)
+
+    Failure modes if a FlashInfer upgrade breaks either property:
+      * The shape-check property is hard-fail: ``run()`` raises before any
+        kernel launches.
+      * The bit-exactness property is a numerical contract regression:
+        real-row output drifts by a few bf16 ULPs (this was the observed
+        ``null_block`` behavior). Not catastrophic, but a contract change
+        we want to notice rather than absorb silently.
+    """
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    # Configuration mirrors flashinfer_padded_cg_repro.py defaults, where
+    # zero_rows was empirically verified to give abs_err == rel_err == 0
+    # on real rows. Diverging from these head counts risks landing on a
+    # different FlashInfer kernel schedule and losing bit-exactness.
+    real_bs = 3
+    padded_bs = 8
+    q_len = 5  # 1 + num_speculative_tokens, uniform across the bucket
+    num_qo_heads, num_kv_heads = 32, 8
+    head_dim = 128
+    page_size = 16
+    pages_per_req = 4
+
+    real_kv_len = (
+        pages_per_req * page_size
+    )  # last page full → last_page_len = page_size
+    real_pages = real_bs * pages_per_req
+    num_total_pages = real_pages + 16  # extra slack
+
+    kv_cache = torch.randn(
+        num_total_pages, 2, page_size, num_kv_heads, head_dim, dtype=dtype
+    )
+
+    # Persistent GPU buffers — addresses captured by the cudagraph-mode
+    # wrapper. Sized for the padded request count.
+    qo_indptr_buf = torch.zeros(padded_bs + 1, dtype=torch.int32)
+    paged_kv_indptr_buf = torch.zeros(padded_bs + 1, dtype=torch.int32)
+    paged_kv_indices_buf = torch.zeros(padded_bs * pages_per_req, dtype=torch.int32)
+    paged_kv_last_page_len_buf = torch.zeros(padded_bs, dtype=torch.int32)
+
+    # Build the padded zero_rows metadata on CPU (FlashInfer copies these
+    # into the persistent buffers during plan()).
+    qo_indptr_cpu = torch.zeros(padded_bs + 1, dtype=torch.int32, device="cpu")
+    paged_kv_indptr_cpu = torch.zeros(padded_bs + 1, dtype=torch.int32, device="cpu")
+    paged_kv_last_page_len_cpu = torch.zeros(padded_bs, dtype=torch.int32, device="cpu")
+    real_indices: list[int] = []
+    for r in range(real_bs):
+        qo_indptr_cpu[r + 1] = qo_indptr_cpu[r] + q_len
+        paged_kv_indptr_cpu[r + 1] = paged_kv_indptr_cpu[r] + pages_per_req
+        paged_kv_last_page_len_cpu[r] = page_size
+        real_indices.extend(range(r * pages_per_req, (r + 1) * pages_per_req))
+    # zero_rows tail: duplicate the previous indptr entries, last_page_len=0.
+    for r in range(real_bs, padded_bs):
+        qo_indptr_cpu[r + 1] = qo_indptr_cpu[r]
+        paged_kv_indptr_cpu[r + 1] = paged_kv_indptr_cpu[r]
+        paged_kv_last_page_len_cpu[r] = 0
+
+    # Sanity check that we built the layout the test claims to exercise.
+    expected_qo_indptr = [0, 5, 10, 15, 15, 15, 15, 15, 15]
+    assert qo_indptr_cpu.tolist() == expected_qo_indptr
+    assert paged_kv_last_page_len_cpu.tolist() == [16, 16, 16, 0, 0, 0, 0, 0]
+
+    paged_kv_indices_cpu = torch.tensor(real_indices, dtype=torch.int32)
+
+    # Query is sized to qo_indptr[-1] = real_bs * q_len. FlashInfer enforces
+    # q.shape[0] == qo_indptr[-1]; the "padded" dimension under zero_rows is
+    # the request count in the persistent buffers, not the query tensor.
+    real_query = torch.randn(real_bs * q_len, num_qo_heads, head_dim, dtype=dtype)
+
+    # CUDA-graph-mode wrapper backed by the persistent buffers.
+    workspace_cg = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    cg_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        workspace_cg,
+        "NHD",
+        use_cuda_graph=True,
+        qo_indptr_buf=qo_indptr_buf,
+        paged_kv_indptr_buf=paged_kv_indptr_buf,
+        paged_kv_indices_buf=paged_kv_indices_buf,
+        paged_kv_last_page_len_buf=paged_kv_last_page_len_buf,
+    )
+    cg_wrapper.plan(
+        qo_indptr=qo_indptr_cpu,
+        paged_kv_indptr=paged_kv_indptr_cpu,
+        paged_kv_indices=paged_kv_indices_cpu,
+        paged_kv_last_page_len=paged_kv_last_page_len_cpu,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim_qk=head_dim,
+        page_size=page_size,
+        causal=True,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+
+    cg_output = cg_wrapper.run(real_query, kv_cache)
+
+    # Unpadded reference: the same wrapper class without cudagraph mode,
+    # built only on the real rows.
+    real_qo_indptr_cpu = qo_indptr_cpu[: real_bs + 1].clone()
+    real_paged_kv_indptr_cpu = paged_kv_indptr_cpu[: real_bs + 1].clone()
+    real_paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu[:real_bs].clone()
+    workspace_ref = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    ref_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace_ref, "NHD")
+    ref_wrapper.plan(
+        qo_indptr=real_qo_indptr_cpu,
+        paged_kv_indptr=real_paged_kv_indptr_cpu,
+        paged_kv_indices=paged_kv_indices_cpu,
+        paged_kv_last_page_len=real_paged_kv_last_page_len_cpu,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim_qk=head_dim,
+        page_size=page_size,
+        causal=True,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+    ref_output = ref_wrapper.run(real_query, kv_cache)
+
+    # Real rows must match bit-exactly — padded slots changing kernel
+    # scheduling would shift numerics by a few bf16 ULPs (the null_block
+    # alternative); zero_rows is the contract we depend on.
+    torch.testing.assert_close(cg_output, ref_output, atol=0.0, rtol=0.0)
+
+    # Cross-check against a hand-rolled paged-attention reference so we
+    # know the test's "ground truth" agrees on real-row math — defends
+    # against the degenerate case where both wrappers silently produce
+    # zeros (e.g. workspace bug) and the bit-exact assert above passes
+    # vacuously.
+    key_cache = kv_cache[:, 0, :, :, :].squeeze(1)
+    value_cache = kv_cache[:, 1, :, :, :].squeeze(1)
+    block_tables = torch.tensor(
+        [[r * pages_per_req + p for p in range(pages_per_req)] for r in range(real_bs)],
+        dtype=torch.int32,
+    )
+    hand_ref = ref_paged_attn(
+        query=real_query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[q_len] * real_bs,
+        kv_lens=[real_kv_len] * real_bs,
+        block_tables=block_tables,
+        scale=head_dim**-0.5,
+    )
+    torch.testing.assert_close(cg_output, hand_ref, atol=5e-2, rtol=1e-2)

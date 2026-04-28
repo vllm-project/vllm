@@ -1309,6 +1309,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     # paged_kv_indptr entries and last_page_len == 0, which
                     # FlashInfer accepts with bit-identical real-row numerics
                     # (verified via flashinfer_padded_cg_repro.py).
+                    #
+                    # FlashInfer enforces ``q.shape[0] == qo_indptr[-1]`` —
+                    # the real query-token total. Override num_decode_tokens
+                    # so that forward()'s ``query[:num_decode_tokens]`` slice
+                    # matches that contract: split_decodes_and_prefills
+                    # returns num_decode_tokens == num_actual_tokens for
+                    # uniform decode batches, and num_actual_tokens may be
+                    # padded under full CG (see CommonAttentionMetadata
+                    # docstring).
+                    real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
+                    attn_metadata.num_decode_tokens = real_decode_tokens
                     spec_wrapper = self._get_spec_decode_prefill_wrapper(
                         num_decodes, use_cudagraph
                     )

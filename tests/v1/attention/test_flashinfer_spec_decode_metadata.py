@@ -133,8 +133,18 @@ def _make_builder() -> FlashInferMetadataBuilder:
     return builder
 
 
-def _build(builder: FlashInferMetadataBuilder, batch_spec: BatchSpec):
+def _build(
+    builder: FlashInferMetadataBuilder,
+    batch_spec: BatchSpec,
+    num_actual_tokens_override: int | None = None,
+):
     common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
+    if num_actual_tokens_override is not None:
+        # Simulate full-CG token-dim padding: the model runner inflates
+        # num_actual_tokens beyond qo_indptr[-1]. CommonAttentionMetadata's
+        # docstring acknowledges this ("TODO(lucas): rename to num_tokens
+        # since it may be padded and this is misleading").
+        common.num_actual_tokens = num_actual_tokens_override
     fake_wrapper = _RecordingPrefillWrapper()
 
     def _fake_get_spec_decode_prefill_wrapper(batch_size, use_cudagraph):
@@ -162,26 +172,52 @@ def _build(builder: FlashInferMetadataBuilder, batch_spec: BatchSpec):
 
 
 @pytest.mark.parametrize(
-    "query_lens, seq_lens, expected_qo_indptr, expected_last_page_len",
+    "query_lens, seq_lens, num_actual_tokens_override, "
+    "expected_qo_indptr, expected_last_page_len, expected_num_decode_tokens",
     [
-        # The regression case: trailing zero row from CG padding.
+        # Routing-fix regression case: trailing zero row from CG padding.
         # Old aggregate logic: 10 % 3 == 1 → query_len=1 → FIDecode (bug).
         # New per-row scan: nonzero rows are [5, 5] → query_len=5 →
         # FISpecDecode.
-        ([5, 5, 0], [64, 72, 0], [0, 5, 10, 10], [16, 8, 0]),
+        ([5, 5, 0], [64, 72, 0], None, [0, 5, 10, 10], [16, 8, 0], 10),
         # Sanity: no padding, all real rows.
-        ([5, 5, 5], [64, 72, 80], [0, 5, 10, 15], [16, 8, 16]),
+        ([5, 5, 5], [64, 72, 80], None, [0, 5, 10, 15], [16, 8, 16], 15),
+        # num_decode_tokens regression case: num_actual_tokens has been
+        # padded by the model runner (full CG token-dim padding) but
+        # qo_indptr only describes real query tokens. FlashInfer enforces
+        # ``q.shape[0] == qo_indptr[-1]``; the FISpecDecode build path must
+        # set num_decode_tokens to qo_indptr[-1] so forward()'s
+        # ``query[:num_decode_tokens]`` slice matches that contract.
+        # Without the override, num_decode_tokens would leak the padded 40.
+        ([5, 5, 0], [64, 72, 0], 40, [0, 5, 10, 10], [16, 8, 0], 10),
     ],
-    ids=["padded_zero_row", "no_padding"],
+    ids=[
+        "padded_zero_row",
+        "no_padding",
+        "padded_zero_row_with_inflated_num_tokens",
+    ],
 )
 def test_spec_decode_routes_to_fispecdecode(
-    query_lens, seq_lens, expected_qo_indptr, expected_last_page_len
+    query_lens,
+    seq_lens,
+    num_actual_tokens_override,
+    expected_qo_indptr,
+    expected_last_page_len,
+    expected_num_decode_tokens,
 ):
     """Uniform query_len > 1 in the decode bucket must produce FISpecDecode
-    metadata, with per-request plan() kwargs preserving zero_rows entries."""
+    metadata, with per-request plan() kwargs preserving zero_rows entries.
+
+    Also pins that ``attn_metadata.num_decode_tokens`` matches the real
+    query-token total (``qo_indptr[-1]``) regardless of how
+    ``common_attn_metadata.num_actual_tokens`` was padded by the model
+    runner — forward() relies on this when slicing the query/output for
+    the FlashInfer call (``q.shape[0] == qo_indptr[-1]``)."""
     builder = _make_builder()
     attn_metadata, fake_wrapper = _build(
-        builder, BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+        builder,
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        num_actual_tokens_override=num_actual_tokens_override,
     )
 
     assert isinstance(attn_metadata.decode, FISpecDecode), (
@@ -213,3 +249,14 @@ def test_spec_decode_routes_to_fispecdecode(
         assert paged_kv_indptr[-1].item() == paged_kv_indptr[-2].item(), (
             f"padded row should not extend paged_kv_indptr: {paged_kv_indptr.tolist()}"
         )
+
+    # num_decode_tokens must equal qo_indptr[-1] = real query-token total,
+    # not the (potentially padded) num_actual_tokens. The first assertion
+    # makes the FlashInfer contract relationship (forward()'s query slice
+    # size == qo_indptr[-1]) visually explicit; the second pins the value.
+    assert attn_metadata.num_decode_tokens == qo[-1].item(), (
+        f"num_decode_tokens ({attn_metadata.num_decode_tokens}) must equal "
+        f"qo_indptr[-1] ({qo[-1].item()}) — FlashInfer's prefill wrapper "
+        f"enforces q.shape[0] == qo_indptr[-1]."
+    )
+    assert attn_metadata.num_decode_tokens == expected_num_decode_tokens
