@@ -76,6 +76,32 @@ if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt
     exit 0
 fi
 
+# Ensure git is available — some vllm runtime images (e.g. the slim
+# *-cu130-ubuntu2404 variants) ship without it, but the clone below needs it.
+if ! command -v git >/dev/null 2>&1; then
+    echo "git not found; attempting to install it..."
+    if [ "$(id -u)" -eq 0 ]; then
+        SUDO=""
+    elif command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        echo "Error: git is required but not installed, and no root/sudo access is available." >&2
+        exit 1
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        $SUDO apt-get update && $SUDO apt-get install -y --no-install-recommends git
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf install -y git
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO yum install -y git
+    elif command -v apk >/dev/null 2>&1; then
+        $SUDO apk add --no-cache git
+    else
+        echo "Error: git is required but no supported package manager (apt/dnf/yum/apk) was found." >&2
+        exit 1
+    fi
+fi
+
 echo "Preparing DeepGEMM build..."
 echo "Repository: $DEEPGEMM_GIT_REPO"
 echo "Reference: $DEEPGEMM_GIT_REF"
