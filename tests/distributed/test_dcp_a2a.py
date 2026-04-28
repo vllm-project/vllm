@@ -187,6 +187,51 @@ class TestLSEWeightedCombine:
         assert global_lse.shape == (B, H)
         assert abs(global_lse.item() - expected_global_lse) < 1e-5
 
+    def test_base2_return_lse(self):
+        """Base-2 LSE mode returns log2-sum-exp2 global LSE."""
+        from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
+
+        outputs = torch.tensor(
+            [
+                [[[1.0, 2.0]]],
+                [[[3.0, 4.0]]],
+            ]
+        )
+        lses = torch.tensor(
+            [
+                [[1.0]],
+                [[2.0]],
+            ]
+        )
+
+        result, global_lse = _lse_weighted_combine(
+            outputs,
+            lses,
+            return_lse=True,
+            is_lse_base_on_e=False,
+        )
+
+        expected_global_lse = math.log2(2**1 + 2**2)
+        w0 = 2**1 / (2**1 + 2**2)
+        w1 = 2**2 / (2**1 + 2**2)
+        expected = torch.tensor([[[w0 * 1.0 + w1 * 3.0, w0 * 2.0 + w1 * 4.0]]])
+
+        torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            global_lse,
+            torch.tensor([[expected_global_lse]]),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_lse_pack_dim(self):
+        """Packed A2A stores one fp32 LSE in output-dtype lanes."""
+        from vllm.v1.attention.ops.dcp_alltoall import _dcp_a2a_lse_pack_dim
+
+        assert _dcp_a2a_lse_pack_dim(torch.bfloat16) == 2
+        assert _dcp_a2a_lse_pack_dim(torch.float16) == 2
+        assert _dcp_a2a_lse_pack_dim(torch.float32) == 1
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
