@@ -134,48 +134,52 @@ __global__ void scaled_fp8_quant_kernel_strided_dynamic(
       });
 }
 
-template <typename scalar_t, typename fp8_type>
+template <typename scalar_t, typename fp8_t>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
-    fp8_type* __restrict__ out, float* __restrict__ scale,
-    const scalar_t* __restrict__ input, const float* __restrict__ scale_ub,
-    int hidden_size, int64_t in_row_stride, int64_t out_row_stride) {
+    fp8_t* __restrict__ out,
+    float* __restrict__ scale,
+    const scalar_t* __restrict__ input,
+    const float* __restrict__ scale_ub,
+    int hidden_size,
+    int64_t in_row_stride,
+    int64_t out_row_stride) {
   const int64_t token_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
-  // Use int64 to avoid overflowing an int32 when calculating this offset
-  int64_t in_offset = static_cast<int64_t>(token_idx) * in_row_stride;
-  int64_t out_offset = static_cast<int64_t>(token_idx) * out_row_stride;
+  const int64_t in_offset = token_idx * in_row_stride;
+  const int64_t out_offset = token_idx * out_row_stride;
   const scalar_t* token_in = input + in_offset;
-  fp8_type* token_out = out + out_offset;
+  fp8_t* token_out = out + out_offset;
 
-  // 1) per-token absmax
+  extern __shared__ __align__(16) unsigned char smem_raw[];
+  scalar_t* token_smem = reinterpret_cast<scalar_t*>(smem_raw);
+
+  // 1) cache token into shared memory while computing per-thread absmax
   float absmax_val = 0.f;
-  vectorize_read_with_alignment<16>(
-      token_in, hidden_size, tid, blockDim.x, [&] __device__(scalar_t v) {
-        absmax_val = fmaxf(absmax_val, fabsf(static_cast<float>(v)));
-      });
-
-  using BlockReduce = cub::BlockReduce<float, 256>;
-  __shared__ typename BlockReduce::TempStorage tmp;
-  const float block_max =
-      BlockReduce(tmp).Reduce(absmax_val, CubMaxOp{}, blockDim.x);
-
-  __shared__ float token_scale;
-  if (tid == 0) {
-    token_scale = scale_ub ? fminf(block_max, *scale_ub) : block_max;
-    token_scale = fmaxf(token_scale / quant_type_max_v<fp8_type>,
-                        min_scaling_factor<fp8_type>::val());
-    scale[token_idx] = token_scale;
+  for (int i = tid; i < hidden_size; i += blockDim.x) {
+    const scalar_t v = token_in[i];
+    token_smem[i] = v;
+    absmax_val = fmaxf(absmax_val, fabsf(to_f32(v)));
   }
   __syncthreads();
 
-  // 2) quantize
-  vectorize_with_alignment<16>(
-      token_in, token_out, hidden_size, tid, blockDim.x,
-      [=] __device__(fp8_type & dst, const scalar_t& src) {
-        dst = scaled_fp8_conversion<false, fp8_type>(static_cast<float>(src),
-                                                     token_scale);
-      });
+  using BlockReduce = cub::BlockReduce<float, kBlockSize>;
+  __shared__ typename BlockReduce::TempStorage tmp;
+  const float block_max = BlockReduce(tmp).Reduce(absmax_val, cub::Max());
+
+  __shared__ float token_scale;
+  if (tid == 0) {
+    float t = scale_ub ? fminf(block_max, *scale_ub) : block_max;
+    t = fmaxf(t / quant_type_max_v<fp8_t>::value, min_scaling_factor<fp8_t>::val());
+    token_scale = t;
+    scale[token_idx] = t;
+  }
+  __syncthreads();
+
+  // 2) quantize reading from shared memory (avoid second global read)
+  for (int i = tid; i < hidden_size; i += blockDim.x) {
+    token_out[i] = fp8_from_scaled<fp8_t>(to_f32(token_smem[i]), token_scale);
+  }
 }
 
 }  // namespace vllm
