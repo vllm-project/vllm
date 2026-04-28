@@ -136,14 +136,23 @@ def test_warm_up_compile_pool_oom_fallback(monkeypatch):
 
 
 def test_warm_pool_real_oom():
-    """Verify that AsyncCompile.warm_pool() raises an exception under
-    memory pressure when RLIMIT_AS is enforced."""
+    """Verify that the OOM in warm_pool() can be caught and handled
+    gracefully, rather than crashing the process."""
+    # This test runs in a subprocess with restricted memory to trigger OOM,
+    # then verifies the exception can be caught by a try-except block
+    # (simulating vLLM's fallback logic).
     probe_code = """
 import resource
 # Restrict virtual memory to 500MB
 resource.setrlimit(resource.RLIMIT_AS, (500 * 1024**2, 500 * 1024**2))
-from torch._inductor.async_compile import AsyncCompile
-AsyncCompile.warm_pool()
+
+try:
+    from torch._inductor.async_compile import AsyncCompile
+    AsyncCompile.warm_pool()
+    print("NO_OOM")
+except Exception as e:
+    # This is expected - the catch worked, process didn't crash
+    print(f"CAUGHT:{type(e).__name__}")
 """
     result = subprocess.run(
         [sys.executable, "-c", probe_code],
@@ -151,6 +160,12 @@ AsyncCompile.warm_pool()
         text=True,
         timeout=60,
     )
-    assert result.returncode != 0 or "EXCEPTION" in result.stdout or result.stderr, (
-        "Expected warm_pool() to fail under memory limit on Linux"
+    # Process should exit normally (returncode == 0) and print CAUGHT
+    assert result.returncode == 0, (
+        f"Expected process to exit normally (caught exception), "
+        f"but got returncode={result.returncode}, stderr={result.stderr}"
+    )
+    assert "CAUGHT:" in result.stdout, (
+        f"Expected warm_pool() to raise a catchable exception, "
+        f"got stdout={result.stdout}"
     )
