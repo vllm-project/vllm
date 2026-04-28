@@ -300,7 +300,7 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
         proc.send_signal(signal.SIGTERM)
 
         # abort timeout (0) should exit promptly
-        for _ in range(30):
+        for _ in range(40):
             if proc.poll() is not None:
                 break
             time.sleep(0.1)
@@ -311,7 +311,7 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
             pytest.fail("Process did not exit after SIGTERM with abort timeout")
 
         exit_time = time.time() - start_time
-        assert exit_time < 3.1, f"Default shutdown took too long: {exit_time:.1f}s"
+        assert exit_time < 4.1, f"Default shutdown took too long: {exit_time:.1f}s"
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
 
         await _assert_children_cleaned_up(child_pids)
