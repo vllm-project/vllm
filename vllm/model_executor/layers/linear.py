@@ -1017,6 +1017,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        skip_v: bool = False,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -1025,6 +1026,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        self.skip_v = skip_v
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.num_heads = divide(self.total_num_heads, tp_size)
@@ -1035,16 +1037,26 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = (
-            self.num_heads * self.head_size
-            + self.num_kv_heads * self.head_size
-            + self.num_kv_heads * self.v_head_size
-        ) * tp_size
-        self.output_sizes = [
-            self.num_heads * self.head_size * tp_size,  # q_proj
-            self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
-        ]
+        if skip_v:
+            output_size = (
+                self.num_heads * self.head_size
+                + self.num_kv_heads * self.head_size
+            ) * tp_size
+            self.output_sizes = [
+                self.num_heads * self.head_size * tp_size,   # q_proj
+                self.num_kv_heads * self.head_size * tp_size,  # k_proj
+            ]
+        else:
+            output_size = (
+                self.num_heads * self.head_size
+                + self.num_kv_heads * self.head_size
+                + self.num_kv_heads * self.v_head_size
+            ) * tp_size
+            self.output_sizes = [
+                self.num_heads * self.head_size * tp_size,  # q_proj
+                self.num_kv_heads * self.head_size * tp_size,  # k_proj
+                self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
+            ]
 
         super().__init__(
             input_size=input_size,
@@ -1063,7 +1075,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             return
         if isinstance(loaded_shard_id, str):
-            if loaded_shard_id not in ["q", "k", "v"]:
+            valid = ["q", "k"] if self.skip_v else ["q", "k", "v"]
+            if loaded_shard_id not in valid:
                 raise ValueError(
                     "Shard id for QKVParallelLinear should be 'q', 'k', or 'v', "
                     f"got shard id {loaded_shard_id}."
@@ -1109,12 +1122,15 @@ class QKVParallelLinear(ColumnParallelLinear):
                 self.total_num_heads * self.head_size,
                 self.total_num_kv_heads * self.head_size,
             ),
-            (
-                "v",
-                (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
-                self.total_num_kv_heads * self.v_head_size,
-            ),
         ]
+        if not self.skip_v:
+            shard_offsets.append(
+                (
+                    "v",
+                    (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
+                    self.total_num_kv_heads * self.v_head_size,
+                )
+            )
 
         for shard_id, shard_offset, shard_size in shard_offsets:
             # Special case for Quantization.
@@ -1237,12 +1253,15 @@ class QKVParallelLinear(ColumnParallelLinear):
                     self.total_num_heads * self.head_size,
                     self.total_num_kv_heads * self.head_size,
                 ),
-                (
-                    "v",
-                    (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
-                    self.total_num_kv_heads * self.v_head_size,
-                ),
             ]
+            if not self.skip_v:
+                shard_offsets.append(
+                    (
+                        "v",
+                        (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
+                        self.total_num_kv_heads * self.v_head_size,
+                    )
+                )
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
 
             packed_dim = getattr(param, "packed_dim", None)
@@ -1267,24 +1286,27 @@ class QKVParallelLinear(ColumnParallelLinear):
                     )
 
                 if use_bitsandbytes_4bit:
-                    orig_qkv_offsets = {
+                    qk_total = (
+                        self.total_num_heads + self.total_num_kv_heads
+                    ) * self.head_size
+                    orig_qkv_offsets: dict[str, tuple[int, int]] = {
                         "q": (0, self.total_num_heads * self.head_size),
                         "k": (
                             self.total_num_heads * self.head_size,
                             self.total_num_kv_heads * self.head_size,
                         ),
-                        "v": (
-                            (self.total_num_heads + self.total_num_kv_heads)
-                            * self.head_size,
-                            self.total_num_kv_heads * self.v_head_size,
-                        ),
                         "total": (
-                            (self.total_num_heads + self.total_num_kv_heads)
-                            * self.head_size
-                            + self.total_num_kv_heads * self.v_head_size,
+                            qk_total
+                            if self.skip_v
+                            else qk_total + self.total_num_kv_heads * self.v_head_size,
                             0,
                         ),
                     }
+                    if not self.skip_v:
+                        orig_qkv_offsets["v"] = (
+                            qk_total,
+                            self.total_num_kv_heads * self.v_head_size,
+                        )
 
                     shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                         param, orig_qkv_offsets, shard_id
@@ -1296,7 +1318,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
-        assert loaded_shard_id in ["q", "k", "v"]
+        assert loaded_shard_id in (["q", "k"] if self.skip_v else ["q", "k", "v"])
 
         # If output dim is defined, use the default loading process.
         if output_dim is not None:
@@ -1336,24 +1358,27 @@ class QKVParallelLinear(ColumnParallelLinear):
             is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
             if use_bitsandbytes_4bit:
-                orig_qkv_offsets = {
+                qk_total = (self.num_heads + self.num_kv_heads) * self.head_size
+                bnb_offsets = {
                     "q": (0, self.num_heads * self.head_size),
                     "k": (
                         self.num_heads * self.head_size,
                         self.num_kv_heads * self.head_size,
                     ),
-                    "v": (
-                        (self.num_heads + self.num_kv_heads) * self.head_size,
-                        self.num_kv_heads * self.v_head_size,
-                    ),
                     "total": (
-                        (self.num_heads + self.num_kv_heads) * self.head_size
-                        + self.num_kv_heads * self.v_head_size,
+                        qk_total
+                        if self.skip_v
+                        else qk_total + self.num_kv_heads * self.v_head_size,
                         0,
                     ),
                 }
+                if not self.skip_v:
+                    bnb_offsets["v"] = (
+                        qk_total,
+                        self.num_kv_heads * self.v_head_size,
+                    )
                 shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                    param, orig_qkv_offsets, loaded_shard_id
+                    param, bnb_offsets, loaded_shard_id
                 )
 
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
