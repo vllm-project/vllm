@@ -27,6 +27,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
+from .aiter import AITERConfig
 from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -291,6 +292,8 @@ class VllmConfig:
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
     """Kernel configuration."""
+    aiter_config: AITERConfig = Field(default_factory=AITERConfig)
+    """ROCm AITER operations configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -437,6 +440,10 @@ class VllmConfig:
             vllm_factors.append(self.kernel_config.compute_hash())
         else:
             vllm_factors.append(None)
+        if self.aiter_config:
+            vllm_factors.append(self.aiter_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
@@ -955,6 +962,9 @@ class VllmConfig:
         # must happen after compilation mode and backend are decided,
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
+
+        # Initialize ROCm AITER ops from config
+        self._init_aiter_ops()
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
@@ -1830,6 +1840,20 @@ class VllmConfig:
                 "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
                 + ", ".join(unsupported)
             )
+
+    def _init_aiter_ops(self) -> None:
+        """Initialize ROCm AITER ops from aiter_config.
+
+        This sets the rocm_aiter_ops class variables from the aiter_config,
+        allowing AITER operations to be controlled via the config instead of
+        environment variables.
+        """
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm() and self.aiter_config is not None:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            rocm_aiter_ops.init_from_config(self.aiter_config)
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.

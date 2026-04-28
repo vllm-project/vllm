@@ -945,11 +945,11 @@ class RocmPlatform(Platform):
         # This (mostly) preserves previous CustomOp behavior
         # Necessary on ROCm because it's common that users
         # enable rms_norm to use the aiter kernel.
-        # TODO(luka/TJ) remove env vars completely
+        aiter_config = vllm_config.aiter_config
         if (
             cc.is_custom_op_enabled("rms_norm")
-            and envs.VLLM_ROCM_USE_AITER
-            and envs.VLLM_ROCM_USE_AITER_RMSNORM
+            and aiter_config.enabled
+            and aiter_config.rmsnorm
         ):
             rms_norm = ["aiter"] + default
         else:

@@ -281,14 +281,15 @@ def select_unquantized_moe_backend(
                 "FlashInfer unquantized MoE backend supports the configuration."
             )
 
-    # Handle explicit AITER FP8 configuration.
-    if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
-            if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
-        else:
-            backend = UnquantizedMoeBackend.AITER
-            return _return_or_raise(backend, moe_config, activation_format)
+    # Handle explicit AITER configuration via config or env vars.
+    # rocm_aiter_ops uses either AITERConfig (if initialized) or falls back to env vars.
+    if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_fused_moe_enabled():
+        backend = UnquantizedMoeBackend.AITER
+        return _return_or_raise(backend, moe_config, activation_format)
+    else:
+        # AITER not enabled, remove from available backends
+        if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
+            AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
 
     for backend in AVAILABLE_BACKENDS:
         k_cls = backend_to_kernel_cls(backend)

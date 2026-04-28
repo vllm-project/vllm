@@ -369,15 +369,17 @@ def select_fp8_moe_backend(
             backend, config, weight_key, activation_key, activation_format
         )
 
-    # Handle explicit AITER FP8 configuration.
-    if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+    # Handle explicit AITER FP8 configuration via config or env vars.
+    # rocm_aiter_ops uses either AITERConfig (if initialized) or falls back to env vars.
+    if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_fused_moe_enabled():
+        backend = Fp8MoeBackend.AITER
+        return _return_or_raise(
+            backend, config, weight_key, activation_key, activation_format
+        )
+    else:
+        # AITER not enabled, remove from available backends if present
+        if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
-        else:
-            backend = Fp8MoeBackend.AITER
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
