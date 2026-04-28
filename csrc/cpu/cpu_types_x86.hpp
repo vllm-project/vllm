@@ -208,13 +208,12 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   explicit BF16Vec32(__m256i low, __m256i high)
       : reg_low(low), reg_high(high) {}
 
+  explicit BF16Vec32()
+      : reg_low(_mm256_setzero_si256()), reg_high(_mm256_setzero_si256()) {}
+
   explicit BF16Vec32(BF16Vec8& vec8_data)
-      : reg_low((__m256i)_mm256_inserti32x4(
-            _mm256_castsi128_si256((__m128i)vec8_data.reg),
-            (__m128i)vec8_data.reg, 1)),
-        reg_high((__m256i)_mm256_inserti32x4(
-            _mm256_castsi128_si256((__m128i)vec8_data.reg),
-            (__m128i)vec8_data.reg, 1)) {}
+      : reg_low(_mm256_broadcastsi128_si256((__m128i)vec8_data.reg)),
+        reg_high(_mm256_broadcastsi128_si256((__m128i)vec8_data.reg)) {}
 
   void save(void* ptr) const {
     _mm256_storeu_si256((__m256i*)ptr, reg_low);
@@ -549,6 +548,11 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   FP32Vec16 operator-(const FP32Vec16& b) const {
     return FP32Vec16(_mm256_sub_ps(reg_low, b.reg_low),
                      _mm256_sub_ps(reg_high, b.reg_high));
+  }
+
+  FP32Vec16 operator-() const {
+    const __m256 neg = _mm256_set1_ps(-0.0f);
+    return FP32Vec16(_mm256_xor_ps(reg_low, neg), _mm256_xor_ps(reg_high, neg));
   }
 
   FP32Vec16 operator/(const FP32Vec16& b) const {
