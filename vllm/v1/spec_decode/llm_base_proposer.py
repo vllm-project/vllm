@@ -84,6 +84,15 @@ class SpecDecodeBaseProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
+        # DeepSeek V4 MTP consumes the target's pre-hc_head residual stream,
+        # shape (T, hc_mult * hidden_size). Expand the hidden_states buffer
+        # so target_hidden_states fits; detect DeepseekV4 via draft hf_config.
+        draft_hf_config = self.draft_model_config.hf_config
+        if hasattr(draft_hf_config, "compress_ratios") and hasattr(
+            draft_hf_config, "hc_mult"
+        ):
+            self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
+
         # Unifying eagle, draft model, and parallel drafting support.
         # DFlash always uses parallel drafting (all tokens in one pass),
         # but has an additional slot for the next_token_id (does not shift like EAGLE)
@@ -1267,15 +1276,29 @@ class SpecDecodeBaseProposer:
         Subclasses may override to apply additional config changes.
         """
         spec_cfg = self.speculative_config
+        base = self.vllm_config
+
         if spec_cfg.moe_backend is not None:
-            return replace(
-                self.vllm_config,
+            base = replace(
+                base,
                 kernel_config=replace(
-                    self.vllm_config.kernel_config,
+                    base.kernel_config,
                     moe_backend=spec_cfg.moe_backend,
                 ),
             )
-        return self.vllm_config
+
+        # Note (matt): Never inherit the attention backend from base, because there are
+        # many opportunities for incompatibility, so we always independently autoselect
+        # unless explicitly specified in the speculative config.
+        base = replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                backend=spec_cfg.attention_backend,
+            ),
+        )
+
+        return base
 
     def _get_model(self) -> nn.Module:
         """
@@ -1308,9 +1331,12 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        self._draft_attn_layer_names = (
-            set(all_attn_layers.keys()) - target_attn_layer_names
-        )
+        # Filter to only layers that have KV cache specs.
+        self._draft_attn_layer_names = {
+            name
+            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
+        }
 
         if self.supports_mm_inputs:
             # Even if the target model is multimodal, we can also use
@@ -1332,6 +1358,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
@@ -1513,6 +1540,17 @@ class SpecDecodeBaseProposer:
                         logger.info(
                             "Shared target model lm_head with MTP shared_head.head."
                         )
+
+        if hasattr(target_language_model.model, "topk_indices_buffer"):
+            if hasattr(self.model.model, "topk_indices_buffer"):
+                del self.model.model.topk_indices_buffer
+            self.model.model.topk_indices_buffer = (
+                target_language_model.model.topk_indices_buffer
+            )
+            logger.info(
+                "Detected MTP model with topk_indices_buffer. "
+                "Sharing target model topk_indices_buffer with the draft model."
+            )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
