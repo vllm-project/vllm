@@ -15,8 +15,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
-from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -63,14 +61,6 @@ class MockVllmConfig:
     model_config: MockModelConfig
 
 
-def _build_renderer(model_config: MockModelConfig):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-    return HfRenderer.from_config(
-        MockVllmConfig(model_config),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
-    )
-
-
 def _build_kimi_serving_chat() -> OpenAIServingChat:
     """Build an OpenAIServingChat with Kimi K2 model type."""
     model_config = MockModelConfig(
@@ -82,7 +72,7 @@ def _build_kimi_serving_chat() -> OpenAIServingChat:
     mock_engine.model_config = model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
-    mock_engine.renderer = _build_renderer(model_config)
+    mock_engine.renderer = MagicMock()
 
     models = OpenAIServingModels(
         engine_client=mock_engine,
@@ -92,6 +82,7 @@ def _build_kimi_serving_chat() -> OpenAIServingChat:
         mock_engine,
         models,
         response_role="assistant",
+        openai_serving_render=MagicMock(),
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -107,7 +98,7 @@ def _build_non_kimi_serving_chat() -> OpenAIServingChat:
     mock_engine.model_config = model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
-    mock_engine.renderer = _build_renderer(model_config)
+    mock_engine.renderer = MagicMock()
 
     models = OpenAIServingModels(
         engine_client=mock_engine,
@@ -117,6 +108,7 @@ def _build_non_kimi_serving_chat() -> OpenAIServingChat:
         mock_engine,
         models,
         response_role="assistant",
+        openai_serving_render=MagicMock(),
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,

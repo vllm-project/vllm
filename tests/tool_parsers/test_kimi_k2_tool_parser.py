@@ -13,6 +13,8 @@ from tests.tool_parsers.utils import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
@@ -461,9 +463,15 @@ class TestStreamingEdgeCases:
 class TestAdjustRequest:
     def test_sets_skip_special_tokens_false(self, parser):
         request = MagicMock(spec=ChatCompletionRequest)
-        request.tools = [{"type": "function", "function": {"name": "test"}}]
+        request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(name="test"),
+            )
+        ]
         request.tool_choice = "auto"
         request.skip_special_tokens = True
+        request.structured_outputs = None
 
         result = parser.adjust_request(request)
         assert result.skip_special_tokens is False
@@ -473,6 +481,7 @@ class TestAdjustRequest:
         request.tools = [{"type": "function", "function": {"name": "test"}}]
         request.tool_choice = "none"
         request.skip_special_tokens = True
+        request.structured_outputs = None
 
         result = parser.adjust_request(request)
         assert result.skip_special_tokens is True
@@ -482,6 +491,7 @@ class TestAdjustRequest:
         request.tools = None
         request.tool_choice = "auto"
         request.skip_special_tokens = True
+        request.structured_outputs = None
 
         result = parser.adjust_request(request)
         assert result.skip_special_tokens is True
