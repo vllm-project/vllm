@@ -1764,10 +1764,13 @@ steps:
   - vllm/model_executor/kernels/
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/utils/platform_utils.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
   - tests/kernels/quantization/
   - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -3158,10 +3161,13 @@ steps:
   - vllm/model_executor/kernels/
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/utils/platform_utils.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
   - tests/kernels/quantization/
   - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   commands:
   - pytest -v -s kernels/quantization
       --ignore=kernels/quantization/test_rocm_aiter_fp4.py
