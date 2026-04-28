@@ -1007,7 +1007,7 @@ def unified_mla_kv_cache_update(
     """
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        attn_layer.impl.do_kv_cache_update(
+        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
             kv_cache,
