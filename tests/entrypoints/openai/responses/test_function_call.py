@@ -321,12 +321,100 @@ async def test_function_calling_with_streaming_expected_arguments(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required"],
+)
 async def test_function_calling_with_streaming_types(
-    client: openai.AsyncOpenAI, model_name: str
+    client: openai.AsyncOpenAI, model_name: str, tool_choice
 ):
     # this links the "done" type with the "start" type
     # so every "done" type should have a corresponding "start" type
     # and every open block should be closed by the end of the stream
+    #
+    # stream of events for a response with function call could look like this:
+    # option1: reasoning -> content(option) -> function_call
+    # response.created
+    # -> response.in_progress
+    # -> response.output_item.added
+    # -> response.reasoning_part.added
+    # -> response.reasoning_text.delta
+    # ....
+    # -> response.reasoning_text.delta
+    # -> response.reasoning_text.done
+    # -> response.reasoning_part.done
+    # -> response.output_item.done
+    # -> response.output_item.added
+    # -> response.content_part.added
+    # -> response.output_text.delta
+    # ...
+    # -> response.output_text.delta
+    # -> response.output_text.done
+    # -> response.content_part.done
+    # -> response.output_item.done
+    # -> response.output_item.added
+    # -> response.function_call_arguments.delta
+    # ...
+    # -> response.function_call_arguments.delta
+    # -> response.function_call_arguments.done
+    # -> response.output_item.done
+    # -> response.completed
+    #
+    #
+    # option2: reasoning -> content
+    # response.created
+    # -> response.in_progress
+    # -> response.output_item.added
+    # -> response.reasoning_part.added
+    # -> response.reasoning_text.delta
+    # ....
+    # -> response.reasoning_text.delta
+    # -> response.reasoning_text.done
+    # -> response.reasoning_part.done
+    # -> response.output_item.done
+    # -> response.output_item.added
+    # -> response.content_part.added
+    # -> response.output_text.delta
+    # ..
+    # -> response.output_text.delta
+    # -> response.output_text.done
+    # -> response.content_part.done
+    # -> response.output_item.done
+    # -> response.completed
+    #
+    # option3: content
+    #
+    # response.created
+    # -> response.in_progress
+    # -> response.output_item.added
+    # -> response.content_part.added
+    # -> response.output_text.delta
+    # ...
+    # -> response.output_text.delta
+    # -> response.output_text.done
+    # -> response.content_part.done
+    # -> response.output_item.done
+    # -> response.completed
+    #
+    # option4: content -> function_call
+    # response.created
+    # -> response.in_progress
+    # -> response.output_item.added
+    # -> response.content_part.added
+    # -> response.output_text.delta
+    # ...
+    # -> response.output_text.delta
+    # -> response.output_text.done
+    # -> response.content_part.done
+    # -> response.output_item.done
+    # -> response.output_item.added
+    # -> response.function_call_arguments.delta
+    # ...
+    # -> response.function_call_arguments.delta
+    # -> response.function_call_arguments.done
+    # -> response.output_item.done
+    # -> response.completed
+
     pairs_of_event_types = {
         "response.completed": "response.created",
         "response.output_item.done": "response.output_item.added",
@@ -347,6 +435,7 @@ async def test_function_calling_with_streaming_types(
         model=model_name,
         input=input_list,
         tools=tools,
+        tool_choice=tool_choice,
         stream=True,
     )
 
@@ -367,3 +456,69 @@ async def test_function_calling_with_streaming_types(
             assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
             stack_of_event_types.pop()
     assert len(stack_of_event_types) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", "auto"],
+)
+async def test_function_calling_with_streaming_forced_tool_choice(
+    client: openai.AsyncOpenAI, model_name: str, tool_choice: str
+):
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided location in celsius.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+
+    stream_response = await client.responses.create(
+        model=model_name,
+        input="Call the get_weather function for Berlin and do not answer directly.",
+        tools=tools,
+        tool_choice=tool_choice,
+        stream=True,
+    )
+
+    tool_call_item = None
+    completed_event = None
+    text_deltas = []
+    async for event in stream_response:
+        if (
+            event.type == "response.output_item.added"
+            and event.item.type == "function_call"
+        ):
+            tool_call_item = event.item
+        elif event.type == "response.output_text.delta":
+            text_deltas.append(event.delta)
+        elif event.type == "response.function_call_arguments.delta" and tool_call_item:
+            tool_call_item.arguments += event.delta
+        elif (
+            event.type == "response.output_item.done"
+            and event.item.type == "function_call"
+        ):
+            completed_event = event
+
+    assert tool_call_item is not None
+    assert tool_call_item.type == "function_call"
+    assert tool_call_item.name == "get_weather"
+    assert completed_event is not None
+    assert tool_call_item.arguments == completed_event.item.arguments
+    assert tool_call_item.name == completed_event.item.name
+    args = json.loads(tool_call_item.arguments)
+    assert "location" in args
+    assert args["location"] is not None
+    # Forced tool choice should not leak tool-call JSON via output_text delta.
+    assert "".join(text_deltas).strip() == ""
