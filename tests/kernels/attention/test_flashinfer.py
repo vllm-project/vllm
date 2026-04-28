@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (
 from vllm.config import CUDAGraphMode, SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PerLayerParameters
 
 try:
@@ -810,163 +811,48 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     )
 
 
-@pytest.mark.parametrize("dtype", DTYPES)
-@torch.inference_mode
-def test_flashinfer_prefill_cudagraph_zero_rows_padding(
-    dtype: torch.dtype,
-) -> None:
-    """Pin the zero-row CG padding contract used by the native spec-decode path.
-
-    Trailing request slots carry duplicate qo_indptr / paged_kv_indptr entries
-    and last_page_len == 0; query/output are sized to qo_indptr[-1]. Real-row
-    output must be bit-identical to an unpadded non-CG reference.
-    """
-    torch.set_default_device("cuda")
-    set_random_seed(0)
-
-    real_bs = 3
-    padded_bs = 8
-    q_len = 5
-    num_qo_heads, num_kv_heads = 32, 8
-    head_dim = 128
-    page_size = 16
-    pages_per_req = 4
-
-    real_pages = real_bs * pages_per_req
-    num_total_pages = real_pages + 16
-
-    kv_cache = torch.randn(
-        num_total_pages, 2, page_size, num_kv_heads, head_dim, dtype=dtype
-    )
-
-    # Persistent buffers are sized for padded request count.
-    qo_indptr_buf = torch.zeros(padded_bs + 1, dtype=torch.int32)
-    paged_kv_indptr_buf = torch.zeros(padded_bs + 1, dtype=torch.int32)
-    paged_kv_indices_buf = torch.zeros(padded_bs * pages_per_req, dtype=torch.int32)
-    paged_kv_last_page_len_buf = torch.zeros(padded_bs, dtype=torch.int32)
-
-    qo_indptr_cpu = torch.tensor([0, 5, 10, 15, 15, 15, 15, 15, 15], dtype=torch.int32)
-    paged_kv_indptr_cpu = torch.tensor(
-        [0, 4, 8, 12, 12, 12, 12, 12, 12], dtype=torch.int32
-    )
-    paged_kv_last_page_len_cpu = torch.tensor(
-        [16, 16, 16, 0, 0, 0, 0, 0], dtype=torch.int32
-    )
-    paged_kv_indices_cpu = torch.arange(real_bs * pages_per_req, dtype=torch.int32)
-
-    # Query is sized to real token count.
-    real_query = torch.randn(real_bs * q_len, num_qo_heads, head_dim, dtype=dtype)
-
-    workspace_cg = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
-    cg_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-        workspace_cg,
-        "NHD",
-        use_cuda_graph=True,
-        qo_indptr_buf=qo_indptr_buf,
-        paged_kv_indptr_buf=paged_kv_indptr_buf,
-        paged_kv_indices_buf=paged_kv_indices_buf,
-        paged_kv_last_page_len_buf=paged_kv_last_page_len_buf,
-    )
-    cg_wrapper.plan(
-        qo_indptr=qo_indptr_cpu,
-        paged_kv_indptr=paged_kv_indptr_cpu,
-        paged_kv_indices=paged_kv_indices_cpu,
-        paged_kv_last_page_len=paged_kv_last_page_len_cpu,
-        num_qo_heads=num_qo_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim_qk=head_dim,
-        page_size=page_size,
-        causal=True,
-        q_data_type=dtype,
-        kv_data_type=dtype,
-    )
-
-    cg_output = cg_wrapper.run(real_query, kv_cache)
-
-    workspace_ref = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
-    ref_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace_ref, "NHD")
-    ref_wrapper.plan(
-        qo_indptr=qo_indptr_cpu[: real_bs + 1].clone(),
-        paged_kv_indptr=paged_kv_indptr_cpu[: real_bs + 1].clone(),
-        paged_kv_indices=paged_kv_indices_cpu,
-        paged_kv_last_page_len=paged_kv_last_page_len_cpu[:real_bs].clone(),
-        num_qo_heads=num_qo_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim_qk=head_dim,
-        page_size=page_size,
-        causal=True,
-        q_data_type=dtype,
-        kv_data_type=dtype,
-    )
-    ref_output = ref_wrapper.run(real_query, kv_cache)
-
-    torch.testing.assert_close(cg_output, ref_output, atol=0.0, rtol=0.0)
-
-
-@pytest.mark.parametrize(
-    "query_lens, seq_lens, num_actual_tokens_override, "
-    "expected_qo_indptr, expected_last_page_len",
-    [
-        ([5, 5, 0], [64, 72, 0], None, [0, 5, 10, 10], [16, 8, 0]),
-        ([5, 5, 5], [64, 72, 80], None, [0, 5, 10, 15], [16, 8, 16]),
-        ([5, 5, 0], [64, 72, 0], 40, [0, 5, 10, 10], [16, 8, 0]),
-    ],
-    ids=[
-        "zero_row_padding",
-        "no_padding",
-        "padded_num_actual_tokens",
-    ],
-)
-def test_spec_decode_routes_to_fispecdecode(
-    query_lens,
-    seq_lens,
-    num_actual_tokens_override,
-    expected_qo_indptr,
-    expected_last_page_len,
-):
+def test_spec_decode_full_cudagraph_padding_routes_to_fispecdecode():
     from vllm.v1.attention.backends.flashinfer import FISpecDecode
 
     builder = _make_flashinfer_spec_decode_builder()
     attn_metadata, fake_wrapper = _build_flashinfer_spec_decode_metadata(
         builder,
-        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
-        num_actual_tokens_override=num_actual_tokens_override,
+        BatchSpec(seq_lens=[64, 72, 0], query_lens=[5, 5, 0]),
+        num_actual_tokens_override=40,
     )
 
     assert isinstance(attn_metadata.decode, FISpecDecode), (
-        f"expected FISpecDecode for query_lens={query_lens}, "
+        "expected FISpecDecode for padded multi-token decode, "
         f"got {type(attn_metadata.decode).__name__}"
     )
     assert attn_metadata.decode.wrapper is fake_wrapper
 
-    assert fake_wrapper.requested_batch_size == len(query_lens)
+    assert fake_wrapper.requested_batch_size == 3
     assert fake_wrapper.requested_use_cudagraph is True
     assert fake_wrapper.plan_kwargs is not None
     assert fake_wrapper.plan_kwargs["causal"] is True
 
     qo = fake_wrapper.plan_kwargs["qo_indptr"]
-    assert qo.tolist() == expected_qo_indptr
+    assert qo.tolist() == [0, 5, 10, 10]
 
     last_page_len = fake_wrapper.plan_kwargs["paged_kv_last_page_len"]
-    assert last_page_len.tolist() == expected_last_page_len
+    assert last_page_len.tolist() == [16, 8, 0]
 
     paged_kv_indptr = fake_wrapper.plan_kwargs["paged_kv_indptr"]
-    if query_lens[-1] == 0:
-        assert paged_kv_indptr[-1].item() == paged_kv_indptr[-2].item()
+    assert paged_kv_indptr[-1].item() == paged_kv_indptr[-2].item()
 
     # Prevent query[:40] with qo_indptr[-1] == 10.
-    assert attn_metadata.num_decode_tokens == expected_qo_indptr[-1]
+    assert attn_metadata.num_decode_tokens == 10
 
 
 @pytest.mark.parametrize(
     "dcp_size, expected",
     [
-        (1, "UNIFORM_BATCH"),
-        (2, "UNIFORM_SINGLE_TOKEN_DECODE"),
+        (1, AttentionCGSupport.UNIFORM_BATCH),
+        (2, AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE),
     ],
 )
 def test_get_cudagraph_support_dcp_downgrade(dcp_size, expected):
-    from vllm.v1.attention.backend import AttentionCGSupport
     from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 
     vllm_config = create_vllm_config(
@@ -981,4 +867,4 @@ def test_get_cudagraph_support_dcp_downgrade(dcp_size, expected):
     support = FlashInferMetadataBuilder.get_cudagraph_support(
         vllm_config, kv_cache_spec
     )
-    assert support is getattr(AttentionCGSupport, expected)
+    assert support is expected

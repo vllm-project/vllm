@@ -563,9 +563,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        # Separate prefill-shaped wrapper reserved for spec-decode verification
-        # so real-prefill and spec-decode plan() calls cannot stomp each other
-        # inside a mixed batch.
+        # Reserved for spec-decode so it doesn't stomp real-prefill plan().
         self._spec_decode_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
 
         if envs.VLLM_BATCH_INVARIANT:
@@ -598,9 +596,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
-            # Parallel dict for the spec-decode prefill wrapper, keyed by
-            # request batch size (not token count) because the prefill
-            # CUDAGraph wrapper fixes batch_size == len(qo_indptr) - 1.
+            # Keyed by request count (qo_indptr length), not token count.
             self._spec_decode_wrappers_cudagraph: dict[
                 int, BatchPrefillWithPagedKVCacheWrapper
             ] = {}
@@ -677,10 +673,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Prefer TRTLLM attention for decoding in all cases.
         # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
         self.use_trtllm_decode_attention = can_use_trtllm
-        # Non-DCP native FlashInfer can also route spec-decode through the
-        # decode bucket by using the prefill wrapper in cudagraph mode with
-        # zero_rows padding. DCP keeps threshold=1 regardless (enforced inside
-        # _init_reorder_batch_threshold when supports_dcp_with_varlen is False).
+        # Non-DCP native FlashInfer routes spec-decode through the prefill
+        # wrapper; DCP downgrades to threshold=1.
         native_spec_as_decode = self.dcp_world_size <= 1
         self._init_reorder_batch_threshold(
             1,
@@ -717,10 +711,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
-        # Persistent qo_indptr buffer for the spec-decode prefill wrapper.
-        # Sized for the padded request count (one extra slot for the
-        # inclusive end). Populated by plan() each step; the CUDAGraph-mode
-        # wrapper holds a fixed-address view into this buffer.
+        # Persistent qo_indptr for the spec-decode CUDAGraph wrapper.
         self.spec_decode_qo_indptr = self._make_buffer(max_num_reqs + 1)
 
     def _make_buffer(
@@ -1235,9 +1226,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                # FULL CG padding may add zero-length request rows, so infer
-                # the decode-bucket query length from nonzero qo_indptr deltas
-                # rather than num_decode_tokens / num_decodes.
+                # FULL CG may add zero rows; derive query_len from nonzero
+                # qo_indptr deltas, not num_decode_tokens / num_decodes.
                 decode_query_lens = (
                     qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
                 )
@@ -1286,19 +1276,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
                     attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
                 else:
-                    # FlashInfer prefill requires q.shape[0] == qo_indptr[-1].
-                    # For FULL CG, num_decode_tokens may include padded token
-                    # capacity, so trim it back to the real query-token total
-                    # before forward() slices query/output.
                     real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
-                    if real_decode_tokens != num_decode_tokens:
-                        assert (
-                            use_cudagraph and pure_decode and num_prefill_tokens == 0
-                        ), (
-                            "num_decode_tokens "
-                            f"({num_decode_tokens}) != qo_indptr[-1] "
-                            f"({real_decode_tokens}) outside FULL-CG decode."
+                    full_cg_decode = (
+                        use_cudagraph and pure_decode and num_prefill_tokens == 0
+                    )
+                    if real_decode_tokens != num_decode_tokens and not full_cg_decode:
+                        raise RuntimeError(
+                            f"num_decode_tokens ({num_decode_tokens}) != "
+                            f"qo_indptr[-1] ({real_decode_tokens}) outside "
+                            "FULL-CG decode."
                         )
+                    # FlashInfer prefill uses qo_indptr[-1] as query length;
+                    # full-CG token padding must not leak into forward slice.
                     attn_metadata.num_decode_tokens = real_decode_tokens
                     spec_wrapper = self._get_spec_decode_prefill_wrapper(
                         num_decodes, use_cudagraph
@@ -1718,12 +1707,7 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if isinstance(attn_metadata.decode, FISpecDecode):
-                    # DCP downgrades to single-token decode, so this path is
-                    # non-DCP only.
-                    assert not use_dcp, (
-                        "FISpecDecode is not supported under DCP; "
-                        "get_cudagraph_support should have downgraded."
-                    )
+                    assert not use_dcp, "FISpecDecode is non-DCP only."
                     assert decode_wrapper._causal
                     decode_wrapper.run(
                         decode_query,
