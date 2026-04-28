@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
 
 import torch
 
@@ -35,7 +38,7 @@ class CPUAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[str]] = [
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
         "auto",
         "fp8",
         "fp8_e4m3",
