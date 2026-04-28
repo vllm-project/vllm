@@ -212,10 +212,13 @@ def build_logitsprocs(
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
-        ctor(vllm_config, device, is_pin_memory)
-        for ctor in itertools.chain(
-            BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes
-        )
+        (
+            ctor(vllm_config, device, is_pin_memory)
+            for ctor in itertools.chain(
+                BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes
+            )
+        ),
+        has_custom=bool(custom_logitsprocs_classes),
     )
 
 

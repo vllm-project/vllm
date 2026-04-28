@@ -148,9 +148,17 @@ class BatchUpdateBuilder:
 class LogitsProcessors:
     """Encapsulates initialized logitsproc objects."""
 
-    def __init__(self, logitsprocs: Iterable["LogitsProcessor"] | None = None) -> None:
+    def __init__(
+        self,
+        logitsprocs: Iterable["LogitsProcessor"] | None = None,
+        *,
+        has_custom: bool = False,
+    ) -> None:
         self.argmax_invariant: list[LogitsProcessor] = []
         self.non_argmax_invariant: list[LogitsProcessor] = []
+        # True when non-builtin processors (entry-point plugins or
+        # CLI-passed custom processors) are loaded.
+        self.has_custom = has_custom
         if logitsprocs:
             for logitproc in logitsprocs:
                 (
