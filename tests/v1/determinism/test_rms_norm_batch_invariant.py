@@ -12,7 +12,7 @@ import torch
 from utils import skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import rms_norm as triton_rms_norm
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, fused_add_rms_norm
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -68,6 +68,93 @@ def test_rms_norm_batch_invariant_vs_standard(
         msg=f"RMS norm mismatch for batch_size={batch_size}, "
         f"hidden_size={hidden_size}, "
         f"dtype={dtype}, eps={eps}",
+    )
+
+
+@skip_unsupported
+@pytest.mark.parametrize("hidden_size", [512, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("eps", [1e-6])
+def test_fused_add_rms_norm_batch_invariant_residual_path(
+    hidden_size: int,
+    dtype: torch.dtype,
+    eps: float,
+):
+    """
+    Test the batch-invariant fused residual-add + RMSNorm helper directly.
+    """
+    device = torch.device(DEVICE_TYPE)
+
+    torch.manual_seed(42)
+    x_single = torch.randn(1, hidden_size, dtype=dtype, device=device)
+    residual_single = torch.randn(1, hidden_size, dtype=dtype, device=device)
+    weight = torch.randn(hidden_size, dtype=dtype, device=device)
+
+    x_batch = torch.cat(
+        [
+            x_single,
+            torch.randn(3, hidden_size, dtype=dtype, device=device),
+        ],
+        dim=0,
+    )
+    residual_batch = torch.cat(
+        [
+            residual_single,
+            torch.randn(3, hidden_size, dtype=dtype, device=device),
+        ],
+        dim=0,
+    )
+
+    out_single, residual_out_single = fused_add_rms_norm(
+        x_single.clone(),
+        residual_single.clone(),
+        weight,
+        eps,
+    )
+    out_batch, residual_out_batch = fused_add_rms_norm(
+        x_batch.clone(),
+        residual_batch.clone(),
+        weight,
+        eps,
+    )
+
+    merged_single = x_single + residual_single
+    ref_out = triton_rms_norm(merged_single, weight, eps=eps)
+
+    torch.testing.assert_close(
+        residual_out_single,
+        merged_single,
+        rtol=0.0,
+        atol=0.0,
+        msg="Residual output should equal x + residual exactly",
+    )
+    torch.testing.assert_close(
+        residual_out_batch[:1],
+        merged_single,
+        rtol=0.0,
+        atol=0.0,
+        msg="Residual output should be batch invariant",
+    )
+    torch.testing.assert_close(
+        out_single,
+        out_batch[:1],
+        rtol=0.0,
+        atol=0.0,
+        msg="Fused add RMSNorm output should be batch invariant",
+    )
+
+    if dtype == torch.bfloat16:
+        rtol, atol = 1e-1, 1e-1
+    else:
+        rtol, atol = 1e-2, 1e-2
+
+    torch.testing.assert_close(
+        out_single,
+        ref_out,
+        rtol=rtol,
+        atol=atol,
+        msg="Fused add RMSNorm output should stay numerically close to the "
+        "batch-invariant RMSNorm reference",
     )
 
 

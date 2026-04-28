@@ -137,7 +137,6 @@ def mock_serving_setup():
 
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
@@ -148,7 +147,6 @@ def mock_serving_setup():
     serving_render = OpenAIServingRender(
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
-        io_processor=mock_engine.io_processor,
         model_registry=models.registry,
         request_logger=None,
         chat_template=None,

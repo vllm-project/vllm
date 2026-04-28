@@ -10,6 +10,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -1854,10 +1855,11 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def new_mla_spec(cache_dtype_str=None):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=16,
-        num_kv_heads=16,
-        head_size=64,
+        num_kv_heads=1,
+        head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
@@ -2137,3 +2139,30 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_hma_not_disabled_when_kv_events_enabled():
+    """
+    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+
+    This test guards against that regression by verifying that a VllmConfig
+    with kv_events_config set still resolves disable_hybrid_kv_cache_manager
+    to False (i.e. HMA remains enabled) when no other condition requires it
+    to be disabled.
+    """
+    model_config = ModelConfig(max_model_len=16)
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="null",
+    )
+
+    # Leave disable_hybrid_kv_cache_manager as None (the default) so that
+    # VllmConfig.__post_init__ resolves it automatically.
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        kv_events_config=kv_events_config,
+    )
+
+    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
+        "kv_events_config must not force-disable the hybrid KV cache manager."
+    )

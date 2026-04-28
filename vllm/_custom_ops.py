@@ -404,10 +404,24 @@ def rotary_embedding(
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    rope_dim_offset: int = 0,
+    inverse: bool = False,
 ) -> None:
-    torch.ops._C.rotary_embedding(
-        positions, query, key, head_size, cos_sin_cache, is_neox
-    )
+    if rope_dim_offset == 0 and not inverse:
+        torch.ops._C.rotary_embedding(
+            positions, query, key, head_size, cos_sin_cache, is_neox
+        )
+    else:
+        torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox,
+            rope_dim_offset,
+            inverse,
+        )
 
 
 # layer norm ops
@@ -420,6 +434,7 @@ def rms_norm(
 def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
+    # Note: this func is batch invariant
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
@@ -435,6 +450,7 @@ def fused_qk_norm_rope(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     position_ids: torch.Tensor,
+    forced_token_heads_per_warp: int = -1,
 ) -> None:
     torch.ops._C.fused_qk_norm_rope(
         qkv,
@@ -448,6 +464,7 @@ def fused_qk_norm_rope(
         cos_sin_cache,
         is_neox,
         position_ids,
+        forced_token_heads_per_warp,
     )
 
 
@@ -1142,6 +1159,38 @@ def cutlass_fp4_moe_mm(
         a_scales,
         b_scales,
         alphas,
+        problem_sizes,
+        expert_offsets,
+        sf_offsets,
+    )
+
+
+def cutlass_mxfp4_moe_mm(
+    out_tensors: torch.Tensor,
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    sf_offsets: torch.Tensor,
+):
+    """
+    An MXFP4 Blockscaled Group Gemm for MoE (MXFP4 x MXFP4).
+
+    Uses mx_float4_t types with E8M0 scale factors and 32-element blocks.
+    - a/b_tensors: MXFP4 packed activations/weights (uint8, 2 E2M1 per byte)
+    - a_/b_scales: E8M0 blockscales (uint8, stored in swizzled layout)
+    - Epilogue uses scalar alpha=1, beta=0 inside the CUDA op (no global scales).
+    - expert_offsets/sf_offsets: expert boundary indices
+    - problem_sizes: (num_experts, 3) with (M, N, K) per expert
+    """
+    return torch.ops._C.cutlass_mxfp4_group_mm(
+        out_tensors,
+        a_tensors,
+        b_tensors,
+        a_scales,
+        b_scales,
         problem_sizes,
         expert_offsets,
         sf_offsets,
@@ -1846,6 +1895,109 @@ def silu_and_mul_scaled_fp4_experts_quant(
     return output, output_scales
 
 
+def mxfp4_experts_quant(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to MXFP4 for packed MoE inputs.
+    Uses 32-element blocks with E8M0 (power-of-two) scale factors.
+    MXFP4 has no global scale - only block-level E8M0 scale factors.
+
+    Args:
+        input_tensor: [m_topk, k] BF16/FP16 activations
+        expert_offsets: [n_experts+1] token boundaries per expert
+        blockscale_offsets: [n_experts+1] SF row boundaries per expert
+        n_experts: number of experts
+        topk: number of top-k experts
+    Returns:
+        output: [m_topk, k//2] packed E2M1 values (uint8)
+        output_scales: E8M0 blockscales in swizzled layout (uint8 view)
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2
+
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k = input_tensor.shape
+
+    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk, (
+        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
+        f"{MAX_TOKENS_PER_EXPERT})"
+        f" for cutlass_moe_mxfp4, observed m_numtopk = {m_numtopk}. Use"
+        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value."
+    )
+    scales_k = k // 32
+    padded_k = (scales_k + (4 - 1)) // 4
+
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.empty(
+        MAX_TOKENS_PER_EXPERT * topk,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+    )
+    # E8M0 SFs are stored as uint8
+    output_scales = output_scales.view(torch.uint8)
+    return output, output_scales
+
+
+def silu_and_mul_mxfp4_experts_quant(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
+    MXFP4 has no global scale - only block-level E8M0 scale factors.
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2
+
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k_times_2 = input_tensor.shape
+    assert k_times_2 % 2 == 0, "input width must be even (gate || up layout)"
+    k = k_times_2 // 2
+
+    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk
+    scales_k = k // 32
+    padded_k = (scales_k + (4 - 1)) // 4
+
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.empty(
+        MAX_TOKENS_PER_EXPERT * topk,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.silu_and_mul_mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+    )
+    output_scales = output_scales.view(torch.uint8)
+    return output, output_scales
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -2362,6 +2514,30 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+    )
+
+
+def topk_hash_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        input_tokens,
+        hash_indices_table,
     )
 
 
@@ -3298,6 +3474,12 @@ def cpu_gemm_wna16(
     return output
 
 
+def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
+    out = torch.empty_like(input)
+    torch.ops._C.activation_lut_bf16(out, input, activation)
+    return out
+
+
 def cpu_prepack_moe_weight(
     weight: torch.Tensor,
     isa: str,
@@ -3491,3 +3673,38 @@ if hasattr(torch.ops._C, "hadacore_transform"):
     @register_fake("_C::hadacore_transform")
     def _hadacore_transform_fake(x: torch.Tensor, inplace: bool) -> torch.Tensor:
         return torch.empty_like(x) if not inplace else x
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms"):
+
+    @register_fake("_C::minimax_allreduce_rms")
+    def _minimax_allreduce_rms_fake(
+        input: torch.Tensor,
+        norm_weight: torch.Tensor,
+        workspace: torch.Tensor,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> torch.Tensor:
+        return torch.empty_like(input)
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
+
+    @register_fake("_C::minimax_allreduce_rms_qk")
+    def _minimax_allreduce_rms_qk_fake(
+        qkv: torch.Tensor,
+        norm_weight_q: torch.Tensor,
+        norm_weight_k: torch.Tensor,
+        workspace: torch.Tensor,
+        q_size: int,
+        kv_size: int,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_num = qkv.shape[0]
+        return (
+            torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
+            torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
+        )
