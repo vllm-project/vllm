@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import inspect
 import itertools
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Sequence, Set
+from collections.abc import Sequence
 from functools import lru_cache
-from typing import Any, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -15,25 +17,28 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 import torch
+from typing_extensions import override
 
-from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormat,
-    ChatTemplateContentFormatOption,
     ChatTemplateResolutionError,
-    ConversationMessage,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import EmbedsPrompt, MultiModalDataDict, MultiModalUUIDDict
+from vllm.inputs import EmbedsPrompt
+from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+    PlaceholderRange,
+)
 from vllm.multimodal.processing.processor import (
-    MultiModalPromptUpdates,
     PromptReplacement,
-    ResolvedPromptUpdate,
     apply_token_matches,
     find_mm_placeholders,
 )
@@ -44,9 +49,27 @@ from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
-from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+
+if TYPE_CHECKING:
+    from collections.abc import Set
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.entrypoints.chat_utils import (
+        ChatCompletionMessageParam,
+        ChatTemplateContentFormat,
+        ChatTemplateContentFormatOption,
+        ConversationMessage,
+    )
+    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs.engine import TokensInput
+    from vllm.multimodal.processing.processor import (
+        MultiModalPromptUpdates,
+        ResolvedPromptUpdate,
+    )
+
+    from .inputs import DictPrompt
+    from .params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -247,7 +270,7 @@ def resolve_chat_template(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     *,
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -430,7 +453,7 @@ def _resolve_chat_template_content_format(
     tools: list[dict[str, Any]] | None,
     tokenizer: HfTokenizer,
     *,
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
     resolved_chat_template = resolve_chat_template(
         tokenizer,
@@ -484,7 +507,7 @@ def resolve_chat_template_content_format(
     given_format: ChatTemplateContentFormatOption,
     tokenizer: HfTokenizer,
     *,
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
     if given_format != "auto":
         return given_format
@@ -586,7 +609,7 @@ def resolve_chat_template_kwargs(
 
 @overload
 def safe_apply_chat_template(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     tokenizer: HfTokenizer,
     conversation: list[ConversationMessage],
     *,
@@ -597,7 +620,7 @@ def safe_apply_chat_template(
 ) -> list[int]: ...
 @overload
 def safe_apply_chat_template(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     tokenizer: HfTokenizer,
     conversation: list[ConversationMessage],
     *,
@@ -607,7 +630,7 @@ def safe_apply_chat_template(
     **kwargs,
 ) -> str: ...
 def safe_apply_chat_template(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     tokenizer: HfTokenizer,
     conversation: list[ConversationMessage],
     *,
@@ -846,7 +869,21 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         prompt = parse_dec_only_prompt(prompt_raw)
 
-        if prompt_embeds_tensors:
+        # When `prompt_embeds` is mixed with other modality data,
+        # `_process_tokens` runs `_process_multimodal` first (expanding
+        # `<|AUDIO|>` / `<|IMAGE|>` placeholders) and then
+        # `_apply_prompt_embeds_to_engine_input` augments the result.
+        # Stash the tensors and placeholder ID for that override to consume.
+        if prompt_embeds_tensors and mm_data:
+            assert prompt_embeds_placeholder_token_id is not None
+            cast(dict, prompt)["_prompt_embeds"] = (
+                prompt_embeds_tensors,
+                prompt_embeds_placeholder_token_id,
+            )
+            if params.mm_processor_kwargs:
+                cast(dict, prompt)["mm_processor_kwargs"] = params.mm_processor_kwargs
+        elif prompt_embeds_tensors:
+            # Pure mode: no other MM data, mutate prompt to EmbedsPrompt shape.
             assert prompt_embeds_placeholder_token_id is not None
             self._apply_prompt_embeds_to_prompt(
                 prompt,
@@ -934,7 +971,16 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         prompt = parse_dec_only_prompt(prompt_raw)
 
-        if prompt_embeds_tensors:
+        # See `render_messages` for the rationale.
+        if prompt_embeds_tensors and mm_data:
+            assert prompt_embeds_placeholder_token_id is not None
+            cast(dict, prompt)["_prompt_embeds"] = (
+                prompt_embeds_tensors,
+                prompt_embeds_placeholder_token_id,
+            )
+            if params.mm_processor_kwargs:
+                cast(dict, prompt)["mm_processor_kwargs"] = params.mm_processor_kwargs
+        elif prompt_embeds_tensors:
             assert prompt_embeds_placeholder_token_id is not None
             self._apply_prompt_embeds_to_prompt(
                 prompt,
@@ -949,47 +995,149 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         return conversation, prompt
 
+    @override
+    def _process_tokens(
+        self,
+        prompt: TokensPrompt,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> TokensInput | MultiModalInput:
+        prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
+        if prompt_embeds_info is not None:
+            tensors, placeholder_token_id = prompt_embeds_info
+            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+                list(prompt["prompt_token_ids"]), mm_updates
+            )
+        engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
+        if prompt_embeds_info is not None:
+            tensors, _ = prompt_embeds_info
+            self._apply_prompt_embeds_to_engine_input(
+                cast(MultiModalInput, engine_input),
+                tensors,
+                mm_updates,
+            )
+        return engine_input
+
+    @override
+    async def _process_tokens_async(
+        self,
+        prompt: TokensPrompt,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> TokensInput | MultiModalInput:
+        prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
+        if prompt_embeds_info is not None:
+            tensors, placeholder_token_id = prompt_embeds_info
+            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+                list(prompt["prompt_token_ids"]), mm_updates
+            )
+        engine_input = await super()._process_tokens_async(
+            prompt, skip_mm_cache=skip_mm_cache
+        )
+        if prompt_embeds_info is not None:
+            tensors, _ = prompt_embeds_info
+            self._apply_prompt_embeds_to_engine_input(
+                cast(MultiModalInput, engine_input),
+                tensors,
+                mm_updates,
+            )
+        return engine_input
+
     @staticmethod
     def _apply_prompt_embeds_to_prompt(
         prompt: DictPrompt,
         prompt_embeds_tensors: list[torch.Tensor],
         placeholder_token_id: int,
     ) -> None:
-        """In-place populate `prompt` with mixed-mode fields.
+        """Mutate `prompt` from `TokensPrompt` to `EmbedsPrompt` shape.
 
-        This mutates a TokensPrompt-shaped dict into an EmbedsPrompt-shaped dict
-        in place. The tokenized chat template output contains one placeholder token
-        per `prompt_embeds` content part. This method:
-
-        1. **Expands** each 1-token sentinel into an N-token span matching
-           `tensor.shape[0]` (via `apply_token_matches`).
-        2. **Locates** the expanded runs in the token stream.
-        3. **Builds** a full-length `prompt_embeds` tensor + `is_token_ids`
-           mask aligned to the expanded token IDs.
+        Pure `prompt_embeds` path only (no other MM modalities).  Expands
+        each `<prompt_embeds>` sentinel token into an N-token span and builds
+        the full-length `prompt_embeds` tensor + `prompt_is_token_ids` mask
+        that the engine's `enable_prompt_embeds` worker branch consumes.
         """
-        embeds_prompt = cast(EmbedsPrompt, prompt)
-        token_ids = embeds_prompt.get("prompt_token_ids")
+        token_ids = cast(list[int] | None, prompt.get("prompt_token_ids"))
         if token_ids is None:
             raise RuntimeError(_MISSING_PROMPT_TOKEN_IDS_ERROR)
 
-        # Build PromptReplacement updates.
+        embeds_orig_positions: list[int] = [
+            i for i, tok in enumerate(token_ids) if tok == placeholder_token_id
+        ]
+        if len(embeds_orig_positions) != len(prompt_embeds_tensors):
+            raise ValueError(
+                f"Expected {len(prompt_embeds_tensors)} prompt_embeds "
+                f"placeholder tokens in the rendered prompt, found "
+                f"{len(embeds_orig_positions)}."
+            )
+
         mm_updates = _build_prompt_embeds_updates(
             prompt_embeds_tensors, placeholder_token_id
         )
-
-        # Step 1: Expand 1-token sentinels into N-token spans.
         expanded = _expand_prompt_embeds_placeholders(token_ids, mm_updates)
-        embeds_prompt["prompt_token_ids"] = expanded
-
-        # Step 2: Locate the expanded spans.
         positions = _build_prompt_embeds_positions(
             expanded, len(prompt_embeds_tensors), mm_updates
         )
 
-        # Step 3: Build full-length tensor + mask.
+        embeds_prompt = cast(EmbedsPrompt, prompt)
+        embeds_prompt["prompt_token_ids"] = expanded
         full_embeds, is_token_ids_mask = _build_mixed_prompt_embeds(
             expanded, prompt_embeds_tensors, positions
         )
-
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask
+
+    @staticmethod
+    def _apply_prompt_embeds_to_engine_input(
+        engine_input: MultiModalInput,
+        prompt_embeds_tensors: list[torch.Tensor],
+        mm_updates: MultiModalPromptUpdates,
+    ) -> None:
+        """Augment `engine_input` in-place with a `prompt_embeds` modality.
+
+        Mixed mode: called after `_process_multimodal` has already run on the
+        pre-expanded token IDs (expansion was done in `_process_tokens` before
+        calling `super()`).  Locates the already-expanded `prompt_embeds` spans
+        and adds `prompt_embeds` entries to `mm_kwargs`, `mm_hashes`, and
+        `mm_placeholders`.
+        """
+        # token_ids already contain the pre-expanded N-token spans.
+        token_ids = list(engine_input["prompt_token_ids"])
+
+        positions = _build_prompt_embeds_positions(
+            token_ids, len(prompt_embeds_tensors), mm_updates
+        )
+
+        pe_kwargs_items: list[MultiModalKwargsItem] = []
+        pe_hashes: list[str] = []
+        pe_placeholders: list[PlaceholderRange] = []
+        for tensor, (start, length) in zip(
+            prompt_embeds_tensors, positions, strict=True
+        ):
+            pe_kwargs_items.append(
+                MultiModalKwargsItem(
+                    {
+                        "embedding": MultiModalFieldElem(
+                            data=tensor,
+                            field=MultiModalSharedField(batch_size=1),
+                        )
+                    }
+                )
+            )
+            pe_hashes.append(MultiModalHasher.hash_kwargs(prompt_embeds=tensor))
+            # `is_embed=None` matches the existing image_embeds-style
+            # "no encoder, just splice the tensor directly" semantics.
+            pe_placeholders.append(
+                PlaceholderRange(offset=start, length=length, is_embed=None)
+            )
+
+        cast(
+            MultiModalKwargsItems[MultiModalKwargsItem | None],
+            engine_input["mm_kwargs"],
+        )["prompt_embeds"] = pe_kwargs_items
+        engine_input["mm_hashes"] = {
+            **engine_input["mm_hashes"],
+            "prompt_embeds": pe_hashes,
+        }
+        cast(dict, engine_input["mm_placeholders"])["prompt_embeds"] = pe_placeholders
