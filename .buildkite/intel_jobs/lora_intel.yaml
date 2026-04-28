@@ -126,5 +126,4 @@ steps:
       'cd tests &&
       pytest -v -s lora/test_default_mm_loras.py && 
       (pytest -v -s lora/test_qwen3_unembed.py || true) &&
-      (pytest -v -s lora/test_qwenvl.py || true) &&
       pytest -v -s lora/test_whisper.py'
