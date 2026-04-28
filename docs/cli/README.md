@@ -163,7 +163,7 @@ Running with a local file:
 
 ```bash
 vllm run-batch \
-    -i offline_inference/openai_batch/openai_example_batch.jsonl \
+    -i features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```

@@ -2918,6 +2918,10 @@ class MTBenchDataset(HuggingFaceDataset):
     """
     MT-Bench Dataset.
     https://huggingface.co/datasets/philschmid/mt-bench
+    
+    We create a single turn dataset for MT-Bench.
+    This is similar to Spec decoding benchmark setup in vLLM
+    https://github.com/vllm-project/vllm/blob/9d98ab5ec/examples/offline_inference/eagle.py#L14-L18
     """  # noqa: E501
 
     DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM

@@ -36,7 +36,7 @@ wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/
 Once you've created your batch file it should look like this
 
 ```bash
-cat offline_inference/openai_batch/openai_example_batch.jsonl
+cat features/openai_batch/openai_example_batch.jsonl
 {"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
 ```
@@ -49,7 +49,7 @@ You can run the batch with the following command, which will write its results t
 
 ```bash
 python -m vllm.entrypoints.openai.run_batch \
-    -i offline_inference/openai_batch/openai_example_batch.jsonl \
+    -i features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -58,7 +58,7 @@ or use command-line:
 
 ```bash
 vllm run-batch \
-    -i offline_inference/openai_batch/openai_example_batch.jsonl \
+    -i features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -119,7 +119,7 @@ wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/features/
 Once you've created your batch file it should look like this
 
 ```bash
-cat offline_inference/openai_batch/openai_example_batch.jsonl
+cat features/openai_batch/openai_example_batch.jsonl
 {"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
 ```
@@ -127,7 +127,7 @@ cat offline_inference/openai_batch/openai_example_batch.jsonl
 Now upload your batch file to your S3 bucket.
 
 ```bash
-aws s3 cp offline_inference/openai_batch/openai_example_batch.jsonl s3://MY_BUCKET/MY_INPUT_FILE.jsonl
+aws s3 cp features/openai_batch/openai_example_batch.jsonl s3://MY_BUCKET/MY_INPUT_FILE.jsonl
 ```
 
 ### Step 2: Generate your presigned urls
