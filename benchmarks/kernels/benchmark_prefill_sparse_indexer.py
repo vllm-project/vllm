@@ -7,6 +7,11 @@ import torch
 from torch import Tensor
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.sparse_attn_indexer import kv_cache_as_quant_view
+from vllm.third_party.deep_gemm import (
+    fp8_fp4_paged_mqa_logits,
+    get_paged_mqa_logits_metadata,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
 from vllm.utils.math_utils import cdiv
@@ -30,115 +35,188 @@ def make_random_fp4(*prefix_shape: int) -> tuple[Tensor, Tensor]:
     return fp4, scales
 
 
-def deepgemm_prepare(
-    block_table: Tensor,
-    query_lens_cpu: Tensor,
-    seq_lens_cpu: Tensor,
-    compressed_seq_lens_cpu: Tensor,
-    query_start_loc_cpu: Tensor,
-    compress_ratio: int,
-    use_fp4: bool,
-):
-    chunk_specs = split_indexer_prefill_chunks(
-        compressed_seq_lens_cpu,
-        query_lens_cpu,
-        DEEPGEMM_WORKSPACE_SIZE,
-        DEEPGEMM_MAX_LOGITS_MB * 1024 * 1024,
-    )
-    chunks = []
-    for req_slice, query_slice in chunk_specs:
-        metadata = build_prefill_chunk_metadata(
-            req_slice.start,
-            req_slice.stop,
-            query_start_loc_cpu.cuda(),
-            query_start_loc_cpu,
-            seq_lens_cpu.cuda(),
-            compressed_seq_lens_cpu.cuda(),
+class DeepGemmFlat:
+    def __init__(
+        self,
+        block_table: Tensor,
+        query_lens_cpu: Tensor,
+        seq_lens_cpu: Tensor,
+        compressed_seq_lens_cpu: Tensor,
+        query_start_loc_cpu: Tensor,
+        compress_ratio: int,
+        use_fp4: bool,
+    ) -> None:
+        chunk_specs = split_indexer_prefill_chunks(
             compressed_seq_lens_cpu,
-            block_table,
-            compress_ratio,
-            query_slice=query_slice,
-            skip_kv_gather=query_slice.start > 0,
+            query_lens_cpu,
+            DEEPGEMM_WORKSPACE_SIZE,
+            DEEPGEMM_MAX_LOGITS_MB * 1024 * 1024,
         )
-        if metadata is not None:
-            chunks.append(metadata)
-    if not chunks:
-        raise RuntimeError("generated requests produced no prefill chunks")
+        self.chunks = []
+        for req_slice, query_slice in chunk_specs:
+            metadata = build_prefill_chunk_metadata(
+                req_slice.start,
+                req_slice.stop,
+                query_start_loc_cpu.cuda(),
+                query_start_loc_cpu,
+                seq_lens_cpu.cuda(),
+                compressed_seq_lens_cpu.cuda(),
+                compressed_seq_lens_cpu,
+                block_table,
+                compress_ratio,
+                query_slice=query_slice,
+                skip_kv_gather=query_slice.start > 0,
+            )
+            if metadata is not None:
+                self.chunks.append(metadata)
+        if not self.chunks:
+            raise RuntimeError("generated requests produced no prefill chunks")
 
-    workspace_tokens = max(chunk.total_seq_lens for chunk in chunks)
-    if use_fp4:
-        k_quant_shape = (workspace_tokens, HEAD_DIM // 2)
-        k_scale_shape = (workspace_tokens, HEAD_DIM // MXFP4_BLOCK_SIZE)
-        k_quant_dtype = k_scale_dtype = torch.uint8
-    else:
-        k_quant_shape = (workspace_tokens, HEAD_DIM)
-        k_scale_shape = (workspace_tokens, 4)
-        k_quant_dtype = torch.float8_e4m3fn
-        k_scale_dtype = torch.uint8
+        workspace_tokens = max(chunk.total_seq_lens for chunk in self.chunks)
+        if use_fp4:
+            k_quant_shape = (workspace_tokens, HEAD_DIM // 2)
+            k_scale_shape = (workspace_tokens, HEAD_DIM // MXFP4_BLOCK_SIZE)
+            k_quant_dtype = k_scale_dtype = torch.uint8
+        else:
+            k_quant_shape = (workspace_tokens, HEAD_DIM)
+            k_scale_shape = (workspace_tokens, 4)
+            k_quant_dtype = torch.float8_e4m3fn
+            k_scale_dtype = torch.uint8
 
-    device = block_table.device
-    k_quant_full = torch.empty(k_quant_shape, dtype=k_quant_dtype, device=device)
-    k_scale_full = torch.empty(k_scale_shape, dtype=k_scale_dtype, device=device)
-    return chunks, k_quant_full, k_scale_full
+        self.k_quant_full = torch.empty(
+            k_quant_shape, dtype=k_quant_dtype, device=block_table.device
+        )
+        self.k_scale_full = torch.empty(
+            k_scale_shape, dtype=k_scale_dtype, device=block_table.device
+        )
 
+    def run(
+        self,
+        q_quant: Tensor,
+        q_scale: Tensor | None,
+        kv_cache: Tensor,
+        weights: Tensor,
+        topk_indices_buffer: Tensor,
+    ) -> None:
+        use_fp4 = q_scale is not None
+        _, topk = topk_indices_buffer.shape
 
-def deepgemm_run(
-    q_quant: Tensor,
-    q_scale: Tensor | None,
-    kv_cache: Tensor,
-    weights: Tensor,
-    topk_indices_buffer: Tensor,
-    metadata,
-) -> None:
-    use_fp4 = q_scale is not None
-    chunks, k_quant_full, k_scale_full = metadata
-    _, topk = topk_indices_buffer.shape
+        for chunk in self.chunks:
+            k_quant = self.k_quant_full[: chunk.total_seq_lens]
+            k_scale = self.k_scale_full[: chunk.total_seq_lens]
 
-    for chunk in chunks:
-        k_quant = k_quant_full[: chunk.total_seq_lens]
-        k_scale = k_scale_full[: chunk.total_seq_lens]
+            # This mirrors SparseAttentionIndexer: query sub-chunks from the same
+            # request can reuse the previously gathered K workspace.
+            if not chunk.skip_kv_gather:
+                ops.cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_quant,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                )
 
-        # This mirrors SparseAttentionIndexer: query sub-chunks from the same
-        # request can reuse the previously gathered K workspace.
-        if not chunk.skip_kv_gather:
-            ops.cp_gather_indexer_k_quant_cache(
-                kv_cache,
-                k_quant,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
+            token_slice = slice(chunk.token_start, chunk.token_end)
+            q_slice = q_quant[token_slice]
+
+            if use_fp4:
+                q_slice = q_slice.view(torch.int8)
+                q_scale_slice = q_scale[token_slice]
+                k_quant = k_quant.view(torch.int8)
+                k_scale = k_scale.view(torch.int32).squeeze(-1)
+            else:
+                q_scale_slice = None
+                k_scale = k_scale.view(torch.float32).squeeze(-1)
+
+            logits = fp8_fp4_mqa_logits(
+                (q_slice, q_scale_slice),
+                (k_quant, k_scale),
+                weights[token_slice],
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                clean_logits=False,
+            )
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices_buffer[token_slice],
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk,
             )
 
-        token_slice = slice(chunk.token_start, chunk.token_end)
-        q_slice = q_quant[token_slice]
 
-        if use_fp4:
-            q_slice = q_slice.view(torch.int8)
-            q_scale_slice = q_scale[token_slice]
-            k_quant = k_quant.view(torch.int8)
-            k_scale = k_scale.view(torch.int32).squeeze(-1)
-        else:
-            q_scale_slice = None
-            k_scale = k_scale.view(torch.float32).squeeze(-1)
+class DeepGemmPaged:
+    def __init__(
+        self,
+        block_table: Tensor,
+        query_lens: list[int],
+        seq_lens: list[int],
+        compressed_seq_lens: list[int],
+        compress_ratio: int,
+        block_size: int,
+    ) -> None:
+        query_to_req: list[int] = []
+        context_lens: list[int] = []
+        for req_idx, query_len in enumerate(query_lens):
+            context_len = seq_lens[req_idx] - query_len
+            for offset in range(query_len):
+                query_to_req.append(req_idx)
+                context_lens.append((context_len + offset + 1) // compress_ratio)
+        if not context_lens or max(compressed_seq_lens) == 0:
+            raise RuntimeError("generated requests produced no prefill KV tokens")
 
-        logits = fp8_fp4_mqa_logits(
-            (q_slice, q_scale_slice),
-            (k_quant, k_scale),
-            weights[token_slice],
-            chunk.cu_seqlen_ks,
-            chunk.cu_seqlen_ke,
-            clean_logits=False,
+        device = block_table.device
+        self.indices = torch.tensor(query_to_req, dtype=torch.int32, device=device)
+        self.context_lens = torch.tensor(
+            context_lens, dtype=torch.int32, device=device
+        ).view(-1, 1)
+        self.block_table = block_table.index_select(0, self.indices.to(torch.long))
+        self.max_context_len = max(compressed_seq_lens)
+
+        num_sms = torch.cuda.get_device_properties(
+            torch.cuda.current_device()
+        ).multi_processor_count
+        self.schedule_metadata = get_paged_mqa_logits_metadata(
+            self.context_lens, block_size, num_sms, indices=self.indices
         )
-        topk_indices = topk_indices_buffer[token_slice]
-        torch.ops._C.top_k_per_row_prefill(
+
+    def run(
+        self,
+        q_quant: Tensor,
+        q_scale: Tensor | None,
+        kv_cache: Tensor,
+        weights: Tensor,
+        topk_indices_buffer: Tensor,
+    ) -> None:
+        num_tokens = self.context_lens.shape[0]
+        q_values = q_quant.view(num_tokens, 1, *q_quant.shape[1:])
+        if q_scale is not None:
+            q_values = q_values.view(torch.int8)
+            q_scale = q_scale.view(num_tokens, 1, *q_scale.shape[1:])
+
+        logits = fp8_fp4_paged_mqa_logits(
+            (q_values, q_scale),
+            kv_cache_as_quant_view(kv_cache, HEAD_DIM, q_scale is not None),
+            weights,
+            self.context_lens,
+            self.block_table,
+            self.schedule_metadata,
+            self.max_context_len,
+            False,
+            indices=self.indices,
+        )
+        torch.ops._C.top_k_per_row_decode(
             logits,
-            chunk.cu_seqlen_ks,
-            chunk.cu_seqlen_ke,
-            topk_indices,
+            1,
+            self.context_lens,
+            topk_indices_buffer,
             logits.shape[0],
             logits.stride(0),
             logits.stride(1),
-            topk,
+            topk_indices_buffer.shape[1],
         )
 
 
@@ -146,13 +224,18 @@ def parse_args():
     parser = FlexibleArgumentParser(
         description="Run the DeepGEMM prefill sparse-indexer path."
     )
+    parser.add_argument(
+        "--impl",
+        choices=["deepgemm_flat", "deepgemm_paged"],
+        default="deepgemm_flat",
+    )
     parser.add_argument("--dtype", choices=["fp4", "fp8"], required=True)
     parser.add_argument("--num-requests", type=int, default=8)
     parser.add_argument("--min-query-len", type=int, default=16)
     parser.add_argument("--max-query-len", type=int, default=128)
     parser.add_argument("--min-context-len", type=int, default=0)
     parser.add_argument("--max-context-len", type=int, default=1024)
-    parser.add_argument("--block-size", type=int, default=256)
+    parser.add_argument("--block-size", type=int, default=64)
     parser.add_argument("--compress-ratio", type=int, default=4)
     parser.add_argument("--topk", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
@@ -169,6 +252,9 @@ def main() -> None:
 
     # Prepare request lengths.
     use_fp4 = args.dtype == "fp4"
+    if args.impl == "deepgemm_paged" and args.block_size not in (32, 64):
+        raise ValueError("deepgemm_paged requires --block-size 32 or 64")
+
     query_lens: list[int] = []
     seq_lens: list[int] = []
     compressed_seq_lens: list[int] = []
@@ -255,16 +341,26 @@ def main() -> None:
     block_table = block_table_cpu.cuda()
     topk_indices_buffer = torch.empty((total_query_len, args.topk), dtype=torch.int32)
 
-    metadata = deepgemm_prepare(
-        block_table,
-        query_lens_cpu,
-        seq_lens_cpu,
-        compressed_seq_lens_cpu,
-        query_start_loc_cpu,
-        args.compress_ratio,
-        use_fp4,
-    )
-    deepgemm_run(q_quant, q_scale, kv_cache, weights, topk_indices_buffer, metadata)
+    if args.impl == "deepgemm_flat":
+        impl = DeepGemmFlat(
+            block_table,
+            query_lens_cpu,
+            seq_lens_cpu,
+            compressed_seq_lens_cpu,
+            query_start_loc_cpu,
+            args.compress_ratio,
+            use_fp4,
+        )
+    else:
+        impl = DeepGemmPaged(
+            block_table,
+            query_lens,
+            seq_lens,
+            compressed_seq_lens,
+            args.compress_ratio,
+            block_size,
+        )
+    impl.run(q_quant, q_scale, kv_cache, weights, topk_indices_buffer)
 
 
 if __name__ == "__main__":
