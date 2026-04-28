@@ -138,6 +138,9 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
+    def _empty_cache(self) -> None:
+        pass
+
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         # CPU attention assigns -INF to logits at invalid positions,
         # so stale KV cache data never affects computation.
