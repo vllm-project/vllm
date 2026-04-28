@@ -185,14 +185,14 @@ class NixlConnectorWorker:
 
         Dispatches to the correct remapping strategy:
 
-        - **Gather-read** (``local_to_remote_page_ratio > 1``): per-rank
-          local sub-desc remapping via ``_build_gather_read_specs``.
-        - **Split-read** (``remote_to_local_page_ratio > 1``):
-          rank-independent remote sub-desc remapping via
+        - **Gather-read** (``local_page_size > remote_page_size``): per-rank
+          local descriptor pairing via ``_build_gather_read_specs``.
+        - **Split-read** (``remote_page_size > local_page_size``):
+          rank-independent remote descriptor remapping via
           ``_remap_remote_blocks_to_desc_ids``.
         - **Standard**: direct per-rank group filtering.
         """
-        if plan.local_to_remote_page_ratio > 1:
+        if plan.local_page_size > plan.remote_page_size:
             specs = _build_gather_read_specs(
                 plan, local_block_ids, remote_block_ids
             )
@@ -1351,12 +1351,13 @@ class NixlConnectorWorker:
 
         ### (Optional) Register local agent memory regions.
         if (
-            plan.local_to_remote_page_ratio > 1
+            plan.local_page_size > plan.remote_page_size
             and engine_id not in self._gather_read_handles
         ):
             # Gather-read: local page > remote page.  Register local
             # descriptors matching the remote block size.
             assert self.transfer_topo is not None
+            descs_per_local_block = plan.local_page_size // plan.remote_page_size
             local_base_addresses = self.kv_caches_base_addr[self.engine_id][
                 self.tp_rank
             ]
@@ -1366,7 +1367,7 @@ class NixlConnectorWorker:
                 num_blocks=self.num_blocks,
                 block_len_per_layer=self.block_len_per_layer,
                 is_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
-                gather_page_ratio=plan.local_to_remote_page_ratio,
+                gather_page_ratio=descs_per_local_block,
             )
             descs = self.nixl_wrapper.get_xfer_descs(
                 gather_blocks_data, self.nixl_memory_type
@@ -1957,7 +1958,7 @@ class NixlConnectorWorker:
             logger.debug(
                 "[HeteroTP _read_blocks_for_req] req=%s engine=%s "
                 "tp_ratio=%d, n_read_specs=%d, "
-                "plan: split_ratio=%d, gather_ratio=%d, "
+                "plan: local_page=%d, remote_page=%d, "
                 "group_kinds=%s, "
                 "local_physical_block_ids=[%s], "
                 "remote_block_ids=[%s]",
@@ -1965,8 +1966,8 @@ class NixlConnectorWorker:
                 engine_id,
                 tp_ratio,
                 len(read_specs),
-                plan.remote_to_local_page_ratio,
-                plan.local_to_remote_page_ratio,
+                plan.local_page_size,
+                plan.remote_page_size,
                 [k.value for k in plan.group_kinds],
                 ", ".join(
                     f"g{i}:{meta.local_physical_block_ids[i][:5]}"
@@ -2152,16 +2153,29 @@ class NixlConnectorWorker:
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.
-        # For split-read (page_ratio > 1), each remote block is registered as
-        # multiple descriptors, so scale the remote descriptor-space count.
-        # For gather-read, scale the local descriptor-space count instead.
-        remote_desc_blocks = (
-            self.dst_num_blocks[dst_engine_id] * plan.remote_to_local_page_ratio
-        )
-        local_desc_blocks = self.dst_num_blocks[self.engine_id]
-        if plan.local_to_remote_page_ratio > 1:
-            local_desc_blocks *= plan.local_to_remote_page_ratio
+        # Get descs ids.  Both calls use the same plan since region counts
+        # (len(fa_regions), len(ssm_regions)) are model-determined and
+        # identical across engines.
+        if plan.remote_page_size > plan.local_page_size:
+            # Split-read: each remote block → multiple descriptors.
+            remote_desc_blocks = (
+                self.dst_num_blocks[dst_engine_id]
+                * plan.remote_page_size
+                // plan.local_page_size
+            )
+            local_desc_blocks = self.dst_num_blocks[self.engine_id]
+        elif plan.local_page_size > plan.remote_page_size:
+            # Gather-read: each local block → multiple descriptors.
+            remote_desc_blocks = self.dst_num_blocks[dst_engine_id]
+            local_desc_blocks = (
+                self.dst_num_blocks[self.engine_id]
+                * plan.local_page_size
+                // plan.remote_page_size
+            )
+        else:
+            # Standard: 1:1 block-to-descriptor mapping.
+            remote_desc_blocks = self.dst_num_blocks[dst_engine_id]
+            local_desc_blocks = self.dst_num_blocks[self.engine_id]
 
         remote_block_descs_ids = self._compute_desc_ids_from_plan(
             plan,

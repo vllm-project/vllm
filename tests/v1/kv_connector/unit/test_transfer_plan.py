@@ -604,7 +604,7 @@ def _make_gemma4_plan_params(
       FA:   5 layers, K=2, head_dim=512, P block_size=32, D block_size=16
 
     With page unification + HMA, all groups share one physical pool.
-    page_size: P=65536, D=32768 → remote_to_local_page_ratio=2.
+    page_size: P=65536, D=32768 → remote_page > local_page (split-read).
     For simplicity, use 2 physical layers in tests.
     """
     # D side (local): kv_heads_per_rank for all groups = page_size / block_size
@@ -649,7 +649,8 @@ class TestGemma4PlanStructure:
         """D rank 0 at 2p4d: ratio=2, SWA head-split, FA multi-block."""
         plan = generate_gemma4_plan(**_make_gemma4_plan_params(tp_rank=0))
 
-        assert plan.remote_to_local_page_ratio == 2
+        assert plan.remote_page_size == 65536
+        assert plan.local_page_size == 32768
         assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
         assert plan.local_blocks_per_remote_block == (1, 2)
         assert plan.remote_desc_offset_per_group == (0, 0)  # rank 0: index=0
@@ -794,7 +795,7 @@ def _make_gemma4_gather_plan_params(
       SWA: K=8, head_dim=256, P_tpb=16, D_tpb=16  → concat (2 P ranks)
       FA:  K=2, head_dim=512, P_tpb=16, D_tpb=32  → gather (2P→1D block)
 
-    page_size: P=32768, D=65536 → local_to_remote_page_ratio=2.
+    page_size: P=32768, D=65536 → local_page > remote_page (gather-read).
     """
     d_page = 65536
     p_page = 32768
@@ -836,8 +837,8 @@ class TestGemma4GatherReadPlanStructure:
         """D rank 0 at 4p2d: gather_ratio=2, SWA concat, FA gather."""
         plan = generate_gemma4_plan(**_make_gemma4_gather_plan_params(tp_rank=0))
 
-        assert plan.local_to_remote_page_ratio == 2
-        assert plan.remote_to_local_page_ratio == 1
+        assert plan.local_page_size == 65536
+        assert plan.remote_page_size == 32768
         assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
         assert plan.remote_blocks_per_local_block == (1, 2)
         assert plan.local_blocks_per_remote_block == (1, 1)
@@ -980,6 +981,6 @@ class TestGemma4GatherReadPlan4p1d:
         params["remote_tokens_per_block"] = (16, 16)
         plan = generate_gemma4_plan(**params)
 
-        assert plan.local_to_remote_page_ratio == 4
-        assert plan.remote_to_local_page_ratio == 1
+        assert plan.local_page_size == 131072
+        assert plan.remote_page_size == 32768
         assert plan.remote_blocks_per_local_block == (1, 2)
