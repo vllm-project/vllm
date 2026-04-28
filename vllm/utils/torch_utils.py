@@ -140,13 +140,13 @@ def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     """
     strides = list(t.stride())
     shape = t.shape
-    s = 1
+    prev_stride = 1
     changed = False
     for i in range(len(shape) - 1, -1, -1):
-        if shape[i] == 1 and strides[i] != s:
-            strides[i] = s
+        if shape[i] == 1 and strides[i] != prev_stride:
+            strides[i] = prev_stride
             changed = True
-        s *= shape[i]
+        prev_stride = strides[i] * shape[i]
     if not changed:
         return t
     return t.as_strided(t.shape, strides)
