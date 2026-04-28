@@ -5,9 +5,16 @@
 
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 
 pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 @pytest.mark.parametrize(
@@ -37,6 +44,7 @@ def test_kv_connector(
             kv_offloading_backend=kv_offloading_backend,
             kv_offloading_size=kv_offloading_size,
         ),
+        device_config=DeviceConfig("cpu"),
         kv_transfer_config=kv_transfer_config,
         parallel_config=ParallelConfig(
             tensor_parallel_size=tp, pipeline_parallel_size=pp
@@ -72,6 +80,7 @@ def test_kv_offloading_size_only_uses_native_default():
             kv_offloading_size=4.0,
             # kv_offloading_backend not set, should default to "native"
         ),
+        device_config=DeviceConfig("cpu"),
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -79,3 +88,25 @@ def test_kv_offloading_size_only_uses_native_default():
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+
+
+def test_kv_offloading_preserves_eviction_policy_extra_config():
+    """Test that native KV offloading preserves the configured eviction policy."""
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(
+            kv_offloading_size=4.0,
+            kv_offloading_backend="native",
+        ),
+        device_config=DeviceConfig("cpu"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector_extra_config={"eviction_policy": "lfu"}
+        ),
+    )
+
+    kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
+    kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
+    assert kv_transfer_config.kv_connector == "OffloadingConnector"
+    assert kv_transfer_config.kv_role == "kv_both"
+    assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+    assert kv_connector_extra_config["eviction_policy"] == "lfu"

@@ -16,8 +16,11 @@ from vllm.v1.kv_offload.abstract import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.lfu import LFUCachePolicy
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
@@ -93,7 +96,7 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
-@pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
+@pytest.mark.parametrize("eviction_policy", ["lru", "lfu", "arc"])
 def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     """
     Regression test: a block that is already stored must not be evicted
@@ -561,6 +564,126 @@ class TestARCPolicy:
         # verify events
         events = list(cpu_manager.take_events())
         assert len(events) > 0  # should have store and eviction events
+
+
+class TestLFUPolicy:
+    """Unit tests for CPUOffloadingManager with LFU eviction policy."""
+
+    def _make_manager(
+        self, num_blocks: int = 4, enable_events: bool = True
+    ) -> tuple[CPUOffloadingManager, LFUCachePolicy]:
+        manager = CPUOffloadingManager(
+            block_size=256,
+            num_blocks=num_blocks,
+            cache_policy="lfu",
+            enable_events=enable_events,
+        )
+        policy = manager._policy
+        assert isinstance(policy, LFUCachePolicy)
+        return manager, policy
+
+    def test_eviction_prefers_low_frequency_blocks(self):
+        manager, policy = self._make_manager(enable_events=False)
+
+        manager.prepare_store(to_keys([1, 2, 3, 4]))
+        manager.complete_store(to_keys([1, 2, 3, 4]))
+
+        manager.touch(to_keys([1, 1, 2]))
+
+        output = manager.prepare_store(to_keys([5]))
+        verify_store_output(
+            output,
+            ExpectedPrepareStoreOutput(
+                keys_to_store=[5],
+                store_block_ids=[2],
+                evicted_keys=[3],
+            ),
+        )
+
+        assert policy.freqs[to_keys([1])[0]] == 3
+        assert policy.freqs[to_keys([2])[0]] == 2
+        assert to_keys([3])[0] not in policy.freqs
+        assert policy.freqs[to_keys([4])[0]] == 1
+
+    def test_touch_breaks_frequency_ties_by_recency(self):
+        manager, _ = self._make_manager(enable_events=False)
+
+        manager.prepare_store(to_keys([1, 2, 3, 4]))
+        manager.complete_store(to_keys([1, 2, 3, 4]))
+
+        manager.touch(to_keys([1, 2, 3, 4]))
+        manager.touch(to_keys([2, 3, 4]))
+
+        output = manager.prepare_store(to_keys([5]))
+        verify_store_output(
+            output,
+            ExpectedPrepareStoreOutput(
+                keys_to_store=[5],
+                store_block_ids=[0],
+                evicted_keys=[1],
+            ),
+        )
+
+    def test_loaded_blocks_are_not_evicted(self):
+        manager, _ = self._make_manager(enable_events=False)
+
+        manager.prepare_store(to_keys([1, 2, 3, 4]))
+        manager.complete_store(to_keys([1, 2, 3, 4]))
+
+        manager.touch(to_keys([1, 2, 3]))
+        load_spec = manager.prepare_load(to_keys([4]))
+        verify_load_output(load_spec, [3])
+
+        verify_store_output(
+            manager.prepare_store(to_keys([5])),
+            ExpectedPrepareStoreOutput(
+                keys_to_store=[5],
+                store_block_ids=[2],
+                evicted_keys=[3],
+            ),
+        )
+        manager.complete_load(to_keys([4]))
+
+
+def _run_policy_eval(policy: str, num_blocks: int) -> int:
+    manager = CPUOffloadingManager(
+        block_size=256,
+        num_blocks=num_blocks,
+        cache_policy=policy,  # type: ignore[arg-type]
+        enable_events=False,
+    )
+
+    manager.prepare_store(to_keys(list(range(1, num_blocks + 1))))
+    manager.complete_store(to_keys(list(range(1, num_blocks + 1))))
+
+    hot_key = to_keys([1])
+    manager.touch(hot_key * 3)
+
+    # Refresh the cold keys after the hot-key training so the hot key becomes
+    # the LRU candidate despite having the highest frequency.
+    manager.touch(to_keys([2, 3, 4]))
+
+    # Insert unique cold keys to force eviction pressure without refreshing
+    # recency on the hot key. LRU should evict the hot key, LFU should not.
+    for cold_key in [5]:
+        output = manager.prepare_store(to_keys([cold_key]))
+        assert output is not None
+        manager.complete_store(to_keys([cold_key]))
+
+    return manager.lookup(hot_key)
+
+
+def test_lfu_eval_reduces_hot_key_eviction_against_lru():
+    """
+    Synthetic evaluation:
+    after building frequency on one hot key, unique cold keys create pressure.
+    LFU should retain the hot key where pure LRU evicts it.
+    """
+    lru_hits = _run_policy_eval("lru", num_blocks=4)
+    lfu_hits = _run_policy_eval("lfu", num_blocks=4)
+
+    assert lru_hits == 0
+    assert lfu_hits == 1
 
 
 def test_filter_reused_manager():

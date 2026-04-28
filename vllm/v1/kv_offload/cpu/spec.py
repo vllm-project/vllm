@@ -7,6 +7,7 @@ from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import SUPPORTED_CACHE_POLICIES
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
@@ -48,6 +49,11 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._handlers: CpuGpuOffloadingHandlers | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        if self.eviction_policy not in SUPPORTED_CACHE_POLICIES:
+            raise ValueError(
+                f"Unsupported KV offloading eviction_policy: {self.eviction_policy!r}. "
+                f"Supported policies: {SUPPORTED_CACHE_POLICIES}"
+            )
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
