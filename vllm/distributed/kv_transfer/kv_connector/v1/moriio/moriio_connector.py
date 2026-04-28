@@ -35,8 +35,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferId,
     WriteTask,
     get_moriio_mode,
+    get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
+    parse_moriio_zmq_address,
     set_role,
     zmq_ctx,
 )
@@ -379,13 +381,12 @@ class MoRIIOConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             if self.mode == MoRIIOMode.READ:
                 if remote_block_ids := params.get("remote_block_ids"):
-                    if all(
-                        p in params
-                        for p in ("remote_engine_id", "remote_host", "remote_port")
-                    ):
-                        # If remote_blocks and num_external_tokens = 0, we
+                    # remote_engine_id is returned by the prefill's request_finished.
+                    # host/ports come from the request_id (parsed in add_new_req).
+                    if "remote_engine_id" in params:
+                        # If remote_blocks and num_external_tokens = 0, we have
                         # a full prefix cache hit on the D worker. We need to call
-                        # send_notif in _read_blocks to free the memory on the P.
+                        # send_notify in _read_blocks to free the memory on the P.
 
                         # Get unhashed blocks to pull from remote.
                         local_block_ids = blocks.get_block_ids()[0]
@@ -407,22 +408,30 @@ class MoRIIOConnectorScheduler:
                         )
 
             else:
+                # WRITE mode: prefill scheduler notifies the decode side that
+                # blocks are ready.  Parse the decode's host/notify_port from
+                # the request_id
                 assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
+                peer_zmq = get_peer_zmq_from_request_id(
+                    request.request_id, is_producer=True
+                )
+                remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
+
                 for tp_index in range(self.tp_size):
-                    target_port = request.kv_transfer_params[
-                        "remote_notify_port"
-                    ] + get_port_offset(remote_dp_rank, tp_index)
+                    target_port = remote_notify_port + get_port_offset(
+                        remote_dp_rank, tp_index
+                    )
 
                     self.send_notify_block(
                         req_id=request.request_id,
                         transfer_id=request.kv_transfer_params["transfer_id"],
                         block_notify_list=blocks.get_block_ids()[0],
-                        host=params.get("remote_host"),
+                        host=remote_host,
                         port=target_port,
                     )
 
@@ -584,15 +593,15 @@ class MoRIIOConnectorScheduler:
                 + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
             )
 
-        # If we execute in P-D serial mode, no notification port is needed.
+        # Return KV transfer params forwarded verbatim to the decode instance by
+        # the router.
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=self.host_ip,
-            remote_port=self.handshake_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            transfer_id=params["transfer_id"],
         )
 
 
@@ -846,7 +855,15 @@ class MoRIIOConnectorWorker:
         ]
 
     def _ping(self, zmq_context):
-        http_request_address = f"http://{self.request_address}/v1"
+        # Use host:port format for http_address (compatible with official router)
+        http_address = f"{self.request_address}"
+        # Include host so the router embeds it in the request_id; the connector
+        # on the other side parses host/ports from there.
+        zmq_address = (
+            f"host:{self.local_ip},"
+            f"handshake:{self.handshake_port},"
+            f"notify:{self.notify_port}"
+        )
         role = "P" if self.is_producer else "D"
 
         retry_count = 0
@@ -857,14 +874,17 @@ class MoRIIOConnectorWorker:
             while True:
                 try:
                     data = {
-                        "type": "register",
-                        "role": role,
-                        "index": str(index),
-                        "request_address": http_request_address,
-                        "handshake_port": self.handshake_port,
-                        "notify_port": self.notify_port,
+                        "type": role,  # "P" or "D"
+                        "http_address": http_address,
+                        "zmq_address": zmq_address,
+                        # dp_size/tp_size are not used by the official vLLM router
+                        # (routing operates at the http_address level); they are
+                        # consumed only by the toy proxy server.
                         "dp_size": self.moriio_config.dp_size,
                         "tp_size": self.moriio_config.tp_size,
+                        # transfer_mode is included so the router can distinguish
+                        # READ (prefill-then-decode, sequential) from WRITE (concurrent)
+                        # scheduling.
                         "transfer_mode": self.mode.name,
                     }
 

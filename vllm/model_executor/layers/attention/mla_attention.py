@@ -427,7 +427,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             logger.warning_once(
                 "Disabling prefix caching for TRITON_MLA / FLASHINFER "
                 "with batch invariance, as it is not yet supported.",
-                scope="local",
             )
             cache_config.enable_prefix_caching = False
 
@@ -1423,6 +1422,20 @@ class MLADims:
 def get_mla_dims(model_config: ModelConfig) -> MLADims:
     hf_text_config = model_config.hf_text_config
 
+    # Check if this is a DeepseekV4 config (uses unified head_dim + rope_head_dim)
+    if hasattr(hf_text_config, "compress_ratios"):
+        # DeepseekV4 style config: unified head_dim with rope_head_dim
+        head_dim = hf_text_config.head_dim
+        rope_head_dim = hf_text_config.qk_rope_head_dim
+        return MLADims(
+            q_lora_rank=hf_text_config.q_lora_rank,
+            kv_lora_rank=head_dim,
+            qk_nope_head_dim=head_dim - rope_head_dim,
+            qk_rope_head_dim=rope_head_dim,
+            v_head_dim=head_dim,
+        )
+
+    # DeepseekV2/V3 style config
     return MLADims(
         q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
         kv_lora_rank=hf_text_config.kv_lora_rank,
@@ -1523,9 +1536,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if use_fp8:
             fp8_dtype = current_platform.fp8_dtype()
-            logger.info_once(
-                "FP8 prefill attention enabled: query data type is FP8", scope="local"
-            )
+            logger.info_once("FP8 prefill attention enabled: query data type is FP8")
             return fp8_dtype
         elif vllm_config.attention_config.use_prefill_query_quantization:
             logger.info_once(
@@ -1533,7 +1544,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 " use_prefill_query_quantization is enabled. Please"
                 " ensure that --kv-cache-dtype is set to fp8 and your prefill"
                 " backend is compatible with FP8 attention.",
-                scope="local",
             )
             return model_dtype
         elif (
@@ -1547,7 +1557,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 "prefill latency. To enable, add: "
                 '--attention-config \'{"use_prefill_query_quantization"'
                 ": true}'",
-                scope="local",
             )
 
         return model_dtype
@@ -1827,13 +1836,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
-            num_computed_tokens_cpu = (
-                common_attn_metadata.compute_num_computed_tokens().cpu()
-            )
-
             reqs_start = num_decodes  # prefill_start
 
-            context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
+            # Upper bound is exact for prefill rows (no D2H sync).
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
+            prefill_query_lens_cpu = (
+                query_start_loc_cpu[reqs_start + 1 : num_reqs + 1]
+                - query_start_loc_cpu[reqs_start:num_reqs]
+            )
+            context_lens_cpu = (
+                seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
+            )
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
@@ -2191,6 +2205,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        # DSV3.2 MLA Specific Arguments
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
@@ -2213,6 +2228,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
@@ -2225,21 +2241,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
         if use_trtllm_ragged_deepseek_prefill():
-            logger.info_once(
-                "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
-            )
+            logger.info_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
             self._run_prefill_context_chunk = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_flashinfer_prefill():
-            logger.info_once("Using FlashInfer prefill for MLA", scope="local")
+            logger.info_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
         elif use_cudnn_prefill():
-            logger.info_once("Using CUDNN prefill for MLA", scope="local")
+            logger.info_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
@@ -2250,7 +2264,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     "available. Please install flash_attn or use "
                     "--attention-backend ROCM_AITER_MLA."
                 )
-            logger.info_once("Using FlashAttention prefill for MLA", scope="local")
+            logger.info_once("Using FlashAttention prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
 

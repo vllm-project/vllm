@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -32,10 +33,8 @@ class TrtLlmMxfp4ExpertsBase:
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        **kwargs,
     ):
-        # NOTE: FusedMoEExperts.__init__ is called by the concrete subclass
-        # (Monolithic/Modular) via MRO, not here, to avoid mypy issues with
-        # multiple inheritance. This matches the NvFP4 expert pattern.
         self.moe_config = moe_config
         self.quant_config = quant_config
 
@@ -48,23 +47,34 @@ class TrtLlmMxfp4ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        # MXFP4-specific TRTLLM parameters
+        # MXFP4-specific TRTLLM parameters from quant_config
         device = torch.accelerator.current_device_index()
-        self.gemm1_alpha = torch.tensor(
-            [1.702] * self.local_num_experts,
-            dtype=torch.float32,
-            device=device,
-        )
-        self.gemm1_beta = torch.tensor(
-            [1.0] * self.local_num_experts,
-            dtype=torch.float32,
-            device=device,
-        )
-        self.gemm1_clamp_limit = torch.tensor(
-            [7.0] * self.local_num_experts,
-            dtype=torch.float32,
-            device=device,
-        )
+        if quant_config.gemm1_alpha is not None:
+            self.gemm1_alpha = torch.tensor(
+                [quant_config.gemm1_alpha] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_alpha = None
+
+        if quant_config.gemm1_beta is not None:
+            self.gemm1_beta = torch.tensor(
+                [quant_config.gemm1_beta] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_beta = None
+
+        if quant_config.gemm1_clamp_limit is not None:
+            self.gemm1_clamp_limit = torch.tensor(
+                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_clamp_limit = None
 
         from vllm.config import get_current_vllm_config
 
@@ -97,7 +107,7 @@ class TrtLlmMxfp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SWIGLUOAI
+        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -190,36 +200,41 @@ class TrtLlmMxfp4ExpertsMonolithic(
 
         output = torch.empty_like(hidden_states)
 
-        return trtllm_fp4_block_scale_moe(
-            routing_logits=router_logits.to(torch.bfloat16),
-            routing_bias=None,
-            hidden_states=x_quant,
-            hidden_states_scale=x_scale,
-            gemm1_weights=w1,
-            gemm1_weights_scale=self.w1_scale,
-            gemm1_bias=self.w1_bias,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
-            gemm2_weights=w2,
-            gemm2_weights_scale=self.w2_scale,
-            gemm2_bias=self.w2_bias,
-            output1_scale_scalar=None,
-            output1_scale_gate_scalar=None,
-            output2_scale_scalar=None,
-            num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=None,
-            topk_group=None,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
-            routing_method_type=self.routing_method_type,
-            do_finalize=True,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
-            output=output,
-        )[0]
+        from vllm.utils.flashinfer import _is_fi_autotuning, autotune
+
+        with autotune(_is_fi_autotuning):
+            trtllm_fp4_block_scale_moe(
+                routing_logits=router_logits.to(torch.bfloat16),
+                routing_bias=None,
+                hidden_states=x_quant,
+                hidden_states_scale=x_scale,
+                gemm1_weights=w1,
+                gemm1_weights_scale=self.w1_scale,
+                gemm1_bias=self.w1_bias,
+                gemm1_alpha=self.gemm1_alpha,
+                gemm1_beta=self.gemm1_beta,
+                gemm1_clamp_limit=self.gemm1_clamp_limit,
+                gemm2_weights=w2,
+                gemm2_weights_scale=self.w2_scale,
+                gemm2_bias=self.w2_bias,
+                output1_scale_scalar=None,
+                output1_scale_gate_scalar=None,
+                output2_scale_scalar=None,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                n_group=None,
+                topk_group=None,
+                intermediate_size=self.intermediate_size_per_partition,
+                local_expert_offset=self.ep_rank * self.local_num_experts,
+                local_num_experts=self.local_num_experts,
+                routed_scaling_factor=None,
+                routing_method_type=self.routing_method_type,
+                do_finalize=True,
+                tune_max_num_tokens=max(self.max_capture_size, 1),
+                output=output,
+            )
+
+        return output
 
 
 class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
@@ -237,6 +252,16 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # Modular kernel handles only the expert computation;
+        # routing is done externally, so accept any routing method.
         return True
 
     def supports_expert_map(self) -> bool:
@@ -282,7 +307,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
-        intermediate_size = w2.size(1)
+        intermediate_size = self.intermediate_size_per_partition
         local_expert_offset = self.moe_config.ep_rank * local_num_experts
 
         # Handle input quantization
@@ -302,9 +327,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             x_quant = hidden_states
             x_scale = None
 
-        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-            torch.bfloat16
-        ).view(torch.int16)
+        # Pack topk ids and weights into format expected by the kernel.
+        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
 
         assert self.w1_scale is not None
         assert self.w2_scale is not None
@@ -333,7 +357,10 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             "local_expert_offset": local_expert_offset,
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
-            "routing_method_type": self.routing_method_type,
+            # Modular kernel receives pre-routed tokens, so routing
+            # is already done. Use Renormalize as a safe default that
+            # the TRTLLM C++ kernel supports.
+            "routing_method_type": RoutingMethodType.Renormalize,
             "do_finalize": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
@@ -341,12 +368,9 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
 
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
-        from vllm.utils.flashinfer import autotune
+        from vllm.utils.flashinfer import _is_fi_autotuning, autotune
 
-        with autotune(False):
-            # Enable autotune when,
-            # https://github.com/flashinfer-ai/flashinfer/issues/2023 is
-            # resolved.
+        with autotune(_is_fi_autotuning):
             trtllm_fp4_block_scale_routed_moe(**kwargs)
 
         return output
