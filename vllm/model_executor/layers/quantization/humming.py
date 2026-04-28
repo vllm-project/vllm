@@ -886,8 +886,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 layer=layer,
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
-                max_num_tokens = prepare_finalize.max_num_tokens_per_rank(),
-                num_dispatchers = prepare_finalize.num_dispatchers()
+                max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
+                num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         elif get_humming_moe_gemm_type() == "indexed":
             return HummingIndexedExperts(layer, self.moe, self.moe_quant_config)

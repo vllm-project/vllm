@@ -399,7 +399,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:        
+    ) -> tuple[bool, str | None]:
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             supported = cls.activation_format() == activation_format
             reason = "activation_format mismatched"
@@ -643,7 +643,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     @staticmethod
-    def humming_gemm_type(self) -> HummingGemmType:
+    def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.GROUPED_MASKED
 
     def main_apply(

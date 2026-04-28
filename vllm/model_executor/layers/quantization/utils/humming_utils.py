@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import re
 from typing import Any
 
@@ -5,17 +7,17 @@ import torch
 from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
-from vllm import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
 
-def humming_is_layer_skipped(self, config: dict[str, Any], prefix: str):
+def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
     if not config:
         return True
 
