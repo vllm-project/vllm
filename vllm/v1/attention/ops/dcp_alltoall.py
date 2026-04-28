@@ -172,24 +172,6 @@ def _dcp_a2a_pack_send_kernel(
 
 
 @triton.jit
-def _load_packed_lse(
-    ptr,
-    base,
-    stride,
-    HEAD_DIM: tl.constexpr,
-    LSE_PACK_DIM: tl.constexpr,
-):
-    if LSE_PACK_DIM == 1:
-        return tl.load(ptr + base + HEAD_DIM * stride).to(tl.float32)
-
-    lo_raw = tl.load(ptr + base + HEAD_DIM * stride)
-    hi_raw = tl.load(ptr + base + (HEAD_DIM + 1) * stride)
-    lo = lo_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
-    hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
-    return (lo | (hi << 16)).to(tl.float32, bitcast=True)
-
-
-@triton.jit
 def _dcp_a2a_unpack_combine_kernel(
     recv_ptr,
     out_ptr,
@@ -220,9 +202,16 @@ def _dcp_a2a_unpack_combine_kernel(
             + batch_idx * recv_stride_B
             + head_idx * recv_stride_H
         )
-        lse_val = _load_packed_lse(
-            recv_ptr, recv_base, recv_stride_D, HEAD_DIM, LSE_PACK_DIM
-        )
+        if LSE_PACK_DIM == 1:
+            lse_val = tl.load(recv_ptr + recv_base + HEAD_DIM * recv_stride_D).to(
+                tl.float32
+            )
+        else:
+            lo_raw = tl.load(recv_ptr + recv_base + HEAD_DIM * recv_stride_D)
+            hi_raw = tl.load(recv_ptr + recv_base + (HEAD_DIM + 1) * recv_stride_D)
+            lo = lo_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
+            hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
+            lse_val = (lo | (hi << 16)).to(tl.float32, bitcast=True)
         lse_val = tl.where(
             (lse_val != lse_val) | (lse_val == float("inf")),
             -float("inf"),
@@ -239,9 +228,16 @@ def _dcp_a2a_unpack_combine_kernel(
             + batch_idx * recv_stride_B
             + head_idx * recv_stride_H
         )
-        lse_val = _load_packed_lse(
-            recv_ptr, recv_base, recv_stride_D, HEAD_DIM, LSE_PACK_DIM
-        )
+        if LSE_PACK_DIM == 1:
+            lse_val = tl.load(recv_ptr + recv_base + HEAD_DIM * recv_stride_D).to(
+                tl.float32
+            )
+        else:
+            lo_raw = tl.load(recv_ptr + recv_base + HEAD_DIM * recv_stride_D)
+            hi_raw = tl.load(recv_ptr + recv_base + (HEAD_DIM + 1) * recv_stride_D)
+            lo = lo_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
+            hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
+            lse_val = (lo | (hi << 16)).to(tl.float32, bitcast=True)
         lse_val = tl.where(
             (lse_val != lse_val) | (lse_val == float("inf")),
             -float("inf"),
@@ -264,9 +260,16 @@ def _dcp_a2a_unpack_combine_kernel(
             + batch_idx * recv_stride_B
             + head_idx * recv_stride_H
         )
-        lse_val = _load_packed_lse(
-            recv_ptr, recv_base, recv_stride_D, HEAD_DIM, LSE_PACK_DIM
-        )
+        if LSE_PACK_DIM == 1:
+            lse_val = tl.load(recv_ptr + recv_base + HEAD_DIM * recv_stride_D).to(
+                tl.float32
+            )
+        else:
+            lo_raw = tl.load(recv_ptr + recv_base + HEAD_DIM * recv_stride_D)
+            hi_raw = tl.load(recv_ptr + recv_base + (HEAD_DIM + 1) * recv_stride_D)
+            lo = lo_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
+            hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
+            lse_val = (lo | (hi << 16)).to(tl.float32, bitcast=True)
         lse_val = tl.where(
             (lse_val != lse_val) | (lse_val == float("inf")),
             -float("inf"),
