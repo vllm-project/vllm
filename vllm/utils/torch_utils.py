@@ -14,9 +14,93 @@ import torch
 from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
+import logging
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+
+_logger = logging.getLogger(__name__)
+
+# JIT-compiled C++ extension for zero-allocation padding
+# Module-level singleton: load exactly once during process lifecycle
+# to avoid filesystem I/O thrashing in the hot path
+_CUSTOM_PAD_OP_MODULE = None
+_JIT_LOAD_FAILED = False
+_JIT_LOAD_LOCK = threading.Lock()
+
+# Supported numpy -> torch dtype mappings (strict, no fallback)
+_NUMPY_TO_TORCH_DTYPE = {
+    np.int32: torch.int32,
+    np.int64: torch.int64,
+    np.float16: torch.float16,
+    np.float32: torch.float32,
+    np.float64: torch.float64,
+    np.int8: torch.int8,
+    np.int16: torch.int16,
+    np.uint8: torch.uint8,
+    np.bool_: torch.bool,
+}
+
+
+def _try_load_custom_pad_op():
+    """
+    Attempt to load the JIT-compiled C++ padding operation exactly once.
+
+    Returns the module if successful, None if failed or disabled.
+    Sets _JIT_LOAD_FAILED=True on failure to prevent retry thrashing.
+    """
+    global _CUSTOM_PAD_OP_MODULE, _JIT_LOAD_FAILED
+
+    # Check environment variable - if disabled, return None immediately
+    if not envs.VLLM_ENABLE_JIT_PADDING:
+        _logger.info("VLLM_ENABLE_JIT_PADDING=0, JIT padding disabled, using Python fallback")
+        return None
+
+    # Fast path: already loaded or already failed
+    if _CUSTOM_PAD_OP_MODULE is not None:
+        return _CUSTOM_PAD_OP_MODULE
+    if _JIT_LOAD_FAILED:
+        return None
+
+    # Thread-safe lazy initialization
+    with _JIT_LOAD_LOCK:
+        # Double-check after acquiring lock
+        if _CUSTOM_PAD_OP_MODULE is not None:
+            return _CUSTOM_PAD_OP_MODULE
+        if _JIT_LOAD_FAILED:
+            return None
+
+        _logger.info("VLLM_ENABLE_JIT_PADDING=1, attempting to load JIT C++ padding extension...")
+
+        try:
+            import time
+            from torch.utils.cpp_extension import load
+
+            module_dir = os.path.dirname(os.path.abspath(__file__))
+            cpp_path = os.path.join(module_dir, "custom_pad_op.cpp")
+
+            # JIT compile with optimization flags - measure compilation time
+            load_start = time.perf_counter()
+            _CUSTOM_PAD_OP_MODULE = load(
+                name="custom_pad_op",
+                sources=[cpp_path],
+                extra_cflags=["-O3", "-fvisibility=hidden"],
+                verbose=False,
+            )
+            load_elapsed = time.perf_counter() - load_start
+            _logger.info("JIT C++ padding extension loaded successfully in %.2f seconds", load_elapsed)
+            return _CUSTOM_PAD_OP_MODULE
+
+        except Exception as e:
+            # Mark as failed to prevent future retry attempts
+            _JIT_LOAD_FAILED = True
+            # Log warning but don't crash - fallback to pure Python
+            _logger.warning(
+                "JIT compilation of custom_pad_op failed: %s. "
+                "Falling back to pure Python implementation.",
+                e,
+            )
+            return None
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -596,17 +680,58 @@ def make_ndarray_with_pad(
 
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
+
+    Uses a JIT-compiled C++ extension for zero-allocation in-place filling
+    when available. Falls back to pure Python loop if JIT module failed to load.
     """
+    # Handle empty input edge case
+    if not x or all(len(row) == 0 for row in x):
+        if max_len is None:
+            max_len = 0
+        return np.full((len(x), max_len), pad, dtype=dtype)
+
     if max_len is None:
-        # Unlike for most functions, map is faster than a genexpr over `len`
         max_len = max(map(len, x), default=0)
 
-    padded_x = np.full((len(x), max_len), pad, dtype=dtype)
-    for ind, blocktb in enumerate(x):
-        assert len(blocktb) <= max_len
-        padded_x[ind, : len(blocktb)] = blocktb
+    if max_len == 0:
+        return np.empty((len(x), 0), dtype=dtype)
 
-    return padded_x
+    # Resolve dtype - strict mapping, no silent fallback
+    np_dtype = np.dtype(dtype)
+    torch_dtype = _NUMPY_TO_TORCH_DTYPE.get(np_dtype.type)
+    if torch_dtype is None:
+        # Fail-fast for unsupported dtype instead of silent data corruption
+        raise ValueError(
+            f"Unsupported dtype for JIT padding: {np_dtype}. "
+            f"Supported types: {list(_NUMPY_TO_TORCH_DTYPE.keys())}"
+        )
+
+    # Attempt to use JIT-compiled C++ extension (singleton, no filesystem thrash)
+    custom_pad_op = _try_load_custom_pad_op()
+
+    if custom_pad_op is None:
+        # JIT module failed to load - use pure Python fallback
+        padded_x = np.full((len(x), max_len), pad, dtype=dtype)
+        for ind, row in enumerate(x):
+            if len(row) > max_len:
+                raise ValueError(f"Row {ind} length {len(row)} exceeds max_len {max_len}")
+            padded_x[ind, : len(row)] = row
+        return padded_x
+
+    # Pre-allocate contiguous CPU tensor with pad value
+    padded_tensor = torch.full(
+        (len(x), max_len),
+        pad,
+        dtype=torch_dtype,
+        device="cpu",
+    )
+
+    # Call JIT-compiled C++ op - NO blanket exception handler
+    # C++ errors (segfaults, type errors) should crash loudly during testing
+    custom_pad_op.make_pad_inplace(x, padded_tensor, max_len)
+
+    # Zero-copy conversion to numpy (shares memory)
+    return padded_tensor.numpy()
 
 
 def make_tensor_with_pad(
