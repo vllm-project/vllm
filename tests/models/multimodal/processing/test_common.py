@@ -408,8 +408,7 @@ def _test_processing_correctness_one(
 
 
 # REVERT
-# @pytest.mark.parametrize("model_id", get_model_ids_to_test())
-@pytest.mark.parametrize("model_id", ["CohereAsrForConditionalGeneration"])
+@pytest.mark.parametrize("model_id", get_model_ids_to_test())
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])
