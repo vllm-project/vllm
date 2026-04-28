@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 
 
 class CapturedAttentionState(NamedTuple):
-    attn_metadata: dict[str, Any]
+    attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
 
 
