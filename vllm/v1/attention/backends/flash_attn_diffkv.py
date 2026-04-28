@@ -6,14 +6,16 @@ import torch
 
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
+    is_flash_attn_varlen_func_available,
+)
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
 from .flash_attn import (
@@ -22,8 +24,6 @@ from .flash_attn import (
     FlashAttentionMetadata,
     cascade_attention,
 )
-
-logger = init_logger(__name__)
 
 
 class FlashAttentionDiffKVBackend(FlashAttentionBackend):
@@ -86,6 +86,20 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
 
 
 class FlashAttentionDiffKVImpl(FlashAttentionImpl):
+    vllm_flash_attn_version: int | None
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Re-derive the FA version with diff-kv context so that
+        # get_flash_attn_version can apply the FA3 -> FA4 upgrade rule
+        # for sinks + hdim != hdim_v.
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=self.alibi_slopes is not None,
+            head_size=self.head_size,
+            head_size_v=FlashAttentionDiffKVBackend.head_size_v,
+            has_sinks=self.sinks is not None,
+        )
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,

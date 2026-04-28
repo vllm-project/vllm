@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock, patch
+
 import torch
 from vllm_test_utils.monitor import monitor
 
@@ -61,3 +63,62 @@ def test_memory_profiling():
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
+
+
+def test_memory_snapshot_uses_psutil_on_integrated_gpu():
+    """On integrated (UMA) GPUs, free_memory should come from psutil."""
+    mock_cuda_free = 40 * 1024**3
+    mock_cuda_total = 120 * 1024**3
+    mock_psutil_available = 100 * 1024**3
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+    ):
+        mock_platform.mem_get_info.return_value = (
+            mock_cuda_free,
+            mock_cuda_total,
+        )
+        mock_platform.is_integrated_gpu.return_value = True
+        mock_platform.memory_stats.return_value = {
+            "allocated_bytes.all.peak": 0,
+        }
+        mock_platform.memory_reserved.return_value = 0
+        mock_platform.current_device = lambda: "cuda:0"
+
+        mock_vmem = MagicMock()
+        mock_vmem.available = mock_psutil_available
+        mock_psutil.virtual_memory.return_value = mock_vmem
+
+        snapshot = MemorySnapshot(device="cuda:0")
+
+        assert snapshot.free_memory == mock_psutil_available
+        assert snapshot.total_memory == mock_cuda_total
+        mock_psutil.virtual_memory.assert_called_once()
+
+
+def test_memory_snapshot_uses_cuda_on_discrete_gpu():
+    """On discrete GPUs, free_memory should come from CUDA mem_get_info."""
+    mock_cuda_free = 70 * 1024**3
+    mock_cuda_total = 80 * 1024**3
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+    ):
+        mock_platform.mem_get_info.return_value = (
+            mock_cuda_free,
+            mock_cuda_total,
+        )
+        mock_platform.is_integrated_gpu.return_value = False
+        mock_platform.memory_stats.return_value = {
+            "allocated_bytes.all.peak": 0,
+        }
+        mock_platform.memory_reserved.return_value = 0
+        mock_platform.current_device = lambda: "cuda:0"
+
+        snapshot = MemorySnapshot(device="cuda:0")
+
+        assert snapshot.free_memory == mock_cuda_free
+        assert snapshot.total_memory == mock_cuda_total
+        mock_psutil.virtual_memory.assert_not_called()

@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import time
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from tqdm import tqdm
@@ -26,6 +26,82 @@ from vllm.benchmarks.lib.utils import (
     write_to_json,
 )
 from vllm.engine.arg_utils import EngineArgs
+
+PERCENTAGES = [10, 25, 50, 75, 90, 99]
+
+
+class MetricDesc(NamedTuple):
+    """Descriptor for a metric to collect from each iteration."""
+
+    iter_key: str  # key in the iteration result dict
+    suffix: str  # result key suffix, e.g. "startup", "compilation"
+    display_name: str
+
+
+class MetricStats(NamedTuple):
+    """Aggregated statistics for a single benchmark metric."""
+
+    key: str  # e.g. "cold_startup", "warm_encoder_compilation"
+    display_name: str
+    values: list[float]
+    avg: float
+    percentiles: dict[int, float]
+
+
+_BASE_METRICS = [
+    MetricDesc("total_startup_time", "startup", "Startup time"),
+    MetricDesc("compilation_time", "compilation", "Compilation time"),
+]
+_ENCODER_METRIC = MetricDesc(
+    "encoder_compilation_time",
+    "encoder_compilation",
+    "Encoder compilation time",
+)
+
+
+def _compute_metric(
+    phase: str,
+    desc: MetricDesc,
+    iterations: list[dict[str, float]],
+) -> MetricStats:
+    values = [m[desc.iter_key] for m in iterations]
+    arr = np.array(values)
+    return MetricStats(
+        key=f"{phase}_{desc.suffix}",
+        display_name=desc.display_name,
+        values=values,
+        avg=float(np.mean(arr)),
+        percentiles=dict(zip(PERCENTAGES, np.percentile(arr, PERCENTAGES).tolist())),
+    )
+
+
+def _collect_phase_metrics(
+    phase: str,
+    iterations: list[dict[str, float]],
+    has_encoder: bool,
+) -> list[MetricStats]:
+    metrics = [_compute_metric(phase, desc, iterations) for desc in _BASE_METRICS]
+    if has_encoder:
+        metrics.append(_compute_metric(phase, _ENCODER_METRIC, iterations))
+    return metrics
+
+
+def _print_phase(phase_name: str, metrics: list[MetricStats]) -> None:
+    print(f"\n{phase_name}:")
+    for m in metrics:
+        print(f"Avg {m.display_name.lower()}: {m.avg:.2f} seconds")
+    for m in metrics:
+        print(f"{m.display_name} percentiles:")
+        for pct, val in m.percentiles.items():
+            print(f"  {pct}%: {val:.2f} seconds")
+
+
+def _metric_to_json(m: MetricStats) -> dict[str, Any]:
+    return {
+        f"avg_{m.key}_time": m.avg,
+        f"{m.key}_times": m.values,
+        f"{m.key}_percentiles": m.percentiles,
+    }
 
 
 @contextmanager
@@ -72,6 +148,7 @@ def run_startup_in_subprocess(engine_args, result_queue):
 
         # Extract compilation time if available
         compilation_time = 0.0
+        encoder_compilation_time = 0.0
         if hasattr(llm.llm_engine, "vllm_config"):
             vllm_config = llm.llm_engine.vllm_config
             if (
@@ -79,11 +156,15 @@ def run_startup_in_subprocess(engine_args, result_queue):
                 and vllm_config.compilation_config is not None
             ):
                 compilation_time = vllm_config.compilation_config.compilation_time
+                encoder_compilation_time = (
+                    vllm_config.compilation_config.encoder_compilation_time
+                )
 
         result_queue.put(
             {
                 "total_startup_time": total_startup_time,
                 "compilation_time": compilation_time,
+                "encoder_compilation_time": encoder_compilation_time,
             }
         )
 
@@ -93,65 +174,20 @@ def run_startup_in_subprocess(engine_args, result_queue):
 
 
 def save_to_pytorch_benchmark_format(
-    args: argparse.Namespace, results: dict[str, Any]
+    args: argparse.Namespace, metrics: list[MetricStats]
 ) -> None:
     base_name = os.path.splitext(args.output_json)[0]
-
-    cold_startup_records = convert_to_pytorch_benchmark_format(
-        args=args,
-        metrics={
-            "avg_cold_startup_time": [results["avg_cold_startup_time"]],
-        },
-        extra_info={
-            "cold_startup_times": results["cold_startup_times"],
-            "cold_startup_percentiles": results["cold_startup_percentiles"],
-        },
-    )
-    if cold_startup_records:
-        write_to_json(f"{base_name}.cold_startup.pytorch.json", cold_startup_records)
-
-    cold_compilation_records = convert_to_pytorch_benchmark_format(
-        args=args,
-        metrics={
-            "avg_cold_compilation_time": [results["avg_cold_compilation_time"]],
-        },
-        extra_info={
-            "cold_compilation_times": results["cold_compilation_times"],
-            "cold_compilation_percentiles": results["cold_compilation_percentiles"],
-        },
-    )
-    if cold_compilation_records:
-        write_to_json(
-            f"{base_name}.cold_compilation.pytorch.json", cold_compilation_records
+    for m in metrics:
+        records = convert_to_pytorch_benchmark_format(
+            args=args,
+            metrics={f"avg_{m.key}_time": [m.avg]},
+            extra_info={
+                f"{m.key}_times": m.values,
+                f"{m.key}_percentiles": m.percentiles,
+            },
         )
-
-    warm_startup_records = convert_to_pytorch_benchmark_format(
-        args=args,
-        metrics={
-            "avg_warm_startup_time": [results["avg_warm_startup_time"]],
-        },
-        extra_info={
-            "warm_startup_times": results["warm_startup_times"],
-            "warm_startup_percentiles": results["warm_startup_percentiles"],
-        },
-    )
-    if warm_startup_records:
-        write_to_json(f"{base_name}.warm_startup.pytorch.json", warm_startup_records)
-
-    warm_compilation_records = convert_to_pytorch_benchmark_format(
-        args=args,
-        metrics={
-            "avg_warm_compilation_time": [results["avg_warm_compilation_time"]],
-        },
-        extra_info={
-            "warm_compilation_times": results["warm_compilation_times"],
-            "warm_compilation_percentiles": results["warm_compilation_percentiles"],
-        },
-    )
-    if warm_compilation_records:
-        write_to_json(
-            f"{base_name}.warm_compilation.pytorch.json", warm_compilation_records
-        )
+        if records:
+            write_to_json(f"{base_name}.{m.key}.pytorch.json", records)
 
 
 def add_cli_args(parser: argparse.ArgumentParser):
@@ -224,97 +260,46 @@ def main(args: argparse.Namespace):
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     print("Setting VLLM_ENABLE_V1_MULTIPROCESSING=0 to collect startup metrics.\n")
 
+    # Collect cold startup iterations
     print("Measuring cold startup time...\n")
-    cold_startup_times = []
-    cold_compilation_times = []
+    cold_iterations = []
     for i in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
         with cold_startup():
-            metrics = create_llm_and_measure_startup()
-            cold_startup_times.append(metrics["total_startup_time"])
-            cold_compilation_times.append(metrics["compilation_time"])
+            cold_iterations.append(create_llm_and_measure_startup())
 
     # Warmup for warm startup
     print("\nWarming up for warm startup measurement...\n")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
         create_llm_and_measure_startup()
 
+    # Collect warm startup iterations
     print("\nMeasuring warm startup time...\n")
-    warm_startup_times = []
-    warm_compilation_times = []
+    warm_iterations = []
     for i in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
-        metrics = create_llm_and_measure_startup()
-        warm_startup_times.append(metrics["total_startup_time"])
-        warm_compilation_times.append(metrics["compilation_time"])
+        warm_iterations.append(create_llm_and_measure_startup())
 
-    # Calculate statistics
-    cold_startup_array = np.array(cold_startup_times)
-    cold_compilation_array = np.array(cold_compilation_times)
-    warm_startup_array = np.array(warm_startup_times)
-    warm_compilation_array = np.array(warm_compilation_times)
+    # Determine if encoder compilation occurred in any iteration
+    has_encoder = any(
+        m["encoder_compilation_time"] > 0 for m in cold_iterations + warm_iterations
+    )
 
-    avg_cold_startup = np.mean(cold_startup_array)
-    avg_cold_compilation = np.mean(cold_compilation_array)
-    avg_warm_startup = np.mean(warm_startup_array)
-    avg_warm_compilation = np.mean(warm_compilation_array)
+    cold_metrics = _collect_phase_metrics("cold", cold_iterations, has_encoder)
+    warm_metrics = _collect_phase_metrics("warm", warm_iterations, has_encoder)
+    all_metrics = cold_metrics + warm_metrics
 
-    percentages = [10, 25, 50, 75, 90, 99]
-    cold_startup_percentiles = np.percentile(cold_startup_array, percentages)
-    cold_compilation_percentiles = np.percentile(cold_compilation_array, percentages)
-    warm_startup_percentiles = np.percentile(warm_startup_array, percentages)
-    warm_compilation_percentiles = np.percentile(warm_compilation_array, percentages)
-
+    # Print results
     print("\n" + "=" * 60)
     print("STARTUP TIME BENCHMARK RESULTS")
     print("=" * 60)
-
-    # Cold startup statistics
-    print("\nCOLD STARTUP:")
-    print(f"Avg total startup time: {avg_cold_startup:.2f} seconds")
-    print(f"Avg compilation time:   {avg_cold_compilation:.2f} seconds")
-    print("Startup time percentiles:")
-    for percentage, percentile in zip(percentages, cold_startup_percentiles):
-        print(f"  {percentage}%: {percentile:.2f} seconds")
-    print("Compilation time percentiles:")
-    for percentage, percentile in zip(percentages, cold_compilation_percentiles):
-        print(f"  {percentage}%: {percentile:.2f} seconds")
-
-    # Warm startup statistics
-    print("\nWARM STARTUP:")
-    print(f"Avg total startup time: {avg_warm_startup:.2f} seconds")
-    print(f"Avg compilation time:   {avg_warm_compilation:.2f} seconds")
-    print("Startup time percentiles:")
-    for percentage, percentile in zip(percentages, warm_startup_percentiles):
-        print(f"  {percentage}%: {percentile:.2f} seconds")
-    print("Compilation time percentiles:")
-    for percentage, percentile in zip(percentages, warm_compilation_percentiles):
-        print(f"  {percentage}%: {percentile:.2f} seconds")
-
+    _print_phase("COLD STARTUP", cold_metrics)
+    _print_phase("WARM STARTUP", warm_metrics)
     print("=" * 60)
 
     # Output JSON results if specified
     if args.output_json:
-        results = {
-            "avg_cold_startup_time": float(avg_cold_startup),
-            "avg_cold_compilation_time": float(avg_cold_compilation),
-            "cold_startup_times": cold_startup_times,
-            "cold_compilation_times": cold_compilation_times,
-            "cold_startup_percentiles": dict(
-                zip(percentages, cold_startup_percentiles.tolist())
-            ),
-            "cold_compilation_percentiles": dict(
-                zip(percentages, cold_compilation_percentiles.tolist())
-            ),
-            "avg_warm_startup_time": float(avg_warm_startup),
-            "avg_warm_compilation_time": float(avg_warm_compilation),
-            "warm_startup_times": warm_startup_times,
-            "warm_compilation_times": warm_compilation_times,
-            "warm_startup_percentiles": dict(
-                zip(percentages, warm_startup_percentiles.tolist())
-            ),
-            "warm_compilation_percentiles": dict(
-                zip(percentages, warm_compilation_percentiles.tolist())
-            ),
-        }
+        results: dict[str, Any] = {}
+        for m in all_metrics:
+            results.update(_metric_to_json(m))
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
-        save_to_pytorch_benchmark_format(args, results)
+        save_to_pytorch_benchmark_format(args, all_metrics)

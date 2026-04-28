@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
-# https://github.com/vllm/vllm/entrypoints/openai/serving_chat.py
+# https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/serving.py
 
 """Anthropic Messages API serving handler"""
 
@@ -323,6 +323,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return ChatCompletionRequest(
                 model=anthropic_request.model,
                 messages=openai_messages,
+                chat_template_kwargs=anthropic_request.chat_template_kwargs,
             )
 
         return ChatCompletionRequest(
@@ -335,6 +336,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
     @classmethod
