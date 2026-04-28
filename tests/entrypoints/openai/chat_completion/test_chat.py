@@ -845,7 +845,7 @@ async def test_chat_completion_n_parameter_non_streaming(
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=20,
+        max_completion_tokens=60,
         temperature=0.7,
         n=3,
         stream=False,
