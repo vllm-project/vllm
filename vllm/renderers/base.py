@@ -109,11 +109,11 @@ class BaseRenderer(ABC, Generic[_T]):
         if config.model_config.is_multimodal_model:
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
-            with set_default_torch_num_threads():
-                # Cannot self.executor_tokenizer because the mm processor might
-                # mutate the tokenizer, corrupting the shared tokenizer.
-                self.mm_tokenizer = copy.deepcopy(tokenizer)
+            # Cannot self.executor_tokenizer because the mm processor might
+            # mutate the tokenizer, corrupting the shared tokenizer.
+            self.mm_tokenizer = copy.deepcopy(tokenizer)
 
+            with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
                     tokenizer=self.mm_tokenizer,
