@@ -65,8 +65,11 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
-    """Number of redundant experts to use for expert parallelism."""
+    num_redundant_experts: int | None = Field(default=None, ge=0)
+    """
+    Number of redundant experts to use for expert parallelism. If None,
+    vLLM computes the minimum valid value from the model and EP size.
+    """
 
     log_balancedness: bool = False
     """
@@ -456,7 +459,9 @@ class ParallelConfig:
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
         else:
-            if self.eplb_config.num_redundant_experts != 0:
+            if self.eplb_config.num_redundant_experts is None:
+                self.eplb_config.num_redundant_experts = 0
+            elif self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "

@@ -80,6 +80,16 @@ else:
 
 logger = init_logger(__name__)
 
+
+def get_default_eplb_num_redundant_experts(
+    num_logical_experts: int,
+    ep_size: int,
+) -> int:
+    if ep_size <= 0:
+        raise ValueError(f"ep_size must be positive, got {ep_size}.")
+    return (ep_size - num_logical_experts % ep_size) % ep_size
+
+
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -1143,6 +1153,29 @@ class ModelConfig:
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
+
+        if (
+            parallel_config.enable_eplb
+            and parallel_config.eplb_config.num_redundant_experts is None
+        ):
+            ep_size = (
+                parallel_config.tensor_parallel_size
+                * parallel_config.data_parallel_size
+                * parallel_config.prefill_context_parallel_size
+            )
+            num_logical_experts = self.get_num_experts()
+            num_redundant_experts = get_default_eplb_num_redundant_experts(
+                num_logical_experts,
+                ep_size,
+            )
+            parallel_config.eplb_config.num_redundant_experts = num_redundant_experts
+            logger.info(
+                "Defaulting EPLB num_redundant_experts to %d for %d logical "
+                "experts and EP size %d.",
+                num_redundant_experts,
+                num_logical_experts,
+                ep_size,
+            )
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
