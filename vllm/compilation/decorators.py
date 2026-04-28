@@ -205,6 +205,8 @@ def support_torch_compile(
                 if v.annotation in [
                     torch.Tensor,
                     torch.Tensor | None,
+                    torch.FloatTensor,
+                    torch.FloatTensor | None,
                     IntermediateTensors,
                     IntermediateTensors | None,
                 ]:
@@ -283,7 +285,7 @@ def _try_load_aot_compiled_fn(
     Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
     """
     try:
-        with monitor_torch_compile(model.vllm_config):
+        with monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder):
             with (
                 set_current_vllm_config(model.vllm_config),
                 open(aot_compilation_path, "rb") as f,
@@ -346,7 +348,7 @@ def _support_torch_compile(
 
     def __init__(
         self: _T,
-        *,
+        *args,
         vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs: Any,
@@ -357,11 +359,24 @@ def _support_torch_compile(
         # NOTE: to support multimodal models (such as encoder),
         # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
+        # Check that any positional arguments match the old_init method signature
+        annotations = [p.annotation for p in sig.parameters.values()]
+        for arg, annotation in zip(args, annotations):
+            if annotation is inspect._empty:
+                continue
+            if not isinstance(arg, annotation):
+                init = f"'{type(self).__name__}.__init__'"
+                arg_type = f"'{type(arg).__name__}'"
+                raise TypeError(
+                    f"{init} received a positional argument of type {arg_type}, "
+                    "but no parameter of that type was found in the method signature. "
+                    f"Please either annotate {init} or pass it as a keyword argument."
+                )
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
             kwargs["prefix"] = prefix
-        old_init(self, **kwargs)
+        old_init(self, *args, **kwargs)
 
         self.vllm_config = vllm_config
         self.compilation_config = self.vllm_config.compilation_config
@@ -492,6 +507,16 @@ def _support_torch_compile(
                 hash_key,
             )
 
+            # Hash-level dir; shared across ranks on the same node.
+            self.compilation_config.local_cache_dir = cache_dir
+            inductor_cache = os.path.join(cache_dir, "inductor_cache")
+            os.makedirs(inductor_cache, exist_ok=True)
+            # Process-wide: post-load execution, CUDA-graph capture, and later
+            # autotune/recompile all need to write under {hash}/inductor_cache/.
+            # Unconditional because torch's cache_dir() may have pre-filled the
+            # /tmp default during import, making setdefault a no-op.
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
@@ -592,7 +617,9 @@ def _support_torch_compile(
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                with monitor_torch_compile(self.vllm_config):
+                with monitor_torch_compile(
+                    self.vllm_config, is_encoder=self._is_encoder
+                ):
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                     compilation_counter.num_aot_compiles += 1
                     # All compilation is done at this point, save the
@@ -606,6 +633,7 @@ def _support_torch_compile(
                     self.vllm_config,
                     "torch.compile and initial profiling/warmup "
                     "run together took %.2f s in total",
+                    is_encoder=self._is_encoder,
                 ):
                     output = TorchCompileWithNoGuardsWrapper.__call__(
                         self,  # type: ignore[arg-type]
@@ -640,7 +668,6 @@ def _support_torch_compile(
             logger.info_once(
                 "saved AOT compiled function to %s",
                 self._aot_compilation_path,
-                scope="local",
             )
         except Exception as e:
             logger.warning(

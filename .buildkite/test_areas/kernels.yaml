@@ -2,15 +2,38 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
+- label: vLLM IR Tests
+  timeout_in_minutes: 10
+  device: h200_18gb
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+    - vllm/ir
+    - vllm/kernels
+  commands:
+    - pytest -v -s tests/ir
+    - pytest -v -s tests/kernels/ir
+
 - label: Kernels Core Operation Test
   timeout_in_minutes: 75
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
   - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
+
+- label: Kernels MiniMax Reduce RMS Test (2 GPUs)
+  timeout_in_minutes: 15
+  num_devices: 2
+  device: h100
+  source_file_dependencies:
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - vllm/model_executor/layers/mamba/linear_attn.py
+  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  commands:
+    - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -19,6 +42,7 @@ steps:
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
+  - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -71,11 +95,13 @@ steps:
   - tests/kernels/moe/test_deepgemm.py
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
+  - tests/quantization/test_cutlass_w4a16.py
   commands:
     - pytest -v -s kernels/quantization/test_block_fp8.py
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
+    - pytest -v -s quantization/test_cutlass_w4a16.py
 
 - label: Kernels (B200)
   timeout_in_minutes: 30
@@ -95,6 +121,7 @@ steps:
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
+  - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -105,6 +132,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    - pytest -v -s tests/kernels/test_top_k_per_row.py
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
@@ -115,6 +143,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
     - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
@@ -129,7 +158,7 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install helion
+    - pip install helion==1.0.0
     - pytest -v -s kernels/helion/
 
  
@@ -168,3 +197,35 @@ steps:
     - pytest -v -s kernels/moe/test_flashinfer_moe.py
     - pytest -v -s kernels/moe/test_nvfp4_moe.py
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+
+
+- label: Kernels FusedMoE Layer Test (2 H100s)
+  timeout_in_minutes: 90
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
+  commands:
+    - pytest -v -s kernels/moe/test_moe_layer.py
+
+
+- label: Kernels FusedMoE Layer Test (2 B200s)
+  timeout_in_minutes: 90
+  device: b200
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
+  commands:
+    - pytest -v -s kernels/moe/test_moe_layer.py

@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -26,7 +27,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
@@ -67,6 +67,9 @@ class RocmAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
+
+    # DFlash drafting sets this to False via CommonAttentionMetadata.
+    causal: bool = True
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
@@ -153,12 +156,12 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            causal=common_attn_metadata.causal,
         )
         return attn_metadata
 
 
 class RocmAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -200,6 +203,10 @@ class RocmAttentionBackend(AttentionBackend):
         # kernel, which is less efficient than the proper triton backends.
         return False
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
@@ -212,12 +219,17 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """RocmAttention supports all attention types."""
+        """ENCODER_DECODER is not supported because
+        chunked_prefill_paged_decode's prefill kernel (context_attention_fwd)
+        assumes self-attention semantics: it treats passed K/V as new tokens
+        to mix with cached K/V. For cross-attention layers the encoder K/V
+        are already fully cached, so mixing them again produces incorrect
+        results when max_query_len > 1 (e.g. beam search).
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER_DECODER,
         )
 
     @staticmethod
@@ -296,7 +308,7 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         layer: torch.nn.Module,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
@@ -310,7 +322,7 @@ class RocmAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -345,8 +357,8 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        attn_metadata: RocmAttentionMetadata,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -362,8 +374,6 @@ class RocmAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
-
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
@@ -401,7 +411,7 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             assert layer._q_scale_float == 1.0, (
@@ -435,6 +445,7 @@ class RocmAttentionImpl(AttentionImpl):
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
+            causal=attn_metadata.causal,
         )
 
         return output
@@ -508,7 +519,7 @@ class RocmAttentionImpl(AttentionImpl):
         )
         flash_layout = False
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

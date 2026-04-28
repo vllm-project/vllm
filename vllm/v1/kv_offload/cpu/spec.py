@@ -2,17 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 
-import torch
-
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
-from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
@@ -29,17 +26,13 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         # calculate kv_bytes_per_offloaded_block
         assert kv_cache_config is not None
-        page_sizes = {
-            kv_cache_group.kv_cache_spec.page_size_bytes
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        }
-        assert len(page_sizes) == 1
-        page_size_bytes = page_sizes.pop()
-        kv_bytes_per_block = (
-            page_size_bytes
-            * len(kv_cache_config.kv_cache_tensors)
-            * vllm_config.parallel_config.world_size
-        )
+        if kv_cache_config.num_blocks > 0:
+            total_gpu_kv_bytes = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            kv_bytes_per_block = (
+                total_gpu_kv_bytes // kv_cache_config.num_blocks
+            ) * vllm_config.parallel_config.world_size
+        else:
+            kv_bytes_per_block = 0
 
         kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
         self.num_blocks = (
@@ -63,12 +56,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            offloaded_block_size = gpu_block_size * self.block_size_factor
-
             self._manager = CPUOffloadingManager(
-                block_size=offloaded_block_size,
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,
@@ -90,9 +78,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def get_handlers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
+        self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handlers:
             if not current_platform.is_cuda_alike():
@@ -100,15 +86,10 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-
             self._handlers = CpuGpuOffloadingHandlers(
-                attn_backends=attn_backends,
-                gpu_block_size=gpu_block_size,
-                cpu_block_size=gpu_block_size * self.block_size_factor,
+                kv_caches=kv_caches,
+                block_size_factor=self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
-                gpu_caches=kv_caches,
             )
 
         assert self._handlers is not None

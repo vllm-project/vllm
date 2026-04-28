@@ -27,16 +27,16 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_quantized_kv_cache, is_torch_equal_or_newer
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, EncoderOnlyAttentionSpec
 
 logger = init_logger(__name__)
 
@@ -73,7 +73,6 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 
 class FlexAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -90,6 +89,10 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLEX_ATTENTION"
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -295,6 +298,12 @@ def causal_mask_mod(
     return q_idx >= kv_idx
 
 
+def bidirectional_mask_mod(
+    b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+):
+    return q_idx >= 0
+
+
 # Type alias for the block sparsity hint callable signature.
 _block_sparsity_hint_signature = Callable[
     [torch.Tensor, torch.Tensor, int], torch.Tensor
@@ -314,6 +323,18 @@ class BlockSparsityHint(NamedTuple):
     """
 
     hint_fn: _block_sparsity_hint_signature
+
+
+def copy_to_persistent(dst, src):
+    try:
+        dst = dst.as_strided(src.shape, src.stride())
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Fail to re-stride a persistent tensor of shape {dst.shape} "
+            f"for a tensor of shape {src.shape}"
+        ) from e
+    dst.copy_(src)
+    return dst
 
 
 @dataclass
@@ -341,6 +362,9 @@ class FlexAttentionMetadata:
     physical_to_logical: torch.Tensor
     decode_offset: torch.Tensor
     num_blocks_per_seq: torch.Tensor
+    persistent_kv_indices: torch.Tensor
+    persistent_kv_num_blocks: torch.Tensor
+    persistent_doc_ids: torch.Tensor
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -350,6 +374,7 @@ class FlexAttentionMetadata:
     block_mask: BlockMask | None = None
     score_mod: _score_mod_signature | None = None
     logical_mask_mod: _mask_mod_signature = causal_mask_mod
+    uses_paged_kv: bool = True
     doc_ids: torch.Tensor | None = None
     direct_build: bool = True
     q_block_size: int = 16
@@ -483,7 +508,7 @@ class FlexAttentionMetadata:
                 False,
             )
 
-        return final_mask_mod if self.causal else sliding_window_mask_mod
+        return final_mask_mod if self.uses_paged_kv else sliding_window_mask_mod
 
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
@@ -527,8 +552,7 @@ class FlexAttentionMetadata:
     def get_mask_mod(self):
         # Stage-1: initialize the base mask_mod
         # (causal mask for decoder or bidirectional mask for encoder)
-        has_custom_mask = self.logical_mask_mod is not causal_mask_mod
-        if self.causal or has_custom_mask:
+        if self.uses_paged_kv:
             mask_mod = self.get_paged_mask_mod()
         else:
             mask_mod = self.get_bidirectional_mask_mod()
@@ -581,7 +605,7 @@ class FlexAttentionMetadata:
         return transformed_score_mod
 
     def _build_block_mask_direct(self) -> BlockMask:
-        """Direct block mask construction for standard causal attention.
+        """Direct block mask construction for paged KV cache attention.
 
         This method constructs the block mask directly using
         BlockMask.from_kv_blocks which is much more efficient than the
@@ -657,8 +681,11 @@ class FlexAttentionMetadata:
         kv_indices = unique_static_unsorted(
             (used_pages_padded.long()), M=self.num_blocks
         ).to(torch.int32)
+        kv_indices = copy_to_persistent(self.persistent_kv_indices, kv_indices)
 
         kv_num_blocks = (kv_indices >= 0).sum(dim=-1).to(torch.int32)
+        kv_num_blocks = copy_to_persistent(self.persistent_kv_num_blocks, kv_num_blocks)
+
         block_mask_kwargs = {
             "seq_lengths": (self.num_actual_tokens, self.total_cache_tokens),
             "kv_num_blocks": kv_num_blocks[None, None],
@@ -676,7 +703,9 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         mask_mod = self.get_mask_mod()
-        kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
+        kv_len = (
+            self.total_cache_tokens if self.uses_paged_kv else self.num_actual_tokens
+        )
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -695,6 +724,7 @@ class FlexAttentionMetadata:
         assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
         self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        self.doc_ids = copy_to_persistent(self.persistent_doc_ids, self.doc_ids)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
         self.mask_mod = self.get_mask_mod()
@@ -702,6 +732,8 @@ class FlexAttentionMetadata:
 
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -727,6 +759,39 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.q_block_size: int = 16 if supports_small_blocks else 128
         self.kv_block_size: int = self.block_size if supports_small_blocks else 128
 
+        self.max_model_len = self.model_config.max_model_len
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.max_num_query_groups = cdiv(max_num_batched_tokens, self.q_block_size)
+        max_num_pages_per_seq = cdiv(self.max_model_len, self.block_size)
+        self.max_num_kv_indices = self.q_block_size * max_num_pages_per_seq
+        self.persistent_kv_num_blocks = torch.empty(
+            self.max_num_query_groups, dtype=torch.int32, device=device
+        )
+        self.persistent_offset_tensor = torch.empty(
+            max_num_seqs, dtype=torch.int32, device=device
+        )
+        self.persistent_doc_ids = torch.empty(
+            max_num_batched_tokens, dtype=torch.int32, device=device
+        )
+
+        # initialize later when we can access block_table
+        self.persistent_physical_to_logical = None
+        self.persistent_kv_indices = None
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> FlexAttentionMetadata:
+        # Use actual max_seq_len (not max_model_len) to avoid torch.compile
+        # recompilation during CUDA graph capture.
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        common_attn_metadata.max_seq_len = int(
+            common_attn_metadata.seq_lens_cpu_upper_bound.max().item()
+        )
+        return self.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -749,7 +814,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         prefix_kv_lens = None
         suffix_kv_lens = None
         if use_cascade:
-            raise NotImplementedError("Not yet my friend")
+            raise NotImplementedError(
+                "Cascade prefix attention is not yet implemented "
+                "for FlexAttention backend"
+            )
 
         block_size = self.kv_cache_spec.block_size
         max_possible_seq_len = self.model_config.max_model_len
@@ -763,11 +831,40 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         inverse_block_table = physical_to_logical_mapping(
             block_table_tensor, seq_lens, block_size, num_gpu_blocks
         )
+        if self.persistent_physical_to_logical is None:
+            max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
+            self.persistent_physical_to_logical = torch.empty(
+                max_num_seqs,
+                num_gpu_blocks,
+                dtype=torch.long,
+                device=self.device,
+            )
+
+        if self.persistent_kv_indices is None:
+            self.persistent_kv_indices = torch.empty(
+                self.max_num_query_groups,
+                self.max_num_kv_indices,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
+        inverse_block_table = copy_to_persistent(
+            self.persistent_physical_to_logical, inverse_block_table
+        )
 
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
+        offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
+
+        uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
+        logical_mask_mod = (
+            bidirectional_mask_mod
+            if uses_paged_kv and not common_attn_metadata.causal
+            else causal_mask_mod
+        )
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
+            logical_mask_mod=logical_mask_mod,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -787,13 +884,27 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
+            uses_paged_kv=uses_paged_kv,
             # FIXME(Isotr0py): direct build has issue to build bidirectional
             # attention block mask for encoder-only models, disable it temporarily.
             # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
-            direct_build=(self.direct_build and common_attn_metadata.causal),
+            direct_build=self.direct_build and uses_paged_kv,
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
+            persistent_kv_indices=self.persistent_kv_indices,
+            persistent_kv_num_blocks=self.persistent_kv_num_blocks,
+            persistent_doc_ids=self.persistent_doc_ids,
         )
+
+        # Pre-build block_mask so it is ready before CUDA graph capture.
+        # Without this, the lazy build in forward() would run non-graph-safe
+        # ops (e.g. torch.nonzero) inside capture.
+        if out.block_mask is None:
+            if out.direct_build:
+                out.block_mask = out._build_block_mask_direct()
+            else:
+                out.block_mask = out.build_block_mask()
+
         return out
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -899,7 +1010,7 @@ class FlexAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlexAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -915,7 +1026,6 @@ class FlexAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported for FlexAttentionImpl"
@@ -967,9 +1077,7 @@ class FlexAttentionImpl(AttentionImpl):
             else:
                 attn_metadata.block_mask = attn_metadata.build_block_mask()
 
-        if not attn_metadata.causal:
-            assert self.attn_type == AttentionType.ENCODER_ONLY
-
+        if self.attn_type == AttentionType.ENCODER_ONLY:
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key, value),

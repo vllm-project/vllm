@@ -13,13 +13,13 @@ from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -33,6 +33,7 @@ try:
         amdsmi_init,
         amdsmi_shut_down,
         amdsmi_topo_get_link_type,
+        amdsmi_topo_get_numa_node_number,
     )
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
@@ -64,7 +65,45 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
     "0x744c": "AMD_Radeon_RX7900XTX",
+    # RDNA 3.5 APUs (Strix Point / Strix Halo)
+    "0x150e": "AMD_Radeon_890M",  # gfx1150, Strix Point
+    "0x1586": "AMD_Radeon_8060S",  # gfx1151, Strix Halo
+    # RDNA 4 discrete (Navi 48)
+    "0x7550": "AMD_Radeon_RX9070XT",  # gfx1201
+    "0x7551": "AMD_Radeon_R9700",  # gfx1201
 }
+
+
+@lru_cache(maxsize=8)
+def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
+    """Get number of ROCm devices, caching based on the value of CUDA_VISIBLE_DEVICES
+    at the time of call.
+
+    This should be used instead of torch.accelerator.device_count() unless
+    CUDA_VISIBLE_DEVICES has already been set to the desired value.
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+
+    if not torch.cuda._is_compiled():
+        return 0
+    # ROCm uses amdsmi instead of nvml for stateless device count
+    # This requires a sufficiently modern version of Torch 2.4.0
+    raw_count = (
+        torch.cuda._device_count_amdsmi()
+        if (hasattr(torch.cuda, "_device_count_amdsmi"))
+        else -1
+    )
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    return r
 
 
 def _sync_hip_cuda_env_vars():
@@ -146,8 +185,10 @@ def _get_gcn_arch() -> str:
 _GCN_ARCH = _get_gcn_arch()
 
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+_ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+_ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 
@@ -227,12 +268,20 @@ def on_gfx1x() -> bool:
     return _ON_GFX1X
 
 
+def on_gfx12x() -> bool:
+    return _ON_GFX12X
+
+
 def on_mi3xx() -> bool:
     return _ON_MI3XX
 
 
 def on_gfx9() -> bool:
     return _ON_GFX9
+
+
+def on_gfx90a() -> bool:
+    return _ON_GFX90A
 
 
 def on_gfx942() -> bool:
@@ -334,6 +383,7 @@ def _get_backend_priorities(
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    backends.append(AttentionBackendEnum.TURBOQUANT)
 
     return backends
 
@@ -364,9 +414,17 @@ class RocmPlatform(Platform):
         "gguf",
         "quark",
         "mxfp4",
-        "petit_nvfp4",
+        "mxfp8",
         "torchao",
         "bitsandbytes",
+        "modelopt",
+        "modelopt_fp4",
+        "modelopt_mxfp8",
+        "modelopt_mixed",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
     ]
 
     @classmethod
@@ -439,7 +497,10 @@ class RocmPlatform(Platform):
                     f"this configuration. Reason: {invalid_reasons}"
                 )
             else:
-                logger.info("Using %s backend.", selected_backend)
+                logger.info_once(
+                    "Using %s backend (selected via --attention-backend).",
+                    selected_backend.name,
+                )
                 return selected_backend.get_path()
 
         # No selected backend or the selected backend is invalid,
@@ -476,12 +537,25 @@ class RocmPlatform(Platform):
         )
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
-        logger.info_once(
-            "Using %s attention backend out of potential backends: %s.",
-            selected_backend.name,
-            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
+        valid_str = (
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]"
         )
+        if invalid_reasons:
+            rejected_str = ", ".join(b.name for b in invalid_reasons)
+            logger.info(
+                "Found incompatible backend(s) [%s] with %s. "
+                "Overriding with %s out of potential backends: %s.",
+                rejected_str,
+                attn_selector_config.attn_type,
+                selected_backend.name,
+                valid_str,
+            )
+        else:
+            logger.info_once(
+                "Using %s backend out of potential backends: %s.",
+                selected_backend.name,
+                valid_str,
+            )
 
         return selected_backend.get_path()
 
@@ -547,6 +621,10 @@ class RocmPlatform(Platform):
         torch.cuda.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
+
+    @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         cap = _capability_from_gcn_arch(_GCN_ARCH)
@@ -588,9 +666,9 @@ class RocmPlatform(Platform):
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
-        device_name: str = asic_info["device_id"]
-        if device_name in _ROCM_DEVICE_ID_NAME_MAP:
-            return _ROCM_DEVICE_ID_NAME_MAP[device_name]
+        asic_info_device_id: str = asic_info["device_id"]
+        if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
+            return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
         return asic_info["market_name"]
 
     @classmethod
@@ -649,13 +727,6 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
-        # Enable rotary embedding customop when using AITER if not disabled by user
-        if (
-            rocm_aiter_ops.is_enabled()
-            and "+rotary_embedding" not in compilation_config.custom_ops
-            and "-rotary_embedding" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rotary_embedding")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
@@ -721,9 +792,9 @@ class RocmPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
-        free_mem, total_mem = torch.cuda.mem_get_info(device)
-        return total_mem - free_mem
+        return torch.cuda.max_memory_allocated(device)
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -737,7 +808,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        return on_gfx9() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
@@ -801,7 +872,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def device_count(cls) -> int:
-        return cuda_device_count_stateless()
+        return _rocm_device_count_stateless(getattr(envs, cls.device_control_env_var))
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -863,3 +934,59 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        # TODO(luka/TJ) use aiter, vllm_c, native by default on ROCm
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # This (mostly) preserves previous CustomOp behavior
+        # Necessary on ROCm because it's common that users
+        # enable rms_norm to use the aiter kernel.
+        # TODO(luka/TJ) remove env vars completely
+        if (
+            cc.is_custom_op_enabled("rms_norm")
+            and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        ):
+            rms_norm = ["aiter"] + default
+        else:
+            rms_norm = default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+
+    @classmethod
+    @with_amdsmi_context
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible GPU devices."""
+        try:
+            handles = amdsmi_get_processor_handles()
+            numa_nodes = []
+            for device_id in range(cls.device_count()):
+                physical_device_id = cls.device_id_to_physical_device_id(device_id)
+                try:
+                    numa_node = amdsmi_topo_get_numa_node_number(
+                        handles[physical_device_id]
+                    )
+                except AmdSmiException as e:
+                    logger.warning(
+                        "Could not detect NUMA node for GPU %d, "
+                        "disabling automatic NUMA binding: %s",
+                        device_id,
+                        e,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
+            return None

@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -151,7 +152,7 @@ def rocm_aiter_grouped_topk(
     if e_score_correction_bias is not None:
         rocm_aiter_ops.biased_grouped_topk(
             gating_output,
-            e_score_correction_bias.to(gating_output.dtype),
+            e_score_correction_bias,
             topk_weights,
             topk_ids,
             num_expert_group,
@@ -186,6 +187,7 @@ def rocm_aiter_fused_experts(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
@@ -276,6 +278,17 @@ def rocm_aiter_fused_experts(
                 "Only support topk=1 when `apply_router_weight_on_input` is True"
             )
 
+        # Compute padding on-the-fly for CK MXFP4 kernels
+        hidden_pad = 0
+        intermediate_pad = 0
+        assert moe_config.hidden_dim_unpadded is not None
+        assert moe_config.intermediate_size_per_partition_unpadded is not None
+        hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
+        intermediate_pad = (
+            moe_config.intermediate_size_per_partition
+            - moe_config.intermediate_size_per_partition_unpadded
+        )
+
         return rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
@@ -292,8 +305,8 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=quant_config.hidden_pad,
-            intermediate_pad=quant_config.intermediate_pad,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
@@ -419,6 +432,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             quant_config=self.quant_config,
+            moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,

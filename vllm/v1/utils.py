@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -21,13 +22,14 @@ from typing import (
 )
 
 import torch
+import uvloop
 from torch.autograd.profiler import record_function
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
-from vllm.utils.system_utils import kill_process_tree
+from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -166,20 +168,20 @@ class APIServerProcessManager:
 
     def __init__(
         self,
-        target_server_fn: Callable,
         listen_address: str,
         sock: Any,
         args: argparse.Namespace,
         num_servers: int,
         input_addresses: list[str],
         output_addresses: list[str],
+        target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
 
         Args:
-            target_server_fn: Function to call for each API server process
+            target_server_fn: Override function to call for each API server process
             listen_address: Address to listen for client connections
             sock: Socket for client connections
             args: Command line arguments
@@ -212,7 +214,7 @@ class APIServerProcessManager:
                 client_config["tensor_queue"] = tensor_queue
 
             proc = spawn_context.Process(
-                target=target_server_fn,
+                target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
                 args=(listen_address, sock, args, client_config),
             )
@@ -229,6 +231,25 @@ class APIServerProcessManager:
         """Shutdown API server processes with configurable timeout"""
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
+
+
+def run_api_server_worker_proc(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
+    """Entrypoint for individual API server worker processes."""
+
+    from vllm.entrypoints.openai.api_server import run_server_worker
+
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
+
+    # Set process title and add process-specific prefix to stdout and stderr.
+    set_process_title("APIServer", str(server_index))
+    decorate_logs()
+
+    uvloop.run(
+        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
+    )
 
 
 def wait_for_completion_or_failure(
@@ -249,8 +270,6 @@ def wait_for_completion_or_failure(
         coordinator: The coordinator for data parallel.
     """
 
-    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
-
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -262,33 +281,40 @@ def wait_for_completion_or_failure(
         if coordinator:
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
-        actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        if engine_manager:
+            core_shutdown_recv, core_shutdown_send = connection.Pipe(duplex=False)
+
+            def monitor_engines():
+                try:
+                    engine_manager.monitor_engine_liveness()
+                finally:
+                    core_shutdown_send.close()
+                    core_shutdown_recv.close()
+
+            # start monitor for engine liveness
+            threading.Thread(target=monitor_engines, daemon=True).start()
+            sentinel_to_proc[core_shutdown_recv] = None  # type: ignore[assignment]
 
         # Check if any process terminates
-        while sentinel_to_proc or actor_run_refs:
-            # Wait for any process to terminate
-            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
+        while sentinel_to_proc:
+            # Wait for any process to terminate (or engine shutdown signal)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
 
             # Process any terminated processes
             for sentinel in ready_sentinels:
                 proc = sentinel_to_proc.pop(sentinel)
 
                 # Check if process exited with error
-                if proc.exitcode != 0:
+                if proc is not None and proc.exitcode != 0:
                     raise RuntimeError(
                         f"Process {proc.name} (PID: {proc.pid}) "
                         f"died with exit code {proc.exitcode}"
                     )
-
-            if actor_run_refs:
-                import ray
-
-                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
+                if engine_manager and engine_manager.failed_proc_name is not None:
+                    raise RuntimeError(
+                        f"Engine core process {engine_manager.failed_proc_name} "
+                        "died unexpectedly."
+                    )
 
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, shutting down API servers...")

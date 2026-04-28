@@ -2,6 +2,7 @@ name: pre-commit
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
@@ -15,7 +16,11 @@ permissions:
 
 jobs:
   pre-run-check:
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'ready' ||
+       github.event.label.name == 'verified')
     runs-on: ubuntu-latest
     steps:
     - name: Check PR label and author merge count
@@ -28,6 +33,7 @@ jobs:
           });
 
           const hasReadyLabel = pr.labels.some(l => l.name === 'ready');
+          const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
 
           const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
             q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
@@ -35,15 +41,20 @@ jobs:
           });
           const mergedCount = mergedPRs.total_count;
 
-          if (hasReadyLabel || mergedCount >= 4) {
-            core.info(`Check passed: ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
+          if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
+            core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
           } else {
-            core.setFailed(`PR must have the 'ready' label or the author must have at least 4 merged PRs (found ${mergedCount}).`);
+            core.setFailed(`PR must have the 'verified' or 'ready' (which also triggers tests) label or the author must have at least 4 merged PRs (found ${mergedCount}).`);
           }
 
   pre-commit:
     needs: pre-run-check
-    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+    if: >-
+      always() &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'ready' ||
+       github.event.label.name == 'verified') &&
+      (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

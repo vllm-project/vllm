@@ -3,9 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, cast
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -13,8 +11,10 @@ from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -32,7 +32,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -1901,7 +1900,7 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options=None,
+        mm_options: Mapping[str, BaseDummyOptions],
         mm_processor_kwargs=None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
@@ -1989,7 +1988,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     info=CohereASRProcessingInfo,
     dummy_inputs=CohereASRDummyInputsBuilder,
 )
-class CohereASRForConditionalGeneration(
+class CohereAsrForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
     packed_modules_mapping = {
@@ -2008,6 +2007,7 @@ class CohereASRForConditionalGeneration(
     supports_transcription_only = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
     skip_warmup_audio_preprocessing = True
+    no_space_languages = {"ja", "zh"}
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
@@ -2021,16 +2021,12 @@ class CohereASRForConditionalGeneration(
         return super().validate_language(language)
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,  # not needed here
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+        request_prompt = stt_params.request_prompt
+
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the CohereASR prompt"
@@ -2047,14 +2043,11 @@ class CohereASRForConditionalGeneration(
             f"<|noitn|><|notimestamp|><|nodiarize|>"
         )
         prompt_text = request_prompt if request_prompt else default_prompt
-        prompt = {
-            "prompt": prompt_text,
-            "multi_modal_data": {
-                "audio": (audio, stt_config.sample_rate),
-            },
-        }
 
-        return cast(PromptType, prompt)
+        return TextPrompt(
+            prompt=prompt_text,
+            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

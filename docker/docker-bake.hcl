@@ -20,7 +20,7 @@ variable "NVCC_THREADS" {
 }
 
 variable "TORCH_CUDA_ARCH_LIST" {
-  default = "8.0 8.9 9.0 10.0"
+  default = "8.0 8.9 9.0 10.0 11.0 12.0"
 }
 
 variable "COMMIT" {
@@ -88,7 +88,6 @@ target "test-ubuntu2404" {
   args = {
     UBUNTU_VERSION          = "24.04"
     GDRCOPY_OS_VERSION      = "Ubuntu24_04"
-    FLASHINFER_AOT_COMPILE  = "true"
   }
   output = ["type=docker"]
 }
@@ -100,7 +99,6 @@ target "openai-ubuntu2404" {
   args = {
     UBUNTU_VERSION          = "24.04"
     GDRCOPY_OS_VERSION      = "Ubuntu24_04"
-    FLASHINFER_AOT_COMPILE  = "true"
   }
   output = ["type=docker"]
 }

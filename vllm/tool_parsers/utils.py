@@ -4,14 +4,14 @@
 import ast
 import json
 from json import JSONDecodeError, JSONDecoder
-from typing import Any
+from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
     ToolChoiceFunction,
 )
-from openai.types.responses.tool import Tool
+from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -26,7 +26,22 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 
+Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
+
 logger = init_logger(__name__)
+
+
+def partial_tag_overlap(text: str, tag: str) -> int:
+    """Length of the longest prefix of *tag* that matches a suffix of *text*.
+
+    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
+    Returns 0 when there is no overlap.
+    """
+    max_check = min(len(tag) - 1, len(text))
+    for k in range(max_check, 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
@@ -130,7 +145,7 @@ def consume_space(i: int, s: str) -> int:
 
 
 def _extract_tool_info(
-    tool: Tool | ChatCompletionToolsParam,
+    tool: Tool,
 ) -> tuple[str, dict[str, Any] | None]:
     if isinstance(tool, FunctionTool):
         return tool.name, tool.parameters
@@ -140,7 +155,21 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
+def find_tool_properties(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> dict[str, Any]:
+    """Find a tool by name and return its properties dict, or {}."""
+    if not tools:
+        return {}
+    for tool in tools:
+        name, params = _extract_tool_info(tool)
+        if name == tool_name:
+            return (params or {}).get("properties", {})
+    return {}
+
+
+def _get_tool_schema_from_tool(tool: Tool) -> dict:
     name, params = _extract_tool_info(tool)
     params = params if params else {"type": "object", "properties": {}}
     return {
@@ -153,7 +182,7 @@ def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
 
 
 def _get_tool_schema_defs(
-    tools: list[Tool | ChatCompletionToolsParam],
+    tools: list[Tool],
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
@@ -172,7 +201,7 @@ def _get_tool_schema_defs(
 
 
 def _get_json_schema_from_tools(
-    tools: list[Tool | ChatCompletionToolsParam],
+    tools: list[Tool],
 ) -> dict:
     json_schema = {
         "type": "array",
@@ -190,7 +219,7 @@ def _get_json_schema_from_tools(
 
 def get_json_schema_from_tools(
     tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
-    tools: list[FunctionTool | ChatCompletionToolsParam] | None,
+    tools: list[Tool] | None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
