@@ -106,9 +106,11 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
     c10::BFloat16* __restrict__ a_tile_1 = a_tile + lda * AMX_TILE_ROW_NUM;
     const int64_t a_tile_stride = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
+        // q_buffer is prepacked
         return AMX_TILE_ROW_BYTES;
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
+        // logits_buffer is row-major
+        return lda * sizeof(c10::BFloat16);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
@@ -117,15 +119,19 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
     kv_cache_t* __restrict__ b_tile_2 = b_tile;
     kv_cache_t* __restrict__ b_tile_3 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
+        // k_cache is prepacked
         return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
+        // v_cache is prepacked
         return b_tile + (block_size * AMX_TILE_ROW_BYTES / 4);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
+    // k_cache, v_cache are prepacked
     const int32_t b_tile_stride = AMX_TILE_ROW_BYTES;
 
+    // logits_buffer, output_buffer are not prepacked
     float* __restrict__ c_tile_4 = c_tile;
     float* __restrict__ c_tile_5 =
         c_tile_4 + AMX_TILE_ROW_BYTES / sizeof(float);
@@ -161,17 +167,20 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
       _tile_dpbf16ps(6, 1, 2);
       _tile_dpbf16ps(7, 1, 3);
 
+      // update ptrs
       if constexpr (phase == AttentionGemmPhase::QK) {
+        // Q buffer is prepacked
         a_tile_0 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
+        // P buffer is not prepacked
         a_tile_0 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
-      b_tile_2 += tile_elems;
-      b_tile_3 += tile_elems;
+      b_tile_2 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      b_tile_3 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
     }
 
     _tile_stored(4, c_tile_4, c_tile_stride);
@@ -249,8 +258,10 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
     c10::BFloat16* __restrict__ a_tile_0 = a_tile;
     c10::BFloat16* __restrict__ a_tile_1 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
+        // q_buffer is prepacked
         return a_tile + AMX_TILE_BYTES / sizeof(c10::BFloat16);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
+        // logits_buffer is row-major
         return a_tile + AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
       } else {
         TORCH_CHECK(false, "Unreachable");
@@ -258,9 +269,11 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
     }();
     const int64_t a_tile_stride = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
+        // q_buffer is prepacked
         return AMX_TILE_ROW_BYTES;
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
+        // logits_buffer is row-major
+        return lda * sizeof(c10::BFloat16);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
@@ -278,11 +291,11 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
     }();
     kv_cache_t* __restrict__ b_tile_4 = b_tile_2 + tile_elems;
     kv_cache_t* __restrict__ b_tile_5 = b_tile_3 + tile_elems;
-    const int64_t b_stride = AMX_TILE_ROW_BYTES;
+    int64_t b_stride = AMX_TILE_ROW_BYTES;
 
     float* __restrict__ c_tile_6 = c_tile;
     float* __restrict__ c_tile_7 = c_tile + AMX_TILE_ROW_BYTES / sizeof(float);
-    const int64_t c_stride = ldc * sizeof(float);
+    int64_t c_stride = ldc * sizeof(float);
 
     const int32_t k_times =
         dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
@@ -318,17 +331,20 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
       _tile_stream_loadd(5, const_cast<c10::BFloat16*>(load_5), b_stride);
       _tile_dpbf16ps(7, 1, 5);
 
+      // update ptrs
       if constexpr (phase == AttentionGemmPhase::QK) {
+        // Q buffer is prepacked
         a_tile_0 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
+        // P buffer is not prepacked
         a_tile_0 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
       }
-      b_tile_2 += 2 * tile_elems;
-      b_tile_3 += 2 * tile_elems;
-      b_tile_4 += 2 * tile_elems;
-      b_tile_5 += 2 * tile_elems;
+      b_tile_2 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      b_tile_3 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      b_tile_4 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      b_tile_5 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
     }
 
     if (has_tail) {
@@ -463,15 +479,15 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
     return block_size * HeadDimAlignment;
   }
 
-  void copy_q_heads_tile(scalar_t* __restrict__ src,
-                         scalar_t* __restrict__ q_buffer, const int32_t q_num,
-                         const int32_t q_heads_per_kv,
-                         const int64_t q_num_stride,
-                         const int64_t q_head_stride, const float scale) {
+  static void copy_q_heads_tile(
+      scalar_t* __restrict__ src,  // [q_num, q_heads_per_kv, head_size]
+      scalar_t* __restrict__ q_buffer, const int32_t q_num,
+      const int32_t q_heads_per_kv, const int64_t q_num_stride,
+      const int64_t q_head_stride, const float scale) {
     constexpr int64_t bytes_per_head = head_dim * sizeof(scalar_t);
     static_assert(bytes_per_head % AMX_TILE_ROW_BYTES == 0);
     constexpr int64_t head_size_block_num = bytes_per_head / AMX_TILE_ROW_BYTES;
-    constexpr int64_t head_elem_num_per_block =
+    constexpr int64_t head_elem_num_pre_block =
         AMX_TILE_ROW_BYTES / sizeof(scalar_t);
 
     int32_t idx = 0;
@@ -483,14 +499,16 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
            ++q_head_idx, src_iter += q_head_stride) {
         vec_op::unroll_loop<int32_t, head_size_block_num>(
             [&](int32_t head_size_block_idx) {
+              // Use INT8Vec64 for 64 bytes block
               vec_op::INT8Vec64 vec(src_iter + head_size_block_idx *
-                                                   head_elem_num_per_block);
+                                                   head_elem_num_pre_block);
               vec.save(q_buffer_iter + head_size_block_idx * AMX_TILE_BYTES);
             });
 
         ++idx;
         q_buffer_iter += AMX_TILE_ROW_BYTES;
         if ((idx & (AMX_TILE_ROW_NUM - 1)) == 0) {
+          // head is in another amx tile
           q_buffer_iter -= AMX_TILE_ROW_NUM * AMX_TILE_ROW_BYTES;
           q_buffer_iter += head_size_block_num * AMX_TILE_BYTES;
         }
@@ -607,11 +625,10 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
     }
   }
 
- protected:
+ private:
   alignas(64) __tilecfg amx_tile_config_;
   int32_t current_q_head_num_;
 };
-
 }  // namespace cpu_attention
 
 #endif
