@@ -15,7 +15,7 @@ compares the generation time for two queries that share the same prefix
 but ask different questions.
 
 Run:
-python examples/offline_inference/automatic_prefix_caching.py
+python examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py
 """
 
 import time

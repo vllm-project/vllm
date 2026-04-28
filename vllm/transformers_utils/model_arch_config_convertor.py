@@ -458,6 +458,8 @@ def _strip_mimo_v2_attention_chunk_size(
 
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        if getattr(hf_config, "vision_config", None):
+            hf_config.architectures = ["MiMoV2OmniForCausalLM"]
         super().__init__(hf_config, hf_text_config)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
@@ -542,7 +544,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
-    "mimo_v2_pro": MimoV2ModelArchConfigConvertor,
+    "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
