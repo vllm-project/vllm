@@ -2918,7 +2918,7 @@ class MTBenchDataset(HuggingFaceDataset):
     """
     MT-Bench Dataset.
     https://huggingface.co/datasets/philschmid/mt-bench
-    
+
     We create a single turn dataset for MT-Bench.
     This is similar to Spec decoding benchmark setup in vLLM
     https://github.com/vllm-project/vllm/blob/9d98ab5ec/examples/offline_inference/eagle.py#L14-L18
