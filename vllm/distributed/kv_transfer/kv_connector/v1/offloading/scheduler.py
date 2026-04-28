@@ -425,12 +425,12 @@ class OffloadingConnectorScheduler:
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
-            keys=set(offload_keys),
+            keys=set(keys_to_load),
             is_store=False,
         )
 
         if self._blocks_being_loaded is not None:
-            self._blocks_being_loaded.update(offload_keys)
+            self._blocks_being_loaded.update(keys_to_load)
 
     def _build_store_jobs(
         self,
