@@ -518,6 +518,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     engine_id=self.REMOTE_ENGINE_ID,
                     agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                     kv_caches_base_addr=[0],
+                    region_labels=["layer.0"],
                     device_id=remote_tp_rank,
                     num_blocks=1,
                     block_lens=remote_block_lens,
@@ -971,6 +972,7 @@ class TestNixlHandshake:
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
+                region_labels=["layer.0"],
                 device_id=0,
                 num_blocks=1,
                 block_lens=worker.block_len_per_layer,
@@ -1027,6 +1029,7 @@ class TestNixlHandshake:
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
+                region_labels=["layer.0"],
                 device_id=0,
                 num_blocks=1,
                 # prefill TP=1, decode TP=2, remote block_lens is double to local
@@ -2347,6 +2350,7 @@ def test_compatibility_hash_validation(
         engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
         agent_metadata=FakeNixlWrapper.AGENT_METADATA,
         kv_caches_base_addr=[0],
+        region_labels=["layer.0"],
         device_id=0,
         num_blocks=1,
         block_lens=[4096 * prefill_block_size],  # slot_size * block_size

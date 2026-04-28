@@ -32,8 +32,9 @@ GET_META_MSG = b"get_meta_msg"
 # Version History:
 #   1: Initial version with compatibility checking
 #   2: Add remote_request_id to kv_transfer_params
+#   3: Add region_labels to NixlAgentMetadata for PP stage-local region mapping
 #
-NIXL_CONNECTOR_VERSION: int = 2
+NIXL_CONNECTOR_VERSION: int = 3
 
 
 @dataclass
@@ -41,6 +42,7 @@ class NixlAgentMetadata:
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
+    region_labels: list[str]
     device_id: int
     num_blocks: int
     block_lens: list[int]

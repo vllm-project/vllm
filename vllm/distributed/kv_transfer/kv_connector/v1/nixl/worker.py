@@ -250,9 +250,11 @@ class NixlConnectorWorker:
         # Current rank may pull from multiple remote TP workers.
         # EngineId, dict[int, list[int]] -> engine_id, tp_rank, base_addr_for_layer
         self.kv_caches_base_addr = defaultdict[EngineId, dict[int, list[int]]](dict)
-
-        # Number of NIXL regions. Currently one region per cache
-        # (so 1 per layer for MLA, otherwise 2 per layer)
+        # Ordered labels for the local registered regions (one per unique cache
+        # tensor before any blocks-first logical doubling).
+        self.region_labels: list[str] = []
+        # Remote engine_id -> tp_rank -> ordered region labels.
+        self.remote_region_labels = defaultdict[EngineId, dict[int, list[str]]](dict)
         self.num_regions = 0
 
         # nixl_prepped_dlist_handle.
@@ -763,6 +765,7 @@ class NixlConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
+                self.region_labels.append(layer_name)
                 # Only record non-Mamba page sizes.
                 if isinstance(layer_spec, MambaSpec):
                     self.block_len_per_layer.append(
@@ -847,6 +850,7 @@ class NixlConnectorWorker:
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             device_id=self.device_id,
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
+            region_labels=self.region_labels,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             kv_cache_layout=self.kv_cache_layout
@@ -1187,6 +1191,16 @@ class NixlConnectorWorker:
             self._physical_blocks_per_logical[engine_id] = physical_blocks_per_logical
 
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
+        logger.info(
+            "NIXL remote registration start: engine_id=%s remote_tp_rank=%s "
+            "remote_tp_size=%s tp_ratio=%s region_count=%s num_blocks=%s",
+            engine_id,
+            remote_tp_rank,
+            remote_tp_size,
+            transfer_topo.tp_ratio(remote_tp_size),
+            len(nixl_agent_meta.kv_caches_base_addr),
+            nixl_agent_meta.num_blocks,
+        )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -1207,6 +1221,9 @@ class NixlConnectorWorker:
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
             nixl_agent_meta.kv_caches_base_addr
+        )
+        self.remote_region_labels[engine_id][remote_tp_rank] = (
+            nixl_agent_meta.region_labels
         )
         self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
 
@@ -1352,6 +1369,16 @@ class NixlConnectorWorker:
                 remote_tp_rank,
                 self.tp_rank,
             )
+            if blocks_data:
+                logger.info(
+                    "NIXL remote registration details: engine_id=%s remote_rank=%s "
+                    "registered_regions=%s first_region_count=%s first_entries=%s",
+                    engine_id,
+                    remote_tp_rank,
+                    len(nixl_agent_meta.kv_caches_base_addr),
+                    len(blocks_data),
+                    blocks_data[:4],
+                )
 
         if self._has_mamba:
             # Mamba-HMA: separate FA registration with GQA-aware sizing,
@@ -1484,7 +1511,11 @@ class NixlConnectorWorker:
             # TODO (ZhanqiuHu): For mamba models, validate FA and mamba
             # block_lens separately.
             if not self._has_mamba:
-                for i in range(len(self.block_len_per_layer)):
+                num_check = min(
+                    len(self.block_len_per_layer),
+                    len(nixl_agent_meta.block_lens),
+                )
+                for i in range(num_check):
                     assert (
                         self.block_len_per_layer[i] // block_size_ratio
                         == nixl_agent_meta.block_lens[i]
@@ -1524,8 +1555,10 @@ class NixlConnectorWorker:
 
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
-        # Same number of regions/~layers.
-        assert len(nixl_agent_meta.kv_caches_base_addr) == len(self.block_len_per_layer)
+        # In PP mode, a remote agent may expose only its stage-local subset of
+        # layers/regions, so the remote region count can be smaller than the
+        # decode-side full-model layer count.
+        assert len(nixl_agent_meta.kv_caches_base_addr) <= len(self.block_len_per_layer)
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """copy recved kv from host buffer to device."""
@@ -1905,9 +1938,28 @@ class NixlConnectorWorker:
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        remote_ranks = self.transfer_topo.target_remote_ranks(engine_id)
         remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        remote_tp_size = remote_info.remote_tp_size
+        tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
+        remote_pp_size = meta.pp_size
+
+        if remote_pp_size > 1:
+            if self.use_mla and tp_ratio < 0:
+                # MLA: all TP ranks within a PP stage hold identical KV.
+                # Pick only the first TP rank per PP stage and notify the rest.
+                first_tp = self.transfer_topo.handshake_target_ranks(remote_tp_size)[0]
+                remote_ranks = [
+                    first_tp + pp_rank * remote_tp_size
+                    for pp_rank in range(remote_pp_size)
+                ]
+            else:
+                # Expand to all PP stages × appropriate TP ranks.
+                remote_ranks = self.transfer_topo.get_all_pp_tp_targets(
+                    remote_tp_size=remote_tp_size,
+                    remote_pp_size=remote_pp_size,
+                )
+        else:
+            remote_ranks = self.transfer_topo.target_remote_ranks(engine_id)
 
         if self._has_mamba:
             # Expand remote logical → kernel block IDs.
@@ -1921,11 +1973,6 @@ class NixlConnectorWorker:
             )
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
-            if self.use_mla and tp_ratio < 0 and i > 0:
-                # MLA opt: when P TP > D TP, only a single read is executed for
-                # the first remote rank (cache is duplicated)..
-                break
-
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
@@ -1940,7 +1987,11 @@ class NixlConnectorWorker:
                 assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
+                # Use modulo so the index wraps correctly across PP stages.
+                abs_ratio = -tp_ratio
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][
+                    i % abs_ratio
+                ]
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
@@ -1977,12 +2028,14 @@ class NixlConnectorWorker:
             )
 
             if self.use_mla and tp_ratio < 0:
-                # ..but we still need to notify the other remote ranks that we
-                # have the blocks we need so they can update the request state.
+                # We only read from the first TP rank per PP stage; notify the
+                # other TP ranks in the SAME PP stage so they can release blocks.
                 notif_id = f"{req_id}:{self.world_size}".encode()
                 remote_agents = self._remote_agents[meta.remote.engine_id]
+                pp_stage = remote_rank // remote_tp_size
                 for rank_to_notify, agent in remote_agents.items():
-                    if rank_to_notify != remote_rank:
+                    same_stage = (rank_to_notify // remote_tp_size == pp_stage)
+                    if same_stage and rank_to_notify != remote_rank:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
@@ -2086,14 +2139,55 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
+        remote_region_ids = self._get_remote_stage_region_ids(
+            dst_engine_id, remote_rank
+        )
+        local_region_ids = self._get_local_region_ids_for_remote_stage(
+            dst_engine_id, remote_rank
+        )
         remote_block_descs_ids = self._get_block_descs_ids(
             dst_engine_id,
             remote_block_ids,
+            remote_rank=remote_rank,
+            region_ids_override=remote_region_ids,
         )
         local_block_descs_ids = self._get_block_descs_ids(
             self.engine_id,
             local_block_ids,
             block_size_ratio=block_size_ratio,
+            region_ids_override=local_region_ids,
+        )
+
+        remote_region_count = len(self.kv_caches_base_addr[dst_engine_id][remote_rank])
+        remote_desc_region_count = len(remote_region_ids)
+        expected_remote_descs = (
+            remote_desc_region_count * self.dst_num_blocks[dst_engine_id]
+        )
+        logger.info(
+            "NIXL xfer desc mapping: req_id=%s dst_engine_id=%s remote_rank=%s "
+            "remote_region_count=%s remote_desc_region_count=%s "
+            "dst_num_blocks=%s expected_remote_descs=%s "
+            "remote_desc_len=%s remote_desc_min=%s remote_desc_max=%s "
+            "local_desc_len=%s local_desc_min=%s local_desc_max=%s "
+            "remote_region_ids=%s local_region_ids=%s remote_block_ids=%s "
+            "local_block_ids=%s",
+            request_id,
+            dst_engine_id,
+            remote_rank,
+            remote_region_count,
+            remote_desc_region_count,
+            self.dst_num_blocks[dst_engine_id],
+            expected_remote_descs,
+            len(remote_block_descs_ids),
+            int(remote_block_descs_ids.min()) if len(remote_block_descs_ids) else -1,
+            int(remote_block_descs_ids.max()) if len(remote_block_descs_ids) else -1,
+            len(local_block_descs_ids),
+            int(local_block_descs_ids.min()) if len(local_block_descs_ids) else -1,
+            int(local_block_descs_ids.max()) if len(local_block_descs_ids) else -1,
+            remote_region_ids.tolist(),
+            local_region_ids.tolist(),
+            remote_block_ids,
+            local_block_ids,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
@@ -2155,18 +2249,59 @@ class NixlConnectorWorker:
 
         return mapped_2d.flatten().astype(np.int64)
 
+    def _get_remote_stage_region_ids(
+        self,
+        engine_id: str,
+        remote_rank: int,
+    ) -> np.ndarray:
+        """Return descriptor region ids relative to the remote stage handle."""
+        num_base_regions = len(self.remote_region_labels[engine_id][remote_rank])
+        base_region_ids = np.arange(num_base_regions, dtype=np.int64)
+        return self._expand_base_region_ids(base_region_ids)
+
+    def _get_local_region_ids_for_remote_stage(
+        self,
+        engine_id: str,
+        remote_rank: int,
+    ) -> np.ndarray:
+        """Map a remote worker's explicit region labels onto local region ids."""
+        remote_labels = self.remote_region_labels[engine_id][remote_rank]
+        local_index_by_label = {
+            label: idx for idx, label in enumerate(self.region_labels)
+        }
+        base_region_ids = np.array(
+            [local_index_by_label[label] for label in remote_labels],
+            dtype=np.int64,
+        )
+        return self._expand_base_region_ids(base_region_ids)
+
+    def _expand_base_region_ids(self, base_region_ids: np.ndarray) -> np.ndarray:
+        if self.transfer_topo is not None and self.transfer_topo.is_kv_layout_blocks_first:
+            return (base_region_ids[:, None] * 2 + np.arange(2)).reshape(-1)
+        return base_region_ids
+
     def _get_block_descs_ids(
         self,
         engine_id: str,
         block_ids: BlockIds,
         block_size_ratio: float | None = None,
+        remote_rank: int | None = None,
+        region_ids_override: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
         When HMA is enabled number of descriptors across kv cache groups might differ.
         A single flattened array is returned for all groups anyway.
         """
-        region_ids = np.arange(self.num_regions)
+        if region_ids_override is not None:
+            region_ids = region_ids_override
+            num_regions = len(region_ids)
+        elif remote_rank is None or engine_id == self.engine_id:
+            num_regions = self.num_regions
+            region_ids = np.arange(num_regions)
+        else:
+            region_ids = self._get_remote_stage_region_ids(engine_id, remote_rank)
+            num_regions = len(region_ids)
 
         # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
         # layers from different groups share the same kv tensor.

@@ -763,6 +763,77 @@ class TestGetBlockDescsIdsNumRegionsOverride:
         )
 
 
+class TestPPStageRegionDescriptorMapping:
+    """
+    PP-stage remote handles are indexed stage-locally, while local handles are
+    indexed in full-model layer order. The transfer must pair those two
+    different descriptor id spaces.
+    """
+
+    class _FakeTopology:
+        def __init__(self, blocks_first: bool):
+            self.is_kv_layout_blocks_first = blocks_first
+
+    @staticmethod
+    def _make_worker(blocks_first: bool):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+            NixlConnectorWorker,
+        )
+
+        worker = NixlConnectorWorker.__new__(NixlConnectorWorker)
+        worker.engine_id = "decode"
+        worker.region_labels = [f"layer.{i}" for i in range(8)]
+        worker.remote_region_labels = {
+            "prefill": {
+                2: ["layer.2", "layer.3"],
+            },
+        }
+        worker.transfer_topo = TestPPStageRegionDescriptorMapping._FakeTopology(
+            blocks_first
+        )
+        worker._has_mamba = False
+        worker.num_regions = 16 if blocks_first else 8
+        worker.dst_num_blocks = {
+            "decode": 100,
+            "prefill": 50,
+        }
+        return worker
+
+    def test_non_blocks_first_uses_remote_local_and_local_full_region_ids(self):
+        worker = self._make_worker(blocks_first=False)
+
+        remote_region_ids = worker._get_remote_stage_region_ids("prefill", 2)
+        local_region_ids = worker._get_local_region_ids_for_remote_stage(
+            "prefill", 2
+        )
+
+        assert remote_region_ids.tolist() == [0, 1]
+        assert local_region_ids.tolist() == [2, 3]
+        assert worker._get_block_descs_ids(
+            "prefill", [[3]], remote_rank=2
+        ).tolist() == [3, 53]
+        assert worker._get_block_descs_ids(
+            "decode", [[3]], region_ids_override=local_region_ids
+        ).tolist() == [203, 303]
+
+    def test_blocks_first_expands_region_ids_in_descriptor_order(self):
+        worker = self._make_worker(blocks_first=True)
+
+        remote_region_ids = worker._get_remote_stage_region_ids("prefill", 2)
+        local_region_ids = worker._get_local_region_ids_for_remote_stage(
+            "prefill", 2
+        )
+
+        assert remote_region_ids.tolist() == [0, 1, 2, 3]
+        assert local_region_ids.tolist() == [4, 5, 6, 7]
+        assert worker._get_block_descs_ids(
+            "prefill", [[3]], remote_rank=2
+        ).tolist() == [3, 53, 103, 153]
+        assert worker._get_block_descs_ids(
+            "decode", [[3]], region_ids_override=local_region_ids
+        ).tolist() == [403, 503, 603, 703]
+
+
 class TestBuildLayerRangeXferHandleStride:
     """
     _build_layer_range_xfer_handle must derive entries_per_layer from
