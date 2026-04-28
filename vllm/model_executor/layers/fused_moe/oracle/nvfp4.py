@@ -168,11 +168,13 @@ def select_nvfp4_moe_backend(
     """
 
     # NOTE: the kernels are selected in the following order.
+    # FLASHINFER_B12X is intentionally excluded from auto-selection until
+    # the upstream CUTLASS SM121 MMA op guard is resolved; use
+    # moe_backend="flashinfer_b12x" to opt in explicitly.
     AVAILABLE_BACKENDS = [
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
-        NvFp4MoeBackend.FLASHINFER_B12X,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,

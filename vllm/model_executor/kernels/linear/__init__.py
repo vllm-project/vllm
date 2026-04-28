@@ -260,7 +260,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
-        FlashInferB12xNvFp4LinearKernel,
+        # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
+        # upstream CUTLASS SM121 MMA op guard is resolved; use
+        # VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x to opt in explicitly.
         FlashInferCutlassNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
