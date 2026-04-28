@@ -380,6 +380,11 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     local_rank = int(env["LOCAL_RANK"])
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
+    use_workspace = env.get("USE_WORKSPACE") == "1"
+    if use_workspace:
+        from vllm.v1.worker.workspace import init_workspace_manager
+
+        init_workspace_manager(torch.device(f"cuda:{local_rank}"))
     try:
         from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
@@ -447,6 +452,10 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         else:
             _assert_packed_a2a_close(actual, expected_out, dtype)
     finally:
+        if use_workspace:
+            from vllm.v1.worker.workspace import reset_workspace_manager
+
+            reset_workspace_manager()
         dist.destroy_process_group()
 
 
@@ -462,6 +471,22 @@ def test_distributed_packed_a2a_matches_reference(dtype_name: str):
             "TEST_DTYPE": dtype_name,
             "RETURN_LSE": "1",
             "LSE_BASE_E": "1",
+        },
+    )
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
+)
+def test_distributed_packed_a2a_with_workspace_matches_reference():
+    _distributed_run(
+        _distributed_packed_a2a_worker,
+        world_size=4,
+        extra_env={
+            "TEST_DTYPE": "bfloat16",
+            "RETURN_LSE": "1",
+            "LSE_BASE_E": "1",
+            "USE_WORKSPACE": "1",
         },
     )
 

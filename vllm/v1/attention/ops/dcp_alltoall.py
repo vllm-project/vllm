@@ -26,6 +26,10 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -106,6 +110,24 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
     if bits == 32:
         return 1
     raise ValueError(f"Cannot pack fp32 LSE into output dtype {output_dtype}.")
+
+
+def _dcp_a2a_send_recv_buffers(
+    shape: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if is_workspace_manager_initialized():
+        send_buffer, recv_buffer = current_workspace_manager().get_simultaneous(
+            (shape, dtype),
+            (shape, dtype),
+        )
+        return send_buffer, recv_buffer
+
+    return (
+        torch.empty(shape, device=device, dtype=dtype),
+        torch.empty(shape, device=device, dtype=dtype),
+    )
 
 
 @triton.jit
@@ -407,12 +429,11 @@ def dcp_a2a_lse_reduce(
     H_per_rank = H // world_size
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
-    send_buffer = torch.empty(
+    send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
         (world_size, B, H_per_rank, D + lse_pack_dim),
         device=cp_attn_out.device,
         dtype=cp_attn_out.dtype,
     )
-    recv_buffer = torch.empty_like(send_buffer)
 
     _dcp_a2a_pack_send(
         cp_attn_out,
