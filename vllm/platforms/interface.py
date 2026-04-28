@@ -526,15 +526,30 @@ class Platform:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
-        if cache_config.cache_dtype == "auto":
-            kv_cache_dtype = model_config.dtype
-        else:
-            kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-
-        kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
-
         # Compute attention page size for 1 token
-        if model_config.use_mla:
+        if (
+            isinstance(cache_config.cache_dtype, str)
+            and cache_config.cache_dtype.startswith("turboquant_")
+            and not model_config.use_mla
+        ):
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            tq_config = TurboQuantConfig.from_cache_dtype(
+                cache_config.cache_dtype,
+                model_config.get_head_size(),
+            )
+            attn_page_size_1_token = (
+                model_config.get_num_kv_heads(parallel_config)
+                * tq_config.slot_size_aligned
+            )
+        elif model_config.use_mla:
+            if cache_config.cache_dtype == "auto":
+                kv_cache_dtype = model_config.dtype
+            else:
+                kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -543,6 +558,11 @@ class Platform:
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
         else:
+            if cache_config.cache_dtype == "auto":
+                kv_cache_dtype = model_config.dtype
+            else:
+                kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),

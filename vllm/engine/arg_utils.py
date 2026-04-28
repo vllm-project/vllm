@@ -138,6 +138,27 @@ TypeHint: TypeAlias = type[Any] | object
 TypeHintT: TypeAlias = type[T] | object
 
 
+def _get_turboquant_boundary_skip_layers(
+    model_config: ModelConfig,
+    boundary_size: int = 2,
+) -> list[str]:
+    """Return layer ids that should keep native KV cache with TurboQuant.
+
+    TurboQuant protects the earliest/latest layers from KV cache quantization.
+    Hybrid models such as Qwen3.5/Qwen3.6 cannot mix native and TurboQuant
+    attention cache pages in the current hybrid KV cache manager, so boundary
+    protection is only applied to non-hybrid models.
+    """
+    from vllm.model_executor.layers.quantization.turboquant.config import (
+        TurboQuantConfig,
+    )
+
+    num_layers = model_config.hf_text_config.num_hidden_layers
+    if model_config.is_hybrid:
+        return []
+    return TurboQuantConfig.get_boundary_skip_layers(num_layers, boundary_size)
+
+
 def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
     def _parse_type(val: str) -> T:
         try:
@@ -1701,18 +1722,14 @@ class EngineArgs:
         # These layers are most sensitive to quantization error.
         # Users can add extra layers via --kv-cache-dtype-skip-layers.
         if resolved_cache_dtype.startswith("turboquant_"):
-            if model_config.is_hybrid:
+            if model_config.is_hybrid and cache_config.kv_cache_dtype_skip_layers:
                 raise NotImplementedError(
-                    "TurboQuant KV cache is not supported for hybrid "
-                    "(attention + Mamba) models. Boundary layer protection "
-                    "requires uniform attention layers."
+                    "TurboQuant KV cache skip layers are not supported for "
+                    "hybrid (attention + Mamba) models because native and "
+                    "TurboQuant attention cache pages cannot be mixed."
                 )
-            from vllm.model_executor.layers.quantization.turboquant.config import (
-                TurboQuantConfig,
-            )
-
             num_layers = model_config.hf_text_config.num_hidden_layers
-            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            boundary = _get_turboquant_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             merged = sorted(existing | set(boundary), key=lambda x: int(x))
             cache_config.kv_cache_dtype_skip_layers = merged
