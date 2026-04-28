@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    WorkerConnectorInitializationData,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -132,6 +133,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 "LMCache engine does not support register_kv_caches, "
                 "please check and use the latest version"
             )
+
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> None:
+        """Pass initialization data to the underlying LMCache engine.
+
+        Extracts ``model`` from *initialization_data* and forwards it to
+        LMCache's ``register_model`` when available (used by CacheBlend for
+        selective layer recomputation).
+        """
+        if initialization_data.model is not None and hasattr(
+            self._lmcache_engine, "register_model"
+        ):
+            self._lmcache_engine.register_model(initialization_data.model)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

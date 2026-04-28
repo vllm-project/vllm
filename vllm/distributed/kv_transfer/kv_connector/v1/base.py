@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -79,6 +80,18 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class WorkerConnectorInitializationData:
+    """Data passed to initialize_worker_connector().
+
+    Designed to be extended without breaking existing connectors: new optional
+    fields can be added here and connectors that don't need them simply ignore
+    the extra data.
+    """
+
+    model: torch.nn.Module | None = field(default=None)
 
 
 class SupportsHMA(ABC):
@@ -261,6 +274,26 @@ class KVConnectorBase_V1(ABC):
 
         Args:
             kv_caches: dictionary of layer names, kv cache
+        """
+        return
+
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> None:
+        """
+        Initialize per-worker connector state after model loading.
+
+        Called once by the GPU model runner after the model and KV caches
+        are ready.  The default implementation is a no-op; connectors that
+        need access to model weights (e.g. LMCache's CacheBlend selective
+        recomputation) should override this method.
+
+        Args:
+            initialization_data: data bag containing optional fields such
+                as the loaded model (``initialization_data.model``).
+                New fields may be added in future versions without breaking
+                existing connectors.
         """
         return
 
