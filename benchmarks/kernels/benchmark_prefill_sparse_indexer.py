@@ -38,14 +38,20 @@ def make_random_fp4(*prefix_shape: int) -> tuple[Tensor, Tensor]:
 class DeepGemmFlat:
     def __init__(
         self,
-        block_table: Tensor,
+        block_table_cpu: Tensor,
         query_lens_cpu: Tensor,
         seq_lens_cpu: Tensor,
         compressed_seq_lens_cpu: Tensor,
         query_start_loc_cpu: Tensor,
         compress_ratio: int,
+        block_size: int,
         use_fp4: bool,
     ) -> None:
+        block_table = block_table_cpu.cuda()
+        query_start_loc = query_start_loc_cpu.cuda()
+        seq_lens = seq_lens_cpu.cuda()
+        compressed_seq_lens = compressed_seq_lens_cpu.cuda()
+
         chunk_specs = split_indexer_prefill_chunks(
             compressed_seq_lens_cpu,
             query_lens_cpu,
@@ -57,10 +63,10 @@ class DeepGemmFlat:
             metadata = build_prefill_chunk_metadata(
                 req_slice.start,
                 req_slice.stop,
-                query_start_loc_cpu.cuda(),
+                query_start_loc,
                 query_start_loc_cpu,
-                seq_lens_cpu.cuda(),
-                compressed_seq_lens_cpu.cuda(),
+                seq_lens,
+                compressed_seq_lens,
                 compressed_seq_lens_cpu,
                 block_table,
                 compress_ratio,
@@ -97,7 +103,7 @@ class DeepGemmFlat:
         kv_cache: Tensor,
         weights: Tensor,
         topk_indices_buffer: Tensor,
-    ) -> None:
+    ) -> Tensor:
         use_fp4 = q_scale is not None
         _, topk = topk_indices_buffer.shape
 
@@ -146,35 +152,40 @@ class DeepGemmFlat:
                 logits.stride(1),
                 topk,
             )
+        return topk_indices_buffer
 
 
 class DeepGemmPaged:
     def __init__(
         self,
-        block_table: Tensor,
-        query_lens: list[int],
-        seq_lens: list[int],
-        compressed_seq_lens: list[int],
+        block_table_cpu: Tensor,
+        query_lens_cpu: Tensor,
+        seq_lens_cpu: Tensor,
+        compressed_seq_lens_cpu: Tensor,
+        query_start_loc_cpu: Tensor,
         compress_ratio: int,
         block_size: int,
+        use_fp4: bool,
     ) -> None:
-        query_to_req: list[int] = []
-        context_lens: list[int] = []
-        for req_idx, query_len in enumerate(query_lens):
-            context_len = seq_lens[req_idx] - query_len
-            for offset in range(query_len):
-                query_to_req.append(req_idx)
-                context_lens.append((context_len + offset + 1) // compress_ratio)
-        if not context_lens or max(compressed_seq_lens) == 0:
+        total_query_len = int(query_start_loc_cpu[-1].item())
+        if total_query_len == 0 or int(compressed_seq_lens_cpu.max().item()) == 0:
             raise RuntimeError("generated requests produced no prefill KV tokens")
 
-        device = block_table.device
-        self.indices = torch.tensor(query_to_req, dtype=torch.int32, device=device)
-        self.context_lens = torch.tensor(
-            context_lens, dtype=torch.int32, device=device
-        ).view(-1, 1)
-        self.block_table = block_table.index_select(0, self.indices.to(torch.long))
-        self.max_context_len = max(compressed_seq_lens)
+        req_ids = torch.arange(query_lens_cpu.numel(), device="cpu")
+        req_idx = torch.repeat_interleave(
+            req_ids, query_lens_cpu, output_size=total_query_len
+        )
+        token_idx = torch.arange(total_query_len, dtype=torch.int32, device="cpu")
+        query_offsets = token_idx - query_start_loc_cpu[req_idx]
+        context_lens = (
+            seq_lens_cpu[req_idx] - query_lens_cpu[req_idx] + query_offsets + 1
+        ) // compress_ratio
+
+        req_idx = req_idx.cuda()
+        self.indices = req_idx.to(torch.int32)
+        self.context_lens = context_lens.cuda().view(-1, 1)
+        self.block_table = block_table_cpu.cuda().index_select(0, req_idx)
+        self.max_context_len = int(compressed_seq_lens_cpu.max().item())
 
         num_sms = torch.cuda.get_device_properties(
             torch.cuda.current_device()
@@ -190,7 +201,7 @@ class DeepGemmPaged:
         kv_cache: Tensor,
         weights: Tensor,
         topk_indices_buffer: Tensor,
-    ) -> None:
+    ) -> Tensor:
         num_tokens = self.context_lens.shape[0]
         q_values = q_quant.view(num_tokens, 1, *q_quant.shape[1:])
         if q_scale is not None:
@@ -218,6 +229,7 @@ class DeepGemmPaged:
             logits.stride(1),
             topk_indices_buffer.shape[1],
         )
+        return topk_indices_buffer
 
 
 def parse_args():
@@ -242,7 +254,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> Tensor:
     args = parse_args()
     print(args)
 
@@ -338,29 +350,23 @@ def main() -> None:
             kv_cache[block_id, scale_off : scale_off + block_ks.numel()] = block_ks
 
     kv_cache = kv_cache.view(-1, block_size, cache_dim)
-    block_table = block_table_cpu.cuda()
     topk_indices_buffer = torch.empty((total_query_len, args.topk), dtype=torch.int32)
 
-    if args.impl == "deepgemm_flat":
-        impl = DeepGemmFlat(
-            block_table,
-            query_lens_cpu,
-            seq_lens_cpu,
-            compressed_seq_lens_cpu,
-            query_start_loc_cpu,
-            args.compress_ratio,
-            use_fp4,
-        )
-    else:
-        impl = DeepGemmPaged(
-            block_table,
-            query_lens,
-            seq_lens,
-            compressed_seq_lens,
-            args.compress_ratio,
-            block_size,
-        )
-    impl.run(q_quant, q_scale, kv_cache, weights, topk_indices_buffer)
+    impl_cls = {
+        "deepgemm_flat": DeepGemmFlat,
+        "deepgemm_paged": DeepGemmPaged,
+    }[args.impl]
+    impl = impl_cls(
+        block_table_cpu,
+        query_lens_cpu,
+        seq_lens_cpu,
+        compressed_seq_lens_cpu,
+        query_start_loc_cpu,
+        args.compress_ratio,
+        block_size,
+        use_fp4,
+    )
+    return impl.run(q_quant, q_scale, kv_cache, weights, topk_indices_buffer)
 
 
 if __name__ == "__main__":
