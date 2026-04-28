@@ -100,10 +100,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and self.world_size > 1
             and envs.VLLM_ALLREDUCE_QUANTIZATION is not None
         ):
-            self.quant_comm = QuantizedAllReduceCommunicator(
-                group=self.cpu_group,
-                device=self.device,
-            )
+            if envs.VLLM_BATCH_INVARIANT:
+                logger.warning(
+                    "Disabling quantized allreduce because "
+                    "VLLM_BATCH_INVARIANT is enabled."
+                )
+            else:
+                self.quant_comm = QuantizedAllReduceCommunicator(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
@@ -190,8 +196,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Quantized all-reduce (highest priority when enabled via env var)
         if self.quant_comm is not None and self.quant_comm.should_use_quantized(input_):
             out = self.quant_comm.all_reduce(input_)
-            if out is not None:
-                return out
+            assert out is not None
+            return out
 
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric

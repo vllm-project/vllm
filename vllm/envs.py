@@ -1561,8 +1561,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
     ),
     # Quantized allreduce mode: None (disabled), "int8", or "fp8"
-    "VLLM_ALLREDUCE_QUANTIZATION": lambda: os.getenv(
-        "VLLM_ALLREDUCE_QUANTIZATION", None
+    "VLLM_ALLREDUCE_QUANTIZATION": env_with_choices(
+        "VLLM_ALLREDUCE_QUANTIZATION", default=None, choices=["int8", "fp8"]
     ),
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
