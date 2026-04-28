@@ -9,7 +9,7 @@ Validates that:
 3. Results are deterministic across runs (baseline vs reference).
 
 Usage:
-    python examples/features/routed_experts/routed_experts_offline.py \
+    python examples/rl/routed_experts/routed_experts_offline.py \
         --model Qwen/Qwen3-30B-A3B \
         --tp 4 \
         --max-model-len 4096 \
