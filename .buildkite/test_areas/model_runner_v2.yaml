@@ -35,7 +35,7 @@ steps:
     - examples/generate/multimodal/
     - examples/features/
     - examples/pooling/embed/vision_embedding_offline.py
-    - examples/examples/features/tensorize_vllm_model.py
+    - examples/features/tensorize_vllm_model.py
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
