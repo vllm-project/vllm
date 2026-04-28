@@ -4,30 +4,36 @@
 #
 # Shared helper for rewriting a wheel's platform tag from the generic
 # ``linux_<arch>`` to the correct ``manylinux_<major>_<minor>_<arch>``.
+# After sourcing, call ``apply_manylinux_tag <wheel>`` on each wheel
+# that still carries the generic tag; the renamed path is printed on
+# stdout (logs go to stderr).
 #
-# Sourcing this file eagerly creates an isolated venv with auditwheel and
-# registers an EXIT trap to clean it up. After sourcing, call
-# ``apply_manylinux_tag <wheel>`` on each ``linux_<arch>`` wheel; the
-# renamed path is printed on stdout.
+# Why a pinned Docker container instead of using whatever Python
+# happens to be on the agent:
+#   - vLLM's release agents are heterogeneous -- they don't agree on
+#     a Python minor version, and we can't rely on a particular
+#     ``auditwheel`` being installed.
+#   - ``detect-manylinux-tag.py`` reads ``auditwheel.wheel_abi`` and
+#     ``Policy.sym_policy``, which are *internal* APIs without a
+#     stability promise. Pinning both Python and auditwheel makes the
+#     detected tag a function of the inputs alone, and shifts version
+#     bumps from "implicit drift" to "deliberate, retested change".
+#   - Other release scripts (``generate-and-upload-nightly-index.sh``,
+#     ``upload-rocm-wheels.sh``) already use the python:3-slim image
+#     when the agent's interpreter is too old; this is the same idea
+#     made stricter.
 #
-# The venv is created eagerly (rather than lazily on first call) because
-# callers use ``apply_manylinux_tag`` inside command substitution, which
-# runs in a subshell -- any state or trap set up there would be lost the
-# moment the substitution returns.
-#
-# Configuration:
-# - ``MANYLINUX_PYTHON`` (env var, default ``python3``): the Python
-#   interpreter used to build the venv. Must point to a directly-callable
-#   ``python3`` >= 3.10 (auditwheel's floor); a Docker-wrapped Python
-#   won't work because ``python3 -m venv`` would create the venv inside
-#   the container.
+# To keep the per-wheel cost down (the ROCm upload retags ~10 wheels
+# each run), we install auditwheel into a long-lived helper container
+# once on source, then ``docker exec`` into it for each call.
 #
 # Trap behaviour:
-# - Sourcing installs an EXIT trap that calls ``manylinux_cleanup``. Any
-#   EXIT trap that was already in place when this file was sourced is
-#   captured and run AFTER our cleanup, so we don't silently clobber it.
+# - Sourcing installs an EXIT trap that calls ``manylinux_cleanup`` to
+#   tear down the helper container. Any EXIT trap that was already in
+#   place when this file was sourced is captured and run AFTER our
+#   cleanup, so we don't silently clobber it.
 # - If a caller sets a new EXIT trap *after* sourcing, that trap will
-#   replace ours. In that case the caller should call
+#   replace ours; in that case the caller should call
 #   ``manylinux_cleanup`` from their own handler.
 
 if [[ -n "${_MANYLINUX_LIB_SOURCED:-}" ]]; then
@@ -35,34 +41,50 @@ if [[ -n "${_MANYLINUX_LIB_SOURCED:-}" ]]; then
 fi
 _MANYLINUX_LIB_SOURCED=1
 
-# Resolve our own directory regardless of caller cwd, so we can locate
-# ``detect-manylinux-tag.py`` next to us.
-_MANYLINUX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_MANYLINUX_DETECT_SCRIPT="${_MANYLINUX_LIB_DIR}/../detect-manylinux-tag.py"
-
-# Pin auditwheel: ``detect-manylinux-tag.py`` reads the internal
-# ``analyze_wheel_abi`` / ``sym_policy`` API, which is not part of any
-# stability promise, so an upstream release could silently change the
-# resulting platform tag. Bump this deliberately and re-test the
-# detection on a representative wheel from each build target.
+# Pin both sides. Bump these deliberately and re-run a representative
+# wheel from each build target through the detection.
+_MANYLINUX_PYTHON_IMAGE="python:3.12-slim"
 _MANYLINUX_AUDITWHEEL_VERSION="6.6.0"
 
-_MANYLINUX_PYTHON="${MANYLINUX_PYTHON:-python3}"
-_MANYLINUX_VENV_PARENT="$(mktemp -d)"
-_MANYLINUX_VENV="${_MANYLINUX_VENV_PARENT}/auditwheel-venv"
-"$_MANYLINUX_PYTHON" -m venv "$_MANYLINUX_VENV"
-"$_MANYLINUX_VENV/bin/pip" install --quiet --disable-pip-version-check \
+# Resolve our own directory (and the sibling detect script) using the
+# canonical, symlink-resolved path. The container mounts cwd at the
+# same absolute path on both sides, so all paths we hand to it -- the
+# script, the wheel -- must canonicalise to a location under cwd.
+_MANYLINUX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+_MANYLINUX_DETECT_SCRIPT="$(cd "${_MANYLINUX_LIB_DIR}/.." && pwd -P)/detect-manylinux-tag.py"
+_MANYLINUX_CWD="$(pwd -P)"
+
+docker pull --quiet "$_MANYLINUX_PYTHON_IMAGE" >/dev/null
+
+# Spin up a long-lived helper container so we install auditwheel once
+# and then ``docker exec`` into it for each wheel.
+#
+# The container runs as root so ``pip install`` can write into the
+# system site-packages; individual ``docker exec`` calls below pin
+# themselves to the host UID so any file rename happens with host
+# ownership, not root.
+_MANYLINUX_CONTAINER="$(docker run -d --rm \
+    -v "$_MANYLINUX_CWD:$_MANYLINUX_CWD" \
+    -w "$_MANYLINUX_CWD" \
+    "$_MANYLINUX_PYTHON_IMAGE" \
+    sleep infinity)"
+docker exec "$_MANYLINUX_CONTAINER" \
+    pip install --quiet --disable-pip-version-check \
+    --root-user-action=ignore \
     "auditwheel==${_MANYLINUX_AUDITWHEEL_VERSION}"
 
-# Public cleanup function -- safe to call multiple times.
+# Public cleanup -- safe to call multiple times.
 manylinux_cleanup() {
-    rm -rf "$_MANYLINUX_VENV_PARENT"
+    if [[ -n "${_MANYLINUX_CONTAINER:-}" ]]; then
+        docker rm -f "$_MANYLINUX_CONTAINER" >/dev/null 2>&1 || true
+        _MANYLINUX_CONTAINER=""
+    fi
 }
 
-# Capture any EXIT trap that was already in place so we can chain to it
-# rather than overwrite it. ``trap -p EXIT`` prints the existing handler
-# in eval-able form (``trap -- 'CMD' EXIT``) or nothing if unset; we
-# strip the wrapper to recover ``CMD``. This handles the common case --
+# Capture any EXIT trap that was already in place so we can chain to
+# it rather than overwrite it. ``trap -p EXIT`` prints the handler in
+# eval-able form (``trap -- 'CMD' EXIT``) or nothing if unset; we
+# strip the wrapper to recover ``CMD``. Handles the common case --
 # CMDs without embedded single quotes -- and degrades gracefully (we
 # still run our own cleanup) for the pathological case.
 _manylinux_prev_exit_trap_cmd=""
@@ -82,13 +104,21 @@ _manylinux_run_exit_chain() {
 }
 trap _manylinux_run_exit_chain EXIT
 
-# Detect the manylinux platform tag for a single wheel and rename it in
-# place, printing the renamed wheel path on stdout. Returns non-zero on
-# failure (which under ``set -e`` propagates to the caller).
+# Detect the manylinux platform tag for a single wheel and rename it
+# in place, printing the renamed wheel path on stdout. Returns
+# non-zero on failure (which under ``set -e`` propagates to caller).
+#
+# The wheel must be reachable via a path under the host cwd so it's
+# visible inside the helper container; in CI the wheels always live
+# under ``artifacts/`` so this is fine.
 apply_manylinux_tag() {
     local wheel="$1"
+    local abs_wheel
+    abs_wheel="$(realpath "$wheel")"
     local new_wheel
-    new_wheel="$("$_MANYLINUX_VENV/bin/python" "$_MANYLINUX_DETECT_SCRIPT" "$wheel")"
+    new_wheel="$(docker exec -u "$(id -u):$(id -g)" \
+        "$_MANYLINUX_CONTAINER" \
+        python "$_MANYLINUX_DETECT_SCRIPT" "$abs_wheel")"
     if [[ -z "$new_wheel" || ! -f "$new_wheel" ]]; then
         echo "apply_manylinux_tag: detect-manylinux-tag.py did not produce a valid wheel path for $wheel" >&2
         return 1

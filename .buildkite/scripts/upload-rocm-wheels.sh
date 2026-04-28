@@ -20,7 +20,6 @@ BUCKET="${S3_BUCKET:-vllm-wheels}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
 S3_COMMIT_PREFIX="s3://$BUCKET/$ROCM_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
-PYTHON="${PYTHON_PROG:-python3}"
 
 echo "========================================"
 echo "ROCm Wheel Upload Configuration"
@@ -31,27 +30,19 @@ echo "Commit: $BUILDKITE_COMMIT"
 echo "Branch: $BUILDKITE_BRANCH"
 echo "========================================"
 
-# ======== Part 0: Setup Python ========
+# ======== Part 0: Setup Python and helpers ========
 
-# Detect if python3.12+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)" 2>/dev/null || echo 0)
-if [[ "$has_new_python" -eq 0 ]]; then
-    # Use new python from docker
-    # Use --user to ensure files are created with correct ownership (not root)
-    docker pull python:3-slim
-    PYTHON="docker run --rm --user $(id -u):$(id -g) -v $(pwd):/app -w /app python:3-slim python3"
-fi
+# Pick a Python interpreter for index generation -- local if recent
+# enough, else a one-shot docker fallback.
+# shellcheck source=lib/select-python.sh
+source .buildkite/scripts/lib/select-python.sh
+select_python
 
-echo "Using python interpreter: $PYTHON"
-echo "Python version: $($PYTHON --version)"
-
-# Source the manylinux helper *after* Python detection above so the venv
-# it builds (for auditwheel) uses an interpreter we know is available
-# directly on the agent. The Docker-wrapped fallback above can run the
-# index-generation script, but ``python3 -m venv`` would create the venv
-# inside the throwaway container, so we deliberately don't reuse it
-# here. Override with ``MANYLINUX_PYTHON=`` if the agent's default
-# ``python3`` is too old (auditwheel requires >= 3.10).
+# Set up auditwheel-in-a-container for the manylinux retagging step.
+# Distinct from select_python: ``manylinux.sh`` deliberately pins both
+# the Python and auditwheel versions (the script reads auditwheel
+# internals) and so always runs in a known-good container regardless
+# of what's on the agent.
 # shellcheck source=lib/manylinux.sh
 source .buildkite/scripts/lib/manylinux.sh
 
