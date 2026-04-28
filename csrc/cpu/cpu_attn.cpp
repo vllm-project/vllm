@@ -90,6 +90,8 @@ void cpu_attn_reshape_and_cache(
   TORCH_CHECK_EQ(value.dim(), 3);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
   TORCH_CHECK_EQ(value_cache.dim(), 4);
+  TORCH_CHECK_EQ(key.stride(2), 1);
+  TORCH_CHECK_EQ(value.stride(2), 1);
 
   const int64_t kv_cache_idx =
       static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
