@@ -1581,10 +1581,10 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if layer.enable_eplb:
             raise NotImplementedError(
-                "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
+                f"EPLB not supported for {self.__class__.__name__} yet."
             )
 
         from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
