@@ -520,7 +520,7 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        seq_lens = common_attn_metadata.seq_lens.cpu()
+        seq_lens = common_attn_metadata.get_seq_lens_cpu()
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 

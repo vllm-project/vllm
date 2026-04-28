@@ -13,15 +13,21 @@ buffers.
 """
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 class _ConcreteMambaBuilder(
@@ -148,4 +154,70 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
     torch.testing.assert_close(
         metadata_b.block_idx_last_computed_token,
         block_idx_vals,
+    )
+
+
+def test_build_chunk_metadata_uses_cached_num_computed_tokens_cpu():
+    block_size = 16
+    max_model_len = 256
+    num_reqs = 2
+    device = torch.device("cpu")
+
+    vllm_config = _make_vllm_config(block_size, max_model_len, num_reqs)
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="all",
+    )
+    builder = _ConcreteMambaBuilder(spec, ["layer0"], vllm_config, device)
+
+    query_start_loc_cpu = torch.tensor([0, 3, 5], dtype=torch.int32)
+    query_start_loc = query_start_loc_cpu.to(device)
+    seq_lens_cpu = torch.tensor([7, 9], dtype=torch.int32)
+    seq_lens = seq_lens_cpu.to(device)
+    num_computed_tokens_cpu = torch.tensor([4, 7], dtype=torch.int32)
+
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=5,
+        max_query_len=3,
+        max_seq_len=9,
+        block_table_tensor=torch.zeros((num_reqs, 1), dtype=torch.int32),
+        slot_mapping=torch.zeros(5, dtype=torch.int64),
+        causal=True,
+    )
+    common = SimpleNamespace(num_reqs=num_reqs, num_prefills=num_reqs, num_decode_tokens=0)
+
+    with patch.object(
+        CommonAttentionMetadata,
+        "compute_num_computed_tokens",
+        side_effect=AssertionError(
+            "should use cached num_computed_tokens_cpu instead of recomputing"
+        ),
+    ):
+        cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
+            builder._build_chunk_metadata_tensors(
+                chunk_size=4,
+                common=common,
+                common_attn_metadata=common_attn_metadata,
+            )
+        )
+
+    torch.testing.assert_close(
+        cu_chunk_seqlen_p.cpu(),
+        torch.tensor([0, 3, 4, 5], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        seq_idx_p.cpu(),
+        torch.tensor([0, 1, 1], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        last_chunk_indices_p.cpu(),
+        torch.tensor([0, 2], dtype=torch.int32),
     )

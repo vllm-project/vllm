@@ -424,6 +424,21 @@ class CommonAttentionMetadata:
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
 
+    def get_seq_lens_cpu(self) -> torch.Tensor:
+        """Return the CPU mirror of seq_lens, creating it only when needed."""
+        if self._seq_lens_cpu is None:
+            self._seq_lens_cpu = self.seq_lens.to("cpu")
+        return self._seq_lens_cpu
+
+    def get_num_computed_tokens_cpu(self) -> torch.Tensor:
+        """Return the CPU mirror of num_computed_tokens, creating it only when needed."""
+        if self._num_computed_tokens_cpu is None:
+            query_seq_lens = (
+                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
+            )
+            self._num_computed_tokens_cpu = self.get_seq_lens_cpu() - query_seq_lens
+        return self._num_computed_tokens_cpu
+
     @property
     @deprecated(
         """
@@ -433,9 +448,7 @@ class CommonAttentionMetadata:
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
-        if self._seq_lens_cpu is None:
-            self._seq_lens_cpu = self.seq_lens.to("cpu")
-        return self._seq_lens_cpu
+        return self.get_seq_lens_cpu()
 
     @property
     @deprecated(
@@ -447,12 +460,7 @@ class CommonAttentionMetadata:
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
-        if self._num_computed_tokens_cpu is None:
-            query_seq_lens = (
-                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
-            )
-            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
-        return self._num_computed_tokens_cpu
+        return self.get_num_computed_tokens_cpu()
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""

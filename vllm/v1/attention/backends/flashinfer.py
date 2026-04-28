@@ -980,7 +980,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_cpu = (
+            common_attn_metadata.get_seq_lens_cpu() if needs_seq_lens_cpu else None
+        )
+        if self.use_dcp and seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu.clone()
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
             (seq_lens_np + (page_size - 1)) // page_size

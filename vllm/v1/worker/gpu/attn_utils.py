@@ -15,9 +15,8 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    KVCacheConfig,
+        self._seq_lens_cpu = seq_lens_cpu
+        self._num_computed_tokens_cpu = _num_computed_tokens_cpu
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -254,6 +253,13 @@ def build_attn_metadata(
     positions: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
+    seq_lens_cpu = (
+        seq_lens
+        if seq_lens.device.type == "cpu"
+        else seq_lens.to("cpu", non_blocking=True)
+    )
+    query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+    num_computed_tokens_cpu = seq_lens_cpu - query_lens_cpu
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
     if seq_lens_cpu_upper_bound is not None:
@@ -270,6 +276,8 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            _seq_lens_cpu=seq_lens_cpu,
+            _num_computed_tokens_cpu=num_computed_tokens_cpu,
             max_seq_len=max_seq_len,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
