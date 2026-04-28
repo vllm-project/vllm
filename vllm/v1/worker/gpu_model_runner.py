@@ -405,6 +405,17 @@ class GPUModelRunner(
         self.offload_config = vllm_config.offload_config
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
+
+        # Profiling-based dynamic chunk sizing
+        additional_config = vllm_config.additional_config
+        profiling_cfg = (
+            additional_config.get("profiling_chunk_config", {})
+            if isinstance(additional_config, dict)
+            else {}
+        )
+        self._profiling_chunk_enabled = bool(
+            profiling_cfg.get("enabled", False)
+        )
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -3795,6 +3806,11 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
+        # Profiling chunk timing: record start time
+        if self._profiling_chunk_enabled:
+            self._sync_device()
+            self._execution_start_time = time.perf_counter()
+
         if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
@@ -4348,6 +4364,16 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
             )
+
+            # Profiling chunk timing: record execution time
+            if (
+                self._profiling_chunk_enabled
+                and hasattr(self, "_execution_start_time")
+            ):
+                self._sync_device()
+                output.execution_time_ms = (
+                    time.perf_counter() - self._execution_start_time
+                ) * 1000.0
 
         if not self.use_async_scheduling:
             return output
@@ -5262,6 +5288,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        profile_cpp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5339,6 +5366,9 @@ class GPUModelRunner(
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
+        elif profile_cpp:
+            num_reqs = 1
+            num_scheduled_tokens_list = [num_tokens] * num_reqs
         else:
             num_reqs = min(num_tokens, max_num_reqs)
             min_tokens_per_req = num_tokens // num_reqs
@@ -5361,7 +5391,8 @@ class GPUModelRunner(
                 use_cascade_attn=False,
                 allow_microbatching=allow_microbatching,
                 force_eager=is_profile
-                or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+                or (cudagraph_runtime_mode == CUDAGraphMode.NONE)
+                or profile_cpp,
                 # `force_uniform_decode` is used for cudagraph capture; because for
                 # capturing mixed prefill-decode batches, we sometimes use
                 # num_tokens == num_reqs which looks like a uniform decode batch to the

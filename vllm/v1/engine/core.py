@@ -88,6 +88,87 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+def _record_execution_timing(scheduler, scheduler_output, model_output):
+    """Record execution timing for online model refinement.
+
+    Extracts ``execution_time_ms`` (set dynamically by the model runner)
+    from the model output and feeds it back to the
+    ``ProfilingChunkManager`` for incremental fitting of the history-aware
+    latency model.
+    """
+    profiling_mgr = getattr(scheduler, "profiling_chunk_manager", None)
+    if profiling_mgr is None or not profiling_mgr.is_ready:
+        return
+
+    elapsed_time_ms = getattr(model_output, "execution_time_ms", 0.0)
+    if elapsed_time_ms <= 0:
+        return
+    elapsed_time = elapsed_time_ms / 1000.0
+
+    try:
+        total_tokens = getattr(
+            scheduler_output, "total_num_scheduled_tokens", 0
+        )
+        if total_tokens <= 0:
+            return
+
+        num_scheduled_tokens = getattr(
+            scheduler_output, "num_scheduled_tokens", {}
+        )
+        request_chunks = []
+
+        total_hist_tokens = 0
+        new_reqs = getattr(scheduler_output, "scheduled_new_reqs", [])
+        for req in new_reqs:
+            req_id = getattr(req, "request_id", None) or getattr(
+                req, "req_id", None
+            )
+            if req_id and req_id in num_scheduled_tokens:
+                chunk_size = num_scheduled_tokens[req_id]
+                hist_seq_len = getattr(req, "num_computed_tokens", 0)
+                total_hist_tokens += hist_seq_len
+                if chunk_size > 0:
+                    request_chunks.append((chunk_size, hist_seq_len))
+
+        cached_reqs = getattr(
+            scheduler_output, "scheduled_cached_reqs", None
+        )
+        if cached_reqs is not None:
+            req_ids = getattr(cached_reqs, "req_ids", [])
+            computed_tokens_list = getattr(
+                cached_reqs, "num_computed_tokens", []
+            )
+            for i, req_id in enumerate(req_ids):
+                if req_id in num_scheduled_tokens:
+                    chunk_size = num_scheduled_tokens[req_id]
+                    hist_seq_len = (
+                        computed_tokens_list[i]
+                        if i < len(computed_tokens_list)
+                        else 0
+                    )
+                    total_hist_tokens += hist_seq_len
+                    if chunk_size > 0:
+                        request_chunks.append((chunk_size, hist_seq_len))
+
+        # is first chunk processing
+        if total_hist_tokens == 0 and not profiling_mgr._set_time_done:
+            profiling_mgr.predictor.set_target_latency(
+                0, elapsed_time * 1000
+            )
+            profiling_mgr._set_time_done = True
+
+        if not request_chunks:
+            request_chunks = [(total_tokens, 0)]
+
+        if not profiling_mgr.predictor.history_fitted:
+            profiling_mgr.record_batch_execution_time(
+                request_chunks, elapsed_time
+            )
+
+    except (AttributeError, TypeError) as e:
+        logger.debug("Failed to record execution timing: %s", e)
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -154,6 +235,14 @@ class EngineCore:
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
+
+        # Profiling-based dynamic chunk initialization.
+        if hasattr(self.scheduler, "run_profiling_chunk_init"):
+            logger.info(
+                "[ProfilingChunk] Running profiling initialization..."
+            )
+            self.scheduler.run_profiling_chunk_init(self.model_executor)
+            self._setup_profiling_chunk_timing()
 
         mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
@@ -227,6 +316,27 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _setup_profiling_chunk_timing(self) -> None:
+        """Wrap scheduler.update_from_output to record execution timing
+        for online model refinement of profiling-based chunk prediction."""
+        profiling_mgr = getattr(
+            self.scheduler, "profiling_chunk_manager", None
+        )
+        if profiling_mgr is None:
+            return
+
+        original_update = type(self.scheduler).update_from_output
+
+        def _wrapped_update(scheduler_self, scheduler_output, model_output):
+            _record_execution_timing(
+                scheduler_self, scheduler_output, model_output
+            )
+            return original_update(
+                scheduler_self, scheduler_output, model_output
+            )
+
+        type(self.scheduler).update_from_output = _wrapped_update
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:

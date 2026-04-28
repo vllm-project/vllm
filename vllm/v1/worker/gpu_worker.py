@@ -900,6 +900,58 @@ class Worker(WorkerBase):
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
+    @torch.inference_mode()
+    def profile_prefill_latency(self, num_tokens: int) -> float:
+        """Profile prefill latency for a given number of tokens.
+
+        Runs a real model forward pass and measures the execution time.
+        Used for profiling-based dynamic chunk sizing.
+
+        In PP (Pipeline Parallelism) mode:
+        - All workers execute the forward pass to stay synchronized
+        - Only the timing from the first PP rank is meaningful for scheduling
+
+        Args:
+            num_tokens: Number of tokens to profile
+
+        Returns:
+            Latency in milliseconds
+        """
+        import time
+
+        num_tokens = min(
+            num_tokens,
+            self.scheduler_config.max_num_batched_tokens,
+        )
+        num_tokens = max(num_tokens, 1)
+
+        torch.accelerator.synchronize()
+
+        is_first_pp_rank = get_pp_group().is_first_rank
+
+        start = time.perf_counter()
+
+        self.model_runner._dummy_run(
+            num_tokens=num_tokens,
+            force_attention=True,
+            profile_cpp=True,
+        )
+
+        torch.accelerator.synchronize()
+
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        if not is_first_pp_rank:
+            logger.debug(
+                "[ProfilingChunk] PP rank %d: profiled %d tokens, "
+                "latency=%.2f ms (not used)",
+                get_pp_group().rank_in_group,
+                num_tokens,
+                latency_ms,
+            )
+
+        return latency_ms
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 

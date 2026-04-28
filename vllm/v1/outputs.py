@@ -201,6 +201,9 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Execution time in milliseconds (for profiling-based chunk sizing)
+    execution_time_ms: float = 0.0
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
