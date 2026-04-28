@@ -79,6 +79,10 @@ def test_flashinfer_trtllm_claims_ptpc_quant_scheme(monkeypatch):
     )
 
 
+def test_flashinfer_trtllm_ptpc_supports_swigluoai_alias():
+    assert TrtLlmFp8ExpertsModular._supports_activation(MoEActivation.SWIGLUOAI)
+
+
 def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(
     monkeypatch,
 ):
@@ -158,7 +162,7 @@ def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        activation=MoEActivation.SILU,
+        activation=MoEActivation.SWIGLUOAI,
         global_num_experts=2,
         expert_map=None,
         a1q_scale=a1q_scale,
