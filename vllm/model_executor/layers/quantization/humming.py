@@ -867,6 +867,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         # use moe modular
         experts: HummingIndexedExperts | HummingGroupedExperts
+        assert self.moe_quant_config is not None
         if get_humming_moe_gemm_type() == "indexed":
             experts = HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
         else:
@@ -881,6 +882,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 
         activation_format = prepare_finalize.activation_format
+        assert self.moe_quant_config is not None
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             return BatchedHummingGroupedExperts(
                 layer=layer,
