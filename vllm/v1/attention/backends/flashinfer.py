@@ -1293,9 +1293,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
                     if real_decode_tokens != num_decode_tokens:
                         assert (
-                            use_cudagraph
-                            and pure_decode
-                            and num_prefill_tokens == 0
+                            use_cudagraph and pure_decode and num_prefill_tokens == 0
                         ), (
                             "num_decode_tokens "
                             f"({num_decode_tokens}) != qo_indptr[-1] "

@@ -845,9 +845,7 @@ def test_flashinfer_prefill_cudagraph_zero_rows_padding(
     paged_kv_indices_buf = torch.zeros(padded_bs * pages_per_req, dtype=torch.int32)
     paged_kv_last_page_len_buf = torch.zeros(padded_bs, dtype=torch.int32)
 
-    qo_indptr_cpu = torch.tensor(
-        [0, 5, 10, 15, 15, 15, 15, 15, 15], dtype=torch.int32
-    )
+    qo_indptr_cpu = torch.tensor([0, 5, 10, 15, 15, 15, 15, 15, 15], dtype=torch.int32)
     paged_kv_indptr_cpu = torch.tensor(
         [0, 4, 8, 12, 12, 12, 12, 12, 12], dtype=torch.int32
     )
