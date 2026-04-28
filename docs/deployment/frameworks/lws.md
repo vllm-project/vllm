@@ -135,8 +135,7 @@ Deploy the following yaml file `lws.yaml`
                       - sh
                       - -c
                       - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
-                        vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2
-                        --distributed-executor-backend ray"
+                        vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray"
                     resources:
                       limits:
                         nvidia.com/gpu: "8"
