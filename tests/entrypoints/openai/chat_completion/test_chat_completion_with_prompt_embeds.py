@@ -3,6 +3,7 @@
 
 """E2E tests for `prompt_embeds` content parts in the Chat Completions API."""
 
+import asyncio
 import io
 
 import openai
@@ -227,22 +228,24 @@ async def test_text_content_and_prompt_embeds_match(
     """
     content, encoded_embeds = aligned_content_and_embeds_b64
 
-    text_resp = await client.chat.completions.create(
-        model=MODEL_NAME,
-        max_tokens=10,
-        temperature=0.0,
-        messages=[{"role": "user", "content": content}],
-    )
-    embeds_resp = await client.chat.completions.create(
-        model=MODEL_NAME,
-        max_tokens=10,
-        temperature=0.0,
-        messages=[
-            {
-                "role": "user",
-                "content": [{"type": "prompt_embeds", "data": encoded_embeds}],
-            }
-        ],
+    text_resp, embeds_resp = await asyncio.gather(
+        client.chat.completions.create(
+            model=MODEL_NAME,
+            max_tokens=10,
+            temperature=0.0,
+            messages=[{"role": "user", "content": content}],
+        ),
+        client.chat.completions.create(
+            model=MODEL_NAME,
+            max_tokens=10,
+            temperature=0.0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "prompt_embeds", "data": encoded_embeds}],
+                }
+            ],
+        ),
     )
 
     text_out = text_resp.choices[0].message.content
