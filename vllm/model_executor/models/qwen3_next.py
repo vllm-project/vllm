@@ -669,7 +669,8 @@ class QwenNextMixtureOfExperts(MixtureOfExperts):
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            raise RuntimeError("No Qwen3Next layer found in the model.layers.")
+            logger.warning_once(f"No Qwen3Next layer found in the model.layers.")
+            return
 
         # Set MoE hyperparameters
         self.num_moe_layers = len(self.moe_layers)
