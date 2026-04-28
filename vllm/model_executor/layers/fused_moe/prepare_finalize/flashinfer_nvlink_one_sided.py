@@ -32,7 +32,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         hidden_size: int,
         num_dispatchers: int = 1,
         dispatch_dtype_bytes_per_elem: int = 0,
-        dispatch_has_fp8_scale: bool = True,
+        dispatch_scale_bytes_per_token: int = 0,
     ):
         super().__init__()
         self.max_num_tokens = max_num_tokens
@@ -40,6 +40,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         self.num_experts = num_experts
         self.hidden_size = hidden_size
         self.num_dispatchers_ = num_dispatchers
+        self.scale_elems_per_token = dispatch_scale_bytes_per_token
 
         device_communicator = get_ep_group().device_communicator
         assert device_communicator is not None
@@ -52,7 +53,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
             dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
-            dispatch_has_fp8_scale=dispatch_has_fp8_scale,
+            dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
         )
 
     @property
@@ -97,8 +98,6 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         )
 
         if defer_input_quant:
-            # Experts (e.g. trtllm_mxfp4_moe with mxfp8 activations) will
-            # quantize post-dispatch. Ship bf16 tokens and skip scales.
             a1q, a1q_scale = a1, None
         else:
             a1q, a1q_scale = moe_kernel_quantize_input(
@@ -108,6 +107,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
                 is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+                mx_alignment=quant_config.mx_alignment,
             )
 
         payloads = []
@@ -133,7 +133,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
                 a1q_scale_recv = a1q_scale_recv.view(torch.uint8)
                 a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)
-            a1q_scale_recv = a1q_scale_recv.view(-1, self.hidden_size // 16)
+            assert self.scale_elems_per_token > 0
+            a1q_scale_recv = a1q_scale_recv.view(-1, self.scale_elems_per_token)
         else:
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             a1q_scale_recv = None

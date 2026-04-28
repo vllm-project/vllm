@@ -1195,10 +1195,18 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif mxfp4_backend in (
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-    ):
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+        return mxfp4_mxfp8_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+            mx_alignment=256,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8:
         return mxfp4_mxfp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
@@ -1250,23 +1258,12 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
-    # Some experts (trtllm_mxfp4 with mxfp8 activations) prefer bf16 tokens
-    # on dispatch and quantize internally; signal this to the prepare/finalize
-    # so workspace + prepare path ship bf16 instead of the quant_config dtype.
-    from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
-        TrtLlmMxfp4ExpertsBase,
-    )
-
-    defer_input_quant = issubclass(experts_cls, TrtLlmMxfp4ExpertsBase)
-
-    # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,
-        defer_input_quant=defer_input_quant,
     )
     assert prepare_finalize is not None
 
