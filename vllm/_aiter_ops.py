@@ -1229,6 +1229,7 @@ class rocm_aiter_ops:
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     # TODO: Consolidate under _LINEAR_ENABLED
+    _HIP_FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
@@ -1255,6 +1256,7 @@ class rocm_aiter_ops:
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
+        cls._HIP_FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -1385,6 +1387,13 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950
 
         return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
+
+    @classmethod
+    @if_aiter_supported
+    def is_hip_fp8bmm_enabled(cls) -> bool:
+        from vllm.platforms.rocm import on_mi3xx
+
+        return cls._AITER_ENABLED and cls._HIP_FP8BMM_ENABLED and on_mi3xx()
 
     @classmethod
     @if_aiter_supported

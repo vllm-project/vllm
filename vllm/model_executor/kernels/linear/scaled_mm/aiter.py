@@ -218,17 +218,17 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not envs.VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR:
-            return False, "requires VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR=1."
-
         if not current_platform.is_rocm():
             return False, "requires ROCm."
-        if not rocm_aiter_ops.is_linear_fp8_enabled():
+
+        if not rocm_aiter_ops.is_hip_fp8bmm_enabled():
+            return False, "requires VLLM_ROCM_USE_AITER_LINEAR_HIPBMM =1."
+
+        if not rocm_aiter_ops.is_hip_fp8bmm_enabled():
             return (
                 False,
                 "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`. ",
             )
         try:
             import aiter  # noqa: F401

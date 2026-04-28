@@ -129,8 +129,8 @@ def _sync_hip_cuda_env_vars():
 _sync_hip_cuda_env_vars()
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
-# Forcing the hipb_mm linear kernel does not imply online tuning.
-if envs.VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING:
+# Turn on hipBLASLt online tuning if use AITER hipBLASLt GEMM.
+if envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM:
     os.environ["HIP_ONLINE_TUNING"] = "1"
 
 # AMDSMI utils
