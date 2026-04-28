@@ -146,6 +146,7 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    pp_size: int = 1
     remote: RemoteMeta | None = None
 
 
@@ -167,6 +168,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            pp_size=kv_transfer_params.get("pp_size", 1),
         )
 
     def add_new_req_to_save(
