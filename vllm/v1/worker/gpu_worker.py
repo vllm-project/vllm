@@ -390,9 +390,17 @@ class Worker(WorkerBase):
         if num_procs <= 1:
             return
         logger.info("Using %d parallel compile processes", num_procs)
-        from torch._inductor.async_compile import AsyncCompile
+        try:
+            from torch._inductor.async_compile import AsyncCompile
 
-        AsyncCompile.warm_pool()
+            AsyncCompile.warm_pool()
+        except Exception:
+            logger.warning(
+                "Failed to warm up compile pool with %d processes, "
+                "falling back to 1 process",
+                num_procs,
+            )
+            torch._inductor.config.compile_threads = 1
 
     def _maybe_quiesce_compile_pool(self) -> None:
         """Quiesce the compile worker pool before cudagraph capture.

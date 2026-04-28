@@ -98,3 +98,66 @@ def test_parallel_compile_pool(monkeypatch, vllm_runner, fresh_vllm_cache):
     finally:
         # Clean up for other tests in the same pytest session
         shutdown_compile_workers()
+
+
+def test_parallel_compile_pool_oom_fallback(
+    monkeypatch, vllm_runner, fresh_vllm_cache
+):
+    """Two-part test:
+    1. Verify PyTorch AsyncCompile.warm_pool() raises an exception under memory
+       pressure, proving it can fail with OOM-like errors.
+    2. Verify vLLM catches the exception and gracefully falls back to 1 compile
+       process when warm_pool() fails.
+    """
+    import subprocess
+    import sys
+
+    # === Step 1: Prove warm_pool() can raise an exception under memory limit ===
+    # Run in a subprocess with restricted memory to observe real OOM behavior.
+    probe_code = """
+import resource
+# Restrict virtual memory to 500MB
+resource.setrlimit(resource.RLIMIT_AS, (500 * 1024**2, 500 * 1024**2))
+try:
+    from torch._inductor.async_compile import AsyncCompile
+    AsyncCompile.warm_pool()
+    print("NO_EXCEPTION")
+except Exception as e:
+    print(f"EXCEPTION:{type(e).__name__}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe_code], capture_output=True, text=True, timeout=60
+    )
+    stdout = result.stdout.strip()
+    # Verify that warm_pool() fails with some exception under memory pressure
+    assert stdout.startswith("EXCEPTION:"), (
+        f"Expected warm_pool() to raise an exception under memory limit, "
+        f"got: {stdout}"
+    )
+    exception_type = stdout.split("EXCEPTION:")[1]
+
+    # === Step 2: Mock the same exception type to test vLLM's fallback logic ===
+    import torch
+    import torch._inductor.async_compile as async_compile
+
+    monkeypatch.setenv("VLLM_COMPILE_PROCESSES", "4")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # Mock warm_pool to raise the same exception type observed in Step 1
+    exc_class = getattr(__builtins__, exception_type, Exception)
+    if not isinstance(exc_class, type):
+        exc_class = Exception
+
+    def mock_warm_pool_fail(cls):
+        raise exc_class("Simulated OOM in warm_pool")
+
+    monkeypatch.setattr(async_compile.AsyncCompile, "warm_pool", mock_warm_pool_fail)
+
+    # vLLM should catch the exception and fallback gracefully without crashing
+    _run_vllm(vllm_runner)
+
+    # Verify fallback: compile_threads should be reset to 1
+    assert torch._inductor.config.compile_threads == 1, (
+        f"compile_threads should be 1 after OOM fallback, "
+        f"got {torch._inductor.config.compile_threads}"
+    )
