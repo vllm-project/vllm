@@ -669,7 +669,15 @@ class QwenNextMixtureOfExperts(MixtureOfExperts):
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            logger.warning_once(f"No Qwen3Next layer found in the model.layers.")
+            logger.warning_once(f"No SparseMoe layer found in the model.layers. Make sure you are loading a dense model.")
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_shared_experts = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_redundant_experts = 0
             return
 
         # Set MoE hyperparameters
