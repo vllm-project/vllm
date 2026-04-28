@@ -15,7 +15,7 @@ With custom parallelism settings:
 $ torchrun --nproc-per-node=8 examples/features/torchrun/torchrun_dp_example_offline.py \
     --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 ```
-""" # noqa: E501
+"""  # noqa: E501
 
 import argparse
 
