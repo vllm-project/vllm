@@ -166,6 +166,64 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             logits[self.logits_slice] += self.bias_tensor
         return logits
 
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        """Speculative decoding version of apply().
+
+        logits shape: [sum(num_draft_tokens), vocab_size]，每个 request
+        的 bias 需应用到该 request 所有 draft token 对应的行。
+
+        Example: num_draft_tokens = [2, 3, 1]
+          -> logits shape [6, V], cumsum = [0, 2, 5, 6]
+          -> req 0 -> rows 0-1, req 1 -> rows 2-4, req 2 -> row 5
+        """
+        if not self.biases:
+            return logits
+
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+        vocab_size = logits.shape[-1]
+
+        all_rows: list[np.ndarray] = []
+        all_toks: list[np.ndarray] = []
+        all_biases: list[np.ndarray] = []
+
+        for req_idx, bias_dict in self.biases.items():
+            n_draft = int(num_draft_arr[req_idx])
+            if n_draft == 0:
+                continue
+
+            tok_ids = [tid for tid in bias_dict if tid < vocab_size]
+            bias_vals = [bias_dict[tid] for tid in tok_ids]
+            if not tok_ids:
+                continue
+
+            offset = int(cumsum[req_idx])
+            n_bias = len(tok_ids)
+            row_indices = np.arange(offset, offset + n_draft, dtype=np.int64)
+            all_rows.append(np.repeat(row_indices, n_bias))
+            all_toks.append(np.tile(tok_ids, n_draft))
+            all_biases.append(np.tile(bias_vals, n_draft))
+
+        if all_rows:
+            logits_slice = (
+                torch.from_numpy(np.concatenate(all_rows)).to(
+                    self.device, non_blocking=True
+                ),
+                torch.from_numpy(np.concatenate(all_toks)).to(
+                    self.device, non_blocking=True
+                ),
+            )
+            bias_tensor = torch.from_numpy(
+                np.concatenate(all_biases).astype(np.float32)
+            ).to(self.device, non_blocking=True)
+            logits.index_put_(logits_slice, bias_tensor, accumulate=True)
+
+        return logits
+
 
 class MinTokensLogitsProcessor(LogitsProcessor):
     def __init__(

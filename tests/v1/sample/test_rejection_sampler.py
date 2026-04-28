@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.logits_processor.builtin import LogitBiasLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
@@ -82,6 +83,7 @@ def create_sampling_metadata(
     repetition_penalties: list[float] | None = None,
     bad_words_token_ids: dict[int, list[list[int]]] | None = None,
     allowed_token_ids_mask: torch.Tensor | None = None,
+    logitsprocs: LogitsProcessors | None = None,
 ) -> SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set
     to the given value. Either all greedy or all random sampling
@@ -125,7 +127,7 @@ def create_sampling_metadata(
         spec_token_ids=[] if spec_token_ids is None else spec_token_ids,
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
-        logitsprocs=LogitsProcessors(),
+        logitsprocs=logitsprocs if logitsprocs is not None else LogitsProcessors(),
     )
 
 
@@ -994,3 +996,143 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+def create_logit_bias_processor(
+    biases: dict[int, dict[int, float]],
+) -> LogitsProcessors:
+    """构造带有指定 bias 的 LogitBiasLogitsProcessor，返回 LogitsProcessors 对象。"""
+    processor = LogitBiasLogitsProcessor(None, torch.device(DEVICE_TYPE), False)
+    processor.biases = biases
+    return LogitsProcessors([processor])
+
+
+def test_logit_bias_greedy(rejection_sampler):
+    """测试 logit bias 在 greedy 模式下改变 draft token 的 accept/reject 行为。
+
+    3 个 request：
+    - req 0 和 req 2：对 token 2 施加 -200.0 bias，argmax 从 2 变成 15，
+      draft token 2 被拒绝。
+    - req 1：无 bias，所有 draft token 正常接受。
+    验证非连续 request 索引（0 和 2 有 bias，1 无 bias）的处理正确性。
+    """
+    spec_tokens = [[1, 2, 3], [1, 15, 3], [1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4], [1, 15, 3, 4], [1, 2, 3, 4]]
+
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+
+    logitsprocs = create_logit_bias_processor(
+        biases={0: {2: -200.0}, 2: {2: -200.0}},
+    )
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[2], [3], [4]],
+        spec_token_ids=spec_tokens,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[i][-1] for i in range(len(output_tokens))],
+        device=logits.device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        spec_tokens, device=logits.device
+    )
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # req 0: token 2 biased -> rejected -> [1, 15, -1, -1]
+    # req 1: no bias        -> all accepted -> [1, 15, 3, 4]
+    # req 2: token 2 biased -> rejected -> [1, 15, -1, -1]
+    expected = torch.tensor(
+        [[1, 15, -1, -1], [1, 15, 3, 4], [1, 15, -1, -1]],
+        dtype=torch.int,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_logit_bias_with_empty_draft_tokens(rejection_sampler):
+    """测试 batch 中含空 draft token 列表时 logit bias 的边界处理。
+
+    - req 0：3 个 draft tokens，bias {2: -200.0}
+    - req 1：0 个 draft tokens（空列表），仅输出 bonus token
+    - req 2：3 个 draft tokens，bias {2: -200.0}
+    验证 apply_with_spec_decode 对 num_draft_tokens 中 0 值的处理正确性。
+    """
+    spec_tokens = [[1, 2, 3], [], [1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4], [7], [1, 2, 3, 4]]
+
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+
+    logitsprocs = create_logit_bias_processor(
+        biases={0: {2: -200.0}, 2: {2: -200.0}},
+    )
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[2], [3], [4]],
+        spec_token_ids=spec_tokens,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[i][-1] for i in range(len(output_tokens))],
+        device=logits.device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        spec_tokens, device=logits.device
+    )
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # req 0: token 2 biased -> rejected -> [1, 15, -1, -1]
+    # req 1: no draft tokens -> only bonus -> [7, -1, -1, -1]
+    # req 2: token 2 biased -> rejected -> [1, 15, -1, -1]
+    expected = torch.tensor(
+        [[1, 15, -1, -1], [7, -1, -1, -1], [1, 15, -1, -1]],
+        dtype=torch.int,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_logit_bias_empty_biases(rejection_sampler):
+    """测试 biases 为空时的 no-op 行为。
+
+    传入空 biases 的 LogitBiasLogitsProcessor，验证所有 draft token 正常接受，
+    输出与无 logit bias 时完全一致。
+    """
+    spec_tokens = [[1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4]]
+
+    logits = create_logits_tensor(output_tokens)
+
+    logitsprocs = create_logit_bias_processor(biases={})
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[0][-1]], device=logits.device
+    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    expected = torch.tensor(
+        [[1, 2, 3, 4]], dtype=torch.int, device=logits.device
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
