@@ -15,15 +15,15 @@
 
 set -ex
 
+# shellcheck source=lib/manylinux.sh
+source .buildkite/scripts/lib/manylinux.sh
+
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
 S3_COMMIT_PREFIX="s3://$BUCKET/$ROCM_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
 PYTHON="${PYTHON_PROG:-python3}"
-
-# ROCm uses manylinux_2_35 (Ubuntu 22.04 based)
-MANYLINUX_VERSION="manylinux_2_35"
 
 echo "========================================"
 echo "ROCm Wheel Upload Configuration"
@@ -63,11 +63,18 @@ if [ "$WHEEL_COUNT" -eq 0 ]; then
     exit 1
 fi
 
-# Rename linux to manylinux in wheel filenames
+# Detect the appropriate manylinux platform tag for any wheel that still
+# carries the generic ``linux_<arch>`` tag, and rename it in place. We use
+# auditwheel via ``apply_manylinux_tag`` (see lib/manylinux.sh) rather than
+# a hard-coded ``manylinux_2_35`` string so that the label tracks the actual
+# glibc symbol versions used by the binaries (and stays correct if the
+# rocm_base image is rebased).
+#
+# The ``linux``/``manylinux`` filter below skips both pre-tagged wheels
+# (e.g. upstream torch) and pure-Python ``-any.whl`` wheels.
 for wheel in all-rocm-wheels/*.whl; do
     if [[ "$wheel" == *"linux"* ]] && [[ "$wheel" != *"manylinux"* ]]; then
-        new_wheel="${wheel/linux/$MANYLINUX_VERSION}"
-        mv -- "$wheel" "$new_wheel"
+        new_wheel="$(apply_manylinux_tag "$wheel")"
         echo "Renamed: $(basename "$wheel") -> $(basename "$new_wheel")"
     fi
 done
