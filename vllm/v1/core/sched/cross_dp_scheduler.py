@@ -76,7 +76,7 @@ class RequestManager:
             num_buckets=self.cp_world_size,
             max_length=long_request_threshold)
 
-    def select_dp(self, request: Request, is_long: bool) -> list[int] | None:
+    def select_dp(self, request: Request, is_long: bool, num_new_tokens: int, rank_budgets: list[int]) -> list[int] | None:
         if is_long:
             return [
                 i for i in range(self.cp_world_size)
