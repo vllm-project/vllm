@@ -4,26 +4,28 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.config import ModelConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 
 class OEEmbedding(nn.Module):
-    def __init__(self, hf_config):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
-        self.base_vocab_size = hf_config.vocab_size
-        self.oe_vocab_size = hf_config.oe_vocab_size
+        self.base_vocab_size = model_config.get_vocab_size()
+        self.oe_vocab_size = model_config.get_oe_vocab_size()
 
-        self.n_embed_per_ngram = hf_config.n_embed_per_ngram
-        self.n_head_per_ngram = hf_config.n_head_per_ngram
-        self.max_ngram_size = hf_config.max_ngram_size
+        self.n_embed_per_ngram = model_config.get_n_embed_per_ngram()
+        self.n_head_per_ngram = model_config.get_n_head_per_ngram()
+        self.max_ngram_size = model_config.get_max_ngram_size()
+
         self.oe_total_heads = self.n_head_per_ngram * (self.max_ngram_size - 1)
 
         self.vocab_size_for_head: list[int] = []
         self.vocab_mods: list[torch.Tensor] = []
 
         # init oe embedding
-        self.hidden_size = hf_config.hidden_size
+        self.hidden_size = model_config.get_hidden_size()
         # compute vocab size and vocab mods
         self._initialize_vocab_sizes_for_oe()
         self.cusum_vocab_size_for_heads = np.concatenate(
@@ -31,6 +33,10 @@ class OEEmbedding(nn.Module):
         )
 
         self._init_ngram_embeddings()
+
+        # scale-related parameters
+        self.oe_base_scale = model_config.get_oe_base_scale()
+        self.oe_output_scale = model_config.get_oe_output_scale()
 
     def _initialize_vocab_sizes_for_oe(self):
         """Get vocab sizes for each OE head as prime numbers.
@@ -127,4 +133,12 @@ class OEEmbedding(nn.Module):
             -1, self.oe_total_heads * self.n_embed_per_ngram
         )  # [tokens, oe_total_heads * n_embed_per_ngram]
         oe_proj, _ = self.proj(oe_embed_tokens)  # shape: [tokens, hidden_size]
-        return (base_embedding + oe_proj) / (2**0.5)
+        return (
+            base_embedding * self.oe_base_scale + oe_proj * self.oe_output_scale
+        ) / (
+            (
+                self.oe_base_scale * self.oe_base_scale
+                + self.oe_output_scale * self.oe_output_scale
+            )
+            ** 0.5
+        )

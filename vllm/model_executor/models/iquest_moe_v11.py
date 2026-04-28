@@ -412,7 +412,7 @@ class IquestMoeModel(nn.Module):
 
         self.use_oe_embedding = vllm_config.model_config.get_enable_oe_embedding()
         if self.use_oe_embedding:
-            self.over_encoding = OEEmbedding(config)
+            self.over_encoding = OEEmbedding(vllm_config.model_config)
 
         self.num_sink_tokens = vllm_config.model_config.get_num_sink_tokens()
 

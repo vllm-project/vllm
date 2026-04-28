@@ -1267,6 +1267,7 @@ class ModelConfig:
 
         return chunk_size
 
+    # NOTE(yxing): over encoding configuration
     def get_enable_oe_embedding(self) -> bool:
         return getattr(self.hf_text_config, "use_over_encoding", False)
 
@@ -1282,11 +1283,20 @@ class ModelConfig:
     def get_n_head_per_ngram(self) -> int:
         return getattr(self.hf_text_config, "n_head_per_ngram", 0)
 
+    def get_n_embed_per_ngram(self) -> int:
+        return getattr(self.hf_text_config, "n_embed_per_ngram", 0)
+
     def get_max_ngram_size(self) -> int:
         return getattr(self.hf_text_config, "max_ngram_size", 0)
 
     def get_oe_padding_token_id(self) -> int:
         return getattr(self.hf_text_config, "oe_padding_token_id", 0)
+
+    def get_oe_base_scale(self) -> float:
+        return getattr(self.hf_text_config, "oe_base_scale", 1.0)
+
+    def get_oe_output_scale(self) -> float:
+        return getattr(self.hf_text_config, "oe_output_scale", 1.0)
 
     # NOTE(yxing): plt-related config
     def get_plt_num_loops(self) -> int:
