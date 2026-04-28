@@ -512,14 +512,17 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             self._p0_cache[mm_hash] = prompt_updates
             return self.address_as_item(address, monotonic_id), prompt_updates
         except ValueError as e:
-            # Item exceeds `mm_shm_cache_max_object_size_mb`. Subsequent
-            # UUID-only requests for this item will fail with a cache miss.
-            logger.warning_once(
-                "mm_input %s too large to cache; "
-                "raise --mm-shm-cache-max-object-size-mb. (%s)",
-                mm_hash,
-                e,
-            )
+            # `put` raises ValueError either for an oversize item or for a
+            # duplicate key (concurrent insert); the latter is benign so we
+            # only warn on the oversize case. Subsequent UUID-only requests
+            # for an oversize item will fail with a cache miss.
+            if "already exists" not in str(e):
+                logger.warning_once(
+                    "mm_input %s too large to cache; "
+                    "raise --mm-shm-cache-max-object-size-mb. (%s)",
+                    mm_hash,
+                    str(e),
+                )
             return mm_item
         except MemoryError as e:
             # Cache full and protected items prevent eviction.
@@ -527,7 +530,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
                 "mm_input %s not cached; shm cache full, "
                 "consider raising --mm-processor-cache-gb. (%s)",
                 mm_hash,
-                e,
+                str(e),
             )
             return mm_item
 
