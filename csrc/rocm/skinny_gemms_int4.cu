@@ -1039,29 +1039,37 @@ __global__ void moe_wvSplitK_int4_hf_(
 //   expert_stride_w, expert_stride_s, expert_stride_zp, stream, max_lds_len
 // Required type: fptype, N_in (template constant via switch)
 
-#define MOE_WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP)  \
-  {                                                                         \
-    /* One workgroup per CU; expert-block iteration happens inside the      \
-       kernel (see moe_wvSplitK_int4_hf_sml_).  This restores the           \
-       'workgroups == CuCount' M-split invariant of wvSplitK_int4_hf_sml    \
-       and keeps the Strix Halo 20-CU / 8-active-expert tuning optimal. */  \
-    int moe_cu = CuCount;                                                   \
-    if (num_expert_blocks == 0) return;                                     \
-    dim3 block(_THRDS, 16);                                                 \
-    int __wvPrGrp = mindiv_int4(M_in, moe_cu * _YTILE, 16);                 \
-    dim3 grid(moe_cu);                                                      \
-    if (K_in * _N <= MOE_LDS_ELEMS && M_in % _YTILE == 0)                   \
-      moe_wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N,  \
-                                _GS, _HAS_ZP><<<grid, block, 0, stream>>>(  \
-          K_in, M_in, wptr, aptr, sptr, zpptr, cptr, eidptr, stidptr,       \
-          top_k_in, expert_stride_w, expert_stride_s, expert_stride_zp,     \
-          __wvPrGrp, moe_cu, num_expert_blocks);                            \
-    else                                                                    \
-      moe_wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, \
-                            _HAS_ZP><<<grid, block, 0, stream>>>(           \
-          K_in, M_in, wptr, aptr, sptr, zpptr, cptr, eidptr, stidptr,       \
-          top_k_in, expert_stride_w, expert_stride_s, expert_stride_zp,     \
-          __wvPrGrp, moe_cu, num_expert_blocks);                            \
+#define MOE_WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP) \
+  MOE_WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, 16, 16, _UNRL, _N, _GS,   \
+                                 _HAS_ZP)
+
+// Like MOE_WVSPLITK_INT4G_LAUNCH but parameterizes WvPrGrp and A_CHUNK.
+// Used by the gfx1151 N=1, K<1024 heuristic to instantiate (Y4 U2 AC32);
+// all other call sites go through the (W=16, AC=16) wrapper above.
+#define MOE_WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, _W, _AC, _UNRL, _N,   \
+                                       _GS, _HAS_ZP)                         \
+  {                                                                          \
+    /* One workgroup per CU; expert-block iteration happens inside the       \
+       kernel (see moe_wvSplitK_int4_hf_sml_).  This restores the            \
+       'workgroups == CuCount' M-split invariant of wvSplitK_int4_hf_sml     \
+       and keeps the Strix Halo 20-CU / 8-active-expert tuning optimal. */   \
+    int moe_cu = CuCount;                                                    \
+    if (num_expert_blocks == 0) return;                                      \
+    dim3 block(_THRDS, _W);                                                  \
+    int __wvPrGrp = mindiv_int4(M_in, moe_cu * _YTILE, _W);                  \
+    dim3 grid(moe_cu);                                                       \
+    if (K_in * _N <= MOE_LDS_ELEMS && M_in % _YTILE == 0)                    \
+      moe_wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N,  \
+                                _GS, _HAS_ZP><<<grid, block, 0, stream>>>(   \
+          K_in, M_in, wptr, aptr, sptr, zpptr, cptr, eidptr, stidptr,        \
+          top_k_in, expert_stride_w, expert_stride_s, expert_stride_zp,      \
+          __wvPrGrp, moe_cu, num_expert_blocks);                             \
+    else                                                                     \
+      moe_wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS, \
+                            _HAS_ZP><<<grid, block, 0, stream>>>(            \
+          K_in, M_in, wptr, aptr, sptr, zpptr, cptr, eidptr, stidptr,        \
+          top_k_in, expert_stride_w, expert_stride_s, expert_stride_zp,      \
+          __wvPrGrp, moe_cu, num_expert_blocks);                             \
   }
 
 #define MOE_WVSPLITK_INT4G(_YTILE, _UNRL, _N, _GS, _HAS_ZP)        \
@@ -1075,6 +1083,23 @@ __global__ void moe_wvSplitK_int4_hf_(
     MOE_WVSPLITK_INT4G(_YTILE, _UNRL, _N, 32, _HAS_ZP)   \
   else                                                   \
     MOE_WVSPLITK_INT4G(_YTILE, _UNRL, _N, 128, _HAS_ZP)
+
+// Like MOE_WVSPLIT_INT4G_GS but with explicit (W, AC); gfx1x-only
+// because the (Y4 U2 AC32) win came from gfx1151's ATT trace.  GFX9
+// wave64 path is left at the defaults (W=16, AC=16) -- the 4-axis
+// sweep wasn't run there, so it keeps the original launch macro.
+#define MOE_WVSPLIT_INT4G_GS_W_AC(_YTILE, _W, _AC, _UNRL, _N, _HAS_ZP)    \
+  if (is_gfx1x_int4()) {                                                  \
+    if (group_size == 32)                                                 \
+      MOE_WVSPLITK_INT4G_LAUNCH_W_AC(32, _YTILE, _W, _AC, _UNRL, _N, 32,  \
+                                     _HAS_ZP)                             \
+    else                                                                  \
+      MOE_WVSPLITK_INT4G_LAUNCH_W_AC(32, _YTILE, _W, _AC, _UNRL, _N, 128, \
+                                     _HAS_ZP)                             \
+  } else {                                                                \
+    /* GFX9 fallback: original heuristic (W=AC=16). */                    \
+    MOE_WVSPLIT_INT4G_GS(_YTILE, _UNRL, _N, _HAS_ZP)                      \
+  }
 
 #define MOE_WVSPLIT_INT4G_TILE(_sYT, __N, _HAS_ZP)                    \
   {                                                                   \
@@ -1093,8 +1118,27 @@ __global__ void moe_wvSplitK_int4_hf_(
       MOE_WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                        \
     else if (__N >= 2)                                                \
       MOE_WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                        \
-    else /* N=1: YTILE=2 beats YTILE=1 across all CuCount values */   \
-      MOE_WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                        \
+    else /* N=1 split per K, picked from a full 4-axis (Y, U, W, AC)  \
+            Cartesian sweep on gfx1151.  Re-verified in fresh procs   \
+            against the local kernel; the two K ranges land on        \
+            different optima:                                         \
+              K >= 1024 (gemm1 K=2048): Y=4, U=4, W=16, AC=16         \
+                64.17 us/call @ 182.6 GiB/s vs Y2U4's 66.40 us;       \
+                wider YTILE keeps each CU's m-tile fully fed at       \
+                gfx1151's 20-CU width when M is comparable to         \
+                CuCount * 16 * Y.                                     \
+              K <  1024 (gemm2 K=768): Y=4, U=2, W=32, AC=32          \
+                ~10% faster than the previous (Y8 U2 W=AC=16) heur:   \
+                2 wide-load batches per k-step instead of 4 narrow    \
+                ones, fewer waitcnt boundaries amortize HBM page-mode \
+                costs.  GFX9 wave64 stays on the previous heuristic   \
+                via MOE_WVSPLIT_INT4G_GS_W_AC's fallback. */          \
+    {                                                                 \
+      if (K_in >= 1024)                                               \
+        MOE_WVSPLIT_INT4G_GS(4, 4, __N, _HAS_ZP)                      \
+      else                                                            \
+        MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 32, 2, __N, _HAS_ZP)         \
+    }                                                                 \
   }
 
 #define MOE_WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                \
