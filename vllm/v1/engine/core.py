@@ -1540,7 +1540,8 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if not self.has_work():
+
+        if self._pause_complete():
             if clear_cache:
                 self._reset_caches()
             return None
@@ -1548,6 +1549,13 @@ class EngineCoreProc(EngineCore):
         future = Future[Any]()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
+
+    def _pause_complete(self) -> bool:
+        """Returns True if the pause has fully completed and the caller can
+        return ``None`` synchronously; False if the pause is still pending
+        and the caller should register an idle-state callback to finish it.
+        """
+        return not self.has_work()
 
     def _send_finish_outputs_to_client(
         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
@@ -1650,47 +1658,23 @@ class DPEngineCoreProc(EngineCoreProc):
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
-    def pause_scheduler(
-        self, mode: PauseMode = "abort", clear_cache: bool = True
-    ) -> Future | None:
+    def _pause_complete(self) -> bool:
         """Two-phase DP-aware pause.
 
         Phase 1: Set local pause state and ``pending_pause`` flag. If the
-        engines are idle, kick-start them by setting ``engines_running`` to True
-        so ranks enter the stepping loop and reach the all-reduce consensus
-        checkpoint in ``_has_global_unfinished_reqs``.
+        engines are idle, kick-start them by setting ``engines_running`` to
+        True so ranks enter the stepping loop and reach the all-reduce
+        consensus checkpoint in ``_has_global_unfinished_reqs``.
 
         Phase 2 (in ``_has_global_unfinished_reqs``): Once the all-reduce
         confirms that **all** ranks have ``pending_pause`` set, collectively
         stop stepping and set ``ignore_start_dp_wave`` so that stale
         ``START_DP_WAVE`` messages cannot re-wake any engine.
         """
-        if mode not in ("keep", "abort", "wait"):
-            raise ValueError(f"Invalid pause mode: {mode}")
-
-        def engine_idle_callback(engine: "DPEngineCoreProc", future: Future[Any]) -> None:
-            if clear_cache:
-                engine._reset_caches()
-            future.set_result(None)
-
-        if mode == "abort":
-            aborted_reqs = self.scheduler.finish_requests(
-                None, RequestStatus.FINISHED_ABORTED
-            )
-            self._send_abort_outputs(aborted_reqs)
-
-        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
-        self.scheduler.set_pause_state(pause_state)
-
         self.pending_pause = True
-
-        # Kick-start this engine into the stepping loop so it can
-        # reach the all-reduce consensus checkpoint.
         self.engines_running = True
 
-        future: Future[Any] = Future()
-        self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
-        return future
+        return False
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
@@ -1835,7 +1819,9 @@ class DPEngineCoreProc(EngineCoreProc):
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
-            self.dp_group, has_unfinished=local_unfinished, pending_pause=self.pending_pause
+            self.dp_group,
+            has_unfinished=local_unfinished,
+            pending_pause=self.pending_pause,
         )
 
         if pause_consensus:
