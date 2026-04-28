@@ -741,17 +741,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        """Get the cudagraph support level for FlashInfer attention.
-
-        Native FlashInfer can capture UNIFORM_BATCH full cudagraphs for
-        spec-decode by routing uniform query_len > 1 batches through the
-        prefill wrapper in cudagraph mode (verified zero_rows padding yields
-        bit-identical real-row numerics). TRTLLM decode attention is not
-        required for this path.
-
-        DCP uses BatchDCPPrefillWrapper which is not wired for cudagraph
-        spec-decode; downgrade to UNIFORM_SINGLE_TOKEN_DECODE there.
-        """
+        """Native FlashInfer supports uniform multi-token decode via the
+        prefill wrapper; DCP remains single-token."""
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         return AttentionCGSupport.UNIFORM_BATCH
@@ -1300,6 +1291,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     # capacity, so trim it back to the real query-token total
                     # before forward() slices query/output.
                     real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
+                    if real_decode_tokens != num_decode_tokens:
+                        assert (
+                            use_cudagraph
+                            and pure_decode
+                            and num_prefill_tokens == 0
+                        ), (
+                            "num_decode_tokens "
+                            f"({num_decode_tokens}) != qo_indptr[-1] "
+                            f"({real_decode_tokens}) outside FULL-CG decode."
+                        )
                     attn_metadata.num_decode_tokens = real_decode_tokens
                     spec_wrapper = self._get_spec_decode_prefill_wrapper(
                         num_decodes, use_cudagraph

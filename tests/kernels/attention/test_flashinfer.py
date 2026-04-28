@@ -12,10 +12,10 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import PerLayerParameters
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PerLayerParameters
 
 try:
     import flashinfer
@@ -208,6 +208,7 @@ def _make_flashinfer_spec_decode_builder():
         prompt_lookup_max=4,
         prompt_lookup_min=2,
     )
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
     with (
@@ -244,16 +245,10 @@ def _build_flashinfer_spec_decode_metadata(
         fake_wrapper.requested_use_cudagraph = use_cudagraph
         return fake_wrapper
 
-    with (
-        unittest.mock.patch.object(
-            builder,
-            "_get_spec_decode_prefill_wrapper",
-            side_effect=_fake_get_spec_decode_prefill_wrapper,
-        ),
-        unittest.mock.patch(
-            "vllm.v1.attention.backends.flashinfer.can_use_trtllm_attention",
-            return_value=False,
-        ),
+    with unittest.mock.patch.object(
+        builder,
+        "_get_spec_decode_prefill_wrapper",
+        side_effect=_fake_get_spec_decode_prefill_wrapper,
     ):
         attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
 
@@ -947,6 +942,7 @@ def test_spec_decode_routes_to_fispecdecode(
     assert attn_metadata.decode.wrapper is fake_wrapper
 
     assert fake_wrapper.requested_batch_size == len(query_lens)
+    assert fake_wrapper.requested_use_cudagraph is True
     assert fake_wrapper.plan_kwargs is not None
     assert fake_wrapper.plan_kwargs["causal"] is True
 
@@ -960,5 +956,31 @@ def test_spec_decode_routes_to_fispecdecode(
     if query_lens[-1] == 0:
         assert paged_kv_indptr[-1].item() == paged_kv_indptr[-2].item()
 
-    # FlashInfer prefill requires query length to match qo_indptr[-1].
+    # Prevent query[:40] with qo_indptr[-1] == 10.
     assert attn_metadata.num_decode_tokens == expected_qo_indptr[-1]
+
+
+@pytest.mark.parametrize(
+    "dcp_size, expected",
+    [
+        (1, "UNIFORM_BATCH"),
+        (2, "UNIFORM_SINGLE_TOKEN_DECODE"),
+    ],
+)
+def test_get_cudagraph_support_dcp_downgrade(dcp_size, expected):
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    vllm_config = create_vllm_config(
+        model_name=SPEC_DECODE_MODEL,
+        tensor_parallel_size=dcp_size,
+        max_model_len=512,
+        block_size=SPEC_DECODE_BLOCK_SIZE,
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    support = FlashInferMetadataBuilder.get_cudagraph_support(
+        vllm_config, kv_cache_spec
+    )
+    assert support is getattr(AttentionCGSupport, expected)
