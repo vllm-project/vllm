@@ -64,7 +64,9 @@ def run_chat_completion_prompt_embeds(
     vLLM server applies the chat template around it at request time.
     """
     user_content = messages[-1]["content"]
-    content_token_ids = tokenizer(user_content, return_tensors="pt").input_ids
+    content_token_ids = tokenizer(
+        user_content, return_tensors="pt", add_special_tokens=False
+    ).input_ids
     content_prompt_embeds = embedding_layer(content_token_ids).squeeze(0)
     encoded_embeds = tensor2base64(content_prompt_embeds)
 
@@ -78,7 +80,7 @@ def run_chat_completion_prompt_embeds(
 
     chat_completion = client.chat.completions.create(
         model=model_name,
-        max_tokens=8,
+        max_tokens=6,
         temperature=0.0,
         messages=api_messages,
     )
@@ -110,7 +112,7 @@ def run_completion_prompt_embeds(
     completion = client.completions.create(
         model=model_name,
         prompt=None,
-        max_tokens=8,
+        max_tokens=6,
         temperature=0.0,
         # NOTE: The OpenAI client allows passing in extra JSON body via the
         # `extra_body` argument.
