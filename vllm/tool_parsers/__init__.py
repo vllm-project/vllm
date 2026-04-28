@@ -66,6 +66,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hermes_tool_parser",
         "Hermes2ProToolParser",
     ),
+    "poolside_v1": (
+        "poolside_v1_tool_parser",
+        "PoolsideV1ToolParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
