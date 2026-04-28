@@ -7,15 +7,15 @@ no internal lb supported in external_launcher mode.
 
 To run this example:
 ```bash
-$ torchrun --nproc-per-node=2 examples/offline_inference/torchrun_dp_example.py
+$ torchrun --nproc-per-node=2 examples/features/torchrun/torchrun_dp_example_offline.py
 ```
 
 With custom parallelism settings:
 ```bash
-$ torchrun --nproc-per-node=8 examples/offline_inference/torchrun_dp_example.py \
+$ torchrun --nproc-per-node=8 examples/features/torchrun/torchrun_dp_example_offline.py \
     --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 ```
-"""
+"""  # noqa: E501
 
 import argparse
 
