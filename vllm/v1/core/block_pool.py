@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -388,6 +388,10 @@ class BlockPool:
             )
         return True
 
+    def get_block(self, block_id: int) -> KVCacheBlock:
+        """Get a block by its ID."""
+        return self.blocks[block_id]
+
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
@@ -420,6 +424,27 @@ class BlockPool:
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
+
+    def iter_blocks(
+        self, after_block: KVCacheBlock | None = None
+    ) -> Iterator[KVCacheBlock]:
+        """Yield free blocks in LRU order starting after the given block.
+
+        Args:
+            after_block: Resume iteration after this block, or from
+                the head if None.
+        """
+        free_queue = self.free_block_queue
+        tail = free_queue.fake_free_list_tail
+
+        if after_block is not None:
+            node = after_block.next_free_block
+        else:
+            node = free_queue.fake_free_list_head.next_free_block
+
+        while node is not None and node is not tail:
+            yield node
+            node = node.next_free_block
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

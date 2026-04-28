@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVCacheBlock,
+    KVCacheState,
     KVConnectorBase_V1,
     KVConnectorRole,
     SupportsHMA,
@@ -11,6 +13,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
 )
 
 __all__ = [
+    "KVCacheBlock",
+    "KVCacheState",
     "KVConnectorRole",
     "KVConnectorBase_V1",
     "supports_hma",

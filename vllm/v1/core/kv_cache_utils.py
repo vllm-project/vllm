@@ -141,6 +141,20 @@ class KVCacheBlock:
         )
         self._block_hash = block_hash
 
+    @property
+    def content_hash(self) -> BlockHash | None:
+        """The block hash without the group id suffix."""
+        if self._block_hash is None:
+            return None
+        return get_block_hash(self._block_hash)
+
+    @property
+    def group_id(self) -> int | None:
+        """The KV cache group id, or None if no hash is set."""
+        if self._block_hash is None:
+            return None
+        return get_group_id(self._block_hash)
+
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None

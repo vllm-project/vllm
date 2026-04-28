@@ -42,8 +42,8 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import torch
 
@@ -79,6 +79,54 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@runtime_checkable
+class KVCacheBlock(Protocol):
+    """Read-only view of a KV cache block exposed to connectors."""
+
+    @property
+    def block_id(self) -> int: ...
+    @property
+    def ref_cnt(self) -> int: ...
+    @property
+    def is_null(self) -> bool: ...
+    @property
+    def block_hash(self) -> bytes | None: ...
+    @property
+    def content_hash(self) -> bytes | None: ...
+    @property
+    def group_id(self) -> int | None: ...
+
+
+class KVCacheState(Protocol):
+    """Structural interface to the KV cache state for connectors.
+
+    Provides block-level operations without exposing internal data structures.
+    """
+
+    def get_block(self, block_id: int) -> KVCacheBlock:
+        """Get a read-only view of a block by ID."""
+        ...
+
+    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+        """Increment ref_cnt for blocks, preventing eviction."""
+        ...
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        """Decrement ref_cnt, returning blocks to free queue at 0."""
+        ...
+
+    def iter_blocks(
+        self, after_block: KVCacheBlock | None = None
+    ) -> Iterator[KVCacheBlock]:
+        """Yield free blocks in LRU order starting after the given block.
+
+        Args:
+            after_block: Resume iteration after this block, or from
+                the head if None.
+        """
+        ...
 
 
 class SupportsHMA(ABC):
@@ -445,6 +493,19 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_kv_cache_state(self, kv_cache_state: KVCacheState) -> None:
+        """Bind the KV cache state to the connector.
+
+        Called by the scheduler after the KV cache manager is constructed.
+        Connectors that need to interact with the KV cache state should
+        override this method.
+
+        Args:
+            kv_cache_state: Provides block-level operations for the
+                connector (touch, free, iterate).
+        """
+        return
 
     @abstractmethod
     def get_num_new_matched_tokens(

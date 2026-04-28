@@ -162,7 +162,7 @@ def make_scheduler(
         enable_caching=True,
         hash_block_size=BLOCK_SIZE,
     )
-    sched.bind_gpu_block_pool(gpu_block_pool)
+    sched.bind_kv_cache_state(gpu_block_pool)
 
     return SchedulerFixture(
         scheduler=sched,
