@@ -519,11 +519,12 @@ class GGUFLinearMethod(LinearMethodBase):
         qweight = layer.qweight
         shard_id_map = qweight.shard_id_map
         shard_id = qweight.shard_id
+        # Skip single-slot layers: no merge needed, and shard_offset_map is
+        # not built for them (TP>1 may land only one slot on this rank).
         if len(data_container := qweight.data_container) > 1:
             dtype = {data.dtype for data in data_container}
-            assert len(dtype) == 1, ValueError(
-                f"Data container has mixed dtypes: {dtype}"
-            )
+            if len(dtype) != 1:
+                raise ValueError(f"Data container has mixed dtypes: {dtype}")
             dtype = next(iter(dtype))
             # concat dim0 and pad dim1
             padded_side = max(x.size(1) for x in data_container)
