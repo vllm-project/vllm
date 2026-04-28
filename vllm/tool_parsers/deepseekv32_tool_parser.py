@@ -46,13 +46,13 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
+    tool_call_start_token: str = "<｜DSML｜function_calls>"
+    tool_call_end_token: str = "</｜DSML｜function_calls>"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
-
-        # Sentinel token
-        self.tool_call_start_token: str = "<｜DSML｜function_calls>"
 
         # Streaming state
         self.current_tool_index: int = 0
@@ -60,7 +60,10 @@ class DeepSeekV32ToolParser(ToolParser):
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
-            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>", re.DOTALL
+            re.escape(self.tool_call_start_token)
+            + r"(.*?)"
+            + re.escape(self.tool_call_end_token),
+            re.DOTALL,
         )
         self.invoke_complete_regex = re.compile(
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>', re.DOTALL
@@ -86,7 +89,7 @@ class DeepSeekV32ToolParser(ToolParser):
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
-            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # (e.g. <｜DSML｜function_calls>, </｜DSML｜function_calls>)
             # are not skippedduring decoding.
             # Even though they are not marked as special tokens,
             # setting skip_special_tokens=False ensures proper handling in

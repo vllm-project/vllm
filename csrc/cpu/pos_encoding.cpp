@@ -178,7 +178,12 @@ void rotary_embedding_gptj_impl(
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
-                      torch::Tensor& cos_sin_cache, bool is_neox) {
+                      torch::Tensor& cos_sin_cache, bool is_neox,
+                      int64_t rope_dim_offset, bool inverse) {
+  TORCH_CHECK(rope_dim_offset == 0,
+              "rope_dim_offset != 0 is not supported on CPU");
+  TORCH_CHECK(!inverse, "inverse rotary embedding is not supported on CPU");
+
   int num_tokens = positions.numel();
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;

@@ -309,6 +309,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         if self.unquantized_backend == UnquantizedMoeBackend.CPU:
