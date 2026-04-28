@@ -3,14 +3,14 @@
 """
 Usage:
 Single node:
-    python examples/offline_inference/data_parallel.py \
+    python examples/features/data_parallel/data_parallel_offline.py \
             --model="ibm-research/PowerMoE-3b" \
             -dp=2 \
             -tp=2
 
 Multi-node:
     Node 0 (assume the node has ip of 10.99.48.128):
-            python examples/offline_inference/data_parallel.py \
+            python examples/features/data_parallel/data_parallel_offline.py \
                     --model="ibm-research/PowerMoE-3b" \
                     -dp=2 \
                     -tp=2 \
@@ -19,7 +19,7 @@ Multi-node:
                     --dp-master-addr=10.99.48.128 \
                     --dp-master-port=13345
     Node 1:
-            python examples/offline_inference/data_parallel.py \
+            python examples/features/data_parallel/data_parallel_offline.py \
                     --model="ibm-research/PowerMoE-3b" \
                     -dp=2 \
                     -tp=2 \
