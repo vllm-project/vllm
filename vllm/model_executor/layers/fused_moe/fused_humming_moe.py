@@ -394,7 +394,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def is_supported_config(
-        cls: type["HummingExpertsBase"],
+        cls: type[mk.FusedMoEExperts],
         moe_config: FusedMoEConfig,
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -408,10 +408,11 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 supported = False
                 reason = "activation_format mismatched"
             else:
+                assert hasattr(cls, "humming_gemm_type")
                 gemm_type = cls.humming_gemm_type().value.lower()
-                prefered_gemm_type = get_humming_moe_gemm_type().lower()
-                supported = prefered_gemm_type == gemm_type
-                reason = "prefered gemm type mismatched"
+                preferred_gemm_type = get_humming_moe_gemm_type().lower()
+                supported = preferred_gemm_type == gemm_type
+                reason = "preferred gemm type mismatched"
         else:
             supported = False
             reason = "unsupported activation_format"
