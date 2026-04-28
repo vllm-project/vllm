@@ -289,8 +289,12 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
-    kv_cache_t* __restrict__ b_tile_4 = b_tile_2 + tile_elems;
-    kv_cache_t* __restrict__ b_tile_5 = b_tile_3 + tile_elems;
+    kv_cache_t* __restrict__ b_tile_4 =
+        b_tile_2 + AMX_TILE_BYTES / sizeof(c10::BFloat16);
+    ;
+    kv_cache_t* __restrict__ b_tile_5 =
+        b_tile_3 + AMX_TILE_BYTES / sizeof(c10::BFloat16);
+    ;
     int64_t b_stride = AMX_TILE_ROW_BYTES;
 
     float* __restrict__ c_tile_6 = c_tile;
