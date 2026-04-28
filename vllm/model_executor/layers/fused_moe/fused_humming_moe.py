@@ -48,9 +48,6 @@ def get_humming_moe_gemm_type() -> str:
         gemm_type = env_gemm_type
     elif env_gemm_type in ["grouped_contiguous", "grouped"]:
         gemm_type = "grouped_contiguous"
-    elif current_platform.has_device_capability(90):
-        # for device that supports TMA, use grouped gemm
-        gemm_type = "grouped_contiguous"
     else:
         gemm_type = "indexed"
 
