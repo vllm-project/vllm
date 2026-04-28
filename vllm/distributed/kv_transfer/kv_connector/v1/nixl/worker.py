@@ -49,7 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
     _build_gather_read_specs,
     _is_attention_spec,
     _is_ssm_spec,
-    _remap_remote_blocks_to_subdesc_ids,
+    _remap_remote_blocks_to_desc_ids,
     build_fa_local_descs_for_gather_read,
     build_fa_local_regions,
     build_mamba_local_regions,
@@ -189,22 +189,38 @@ class NixlConnectorWorker:
           local sub-desc remapping via ``_build_gather_read_specs``.
         - **Split-read** (``remote_to_local_page_ratio > 1``):
           rank-independent remote sub-desc remapping via
-          ``_remap_remote_blocks_to_subdesc_ids``.
+          ``_remap_remote_blocks_to_desc_ids``.
         - **Standard**: direct per-rank group filtering.
         """
         if plan.local_to_remote_page_ratio > 1:
-            return _build_gather_read_specs(
+            specs = _build_gather_read_specs(
                 plan, local_block_ids, remote_block_ids
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                for s in specs:
+                    for g in range(len(s.local_block_ids)):
+                        if s.local_block_ids[g]:
+                            logger.debug(
+                                "[ReadSpec gather] rank=%d group=%d: "
+                                "local[:5]=%s remote[:5]=%s "
+                                "(n_local=%d, n_remote=%d)",
+                                s.remote_rank,
+                                g,
+                                s.local_block_ids[g][:5],
+                                s.remote_block_ids[g][:5],
+                                len(s.local_block_ids[g]),
+                                len(s.remote_block_ids[g]),
+                            )
+            return specs
 
         remote_block_ids, local_block_ids = (
-            _remap_remote_blocks_to_subdesc_ids(
+            _remap_remote_blocks_to_desc_ids(
                 plan, remote_block_ids, local_block_ids
             )
         )
 
         num_groups = len(local_block_ids)
-        return [
+        specs = [
             ReadSpec(
                 remote_rank=rank,
                 local_block_ids=[
@@ -222,6 +238,22 @@ class NixlConnectorWorker:
             )
             for rank in plan.all_source_ranks
         ]
+        if logger.isEnabledFor(logging.DEBUG):
+            for s in specs:
+                for g in range(num_groups):
+                    if s.local_block_ids[g]:
+                        logger.debug(
+                            "[ReadSpec std/split] rank=%d group=%d: "
+                            "local[:5]=%s remote[:5]=%s "
+                            "(n_local=%d, n_remote=%d)",
+                            s.remote_rank,
+                            g,
+                            s.local_block_ids[g][:5],
+                            s.remote_block_ids[g][:5],
+                            len(s.local_block_ids[g]),
+                            len(s.remote_block_ids[g]),
+                        )
+        return specs
 
     @staticmethod
     def _build_local_splits_from_plan(
@@ -511,7 +543,7 @@ class NixlConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
-        # Gather-read local handles: local blocks split into sub-descs
+        # Gather-read local handles: local blocks split into descriptors
         # matching remote page size.  Keyed by engine_id.
         self._gather_read_handles: dict[EngineId, int] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
@@ -1242,6 +1274,22 @@ class NixlConnectorWorker:
                 f"Remote tokens_per_block_per_group length "
                 f"{len(remote_tpb)} != {len(group_spec_types)} groups"
             )
+            logger.info(
+                "[HeteroTP] Generating Gemma4 plan: "
+                "group_kinds=%s, total_kv_heads_per_group=%s, "
+                "local_tpb_per_group=%s, remote_tpb_per_group=%s, "
+                "local_block_len_per_layer=%s, remote_block_lens=%s, "
+                "local_tp=%d, remote_tp=%d, tp_rank=%d",
+                [k.value for k in self._group_kinds],
+                self._total_kv_heads_per_group,
+                self._local_tokens_per_block_per_group,
+                remote_tpb,
+                self.block_len_per_layer[:3],
+                nixl_agent_meta.block_lens[:3],
+                transfer_topo.tp_size,
+                remote_tp_size,
+                transfer_topo.tp_rank,
+            )
             self._transfer_plans[engine_id] = generate_gemma4_plan(
                 transfer_topo=transfer_topo,
                 block_len_per_layer=self.block_len_per_layer,
@@ -1306,12 +1354,12 @@ class NixlConnectorWorker:
             plan.local_to_remote_page_ratio > 1
             and engine_id not in self._gather_read_handles
         ):
-            # Gather-read: local page > remote page.  Register local descs
-            # with sub-descriptors matching the remote block size.
+            # Gather-read: local page > remote page.  Register local
+            # descriptors matching the remote block size.
             assert self.transfer_topo is not None
-            local_base_addresses = self.kv_caches_base_addr[
-                self.engine_id
-            ][self.tp_rank]
+            local_base_addresses = self.kv_caches_base_addr[self.engine_id][
+                self.tp_rank
+            ]
             gather_blocks_data = build_fa_local_descs_for_gather_read(
                 base_addresses=local_base_addresses,
                 device_id=self.device_id,
@@ -1323,8 +1371,8 @@ class NixlConnectorWorker:
             descs = self.nixl_wrapper.get_xfer_descs(
                 gather_blocks_data, self.nixl_memory_type
             )
-            self._gather_read_handles[engine_id] = (
-                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+            self._gather_read_handles[engine_id] = self.nixl_wrapper.prep_xfer_dlist(
+                "NIXL_INIT_AGENT", descs
             )
         elif (
             tp_ratio < 0
@@ -1905,6 +1953,31 @@ class NixlConnectorWorker:
         if self.use_mla and tp_ratio < 0:
             read_specs = read_specs[:1]
 
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[HeteroTP _read_blocks_for_req] req=%s engine=%s "
+                "tp_ratio=%d, n_read_specs=%d, "
+                "plan: split_ratio=%d, gather_ratio=%d, "
+                "group_kinds=%s, "
+                "local_physical_block_ids=[%s], "
+                "remote_block_ids=[%s]",
+                req_id,
+                engine_id,
+                tp_ratio,
+                len(read_specs),
+                plan.remote_to_local_page_ratio,
+                plan.local_to_remote_page_ratio,
+                [k.value for k in plan.group_kinds],
+                ", ".join(
+                    f"g{i}:{meta.local_physical_block_ids[i][:5]}"
+                    for i in range(len(meta.local_physical_block_ids))
+                ),
+                ", ".join(
+                    f"g{i}:{meta.remote.block_ids[i][:5]}"
+                    for i in range(len(meta.remote.block_ids))
+                ),
+            )
+
         for i, spec in enumerate(read_specs):
             remote_rank = spec.remote_rank
             local_block_ids = spec.local_block_ids
@@ -1920,7 +1993,7 @@ class NixlConnectorWorker:
             )
             # Get side handles.
             if engine_id in self._gather_read_handles:
-                # Gather-read: local sub-desc handle matches remote page size.
+                # Gather-read: local descriptor handle matches remote page size.
                 local_xfer_side_handle = self._gather_read_handles[engine_id]
             elif tp_ratio < 0 and not self.use_mla:
                 assert remote_block_size == self.block_size
@@ -2048,8 +2121,10 @@ class NixlConnectorWorker:
         # Partial prefix cache hit: trim to the shorter of local/remote.
         # Skip mamba groups — their blocks represent full state (conv+ssm),
         # not per-token data, so trimming would corrupt the transfer.
-        # For standard and split-read: remote >= local (trim remote).
-        # For gather-read: local sub-descs may exceed remote (trim local).
+        # After ReadSpec construction, local descriptor IDs and remote
+        # block IDs should already have matched lengths per group
+        # (gather-read pairing ensures this).  Trim from the head to
+        # keep the tail (newest blocks).
         remote_block_ids = list(remote_block_ids)
         local_block_ids = list(local_block_ids)
         group_specs = self.kv_cache_config.kv_cache_groups
@@ -2064,6 +2139,14 @@ class NixlConnectorWorker:
                 local_block_ids[i] = local_block_ids[i][-n:]
             if n_remote > n:
                 remote_block_ids[i] = remote_block_ids[i][-n:]
+
+        for i in range(len(remote_block_ids)):
+            assert len(local_block_ids[i]) == len(remote_block_ids[i]), (
+                f"Block ID length mismatch after trim: group={i}, "
+                f"n_local={len(local_block_ids[i])}, "
+                f"n_remote={len(remote_block_ids[i])}. "
+                f"ReadSpec should produce matched lengths."
+            )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
@@ -2096,6 +2179,31 @@ class NixlConnectorWorker:
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[HeteroTP _read_blocks] req=%s rank=%d: "
+                "n_descs=%d, block_size_ratio=%s, "
+                "remote_desc_blocks=%d, local_desc_blocks=%d, "
+                "local_desc_ids[:10]=%s, remote_desc_ids[:10]=%s, "
+                "local_block_ids=[%s], remote_block_ids=[%s]",
+                request_id,
+                remote_rank,
+                len(local_block_descs_ids),
+                block_size_ratio,
+                remote_desc_blocks,
+                local_desc_blocks,
+                local_block_descs_ids[:10].tolist(),
+                remote_block_descs_ids[:10].tolist(),
+                ", ".join(
+                    f"g{i}:{local_block_ids[i][:5]}"
+                    for i in range(len(local_block_ids))
+                ),
+                ", ".join(
+                    f"g{i}:{remote_block_ids[i][:5]}"
+                    for i in range(len(remote_block_ids))
+                ),
+            )
 
         # Prepare transfer with Nixl.
         handle = None

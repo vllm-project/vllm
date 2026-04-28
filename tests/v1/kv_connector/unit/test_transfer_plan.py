@@ -652,7 +652,7 @@ class TestGemma4PlanStructure:
         assert plan.remote_to_local_page_ratio == 2
         assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
         assert plan.local_blocks_per_remote_block == (1, 2)
-        assert plan.sub_desc_index_per_group == (0, 0)  # rank 0: index=0
+        assert plan.remote_desc_offset_per_group == (0, 0)  # rank 0: index=0
         assert plan.all_source_ranks == (0,)
         assert plan.source_ranks_per_group == ((0,), (0,))
 
@@ -660,7 +660,7 @@ class TestGemma4PlanStructure:
         """D rank 1 at 2p4d: SWA reads second descriptor (index=1)."""
         plan = generate_gemma4_plan(**_make_gemma4_plan_params(tp_rank=1))
 
-        assert plan.sub_desc_index_per_group == (1, 0)  # rank 1: SWA=1
+        assert plan.remote_desc_offset_per_group == (1, 0)  # rank 1: SWA=1
         assert plan.local_blocks_per_remote_block == (1, 2)
         assert plan.all_source_ranks == (0,)
 
@@ -669,7 +669,7 @@ class TestGemma4PlanStructure:
         plan = generate_gemma4_plan(**_make_gemma4_plan_params(tp_rank=2))
 
         assert plan.all_source_ranks == (1,)
-        assert plan.sub_desc_index_per_group == (0, 0)
+        assert plan.remote_desc_offset_per_group == (0, 0)
 
     def test_fa_regions_have_multiple_descs_per_block(self):
         """FA regions should have descs_per_block = page ratio."""
@@ -842,8 +842,9 @@ class TestGemma4GatherReadPlanStructure:
         assert plan.remote_blocks_per_local_block == (1, 2)
         assert plan.local_blocks_per_remote_block == (1, 1)
         # SWA: D rank 0 reads from P rank 0 and P rank 1
-        assert (0,) in plan.source_ranks_per_group[0] or \
-            len(plan.source_ranks_per_group[0]) == 2
+        assert (0,) in plan.source_ranks_per_group[0] or len(
+            plan.source_ranks_per_group[0]
+        ) == 2
         # FA: after GQA dedup, D rank 0 reads from P rank 0 only
         assert len(plan.source_ranks_per_group[1]) == 1
 
@@ -920,7 +921,7 @@ class TestGemma4GatherReadSpecs:
         spec0 = specs[0]
         assert list(spec0.local_block_ids[0]) == [20, 22]  # SWA slot 0
         assert list(spec0.local_block_ids[1]) == [40, 41]  # FA gather
-        assert list(spec0.remote_block_ids[0]) == [5, 6]   # SWA blocks
+        assert list(spec0.remote_block_ids[0]) == [5, 6]  # SWA blocks
         assert list(spec0.remote_block_ids[1]) == [30, 31]  # FA blocks
 
         # Spec 1 (P rank 1):
@@ -928,7 +929,7 @@ class TestGemma4GatherReadSpecs:
         # FA: empty (rank 1 not in FA source_ranks after GQA dedup)
         spec1 = specs[1]
         assert list(spec1.local_block_ids[0]) == [21, 23]  # SWA slot 1
-        assert list(spec1.remote_block_ids[0]) == [5, 6]   # SWA blocks
+        assert list(spec1.remote_block_ids[0]) == [5, 6]  # SWA blocks
         assert spec1.local_block_ids[1] == []  # FA empty for rank 1
         assert spec1.remote_block_ids[1] == []
 
@@ -971,9 +972,7 @@ class TestGemma4GatherReadPlan4p1d:
 
     def test_4p1d_no_crash(self):
         """4p1d should not crash."""
-        params = _make_gemma4_gather_plan_params(
-            tp_rank=0, tp_size=1, remote_tp_size=4
-        )
+        params = _make_gemma4_gather_plan_params(tp_rank=0, tp_size=1, remote_tp_size=4)
         # D_TP=1: D_page = 131072 (8 heads * 256 * 2 * 16 * 2 for SWA)
         # P_TP=4: P_page = 32768
         params["block_len_per_layer"] = [131072, 131072]

@@ -8,6 +8,7 @@ for NIXL KV cache transfers.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     MambaConvSplitInfo,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -130,15 +133,15 @@ class EngineTransferPlan:
     # Gemma4 2p4d: SWA = 16/16 = 1, FA = 32/16 = 2.
     local_blocks_per_remote_block: tuple[int, ...] = ()
 
-    # Per-group: which descriptor index to read from a multi-descriptor
+    # Per-group: which descriptor offset to read from a multi-descriptor
     # remote block (for head-split groups where local reads a portion).
     # Gemma4 2p4d rank 0: SWA = 0 (first half), FA = 0 (unused, reads all).
     # Gemma4 2p4d rank 1: SWA = 1 (second half), FA = 0.
-    sub_desc_index_per_group: tuple[int, ...] = ()
+    remote_desc_offset_per_group: tuple[int, ...] = ()
 
     # --- Gather-read fields (local page > remote page, e.g. 4p2d FA) ---
-    # When D pages are larger than P pages, local blocks are split into
-    # sub-descriptors matching the remote block size for RDMA pairing.
+    # When D pages are larger than P pages, each local block is registered
+    # as multiple NIXL descriptors matching the remote block size.
 
     # local_page_size_bytes / remote_page_size_bytes.
     # 4p2d Gemma4: 65536 / 32768 = 2.  1 when no gather-read.
@@ -499,10 +502,10 @@ def generate_gemma4_plan(
        and **gather-read** (local page > remote page, e.g. 4p2d).
     3. Encodes per-group transfer behavior via
        ``local_blocks_per_remote_block`` / ``remote_blocks_per_local_block``
-       and ``sub_desc_index_per_group``.
+       and ``remote_desc_offset_per_group``.
 
-    Split-read (P_page > D_page): remote blocks are split into sub-descs.
-    Gather-read (D_page > P_page): local blocks are split into sub-descs.
+    Split-read (P_page > D_page): each remote block → multiple descriptors.
+    Gather-read (D_page > P_page): each local block → multiple descriptors.
     """
     tp_rank = transfer_topo.tp_rank
     tp_size = transfer_topo.tp_size
@@ -523,7 +526,7 @@ def generate_gemma4_plan(
 
     blocks_per_remote: list[int] = []
     remote_blocks_per_local: list[int] = []
-    sub_desc_idx: list[int] = []
+    remote_desc_offset: list[int] = []
 
     source_ranks_all: list[tuple[int, ...]] = []
     rank_to_slot_all: list[dict[int, int]] = []
@@ -551,16 +554,47 @@ def generate_gemma4_plan(
         source_ranks_all.append(m_g.source_ranks_per_group[0])
         rank_to_slot_all.append(m_g.rank_to_attention_slot)
 
-        # Head-split groups (split-read only): rank_offset selects sub-desc.
+        # Head-split groups (split-read only): rank_offset selects descriptor.
         if blocks_per_remote[-1] == 1 and split_page_ratio > 1:
-            sub_desc_idx.append(m_g.rank_offset_factor)
+            remote_desc_offset.append(m_g.rank_offset_factor)
         else:
-            sub_desc_idx.append(0)
+            remote_desc_offset.append(0)
 
     all_ranks: set[int] = set()
     for ranks in source_ranks_all:
         all_ranks.update(ranks)
     all_source_ranks = tuple(sorted(all_ranks))
+
+    # --- Diagnostic logging for HeteroTP plan ---
+    logger.info(
+        "[HeteroTP Plan] tp_rank=%d, tp_size=%d, remote_tp_size=%d, "
+        "local_page=%d, remote_page=%d, "
+        "split_page_ratio=%d, gather_page_ratio=%d",
+        tp_rank,
+        tp_size,
+        remote_tp_size,
+        local_page,
+        remote_page,
+        split_page_ratio,
+        gather_page_ratio,
+    )
+    for g in range(n_groups):
+        logger.info(
+            "[HeteroTP Plan] group=%d kind=%s: K=%d, "
+            "local_tpb=%d, remote_tpb=%d, "
+            "blocks_per_remote=%d, remote_blocks_per_local=%d, "
+            "desc_offset=%d, source_ranks=%s, slot_map=%s",
+            g,
+            group_kinds[g].value,
+            total_num_kv_heads_per_group[g],
+            local_tokens_per_block[g],
+            remote_tokens_per_block[g],
+            blocks_per_remote[g],
+            remote_blocks_per_local[g],
+            remote_desc_offset[g],
+            source_ranks_all[g],
+            rank_to_slot_all[g],
+        )
 
     # HMA: one K pool (+ optional V pool) shared by all groups.
     fa_regions: list[RegionPlan] = []
@@ -573,7 +607,7 @@ def generate_gemma4_plan(
         page_stride = remote_meta.block_lens[i]
 
         if split_page_ratio > 1:
-            # Split-read: remote blocks produce sub-descs of local page size
+            # Split-read: remote blocks produce descriptors of local page size
             desc_bytes = local_block_len
             descs_per_block = split_page_ratio
             desc_stride = local_block_len
@@ -627,7 +661,7 @@ def generate_gemma4_plan(
         remote_expansion_stride=1,
         remote_to_local_page_ratio=split_page_ratio,
         local_blocks_per_remote_block=tuple(blocks_per_remote),
-        sub_desc_index_per_group=tuple(sub_desc_idx),
+        remote_desc_offset_per_group=tuple(remote_desc_offset),
         local_to_remote_page_ratio=gather_page_ratio,
         remote_blocks_per_local_block=tuple(remote_blocks_per_local),
     )
@@ -638,7 +672,7 @@ def generate_gemma4_plan(
 # ======================================================================
 
 
-def _remap_remote_blocks_to_subdesc_ids(
+def _remap_remote_blocks_to_desc_ids(
     plan: EngineTransferPlan,
     remote_block_ids: BlockIds,
     local_block_ids: BlockIds,
@@ -662,8 +696,8 @@ def _remap_remote_blocks_to_subdesc_ids(
     * **Head-split** (``local_blocks_per_remote_block == 1``, e.g. SWA):
       Local reads one specific chunk of the remote block.
       Remote block ``b`` → descriptor index
-      ``b*ratio + sub_desc_index_per_group[g]``.
-      Example: SWA block 10, ratio=2, index=1 → desc index 21.
+      ``b*ratio + remote_desc_offset_per_group[g]``.
+      Example: SWA block 10, ratio=2, offset=1 → desc index 21.
 
     Local block IDs are returned unchanged.
     """
@@ -686,7 +720,7 @@ def _remap_remote_blocks_to_subdesc_ids(
                 remapped.extend(b * ratio + s for s in range(n_local))
             new_remote.append(remapped)
         else:
-            idx = plan.sub_desc_index_per_group[g]
+            idx = plan.remote_desc_offset_per_group[g]
             new_remote.append([b * ratio + idx for b in r_ids])
 
         new_local.append(l_ids)
@@ -701,21 +735,76 @@ def _build_gather_read_specs(
 ) -> list[ReadSpec]:
     """Build read specs for gather-read (local page > remote page).
 
-    In gather-read, local blocks are split into sub-descriptors matching
-    remote block size.  Each rank's read targets specific local sub-descs:
+    In gather-read, each local block is registered as multiple NIXL
+    descriptors (``descs_per_block`` in ``RegionPlan``), each matching
+    the remote block byte size.  Each rank's read targets specific
+    local descriptor IDs:
 
     * **Gather groups** (``remote_blocks_per_local_block > 1``, e.g. FA):
       N remote blocks fill one local block.
-      Local block ``b`` → sub-desc indices
-      ``[b*ratio, b*ratio+1, ..., b*ratio+(N-1)]``.
+      Local block ``b`` → descriptor IDs
+      ``[b*gather_ratio, b*gather_ratio+1, ..., b*gather_ratio+(N-1)]``.
+      Remote block IDs are kept as-is (one remote block = one
+      remote descriptor).  The matched-length invariant
+      ``len(local_desc_ids) == len(remote_block_ids)`` must hold;
+      it is enforced by an assertion after construction.
 
     * **Concat groups** (``remote_blocks_per_local_block == 1``, e.g. SWA):
-      Each rank writes to a specific slot of the local block.
-      Local block ``b`` → sub-desc index
-      ``b*ratio + rank_slot``.
+      Each rank writes to a specific descriptor within the local block.
+      Local block ``b`` → descriptor ID
+      ``b*gather_ratio + rank_slot``.
     """
     gather_ratio = plan.local_to_remote_page_ratio
     num_groups = len(local_block_ids)
+
+    def _pair_gather_group(
+        g_local_block_ids: list[int],
+        g_remote_block_ids: list[int],
+        remote_blocks_per_local: int,
+    ) -> tuple[list[int], list[int]]:
+        """Pair local descriptor IDs with remote block IDs for a gather group.
+
+        With HMA, all groups receive the same block ID list.  For gather
+        groups (``remote_blocks_per_local > 1``), every
+        ``remote_blocks_per_local`` consecutive remote blocks map to
+        descriptors of a single local block:
+
+            local block b, remote blocks [r0, r1]  →
+                local desc  b*gather_ratio + 0  paired with  r0
+                local desc  b*gather_ratio + 1  paired with  r1
+
+        When the remote block count is not a multiple of
+        ``remote_blocks_per_local``, the remainder fills the first
+        descriptors of the next local block (partial fill).
+
+        Returns matched-length lists:
+            (local_desc_ids, paired_remote_block_ids)
+        """
+        n_local = len(g_local_block_ids)
+        n_remote = len(g_remote_block_ids)
+        n_full = min(n_remote // remote_blocks_per_local, n_local)
+        remainder_remote = n_remote - n_full * remote_blocks_per_local
+
+        local_desc_ids: list[int] = []
+        paired_remote: list[int] = []
+
+        for i in range(n_full):
+            b = g_local_block_ids[i]
+            for s in range(remote_blocks_per_local):
+                local_desc_ids.append(b * gather_ratio + s)
+                paired_remote.append(
+                    g_remote_block_ids[i * remote_blocks_per_local + s]
+                )
+
+        if remainder_remote > 0 and n_full < n_local:
+            b = g_local_block_ids[n_full]
+            base = n_full * remote_blocks_per_local
+            for s in range(remainder_remote):
+                local_desc_ids.append(b * gather_ratio + s)
+                paired_remote.append(g_remote_block_ids[base + s])
+
+        return local_desc_ids, paired_remote
+
     specs: list[ReadSpec] = []
 
     for rank in plan.all_source_ranks:
@@ -731,28 +820,48 @@ def _build_gather_read_specs(
             n_remote_per_local = plan.remote_blocks_per_local_block[g]
 
             if n_remote_per_local > 1:
-                expanded_local: list[int] = []
-                for b in local_block_ids[g]:
-                    expanded_local.extend(
-                        b * gather_ratio + s
-                        for s in range(n_remote_per_local)
-                    )
-                rank_local.append(expanded_local)
-                rank_remote.append(list(remote_block_ids[g]))
+                g_local, g_remote = _pair_gather_group(
+                    local_block_ids[g],
+                    remote_block_ids[g],
+                    n_remote_per_local,
+                )
+                rank_local.append(g_local)
+                rank_remote.append(g_remote)
             else:
                 slot = plan.rank_to_attention_slot[g].get(rank, 0)
+                l_ids = local_block_ids[g]
+                r_ids = remote_block_ids[g]
+                n = min(len(l_ids), len(r_ids))
                 rank_local.append(
-                    [b * gather_ratio + slot for b in local_block_ids[g]]
+                    [
+                        l_ids[i] * gather_ratio + slot
+                        for i in range(len(l_ids) - n, len(l_ids))
+                    ]
                 )
-                rank_remote.append(list(remote_block_ids[g]))
+                rank_remote.append(list(r_ids[len(r_ids) - n :]))
 
-        specs.append(ReadSpec(
-            remote_rank=rank,
-            local_block_ids=rank_local,
-            remote_block_ids=rank_remote,
-        ))
+        for g in range(num_groups):
+            assert len(rank_local[g]) == len(rank_remote[g]), (
+                f"Gather-read length mismatch: group={g}, rank={rank}, "
+                f"n_local_descs={len(rank_local[g])}, "
+                f"n_remote_blocks={len(rank_remote[g])}. "
+                f"Each local descriptor must pair with exactly one "
+                f"remote block ID."
+            )
+
+        specs.append(
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=rank_local,
+                remote_block_ids=rank_remote,
+            )
+        )
 
     return specs
+
+
+logger = logging.getLogger(__name__)
+
 
 
 # ======================================================================
@@ -810,36 +919,31 @@ def build_fa_local_descs_for_gather_read(
     is_blocks_first: bool,
     gather_page_ratio: int,
 ) -> list[tuple[int, int, int]]:
-    """Build FA local descriptors with sub-descriptors for gather-read.
+    """Build FA local descriptors for gather-read.
 
     Each local block produces ``gather_page_ratio`` descriptors, each
     covering ``kv_block_len // gather_page_ratio`` bytes.  This allows
-    NIXL to pair each local sub-descriptor with a remote descriptor of
+    NIXL to pair each local descriptor with a remote descriptor of
     matching size (the remote's natural page size).
     """
     result: list[tuple[int, int, int]] = []
     for i, base_addr in enumerate(base_addresses):
         kv_block_len = _get_kv_block_len(i, block_len_per_layer, is_blocks_first)
         page_stride = block_len_per_layer[i]
-        sub_desc_bytes = kv_block_len // gather_page_ratio
+        desc_bytes = kv_block_len // gather_page_ratio
 
         for block_id in range(num_blocks):
             blk_addr = base_addr + block_id * page_stride
             for s in range(gather_page_ratio):
-                result.append(
-                    (blk_addr + s * sub_desc_bytes, sub_desc_bytes, device_id)
-                )
+                result.append((blk_addr + s * desc_bytes, desc_bytes, device_id))
 
         if is_blocks_first:
-            v_sub_desc_bytes = kv_block_len // gather_page_ratio
+            v_desc_bytes = kv_block_len // gather_page_ratio
             for block_id in range(num_blocks):
-                v_blk_addr = (
-                    base_addr + block_id * page_stride + kv_block_len
-                )
+                v_blk_addr = base_addr + block_id * page_stride + kv_block_len
                 for s in range(gather_page_ratio):
                     result.append(
-                        (v_blk_addr + s * v_sub_desc_bytes, v_sub_desc_bytes,
-                         device_id)
+                        (v_blk_addr + s * v_desc_bytes, v_desc_bytes, device_id)
                     )
 
     return result
