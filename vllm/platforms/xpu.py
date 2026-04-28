@@ -362,6 +362,7 @@ class XPUPlatform(Platform):
 
         return IrOpPriorityConfig.with_default(
             default,
+            dynamic_group_quant_fp8=["xpu_kernels", "native"],
         )
 
     @classmethod

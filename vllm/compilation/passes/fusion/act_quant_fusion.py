@@ -19,9 +19,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+
+from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 from .matcher_utils import MatcherSiluAndMul
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i32
-from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 
 logger = init_logger(__name__)
 
@@ -201,7 +202,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
             return vllm.ir.ops.dynamic_group_quant_fp8(
                 silu_out,
                 group_shape=[1, self.group_size],
-                column_major=is_scale_transposed,
+                column_major=self.is_scale_transposed,
                 use_ue8m0=self.is_e8m0,
                 fp8_dtype=FP8_DTYPE,
                 scale_alignment=4 if self.is_tma_aligned else 1,
