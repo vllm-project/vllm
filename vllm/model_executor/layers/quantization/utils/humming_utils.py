@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import re
 from typing import Any
 
+import regex as re
 import torch
 from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
