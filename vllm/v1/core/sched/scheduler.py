@@ -2169,7 +2169,7 @@ class Scheduler(SchedulerInterface):
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids)
                 affected_req_ids.add(req_id)
-        
+
         return affected_req_ids, blocks_to_evict
 
     def _handle_invalid_blocks(
@@ -2181,22 +2181,20 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
-        
+
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
             req
             for req in self.skipped_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
-        async_failed_req_ids, _ = (
-            self._update_requests_with_invalid_blocks(
-                async_load_reqs,
-                invalid_block_ids,
-                num_scheduled_tokens,
-                evict_blocks=False,
-            )
+        async_failed_req_ids, _ = self._update_requests_with_invalid_blocks(
+            async_load_reqs,
+            invalid_block_ids,
+            num_scheduled_tokens,
+            evict_blocks=False,
         )
-        
+
         total_failed_requests = len(async_failed_req_ids)
 
         # handle sync loads (may be cached, collect blocks for eviction)

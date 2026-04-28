@@ -106,7 +106,7 @@ def test_async_load_failure(
     for request in scheduler.skipped_waiting:
         assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        
+
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
 
 
@@ -260,18 +260,18 @@ def test_sync_load_failure_with_shared_blocks(
         request1.request_id: 0,
         request2.request_id: common_prefix_len,
     }
-    
+
     assert len(scheduler.finished_req_ids) == 2
     assert len(scheduler.running) == 0
-    
+
     assert request1.num_computed_tokens == expected_computed_tokens[request1.request_id]
     assert request1.status == RequestStatus.FINISHED_ERROR
     assert request1.get_finished_reason() == FinishReason.ERROR
-    
+
     assert request2.num_computed_tokens == expected_computed_tokens[request2.request_id]
     assert request2.status == RequestStatus.FINISHED_ERROR
     assert request2.get_finished_reason() == FinishReason.ERROR
-    
+
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
 
 
