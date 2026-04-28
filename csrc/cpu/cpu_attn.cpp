@@ -134,6 +134,12 @@ void cpu_attn_reshape_and_cache(
     }
   }();
 
+  if (is_fp8) {
+    TORCH_CHECK(isa_tag == cpu_attention::ISA::AMX ||
+                    isa_tag == cpu_attention::ISA::VEC,
+                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+  }
+
   VLLM_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
         CPU_ATTN_DISPATCH(head_dim, isa_tag, kv_cache_idx, [&]() {
@@ -218,6 +224,9 @@ void cpu_attention_with_kv_cache(
   if (is_fp8) {
     input.k_scale_fp8 = static_cast<float>(k_scale);
     input.v_scale_fp8 = static_cast<float>(v_scale);
+    TORCH_CHECK(input.metadata->isa == cpu_attention::ISA::AMX ||
+                    input.metadata->isa == cpu_attention::ISA::VEC,
+                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(

@@ -1391,8 +1391,13 @@ class AttentionMainLoop {
       }
 
       attention_impl_t attn_impl;
-      attn_impl.init_from_input(input);
-      const float output_v_scale = attn_impl.get_output_v_scale();
+      constexpr bool fp8_kv = std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                              std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+      if constexpr (fp8_kv) {
+        attn_impl.init_from_input(input);
+      }
+      const float output_v_scale =
+          fp8_kv ? attn_impl.get_output_v_scale() : 1.0f;
 
       // general information
       const int32_t q_head_num = input->num_heads;

@@ -226,6 +226,8 @@ def varlen_with_paged_kv(
     )
 
     is_fp8 = kv_cache_dtype != "auto"
+    if is_fp8 and current_platform.get_cpu_architecture() != CpuArchEnum.X86:
+        pytest.skip("FP8 KV cache only supported on x86")
 
     query = tensor_cache(
         elem_num=token_num * num_query_heads * head_size,
