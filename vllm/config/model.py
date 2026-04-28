@@ -326,6 +326,10 @@ class ModelConfig:
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
+    mm_encoder_attn_dtype: InitVar[str | None] = None
+    mm_encoder_fp8_scale_path: InitVar[str | None] = None
+    mm_encoder_fp8_scale_save_path: InitVar[str | None] = None
+    mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -447,6 +451,10 @@ class ModelConfig:
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
+        mm_encoder_attn_dtype: str | None,
+        mm_encoder_fp8_scale_path: str | None,
+        mm_encoder_fp8_scale_save_path: str | None,
+        mm_encoder_fp8_scale_save_margin: float | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -513,6 +521,7 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
         )
@@ -520,7 +529,6 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )
-        self.model_arch_config = self.get_model_arch_config()
 
         architectures = self.architectures
         registry = self.registry
@@ -643,6 +651,10 @@ class ModelConfig:
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
+                mm_encoder_attn_dtype=mm_encoder_attn_dtype,
+                mm_encoder_fp8_scale_path=mm_encoder_fp8_scale_path,
+                mm_encoder_fp8_scale_save_path=mm_encoder_fp8_scale_save_path,
+                mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
