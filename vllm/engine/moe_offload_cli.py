@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Stage-1 CLI/config wiring for MoE CPU offload expert paging.
+"""CLI/config wiring for MoE CPU offload expert paging.
 
 This module intentionally does not change runtime behavior. It only exposes
-user-facing flags and attaches a MoEOffloadConfig object to VllmConfig so later
-stages can consume it behind the --moe-cpu-offload master flag.
+user-facing flags and attaches a MoEOffloadConfig object to VllmConfig so the
+Case 1 passive path and Case 2 prefetch path can consume it.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def _maybe_cap_low_memory_prefetch_max_model_len(
 
 
 def patch_engine_args() -> None:
-    """Patch EngineArgs with Stage-1 MoE offload CLI/config plumbing."""
+    """Patch EngineArgs with MoE offload CLI/config plumbing."""
     from vllm.engine.arg_utils import EngineArgs
 
     if getattr(EngineArgs, _PATCHED_ATTR, False):

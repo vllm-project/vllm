@@ -33,6 +33,11 @@ Summary:
 - Router path and KV cache stay on GPU.
 - Active expert weights are passively copied from CPU to GPU only after router
   computation identifies the routed expert set.
+- For each layer/wave, CPU builds a temporary `global_expert_id -> gpu_slot_id`
+  map, copies active experts into compact GPU slots, and remaps routed `topk_ids`
+  before fused expert compute.
+- Fused expert compute uses the staged GPU slot count and no persistent expert
+  map.
 - Active expert GPU copies are retired/freed after expert computation.
 - Large MoE LLMs can run on smaller GPUs because inactive expert weights do not
   occupy GPU memory.
@@ -48,9 +53,16 @@ Compute flow:
 1. Keep full expert weights in CPU memory.
 2. Run router computation on GPU.
 3. Identify active experts from router output.
-4. Copy only needed active expert weights to GPU.
-5. Compute the active expert bucket.
-6. Free the GPU expert copy after computation.
+4. Build a temporary `global_expert_id -> gpu_slot_id` map.
+5. Copy only needed active expert weights into compact GPU slots.
+6. Remap routed `topk_ids` to GPU slot ids.
+7. Compute the active expert bucket with the staged slot count.
+8. Free the GPU expert copy and clear the temporary map after computation.
+
+Latest Case 1 fix: compact staged expert execution now passes the staged expert
+count and no persistent expert map to the fused-MoE kernel after `topk_ids` are
+remapped. This fixes degenerate repetitive completions caused by mixing remapped
+slot ids with the original global expert id space.
 
 This trades performance for memory capacity. Inference can be slower than full
 GPU expert residency because active expert weights are copied from CPU memory to
@@ -72,15 +84,15 @@ Summary:
   resident.
 - Runtime tracks the active model list, current working model list, and missing
   model list.
-- Missing experts are loaded into the GPU cache and cold experts are evicted
-  when cache capacity is reached.
+- Missing experts are loaded into the GPU cache and cold experts are retired when
+  cache capacity is reached.
 - If `<num>` is smaller than the model config active expert count, vLLM uses an
   effective prefetch size of `ceil(active_expert_count * 1.5)`.
 - Logs report Case 2 selection, requested/effective prefetch size, and
   rate-limited pager state including active, working, and missing expert lists.
 
-This mode trades more GPU memory than passive offload for fewer repeated
-CPU-to-GPU expert transfers when routed experts are reused.
+This mode uses a bounded GPU expert cache to improve reuse when routed experts
+repeat across requests.
 
 ## Example Validation
 
@@ -91,11 +103,12 @@ The local harness validated:
 - two `gemma-4-26B-A4B-it` MoE model instances sharing one 40GB GPU from
   separate vLLM endpoints,
 - valid completion responses from all tested endpoints,
-- Case 1 passive offload and Case 2 GPU prefetch harness paths.
+- both independent MoE offload harness paths.
 
 ## Useful Files
 
 - [Original README](README.old)
+- [Root changelog](changlog.md)
 - [Feature work area](dev/moe)
 - [Feature changelog](dev/moe/CHANGELOG.md)
 - [Design notes](dev/moe/DESIGN.md)

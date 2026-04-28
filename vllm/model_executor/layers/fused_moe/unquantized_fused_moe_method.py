@@ -206,7 +206,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if layer.moe_cpu_offload_enabled:
             if layer.expert_map is not None:
                 raise NotImplementedError(
-                    "MoE CPU offload Stage 2 does not yet support expert "
+                    "MoE offload Case 1/Case 2 do not yet support expert "
                     "parallel expert maps."
                 )
             w13, w2 = convert_to_unquantized_kernel_format(
@@ -337,14 +337,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
         if layer.moe_offload_cache is not None:
-            if (
-                layer.w13_weight.device != x.device
-                or layer.w2_weight.device != x.device
-            ):
-                layer.move_moe_offload_cache_to_device(x.device)
             if shared_experts_input is not None:
                 raise NotImplementedError(
-                    "MoE CPU offload Stage 2 does not yet support internally "
+                    "MoE CPU offload does not yet support internally "
                     "overlapped shared experts."
                 )
             token_counts = local_expert_token_counts(
@@ -352,6 +347,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 local_num_experts=layer.local_num_experts,
                 expert_map=layer.expert_map,
             )
+            if not token_counts:
+                return torch.zeros_like(x)
             if layer.moe_gpu_prefetch_enabled:
                 output: torch.Tensor | None = None
                 for expert_counts in (
@@ -370,6 +367,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                             expert_map=layer.expert_map,
                         )
                     )
+                    staged_num_experts = int(layer.w13_weight.shape[0])
                     wave_output = self.moe_kernel.apply(
                         hidden_states=x,
                         w1=layer.w13_weight,
@@ -378,8 +376,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         topk_ids=wave_topk_ids,
                         activation=layer.activation,
                         apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                        global_num_experts=layer.global_num_experts,
-                        expert_map=layer.expert_map,
+                        global_num_experts=staged_num_experts,
+                        expert_map=None,
                         shared_experts_input=None,
                     )
                     output = wave_output if output is None else output + wave_output
@@ -387,13 +385,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     return output
 
             output: torch.Tensor | None = None
-            for expert_counts in layer.moe_offload_cache.expert_batches_for_counts(
+            expert_batches = layer.moe_offload_cache.expert_batches_for_counts(
                 token_counts
-            ):
-                layer.move_moe_offload_cache_to_device(x.device)
-                layer.moe_offload_cache.ensure_experts_resident(expert_counts)
+            )
+            if layer.apply_router_weight_on_input and len(expert_batches) > 1:
+                raise NotImplementedError(
+                    "MoE CPU offload passive split-wave execution does not yet "
+                    "support apply_router_weight_on_input=True."
+                )
+            for expert_counts in expert_batches:
                 wave_experts = set(expert_counts)
                 try:
+                    layer.move_moe_offload_cache_to_device(x.device)
+                    layer.moe_offload_cache.ensure_experts_resident(expert_counts)
                     wave_topk_ids, wave_topk_weights = (
                         layer.moe_offload_cache.make_wave_tensors(
                             topk_ids,
@@ -402,6 +406,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                             expert_map=layer.expert_map,
                         )
                     )
+                    staged_num_experts = int(layer.w13_weight.shape[0])
                     wave_output = self.moe_kernel.apply(
                         hidden_states=x,
                         w1=layer.w13_weight,
@@ -410,8 +415,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         topk_ids=wave_topk_ids,
                         activation=layer.activation,
                         apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                        global_num_experts=layer.global_num_experts,
-                        expert_map=layer.expert_map,
+                        global_num_experts=staged_num_experts,
+                        expert_map=None,
                         shared_experts_input=None,
                     )
                 finally:

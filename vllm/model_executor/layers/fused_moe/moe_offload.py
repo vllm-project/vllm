@@ -40,7 +40,7 @@ class _ExpertTensor:
 
 
 class ExpertCache:
-    """Synchronous Stage-2 MoE expert cache.
+    """MoE expert cache for Case 1 passive transfer and Case 2 prefetch.
 
     The CPU tensors are the source of truth. The layer parameters remain the
     execution tensors; when an expert is demanded, its slice is copied from CPU
@@ -53,6 +53,7 @@ class ExpertCache:
         layer_id: int,
         active_expert_budget: int | None,
         expert_tensors: list[_ExpertTensor],
+        mode: Literal["passive", "prefetch"],
         use_identity_slots: bool = True,
     ) -> None:
         if active_expert_budget is not None and active_expert_budget < 1:
@@ -62,6 +63,7 @@ class ExpertCache:
 
         self.layer_id = layer_id
         self.expert_tensors = expert_tensors
+        self.mode = mode
         self.use_identity_slots = use_identity_slots
         self.active_experts: dict[int, ActiveExpertEntry] = {}
         self.step = 0
@@ -104,6 +106,7 @@ class ExpertCache:
             layer_id=layer_id,
             active_expert_budget=active_expert_budget,
             expert_tensors=expert_tensors,
+            mode="passive",
             use_identity_slots=True,
         )
 
@@ -115,6 +118,7 @@ class ExpertCache:
         active_expert_budget: int | None,
         sources: dict[str, torch.Tensor],
         device: torch.device,
+        mode: Literal["passive", "prefetch"],
     ) -> ExpertCache:
         expert_tensors: list[_ExpertTensor] = []
         for name, source in sources.items():
@@ -128,6 +132,7 @@ class ExpertCache:
             layer_id=layer_id,
             active_expert_budget=active_expert_budget,
             expert_tensors=expert_tensors,
+            mode=mode,
             use_identity_slots=False,
         )
         cache._target_device = device
@@ -350,6 +355,22 @@ class ExpertCache:
             self.step,
         )
 
+    def _log_passive_transfer(
+        self,
+        *,
+        active_experts: set[int],
+    ) -> None:
+        if self.mode != "passive" or self.use_identity_slots:
+            return
+
+        logger.debug(
+            "[MoE CPU Offload] Passive transfer layer=%d active_experts=%s "
+            "step=%d",
+            self.layer_id,
+            self._format_expert_ids(active_experts),
+            self.step,
+        )
+
     def ensure_experts_resident(
         self,
         expert_token_counts: dict[int, int],
@@ -365,19 +386,23 @@ class ExpertCache:
             and len(expert_token_counts) > self.active_expert_budget
         ):
             raise RuntimeError(
-                "MoE CPU offload Stage 2 cannot execute a batch that routes to "
+                "MoE CPU offload cannot execute a batch that routes to "
                 f"{len(expert_token_counts)} local experts with "
                 f"active_expert_staging_slots={self.active_expert_budget}. "
                 "Use smaller routed waves or reduce batch size."
             )
         required_experts = set(expert_token_counts)
         missing_experts = required_experts - set(self.active_experts)
-        if missing_experts:
+        if missing_experts and self.mode == "prefetch":
             self._log_pager_state(
                 event="miss",
                 working_experts=required_experts,
                 missing_experts=missing_experts,
                 force=True,
+            )
+        elif missing_experts:
+            self._log_passive_transfer(
+                active_experts=required_experts,
             )
         if not self.use_identity_slots and evict_unrequested:
             for expert_id in list(self.active_experts):
@@ -408,11 +433,12 @@ class ExpertCache:
                 entry.state = "resident"
                 entry.last_used_step = self.step
                 entry.recent_token_count = token_count
-        self._log_pager_state(
-            event="summary",
-            working_experts=required_experts,
-            missing_experts=set(),
-        )
+        if self.mode == "prefetch":
+            self._log_pager_state(
+                event="summary",
+                working_experts=required_experts,
+                missing_experts=set(),
+            )
 
     def resident_expert_ids(self) -> set[int]:
         return set(self.active_experts)

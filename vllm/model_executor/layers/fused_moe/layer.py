@@ -538,6 +538,22 @@ class FusedMoE(PluggableLayer):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
+        if self.moe_cpu_offload_enabled:
+            if not isinstance(self.quant_method, UnquantizedFusedMoEMethod):
+                raise NotImplementedError(
+                    "MoE CPU offload currently supports only unquantized "
+                    "fused-MoE experts; got "
+                    f"{self.quant_method.__class__.__name__}."
+                )
+            if self.use_ep:
+                raise NotImplementedError(
+                    "MoE CPU offload does not yet support expert parallelism."
+                )
+            if shared_experts is not None:
+                raise NotImplementedError(
+                    "MoE CPU offload does not yet support overlapped shared "
+                    "experts."
+                )
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
@@ -680,6 +696,7 @@ class FusedMoE(PluggableLayer):
             active_expert_budget=self.moe_gpu_prefetch_budget,
             sources=sources,
             device=device,
+            mode="prefetch" if self.moe_gpu_prefetch_enabled else "passive",
         )
         if self.moe_gpu_startup_prefetch_enabled:
             prefetch_count = self.moe_gpu_prefetch_budget or 1

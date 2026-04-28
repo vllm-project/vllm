@@ -98,6 +98,7 @@ def test_expert_cache_stages_cpu_sources_and_remaps_topk_ids():
             "w2_weight": layer.w2_weight.detach(),
         },
         device=torch.device("cpu"),
+        mode="passive",
     )
 
     topk_ids = torch.tensor([[2, 1], [2, 1]])
@@ -115,6 +116,30 @@ def test_expert_cache_stages_cpu_sources_and_remaps_topk_ids():
     assert cache.active_experts[2].gpu_slot_id == 1
 
 
+def test_passive_cache_logs_transfer_not_pager(monkeypatch):
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="passive",
+    )
+    log_messages = []
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.moe_offload.logger.debug",
+        lambda message, *args: log_messages.append(message % args),
+    )
+
+    cache.ensure_experts_resident({1: 4, 2: 3})
+
+    assert len(log_messages) == 1
+    assert "[MoE CPU Offload] Passive transfer" in log_messages[0]
+    assert "active_experts=[1, 2]" in log_messages[0]
+    assert "step=0" in log_messages[0]
+    assert "MoE expert pager" not in log_messages[0]
+
+
 def test_expert_cache_rejects_more_demand_than_staging_budget():
     layer = _MockMoELayer()
     cache = ExpertCache.from_cpu_sources(
@@ -122,6 +147,7 @@ def test_expert_cache_rejects_more_demand_than_staging_budget():
         active_expert_budget=2,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="passive",
     )
 
     topk_ids = torch.tensor([[0, 1], [2, 1]])
@@ -145,6 +171,7 @@ def test_expert_cache_builds_budget_sized_waves():
         active_expert_budget=2,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="passive",
     )
     counts = {0: 1, 1: 4, 2: 3, 3: 2}
 
@@ -160,6 +187,7 @@ def test_expert_cache_auto_budget_uses_smaller_gpu_memory_wave(monkeypatch):
         active_expert_budget=None,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cuda"),
+        mode="passive",
     )
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (50, 100))
@@ -171,6 +199,28 @@ def test_expert_cache_auto_budget_uses_smaller_gpu_memory_wave(monkeypatch):
     assert waves == [{1: 4, 2: 3}, {3: 2, 0: 1}]
 
 
+def test_expert_cache_auto_budget_does_not_allocate_before_wave_sizing(
+    monkeypatch,
+):
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=None,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cuda"),
+        mode="passive",
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (50, 100))
+
+    waves = cache.expert_batches_for_counts({0: 1, 1: 4, 2: 3, 3: 2})
+
+    assert waves == [{1: 4, 2: 3}, {3: 2, 0: 1}]
+    assert cache.active_expert_budget == 2
+    assert cache.target_for("w13_weight").shape[0] == 0
+    assert cache.resident_expert_ids() == set()
+
+
 def test_expert_cache_wave_tensors_mask_nonresident_experts():
     layer = _MockMoELayer()
     cache = ExpertCache.from_cpu_sources(
@@ -178,6 +228,7 @@ def test_expert_cache_wave_tensors_mask_nonresident_experts():
         active_expert_budget=2,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="passive",
     )
     topk_ids = torch.tensor([[1, 2], [3, 0]])
     topk_weights = torch.tensor([[0.4, 0.6], [0.25, 0.75]])
@@ -201,6 +252,7 @@ def test_expert_cache_keeps_requested_wave_resident_when_reusing_slots():
         active_expert_budget=2,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="passive",
     )
 
     cache.ensure_experts_resident({1: 4, 2: 3})
@@ -216,6 +268,7 @@ def test_expert_cache_can_keep_prefetched_experts_resident():
         active_expert_budget=3,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="prefetch",
     )
 
     cache.ensure_experts_resident(
@@ -237,6 +290,7 @@ def test_expert_cache_protects_current_prefetch_wave_from_eviction():
         active_expert_budget=2,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="prefetch",
     )
 
     cache.ensure_experts_resident(
@@ -258,6 +312,7 @@ def test_expert_cache_retires_loaded_experts():
         active_expert_budget=2,
         sources={"w13_weight": layer.w13_weight.detach()},
         device=torch.device("cpu"),
+        mode="passive",
     )
 
     cache.ensure_experts_resident({1: 4, 2: 3})
