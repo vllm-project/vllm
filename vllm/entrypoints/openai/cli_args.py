@@ -153,9 +153,21 @@ class BaseFrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
+    """Controls the ``system_fingerprint`` field on responses.
+
+    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+      server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
+      8-char config hash.
+    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
+    - ``custom``: emits the literal string from ``--fingerprint-value``.
+    - ``none``: the field is omitted (serialized as ``null``).
+    """
+    fingerprint_value: str | None = None
+    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
 
     @classmethod
     def _customize_cli_kwargs(
