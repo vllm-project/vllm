@@ -262,7 +262,7 @@ pull_request_rules:
       - files~=^docker/Dockerfile.xpu
       - files~=^\\.buildkite/intel_jobs/
       - files=\.buildkite/ci_config_intel.yaml
-      - files=vllm/model_executor/layers/fused_moe/xpu_fused_moe.py
+      - files=vllm/model_executor/layers/fused_moe/experts/xpu_moe.py
       - files=vllm/model_executor/kernels/linear/mixed_precision/xpu.py
       - files=vllm/model_executor/kernels/linear/mxfp8/xpu.py
       - files=vllm/model_executor/kernels/linear/scaled_mm/xpu.py
@@ -389,11 +389,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
       - files=docs/features/tool_calling.md
-      - files~=^examples/tool_chat_*
-      - files=examples/offline_inference/chat_with_tools.py
-      - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
-      - files=examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py
-      - files=examples/online_serving/openai_chat_completion_client_with_tools.py
+      - files~=^examples/tool_calling/
   actions:
     label:
       add:

@@ -141,6 +141,8 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       torch::Tensor slot_mapping,
                                       const int64_t block_size);
 
+void init_cpu_memory_env(std::vector<int64_t> node_ids);
+
 namespace cpu_utils {
 void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& cu_num_draft_tokens,
@@ -261,7 +263,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
       "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
+      "                 Tensor cos_sin_cache, bool is_neox, int "
+      "rope_dim_offset=0, bool inverse=False) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
@@ -430,6 +433,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "positions, Tensor block_table, Tensor(a3!) slot_mapping, SymInt "
       "block_size) -> ()",
       &compute_slot_mapping_kernel_impl);
+
+  ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
   // Speculative decoding kernels
   ops.def(

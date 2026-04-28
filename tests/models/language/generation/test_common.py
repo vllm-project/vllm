@@ -46,7 +46,7 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
@@ -142,11 +142,6 @@ def test_models(
         # needed as all the models will be calling AITER kernels
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
-
-    if current_platform.is_cpu() and model in ("openai-community/gpt2",):
-        # These models are sensitive to the rounding error
-        # Fuse ops to reduce rounding
-        monkeypatch.setenv("VLLM_CPU_CI_ENV", "0")
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
