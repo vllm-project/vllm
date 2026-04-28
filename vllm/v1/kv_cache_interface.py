@@ -503,6 +503,25 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class FirstNSpec(SlidingWindowSpec):
+    """Like SlidingWindowSpec but pins the FIRST N tokens (no eviction).
+
+    Allocation is capped at ``ceil(N/block_size)`` blocks per request and old blocks are
+    never evicted. Used by the mixed-precision KV cache's ``location='first'`` mode,
+    where the sibling cache holds positions ``[0, N)`` indefinitely.
+
+    Reuses ``sliding_window``."""
+
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        # Per-request peak holdings = ceil(N / block_size), regardless of
+        # batched-token / max-model-len: we stop allocating once the first
+        # N tokens are stored, and we never evict.
+        return cdiv(self.sliding_window, self.block_size)
+
+
+@dataclass(frozen=True, kw_only=True)
 class SlidingWindowMLASpec(SlidingWindowSpec):
     """Sliding window attention with MLA cache format."""
 

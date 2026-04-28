@@ -2105,6 +2105,19 @@ class VllmConfig:
         return self
 
     @model_validator(mode="after")
+    def validate_mixed_kv_cache_with_dcp(self) -> "VllmConfig":
+        if (
+            self.attention_config.mixed_kv_n_tokens > 0
+            and self.parallel_config.decode_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "Mixed-precision KV cache is not supported with decode context "
+                "parallelism. Set mixed_kv_n_tokens=0 or use "
+                "decode_context_parallel_size=1."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":
         if self.model_config is None:
             return self

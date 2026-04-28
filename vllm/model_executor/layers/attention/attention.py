@@ -36,6 +36,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionType,
 )
+from vllm.v1.attention.backends.mixed_precision_kv import (
+    MixedPrecisionKVCache,
+    mixed_kv_layer_prefix,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -380,20 +384,76 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
-        impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **extra_impl_args,
+        # Mixed-precision KV cache: NVFP4 bulk + higher-precision sibling for
+        # the first-N or last-N tokens. When enabled we construct
+        # ``MixedPrecisionFlashInferImpl`` (subclass of ``FlashInferImpl``)
+        # so the dual-kernel decode path is selected via the impl's type
+        # rather than monkey-patched attributes.
+        attn_cfg = vllm_config.attention_config
+        mixed_kv_n_tokens = attn_cfg.mixed_kv_n_tokens
+        # Mixed-KV is for full-attention layers only.
+        mixed_kv_enabled = (
+            mixed_kv_n_tokens > 0
+            and kv_cache_dtype == "nvfp4"
+            and kv_sharing_target_layer_name is None
+            and self.attn_backend.get_name() == "FLASHINFER"
+            and sliding_window is None
         )
+
+        impl_cls = self.attn_backend.get_impl_cls()
+        self.mixed_kv_cache: MixedPrecisionKVCache | None = None
+        if mixed_kv_enabled:
+            assert cache_config is not None, (
+                "Mixed-precision KV cache requires a CacheConfig."
+            )
+            sibling_prefix = mixed_kv_layer_prefix(prefix)
+            # Import locally to avoid pulling FlashInfer at module load on
+            # platforms where it isn't installed (this branch only fires
+            # when the FlashInfer backend was selected above).
+            from vllm.v1.attention.backends.flashinfer import (
+                MixedPrecisionFlashInferImpl,
+            )
+
+            self.impl = MixedPrecisionFlashInferImpl(  # type: ignore[assignment]
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **extra_impl_args,
+                mixed_kv_cache_prefix=sibling_prefix,
+                mixed_kv_n_tokens=mixed_kv_n_tokens,
+                mixed_kv_location=attn_cfg.mixed_kv_location,
+                mixed_kv_dtype=attn_cfg.mixed_kv_dtype,
+            )
+            self.mixed_kv_cache = MixedPrecisionKVCache(
+                head_size=head_size,
+                num_kv_heads=num_kv_heads,
+                n_tokens=mixed_kv_n_tokens,
+                dtype=attn_cfg.mixed_kv_dtype,
+                location=attn_cfg.mixed_kv_location,
+                prefix=sibling_prefix,
+                cache_config=cache_config,
+            )
+        else:
+            self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **extra_impl_args,
+            )
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -444,6 +504,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 if is_per_head
                 else GroupShape.PER_TENSOR,
             )
+
+        # BF16 sibling reads the query unquantized — skip the outer
+        # auto-quantize. We still want ``self.query_quant`` *built* above so
+        # the impl can inline-quantize Q for the NVFP4 call; the flip has to
+        # happen *after* that build, hence the post-construction patch.
+        if self.mixed_kv_cache is not None and attn_cfg.mixed_kv_dtype == "bf16":
+            self.impl.supports_quant_query_input = False
 
     def forward(
         self,

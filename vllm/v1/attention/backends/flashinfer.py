@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import numpy as np
 import torch
@@ -80,6 +80,9 @@ FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+
+# trtllm-gen FMHA writes LSE in base 2; merge_attn_states uses expf (base e).
+_LN2 = 0.6931471805599453
 
 logger = init_logger(__name__)
 
@@ -1268,8 +1271,8 @@ class FlashInferImpl(AttentionImpl):
         sliding_window: int | None,
         kv_cache_dtype: str,
         logits_soft_cap: float | None = None,
-        attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: int | None = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
@@ -1850,6 +1853,502 @@ class FlashInferImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+
+
+class MixedPrecisionFlashInferImpl(FlashInferImpl):
+    """FlashInferImpl variant for NVFP4 primary + higher-precision sibling KV.
+
+    Owns:
+    - The four ``mixed_kv_*`` config attributes, set explicitly in
+      ``__init__`` (no monkey-patching from ``Attention.__init__``).
+    - Pre-allocated decode scratch (``_mixed_out_a/b``, ``_mixed_lse_a/b``)
+      sized for cuda-graph capture/replay.
+    - Override ``forward`` to run the dual-kernel decode (NVFP4 + sibling)
+      merged via LSE, with NVFP4-only prefill.
+    - Override ``do_kv_cache_update`` to also write the sibling cache.
+    - Override ``fused_output_quant_supported`` to advertise FP8 only.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
+        sinks: torch.Tensor | None = None,
+        *,
+        mixed_kv_cache_prefix: str,
+        mixed_kv_n_tokens: int,
+        mixed_kv_location: Literal["first", "last"],
+        mixed_kv_dtype: Literal["fp8", "bf16"],
+    ) -> None:
+        assert kv_cache_dtype == "nvfp4", (
+            "MixedPrecisionFlashInferImpl requires NVFP4 primary cache; "
+            f"got kv_cache_dtype={kv_cache_dtype!r}."
+        )
+        assert kv_sharing_target_layer_name is None, (
+            "Mixed-precision KV does not support cross-layer KV sharing."
+        )
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            sinks=sinks,
+        )
+        self.mixed_kv_cache_prefix = mixed_kv_cache_prefix
+        self.mixed_kv_n_tokens = mixed_kv_n_tokens
+        self.mixed_kv_location = mixed_kv_location
+        self.mixed_kv_dtype = mixed_kv_dtype
+
+        # Pre-allocated dual-kernel decode scratch. Stable addresses so
+        # cuda-graph capture/replay sees the same buffers on every run.
+        # Zero-init: when the NVFP4 pass is skipped (every request fits in
+        # the high-precision window) we deselect partial A via
+        # ``lse_a = -inf`` and rely on ``0 * out_a = 0`` in the LSE merge.
+        # Bytes 0x7F/0xFF in FP8-E4M3FN decode to NaN -- without zero-init,
+        # ``0 * NaN = NaN`` would propagate into the output.
+        vllm_config = get_current_vllm_config_or_none()
+        assert vllm_config is not None, (
+            "MixedPrecisionFlashInferImpl needs a vllm_config to size "
+            "the decode scratch buffers."
+        )
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self._mixed_out_a = torch.zeros(
+            (max_num_tokens, num_heads, head_size),
+            dtype=FP8_DTYPE,
+            device="cuda",
+        )
+        # Sibling output dtype follows the sibling cache: FP8 for FP8
+        # sibling (trtllm-gen forces FP8 output when KV is FP8), or the
+        # model dtype (typically BF16) for BF16 sibling.
+        sibling_out_dtype = (
+            FP8_DTYPE if mixed_kv_dtype == "fp8" else vllm_config.model_config.dtype
+        )
+        self._mixed_out_b = torch.zeros(
+            (max_num_tokens, num_heads, head_size),
+            dtype=sibling_out_dtype,
+            device="cuda",
+        )
+        self._mixed_lse_a = torch.zeros(
+            (max_num_tokens, num_heads),
+            dtype=torch.float32,
+            device="cuda",
+        )
+        self._mixed_lse_b = torch.zeros_like(self._mixed_lse_a)
+
+    def fused_output_quant_supported(self, quant_key: QuantKey):
+        # NVFP4 output quant is unsupported on the mixed path (the merge
+        # step is FP8 / model-dtype). Restrict to FP8 only.
+        return (
+            self.support_trtllm_attn
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and quant_key == kFp8StaticTensorSym
+        )
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashInferMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Mixed-precision attention: NVFP4 primary + sibling cache.
+
+        DECODE: dual-kernel path. The trtllm-gen decode kernel is invoked twice per
+        layer:
+
+        * Once on the sibling cache with ``seq_lens`` clipped to ``min(seq_len,
+          n_tokens)``. The sibling owns the first or last N tokens per
+          ``mixed_kv_location``; its block_table comes from the FirstNManager
+          (location='first') or sliding-window manager (location='last') and naturally
+          points at those tokens.
+        * Once on the NVFP4 cache with ``seq_lens`` clipped to ``max(0, seq_len -
+          n_tokens)`` (NVFP4 covers the complement). For ``location='first'`` the NVFP4
+          block_table is additionally sliced to drop the first ``n_tokens / block_size``
+          blocks so the kernel reads positions ``[n_tokens, seq_len)``.
+
+        Each call returns its partial attention output and per-token LSE. The two are
+        recombined via ``merge_attn_states`` (log-sum-exp recombination) so each token
+        is attended exactly once across the pair — no double-counting.
+
+        PREFILL: NVFP4-only. Prefill reads from NVFP4 only (which holds the entire
+        history). The sibling cache is still WRITTEN during prefill, so decode
+        immediately benefits.
+
+        Limitations:
+          * Fused output quant supports FP8 only (no NVFP4 output quant).
+          * No cascade attention.
+          * No DCP.
+          * ``mixed_kv_dtype`` ∈ {'fp8', 'bf16'}. BF16 sibling reads/ writes
+            unquantized; we leave the query unquantized at the outer layer (by flipping
+            ``supports_quant_query_input`` to False) and inline-quantize Q only for the
+            NVFP4 call here.
+        """
+        from vllm.model_executor.layers.attention.attention import (
+            get_attention_context,
+        )
+        from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+
+        if attn_metadata is None:
+            return output.fill_(0)
+        # ---------- guards ----------
+        if attn_metadata.use_cascade:
+            raise NotImplementedError(
+                "Mixed-precision KV (NVFP4 primary + sibling) does not support "
+                "cascade attention."
+            )
+        if self.dcp_world_size > 1:
+            raise NotImplementedError(
+                "Mixed-precision KV (NVFP4 primary + sibling) does not yet support "
+                "decode context parallelism."
+            )
+        if output_scale is None:
+            assert output_block_scale is None, (
+                "output_block_scale is not supported when fusion has not happened"
+            )
+        else:
+            if output.dtype != FP8_DTYPE:
+                raise NotImplementedError(
+                    "Mixed-precision KV only supports fused FP8 output "
+                    "quantization. NVFP4 output quantization is not supported."
+                )
+            assert output_block_scale is None, (
+                "output_block_scale should not be provided for fp8 output"
+            )
+            if layer._o_scale_float is None:
+                layer._o_scale_float = output_scale.cpu().item()
+
+        # ---------- per-step setup (mirrors existing forward) ----------
+        # NVFP4 cache always sees an FP8 query, so its bmm scales include
+        # the q/k/v quantization factors. The sibling cache scales depend
+        # on its dtype: FP8 sibling = same as NVFP4 (Q is FP8, KV is FP8);
+        # BF16 sibling = pure sm_scale (Q is BF16, KV is BF16, no
+        # quantization scales involved).
+        if self.bmm1_scale is None:
+            self.bmm1_scale = self.scale * layer._q_scale_float * layer._k_scale_float
+        if self.bmm2_scale is None:
+            self.bmm2_scale = layer._v_scale_float
+        if self.mixed_kv_dtype == "fp8":
+            sibling_bmm1_scale = self.bmm1_scale
+            sibling_bmm2_scale = self.bmm2_scale
+        else:  # bf16
+            sibling_bmm1_scale = self.scale
+            sibling_bmm2_scale = 1.0
+
+        # ---------- look up sibling cache + metadata ----------
+        n_tokens = self.mixed_kv_n_tokens
+        sibling_meta, _sibling_layer, sibling_kv_cache, _ = get_attention_context(
+            self.mixed_kv_cache_prefix
+        )
+        assert sibling_meta is not None, (
+            "Mixed-KV metadata missing — sibling cache layer must be "
+            "registered with the KVCacheManager."
+        )
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
+
+        # First-N alignment gate. ``location='first'`` truncates the primary
+        # block_table by ``skip_blocks = n_tokens // nvfp4_block_size``;
+        # ``n_tokens`` must be an exact multiple of the *post-unify* primary
+        # block_size or decode either double-counts the prefix or silently
+        # widens the sibling window. ``kv_cache.shape[2]`` is the actual
+        # value after platform bumping and ``unify_kv_cache_spec_page_size``.
+        nvfp4_block_size = kv_cache.shape[2]
+        if self.mixed_kv_location == "first" and n_tokens % nvfp4_block_size != 0:
+            raise ValueError(
+                f"mixed_kv_n_tokens={n_tokens} must be a multiple of the "
+                f"post-unify NVFP4 primary block_size={nvfp4_block_size} "
+                f"for mixed_kv_location='first'. Use a multiple of "
+                f"{nvfp4_block_size}, or use mixed_kv_location='last' "
+                "(no alignment constraint)."
+            )
+        kv_cache_fp = kv_cache.view(
+            FlashInferBackend.get_dtype_for_flashinfer(self.kv_cache_dtype)
+        )
+        stride_order = FlashInferBackend.get_kv_cache_stride_order()
+        kv_cache_permute = kv_cache_fp.permute(*stride_order)
+        nvfp4_data, nvfp4_scales = nvfp4_kv_cache_split_views(kv_cache_permute)
+
+        # For FP8 the underlying storage is uint8 and we view-cast to E4M3; for BF16 the
+        # storage is already bfloat16 so no cast is needed.
+        if self.mixed_kv_dtype == "fp8":
+            sibling_view = sibling_kv_cache.view(FP8_DTYPE)
+        else:  # bf16 — cache tensor is already bfloat16
+            sibling_view = sibling_kv_cache
+        # Permute to the FlashInfer stride order.
+        sibling_kv_cache_permute = sibling_view.permute(*stride_order)
+
+        # ---------- query setup ----------
+        # FP8 sibling: outer ``Attention.forward`` auto-quantized Q to FP8
+        # (``supports_quant_query_input`` left at True), so NVFP4 and
+        # sibling kernels both consume the same FP8 tensor. BF16 sibling:
+        # ``Attention.__init__`` flips ``supports_quant_query_input`` to
+        # False *after* building ``layer.query_quant`` — outer auto-quantize
+        # is skipped but the inline op is still available for the NVFP4
+        # call below.
+        query = query[:num_actual_tokens]
+        if self.mixed_kv_dtype == "fp8":
+            assert attn_metadata.q_data_type == FP8_DTYPE, (
+                "FP8 sibling requires FP8 query (set "
+                "disable_flashinfer_q_quantization=False)."
+            )
+            nvfp4_query = query
+            sibling_query = query
+        else:  # bf16
+            assert query.dtype != FP8_DTYPE, (
+                "BF16 sibling expects an unquantized query; got FP8 — "
+                "``Attention.__init__`` should have flipped "
+                "``supports_quant_query_input`` to False after building "
+                "``query_quant``."
+            )
+            # query_quant (scaled_fp8_quant) expects a 2D (num_tokens, hidden) tensor,
+            # but by the time we're inside the impl the outer `Attention.forward` has
+            # reshaped to (num_tokens, num_heads, head_size). Flatten for the quant op,
+            # then restore the original shape so the kernel call signature matches the
+            # FP8-sibling path.
+            orig_shape = query.shape
+            q_flat = query.reshape(orig_shape[0], -1)
+            nvfp4_query_flat, _ = layer.query_quant(q_flat, layer._q_scale)
+            nvfp4_query = nvfp4_query_flat.view(orig_shape)
+            sibling_query = query
+
+        # Pre-allocated scratch (``_mixed_out_a/b`` / ``_mixed_lse_a/b``)
+        # spans ``max_num_batched_tokens``; we slice into it below. Decode
+        # tokens are at ``[0:num_decode_tokens]`` per the standard vLLM
+        # batch ordering.
+        workspace_buffer = _get_trtllm_gen_workspace_buffer()
+
+        # ---------- DECODE branch ----------
+        if num_decode_tokens > 0:
+            assert isinstance(attn_metadata.decode, TRTLLMDecode), (
+                "Mixed-precision KV requires the trtllm-gen decode path."
+            )
+            nvfp4_decode_query = nvfp4_query[:num_decode_tokens]
+            sibling_decode_query = sibling_query[:num_decode_tokens]
+
+            out_a_d = self._mixed_out_a[:num_decode_tokens]
+            out_b_d = self._mixed_out_b[:num_decode_tokens]
+            lse_a_d = self._mixed_lse_a[:num_decode_tokens]
+            lse_b_d = self._mixed_lse_b[:num_decode_tokens]
+
+            seq_lens_d = attn_metadata.decode.seq_lens
+            seq_lens_nvfp4_d = torch.clamp(seq_lens_d - n_tokens, min=0)
+            seq_lens_sib_d = torch.clamp(seq_lens_d, max=n_tokens)
+            max_seq_len_d = attn_metadata.decode.max_seq_len
+            max_seq_len_nvfp4_d = max(0, max_seq_len_d - n_tokens)
+            max_seq_len_sib_d = min(max_seq_len_d, n_tokens)
+
+            block_tables_sib_d = sibling_meta.block_table[:num_decodes]
+            if self.mixed_kv_location == "first":
+                # NVFP4 should attend to [n_tokens, seq_len), so drop the first
+                # ``n_tokens / nvfp4_block_size`` rows of its block_table. The
+                # alignment check above guarantees this divides exactly.
+                # ``.contiguous()`` is required: the trtllm-gen kernel reads
+                # block_tables as a flat ``int*`` and ignores stride; a column
+                # slice keeps the original row stride, so without the copy the
+                # kernel would read the wrong row for req > 0.
+                skip_blocks = n_tokens // nvfp4_block_size
+                block_tables_nvfp4_d = attn_metadata.decode.block_tables[
+                    :, skip_blocks:
+                ].contiguous()
+            else:
+                block_tables_nvfp4_d = attn_metadata.decode.block_tables
+
+            if num_decode_tokens % num_decodes != 0:
+                q_len_per_req = 1
+            else:
+                q_len_per_req = num_decode_tokens // num_decodes
+
+            # Pass A: NVFP4 cache. Run unconditionally (not wasteful — a Python
+            # ``if`` would only capture one branch into cuda graph and the
+            # replay would diverge from the actual per-step seq lens); then
+            # mask ``lse_a = -inf`` per-request for ``seq_lens_nvfp4 == 0`` so
+            # the merge gives those entries weight 0. sinks=None — they live
+            # on the sibling partial so the merge accounts for them once.
+            trtllm_batch_decode_with_kv_cache(
+                query=nvfp4_decode_query,
+                kv_cache=nvfp4_data,
+                workspace_buffer=workspace_buffer,
+                block_tables=block_tables_nvfp4_d,
+                seq_lens=seq_lens_nvfp4_d,
+                max_seq_len=max(1, max_seq_len_nvfp4_d),
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=self.bmm2_scale,
+                window_left=self.window_left,
+                sinks=None,
+                o_sf_scale=self.o_sf_scale,
+                out=out_a_d,
+                q_len_per_req=q_len_per_req,
+                kv_cache_sf=nvfp4_scales,
+                return_lse=True,
+                lse=lse_a_d,
+            )
+            empty_req_mask = (
+                (seq_lens_nvfp4_d == 0).repeat_interleave(q_len_per_req).view(-1, 1)
+            )
+            lse_a_d[:num_decode_tokens].masked_fill_(empty_req_mask, float("-inf"))
+
+            # Pass B: sibling cache (FP8 or BF16).
+            # For ``location='last'``: SlidingWindowManager evicts old blocks
+            # → sibling block_table has NULL leading entries. With clipped
+            # ``seq_lens`` the kernel would read the NULL prefix instead of
+            # the recent N tokens. Use full ``seq_lens`` + ``window_left=n-1``
+            # so the kernel attends to the last N keys (mirroring how
+            # standard SWA uses this kernel). For ``location='first'``,
+            # FirstNManager doesn't evict so block_table is clean and the
+            # natural ``seq_lens=n`` read works.
+            if self.mixed_kv_location == "last":
+                sib_seq_lens = seq_lens_d
+                sib_max_seq_len = max_seq_len_d
+                sib_window_left = n_tokens - 1
+            else:  # first
+                sib_seq_lens = seq_lens_sib_d
+                sib_max_seq_len = max_seq_len_sib_d
+                sib_window_left = self.window_left
+            trtllm_batch_decode_with_kv_cache(
+                query=sibling_decode_query,
+                kv_cache=sibling_kv_cache_permute,
+                workspace_buffer=workspace_buffer,
+                block_tables=block_tables_sib_d,
+                seq_lens=sib_seq_lens,
+                max_seq_len=sib_max_seq_len,
+                bmm1_scale=sibling_bmm1_scale,
+                bmm2_scale=sibling_bmm2_scale,
+                window_left=sib_window_left,
+                sinks=self.sinks,
+                o_sf_scale=self.o_sf_scale,
+                out=out_b_d,
+                q_len_per_req=q_len_per_req,
+                kv_cache_sf=None,
+                return_lse=True,
+                lse=lse_b_d,
+            )
+
+            # Merge. trtllm-gen FMHA writes LSE in base 2; merge_attn_states
+            # uses expf (base e), so multiply by ln(2) to convert. trtllm LSE
+            # shape is (num_tokens, num_heads); the merge wants
+            # (num_heads, num_tokens), so transpose.
+            merge_input_dtype = (
+                layer.dtype if output_scale is not None else output.dtype
+            )
+            merge_attn_states(
+                output=output[:num_decode_tokens],
+                prefix_output=out_a_d.to(merge_input_dtype),
+                prefix_lse=lse_a_d.transpose(0, 1).contiguous().mul_(_LN2),
+                suffix_output=out_b_d.to(merge_input_dtype),
+                suffix_lse=lse_b_d.transpose(0, 1).contiguous().mul_(_LN2),
+                output_scale=output_scale,
+            )
+
+        # ---------- PREFILL branch (NVFP4-only) ----------
+        # We do NOT split the prefill compute across the two caches.
+        if num_prefill_tokens > 0:
+            assert isinstance(attn_metadata.prefill, TRTLLMPrefill), (
+                "Mixed-precision KV requires the trtllm-gen prefill path."
+            )
+            # NVFP4 prefill needs FP8 Q. With BF16 sibling, `nvfp4_query`
+            # is the inline-quantized version; with FP8 sibling, it is the
+            # already-FP8 query passed in.
+            prefill_query = nvfp4_query[num_decode_tokens:]
+            prefill_end = num_decode_tokens + num_prefill_tokens
+
+            # NVFP4 trtllm prefill emits FP8. For fused FP8 output quant,
+            # write directly to the final output with the output scale folded
+            # into bmm2_scale. Otherwise, use scratch and dequantize below.
+            if output_scale is not None:
+                assert self.bmm2_scale is not None
+                assert layer._o_scale_float is not None
+                out_p = output[num_decode_tokens:prefill_end]
+                prefill_bmm2_scale = self.bmm2_scale / layer._o_scale_float
+            else:
+                out_p = self._mixed_out_a[num_decode_tokens:prefill_end]
+                prefill_bmm2_scale = self.bmm2_scale
+            trtllm_batch_context_with_kv_cache(
+                query=prefill_query,
+                kv_cache=nvfp4_data,
+                workspace_buffer=workspace_buffer,
+                block_tables=attn_metadata.prefill.block_tables,
+                seq_lens=attn_metadata.prefill.seq_lens,
+                max_q_len=attn_metadata.prefill.max_q_len,
+                max_kv_len=attn_metadata.prefill.max_seq_len,
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=prefill_bmm2_scale,
+                batch_size=num_prefills,
+                cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
+                cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
+                window_left=self.window_left,
+                sinks=self.sinks,
+                o_sf_scale=self.o_sf_scale,
+                out=out_p,
+                kv_cache_sf=nvfp4_scales,
+            )
+            if output_scale is None:
+                output[num_decode_tokens:prefill_end].copy_(out_p.to(output.dtype))
+
+        return output
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        # Primary (NVFP4) write -- delegate to FlashInferImpl.
+        super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+        if self.kv_sharing_target_layer_name is not None:
+            return
+        # Sibling write. Read slot_mapping from MixedKVMetadata, NOT from
+        # forward_context.slot_mapping: the first-N -1 mask only lives in
+        # the former. Without it, past-N positions write to wrong slots.
+        from vllm.model_executor.layers.attention.attention import (
+            get_attention_context,
+        )
+
+        sibling_meta, _sibling_layer, sibling_kv_cache, _ = get_attention_context(
+            self.mixed_kv_cache_prefix
+        )
+        if sibling_meta is None or sibling_kv_cache.numel() == 0:
+            return
+        # Cache shape is already at natural num_kv_heads (inter-block
+        # padding handled by page_size_padded). FP8 sibling: pass "fp8"
+        # so the kernel quantizes bf16 inputs to E4M3 with ``_k_scale`` /
+        # ``_v_scale``. BF16 sibling: pass "auto" so the kernel writes
+        # bf16 inputs through unchanged (scales unused).
+        sibling_cache_dtype_str = "fp8" if self.mixed_kv_dtype == "fp8" else "auto"
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            sibling_kv_cache[:, 0],
+            sibling_kv_cache[:, 1],
+            sibling_meta.slot_mapping,
+            sibling_cache_dtype_str,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
 
 def fast_plan_decode(

@@ -2270,6 +2270,50 @@ def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
         get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
+def test_unify_kv_cache_spec_page_size_scales_attention_block_size():
+    small_spec = new_kv_cache_spec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    large_spec = new_kv_cache_spec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32
+    )
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "small": small_spec,
+            "large": large_spec,
+        }
+    )
+
+    assert unified["small"].page_size_bytes == large_spec.page_size_bytes
+    assert unified["small"].block_size == small_spec.block_size * 2
+    assert unified["large"] == large_spec
+
+
+def test_unify_kv_cache_spec_page_size_pads_mamba_spec():
+    mamba_spec = new_mamba_spec(
+        block_size=32,
+        shapes=((64,),),
+        dtypes=(torch.float32,),
+        page_size_padded=None,
+    )
+    attention_spec = new_kv_cache_spec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32
+    )
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mamba": mamba_spec,
+            "attention": attention_spec,
+        }
+    )
+
+    assert unified["mamba"].page_size_bytes == attention_spec.page_size_bytes
+    assert unified["mamba"].block_size == mamba_spec.block_size
+    assert unified["mamba"].page_size_padded == attention_spec.page_size_bytes
+    assert unified["attention"] == attention_spec
+
+
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec()

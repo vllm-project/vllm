@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
+    FirstNSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheSpec,
@@ -445,6 +446,52 @@ class SingleTypeKVCacheManager(ABC):
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
+    @staticmethod
+    def _match_prefix_blocks(
+        block_hashes: BlockHashList,
+        max_num_blocks: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        """Scan ``block_hashes`` left-to-right, returning the longest run of
+        contiguous cached blocks (up to ``max_num_blocks``). Shared by
+        ``FullAttentionManager`` and ``FirstNManager``."""
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids))
+        )
+        for block_hash in itertools.islice(block_hashes, max_num_blocks):
+            # block_hashes is a chain of block hashes. If a block hash is not
+            # in the cached_block_hash_to_id, the following block hashes are
+            # not computed yet for sure.
+            if cached_block := block_pool.get_cached_block(
+                block_hash, kv_cache_group_ids
+            ):
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed.append(cached)
+            else:
+                break
+        return computed_blocks
+
+    @staticmethod
+    def _trim_for_eagle_and_align(
+        computed_blocks: tuple[list[KVCacheBlock], ...],
+        block_size: int,
+        alignment_tokens: int,
+        use_eagle: bool,
+    ) -> None:
+        """Apply the eagle drop + alignment trim post-processing in place.
+        Shared by ``FullAttentionManager`` and ``FirstNManager``."""
+        if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
+        while (
+            block_size != alignment_tokens
+            and computed_blocks[0]
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
+            for computed in computed_blocks:
+                computed.pop()
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -464,34 +511,16 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
         )
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [] for _ in range(len(kv_cache_group_ids))
-        )
         block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
-        for block_hash in itertools.islice(block_hashes, max_num_blocks):
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
-            ):
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed.append(cached)
-            else:
-                break
-        if use_eagle and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
-            for computed in computed_blocks:
-                computed.pop()
-        while (
-            block_size != alignment_tokens  # Faster for common case.
-            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-        ):
-            for computed in computed_blocks:
-                computed.pop()
+        computed_blocks = cls._match_prefix_blocks(
+            block_hashes, max_num_blocks, kv_cache_group_ids, block_pool
+        )
+        cls._trim_for_eagle_and_align(
+            computed_blocks, block_size, alignment_tokens, use_eagle
+        )
         return computed_blocks
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -640,6 +669,101 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         window in the future.
         """
         return 0
+
+
+class FirstNManager(SlidingWindowManager):
+    """KV cache manager that pins the FIRST N tokens of every request.
+
+    Allocation is capped at ``ceil(N / block_size)`` blocks per request and
+    no eviction ever happens — the first N tokens stay resident for the
+    full lifetime of the request. Used by the mixed-precision KV cache's
+    ``location='first'`` mode.
+
+    Inherits from SlidingWindowManager so the page-size unification logic
+    that pairs the sibling cache with NVFP4 keeps working unchanged.
+    """
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        # Match real cached blocks for the first ``ceil(N/block_size)`` positions, then
+        # append null-block fillers up to ``max_length``. The padding past N matters:
+        # without it, FirstN's hit length caps at N and the coordinator's fixed-point
+        # clamps the primary (full-attention) group's longer prefix-cache hit to N too.
+        # The nulls are safe because the sibling kernel reads only ``seq_lens_sib <= N``
+        # keys and writes past N are masked to slot=-1 in
+        # ``MixedKVMetadataBuilder.build``.
+        assert isinstance(kv_cache_spec, FirstNSpec), (
+            "FirstNManager can only be used for FirstNSpec groups"
+        )
+        block_size = kv_cache_spec.block_size
+        if dcp_world_size * pcp_world_size > 1:
+            block_size *= dcp_world_size * pcp_world_size
+        max_num_blocks = max_length // block_size
+        max_first_n_blocks = (
+            kv_cache_spec.sliding_window + block_size - 1
+        ) // block_size
+        real_match_blocks = min(max_num_blocks, max_first_n_blocks)
+
+        computed_blocks = FullAttentionManager._match_prefix_blocks(
+            block_hashes, real_match_blocks, kv_cache_group_ids, block_pool
+        )
+        # Pad with null blocks past N — but only if we matched the full first-N range
+        # (otherwise the primary group will reduce the hit length below N anyway, and
+        # extra padding here is wasted work).
+        if len(computed_blocks[0]) == max_first_n_blocks:
+            for _ in range(max_first_n_blocks, max_num_blocks):
+                for computed in computed_blocks:
+                    computed.append(block_pool.null_block)
+        FullAttentionManager._trim_for_eagle_and_align(
+            computed_blocks, block_size, alignment_tokens, use_eagle
+        )
+        return computed_blocks
+
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        # No eviction: every token in [0, N) of every request stays resident.
+        return 0
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        # Stop allocating once we have the first N tokens worth of blocks.
+        # Any chunk whose tokens fall past position N adds zero new blocks
+        # (its slot_mapping entries are masked to -1 by the metadata
+        # builder, so reshape_and_cache_flash skips them).
+        capped = min(num_tokens, self.sliding_window)
+        capped_main = min(num_tokens_main_model, self.sliding_window)
+        return super().allocate_new_blocks(request_id, capped, capped_main)
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        # Same cap as allocate_new_blocks so admission accounting stays
+        # consistent with the runtime allocator.
+        return super().get_num_blocks_to_allocate(
+            request_id,
+            min(num_tokens, self.sliding_window),
+            new_computed_blocks,
+            total_computed_tokens,
+            min(num_tokens_main_model, self.sliding_window),
+            apply_admission_cap=apply_admission_cap,
+        )
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
@@ -1147,6 +1271,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     HiddenStateCacheSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     SlidingWindowMLASpec: SlidingWindowManager,
+    FirstNSpec: FirstNManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
