@@ -144,6 +144,12 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if self.block_size is None:
+            # Mamba/SSM block tables have block_size=None and the SSM
+            # forward path doesn't use slot_mapping anyway. Skip the
+            # kernel; calling it would compute None * TOTAL_CP_WORLD_SIZE
+            # and crash.
+            return
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank

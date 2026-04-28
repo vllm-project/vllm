@@ -1688,9 +1688,15 @@ def _report_kv_cache_config(
         vllm_config: The global VllmConfig
         kv_cache_config: The resolved KV cache configuration
     """
-    min_block_size = min(
-        [group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups]
-    )
+    # Mamba/SSM groups have block_size=None (state is per sequence, not
+    # per token-block). Drop them before min() so a hybrid attention+SSM
+    # config doesn't crash here on min(None, 16).
+    block_sizes = [
+        group.kv_cache_spec.block_size
+        for group in kv_cache_config.kv_cache_groups
+        if group.kv_cache_spec.block_size is not None
+    ]
+    min_block_size = min(block_sizes) if block_sizes else 1
 
     # Log the KV cache size and maximum concurrency.
     num_tokens = (
