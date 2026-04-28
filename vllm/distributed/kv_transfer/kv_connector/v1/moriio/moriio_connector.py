@@ -408,9 +408,18 @@ class MoRIIOConnectorScheduler:
                         )
 
             else:
-                # WRITE mode: prefill scheduler notifies the decode side that
-                # blocks are ready.  Parse the decode's host/notify_port from
-                # the request_id
+                # WRITE mode: this branch only fires on the decode-side
+                # scheduler (the toy proxy sets do_remote_prefill=True only on
+                # decode-bound requests).  The decode tells the prefill which
+                # blocks to RDMA-write into, so we need the *prefill's*
+                # host/notify_port from the request_id.
+                # get_peer_zmq_from_request_id() takes the *caller's* role and
+                # returns the peer's address; passing self.is_producer=False
+                # on the decode side resolves to the prefill address.
+                # Hardcoding True here used to make the decode send the
+                # block-notify message to its own notify port, where the
+                # consumer-role assertion in
+                # MoRIIOWrapper._handle_structured_message would fail.
                 assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
@@ -418,7 +427,7 @@ class MoRIIOConnectorScheduler:
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
                 peer_zmq = get_peer_zmq_from_request_id(
-                    request.request_id, is_producer=True
+                    request.request_id, is_producer=self.is_producer
                 )
                 remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
 
@@ -770,17 +779,83 @@ class MoRIIOConnectorWorker:
         self.use_mla = self.model_config.use_mla
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
-        backend = get_attn_backend(
-            self.model_config.get_head_size(),
-            self.model_config.dtype,
-            self.cache_config.cache_dtype,
-            use_mla=self.use_mla,
-        )
+        # DeepSeek V4 sparse attention switches the cache layout to
+        # "fp8_ds_mla" inside the attention layer. The platform's attention
+        # selector only exposes the sparse-MLA backend (which understands that
+        # cache dtype) when use_sparse=True is requested. Detect that case from
+        # the configured cache dtype so the connector's backend probe matches
+        # what the model actually instantiated.
+        self.use_sparse = self.cache_config.cache_dtype == "fp8_ds_mla"
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
 
+        # The platform selector cannot describe every backend a model may pick
+        # for itself. DeepSeek V4 in particular returns its own
+        # DeepseekV4FlashMLASparseBackend from the attention layer's
+        # get_attn_backend() and never goes through get_attn_backend() at the
+        # platform level. On ROCm there is no platform candidate registered for
+        # (use_mla=True, use_sparse=True, kv_cache_dtype=fp8_ds_mla), so the
+        # selector raises here even though the model is running fine via the
+        # ROCm FlashMLA fallbacks. self.backend_name is only used as
+        # informational metadata in the MoRIIO handshake (no dispatch keys off
+        # it), so probe optimistically and fall back to the actual backend the
+        # model instantiated.
         # TODO: consider the integration of flashinfer or other backends.
-        self.backend_name = backend.get_name()
-        logger.debug("Detected attention backend %s", self.backend_name)
+        try:
+            backend = get_attn_backend(
+                self.model_config.get_head_size(),
+                self.model_config.dtype,
+                self.cache_config.cache_dtype,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+            )
+            self.backend_name = backend.get_name()
+        except ValueError as exc:
+            self.backend_name = self._infer_backend_name_from_model(
+                vllm_config
+            )
+            logger.warning(
+                "Platform attention selector has no entry for "
+                "(use_mla=%s, use_sparse=%s, kv_cache_dtype=%s); using '%s' "
+                "for MoRIIO handshake metadata. Underlying selector error: %s",
+                self.use_mla,
+                self.use_sparse,
+                self.cache_config.cache_dtype,
+                self.backend_name,
+                exc,
+            )
+        else:
+            logger.debug("Detected attention backend %s", self.backend_name)
+
+    @staticmethod
+    def _infer_backend_name_from_model(vllm_config: VllmConfig) -> str:
+        """Recover the attention backend name from a model that bypasses the
+        platform selector (e.g., DeepSeek V4 returning its own backend class
+        from the attention layer's get_attn_backend()).
+
+        Walks vllm_config.compilation_config.static_forward_context, which
+        holds the instantiated attention layers, and returns the name of the
+        first backend class advertised by any of them. Falls back to a
+        sentinel string if introspection fails.
+        """
+        sentinel = "UNREGISTERED"
+        try:
+            forward_context = (
+                vllm_config.compilation_config.static_forward_context
+            )
+        except AttributeError:
+            return sentinel
+        for layer in forward_context.values():
+            getter = getattr(layer, "get_attn_backend", None)
+            if getter is None:
+                continue
+            try:
+                backend_cls = getter()
+                name = backend_cls.get_name()
+            except Exception:
+                continue
+            if isinstance(name, str) and name:
+                return name
+        return sentinel
 
     def schedule_write_blocks(
         self,
@@ -1174,7 +1249,25 @@ class MoRIIOConnectorWorker:
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(kv_cache)
+            # MoRIIO's register_torch_tensor requires a contiguous tensor for
+            # RDMA pinning. Some KV cache layouts (e.g. DeepSeek V4's MLA spec
+            # with alignment=576) wrap the underlying contiguous int8 storage
+            # in a torch.as_strided() view that is non-contiguous by design
+            # (see vllm/v1/worker/gpu_model_runner.py::_reshape_kv_cache_tensors
+            # and MLAAttentionSpec.page_size_padded). For those, register the
+            # underlying storage as a flat 1D uint8 alias instead -- same
+            # memory, same data_ptr(), so all downstream addressing
+            # (kv_caches_base_addr, schedule_write_blocks, etc.) is unchanged.
+            if kv_cache.is_contiguous():
+                register_target = kv_cache
+            else:
+                register_target = torch.empty(
+                    0, dtype=torch.uint8, device=kv_cache.device
+                ).set_(kv_cache.untyped_storage())
+
+            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(
+                register_target
+            )
             self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                 moriio_mem_metadata
             )
