@@ -6,6 +6,12 @@
 #include <torch/csrc/stable/macros.h>
 namespace vllm {
 
+template <typename fp8_t>
+__device__ __forceinline__ fp8_t fp8_from_scaled(float v, float scale) {
+  // Store fp8 of (v / scale). Scale is stored separately.
+  return fp8_t(v / scale);
+}
+
 // STRIDE_I_ZERO: true if scale_stride_i == 0 (per-tensor or per-channel)
 // STRIDE_J_ZERO: true if scale_stride_j == 0 (per-tensor or per-token)
 template <typename scalar_t, typename fp8_type, bool STRIDE_I_ZERO,
@@ -163,7 +169,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   }
   __syncthreads();
 
-  using BlockReduce = cub::BlockReduce<float, kBlockSize>;
+  using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
   const float block_max = BlockReduce(tmp).Reduce(absmax_val, cub::Max());
 
