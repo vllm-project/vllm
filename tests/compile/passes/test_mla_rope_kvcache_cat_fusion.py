@@ -341,7 +341,7 @@ def test_mla_rope_kvcache_cat_fusion(
         # note: FixFunctionalizationPass is required to correctly lower
         # the fused op to its inplace version with auto-functionalization v1.
         # Without it, decompose_auto_functionalized calls clone_preserve_strides
-        # on the non-contiguous q_pe slice directly, and inductor's lowering 
+        # on the non-contiguous q_pe slice directly, and inductor's lowering
         # of the resulting as_strided chain incorrectly drops the storage offset.
         # auto-functionalization v2 avoids this: it clones the contiguous base
         # tensor (_all_bases) and reconstructs the slice as a view, so the
