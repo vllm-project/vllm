@@ -1490,6 +1490,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
     # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
+    # - "torch": use torch._scaled_mm (requires PyTorch >= 2.8)
     # - "emulation":
     #     use BF16/FP16 GEMM, dequantizing weights and running QDQ on activations.
     #     This is only meant for research purposes to run on devices where NVFP4
@@ -1504,6 +1505,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "flashinfer-cutlass",
             "cutlass",
             "marlin",
+            "torch",
             "emulation",
         ],
     ),

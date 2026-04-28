@@ -6,7 +6,6 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.11.0",
     "wheel",
     "jinja2",
 ]
@@ -178,4 +177,3 @@ wht = "wht"
 WHT = "WHT"
 
 [tool.uv]
-no-build-isolation-package = ["torch"]

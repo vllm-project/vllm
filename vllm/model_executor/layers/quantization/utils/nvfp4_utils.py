@@ -5,9 +5,54 @@ import torch
 
 from vllm._custom_ops import (
     cutlass_scaled_mm_supports_fp4,
+    scaled_fp4_quant,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+
+
+def _apply_nvfp4_linear_torch(
+    *,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_global_scale_inv: torch.Tensor,
+    alpha: torch.Tensor,
+    output_dtype: torch.dtype,
+    output_shape: list[int],
+    output_size: int,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """FP4 linear via torch._scaled_mm, routed through inductor for autotuning.
+
+    NOTE: update to torch._scaled_mm_v2 once it has an inductor lowering
+    supporting FP4.
+    """
+    x_fp4, x_blockscale = scaled_fp4_quant(
+        x, input_global_scale_inv, is_sf_swizzled_layout=True, backend="cutlass"
+    )
+
+    a = x_fp4.view(torch.float4_e2m1fn_x2)
+    b = weight.T
+
+    scale_a = x_blockscale.reshape(-1)
+    scale_b = weight_scale.reshape(-1)
+
+    out = torch._scaled_mm(
+        a,
+        b,
+        scale_a=scale_a,
+        scale_b=scale_b,
+        out_dtype=output_dtype,
+    )
+
+    out = out * alpha
+    out = slice_nvfp4_output(out, output_size)
+
+    if bias is not None:
+        out = out + bias
+
+    return out.view(*output_shape)
 
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:

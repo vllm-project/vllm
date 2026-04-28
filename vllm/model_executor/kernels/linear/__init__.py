@@ -95,6 +95,9 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.torch_backend import (
+    TorchNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
@@ -265,6 +268,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FlashInferTrtllmNvFp4LinearKernel,
         FlashInferCudnnNvFp4LinearKernel,
         FbgemmNvFp4LinearKernel,
+        TorchNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -609,6 +613,7 @@ _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
     "flashinfer-trtllm": FlashInferTrtllmNvFp4LinearKernel,
     "flashinfer-cudnn": FlashInferCudnnNvFp4LinearKernel,
     "emulation": EmulationNvFp4LinearKernel,
+    "torch": TorchNvFp4LinearKernel,
 }
 
 
@@ -784,6 +789,7 @@ __all__ = [
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
+    "TorchNvFp4LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
