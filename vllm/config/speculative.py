@@ -339,7 +339,7 @@ class SpeculativeConfig:
             )
 
         if (arch := hf_config.architectures[0]) in (
-            "MiMoV2ProForCausalLM",
+            "MiMoV2ForCausalLM",
             "MiMoV2OmniForCausalLM",
         ):
             from vllm.model_executor.models.mimo_v2_mtp import (
@@ -347,7 +347,7 @@ class SpeculativeConfig:
             )
 
             mtp_arch_maps = {
-                "MiMoV2ProForCausalLM": "MiMoV2MTPModel",
+                "MiMoV2ForCausalLM": "MiMoV2MTPModel",
                 "MiMoV2OmniForCausalLM": "MiMoV2OmniMTPModel",
             }
 
