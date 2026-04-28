@@ -110,9 +110,13 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
             with set_default_torch_num_threads():
+                # Cannot self.executor_tokenizer because the mm processor might
+                # mutate the tokenizer, corrupting the shared tokenizer.
+                self.mm_tokenizer = copy.deepcopy(tokenizer)
+
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=self.executor_tokenizer,
+                    tokenizer=self.mm_tokenizer,
                     cache=mm_processor_cache,
                 )
 
@@ -127,7 +131,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 with set_default_torch_num_threads():
                     self._readonly_mm_processor = mm_registry.create_processor(
                         config.model_config,
-                        tokenizer=self.executor_tokenizer,
+                        tokenizer=self.mm_tokenizer,
                         cache=ro_cache,
                     )
 
