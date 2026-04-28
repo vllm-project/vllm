@@ -733,7 +733,7 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         return loader.load_weights(weights)
 
 
-class MiMoV2ProForCausalLM(MiMoV2FlashForCausalLM):
+class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):
     packed_modules_mapping = {
         "qkv_proj": ["qkv_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
