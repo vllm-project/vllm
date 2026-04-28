@@ -12,11 +12,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
-# Check if AITER ops are available
+# Check if AITER RMSNorm ops are available
 try:
     from vllm._aiter_ops import rocm_aiter_ops
 
-    _AITER_AVAILABLE = rocm_aiter_ops.is_linear_fp8_enabled()
+    _AITER_AVAILABLE = rocm_aiter_ops.is_rmsnorm_enabled()
 except ImportError:
     _AITER_AVAILABLE = False
     rocm_aiter_ops = None
