@@ -111,11 +111,11 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
 
 
 def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
-    """Canonicalize strides on size-1 dimensions for CUDA TMA compatibility.
+    """Canonicalize strides on dimensions of size=1 for CUDA TMA compatibility.
 
     PyTorch's ``is_contiguous()`` returns ``True`` for *any* stride value on a
-    size-1 dimension, because a dimension of size 1 is never actually stepped
-    across.  As a result, memory allocators may produce tensors where a size-1
+    dimension of size=1, because a dimension of size=1 is never actually stepped
+    across.  As a result, memory allocators may produce tensors where a size=1
     dimension has ``stride = 1`` (one element) rather than the canonical
     ``product(shape[i+1:])``.
 
@@ -125,9 +125,9 @@ def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     ``stride = 1`` element means 2 bytes — well below the 16-byte minimum —
     and triggers ``cudaErrorIllegalInstruction``.
 
-    This function uses ``torch.as_strided`` to patch size-1 dim strides to
-    their canonical C-contiguous value.  **No data is copied**; only stride
-    metadata is updated.  It is safe because a size-1 dimension is *never
+    This function uses ``torch.as_strided`` to patch size=1 dim strides to
+    their canonical value.  **No data is copied**; only stride
+    metadata is updated.  It is safe because a dimension of size=1 is *never
     stepped across* in pointer arithmetic — ``index * stride`` is always
     ``0 * stride = 0`` regardless of the stride value.  Patching to the
     canonical value therefore does not change any memory access; it only
