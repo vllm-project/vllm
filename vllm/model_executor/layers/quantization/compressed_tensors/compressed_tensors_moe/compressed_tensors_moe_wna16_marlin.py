@@ -206,14 +206,15 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # In the case where we have actorder/g_idx,
-        # we do not partition the w2 scales
-        load_full_w2 = self.actorder and self.group_size != -1
+        # Only actorder="group" requires runtime g_idx permutation and
+        # therefore full-K w2 scales. "weight" reorders statically at quant
+        # time, so TP sharding of scales and is_k_full work normally.
+        load_full_w2 = (self.actorder == "group") and self.group_size != -1
         w2_scales_size = (
             intermediate_size_full if load_full_w2 else intermediate_size_per_partition
         )
 
-        self.is_k_full = (not self.actorder) or (
+        self.is_k_full = (self.actorder != "group") or (
             intermediate_size_per_partition == intermediate_size_full
         )
 
@@ -221,6 +222,25 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
         else:
+            if hidden_size % self.group_size != 0:
+                raise ValueError(
+                    "CompressedTensors WNA16 Marlin MoE requires hidden_size "
+                    f"({hidden_size}) to be divisible by group_size "
+                    f"({self.group_size})."
+                )
+            if (
+                not load_full_w2
+                and intermediate_size_per_partition % self.group_size != 0
+            ):
+                raise ValueError(
+                    "CompressedTensors WNA16 Marlin MoE with static group "
+                    "scales requires the MoE intermediate size per "
+                    "tensor-parallel partition "
+                    f"({intermediate_size_per_partition}) to be divisible by "
+                    f"group_size ({self.group_size}). Scale groups would "
+                    "otherwise cross TP shard boundaries; use a compatible TP "
+                    "size or enable expert parallelism."
+                )
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
