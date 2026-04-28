@@ -517,6 +517,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -597,6 +598,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -948,6 +950,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1440,6 +1443,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1918,6 +1922,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.fused_moe.core import (
             ActivationType,

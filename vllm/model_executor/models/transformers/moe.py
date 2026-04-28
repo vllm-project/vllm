@@ -25,7 +25,10 @@ from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
@@ -179,7 +182,7 @@ class MoEMixin(MixtureOfExperts):
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
-                FusedMoE.make_expert_params_mapping(
+                fused_moe_make_expert_params_mapping(
                     self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
@@ -204,8 +207,6 @@ class MoEMixin(MixtureOfExperts):
         )
         assert intermediate_size is not None
 
-        # If there are shared experts, the results are
-        # reduced after mlp.forward() not inside FusedMoE
         num_shared_experts = getattr_iter(
             text_config,
             [
@@ -214,17 +215,6 @@ class MoEMixin(MixtureOfExperts):
             ],
             0,
         )
-        reduce_results = num_shared_experts == 0
-
-        def add_all_reduce(mlp: nn.Module):
-            """Adds an all-reduce to the output of `mlp.forward()`."""
-
-            class MLPWithAllReduce(mlp.__class__):
-                def forward(self, *args, **kwargs):
-                    output = super().forward(*args, **kwargs)
-                    return self.experts.maybe_all_reduce_tensor_model_parallel(output)
-
-            mlp.__class__ = MLPWithAllReduce
 
         # Unused kwargs since we use custom_routing_function:
         # - `scoring_func` and `e_score_correction_bias` only used for grouped
@@ -289,14 +279,11 @@ class MoEMixin(MixtureOfExperts):
                         if "bias" in experts_param_name:
                             has_bias = True
                             break
-                    # Double check there are no shared experts
-                    nonlocal reduce_results
-                    if reduce_results:
+                    # If the config does not specify num_shared_experts, but
+                    # the model has shared experts, we assume there is one.
+                    if self.num_shared_experts == 0:
                         for mlp_param_name, _ in mlp.named_parameters():
                             if "shared_expert" in mlp_param_name:
-                                reduce_results = False
-                                # If the config does not specify num_shared_experts, but
-                                # the model has shared experts, we assume there is one.
                                 self.num_shared_experts = 1
                                 break
                     # Replace experts module with FusedMoE
@@ -305,7 +292,6 @@ class MoEMixin(MixtureOfExperts):
                         top_k=top_k,
                         hidden_size=hidden_size,
                         intermediate_size=intermediate_size,
-                        reduce_results=reduce_results,
                         renormalize=renormalize,
                         # Hard coded because topk happens in Transformers
                         use_grouped_topk=False,
@@ -326,13 +312,6 @@ class MoEMixin(MixtureOfExperts):
                     self.moe_layers.append(fused_experts)
                     self.expert_weights.append(fused_experts.get_expert_weights())
                     self.num_moe_layers += 1
-                    # If results are not all-reduced in FusedMoE, ensure they
-                    # are all-reduced at the end of mlp.forward() if tensor
-                    # parallel or expert parallel is enabled
-                    if not reduce_results and (
-                        fused_experts.tp_size > 1 or fused_experts.ep_size > 1
-                    ):
-                        add_all_reduce(mlp)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
 
