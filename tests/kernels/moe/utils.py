@@ -18,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize,
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
@@ -27,6 +26,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
@@ -69,6 +71,7 @@ def make_dummy_moe_config(
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
+        max_num_tokens=512,
     )
 
 

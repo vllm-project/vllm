@@ -153,7 +153,6 @@ def test_prefix_caching_for_prefill_dedup():
         same_prompt=True,
         block_size=BLOCK_SIZE,
     )
-    requests_copy = requests.copy()
 
     # Two requests with the same prompt.
     req0 = requests.pop(0)
@@ -167,26 +166,31 @@ def test_prefix_caching_for_prefill_dedup():
     # Make sure prefix caching de-duplicates the prompts in the same step,
     # so all the blocks except the last are shared between the two requests.
     assert len(sched_output.num_scheduled_tokens) == 2
-    num_blocks = num_prompt_tokens // BLOCK_SIZE
-    assert req0.num_cached_tokens == 0
-    assert req1.num_cached_tokens >= num_blocks * BLOCK_SIZE
+    assert sched_output.num_scheduled_tokens[req0.request_id] == num_prompt_tokens
+    assert (
+        sched_output.num_scheduled_tokens[req1.request_id]
+        == num_prompt_tokens % BLOCK_SIZE
+    )
 
     sched_outputs.append(scheduler.schedule())
     while sched_outputs:
+        added_req = None
         if requests:
-            scheduler.add_request(requests.pop(0))
+            added_req = requests.pop(0)
+            scheduler.add_request(added_req)
         sched_output = sched_outputs.popleft()
         model_runner_output = _make_model_runner_output(sched_output)
         scheduler.update_from_output(sched_output, model_runner_output)
         sched_output = scheduler.schedule()
         if sched_output.num_scheduled_tokens:
             sched_outputs.append(sched_output)
+            if added_req:
+                assert (
+                    sched_output.num_scheduled_tokens[added_req.request_id]
+                    == num_prompt_tokens % BLOCK_SIZE
+                )
 
-    # Other requests scheduled after the two requests should also get
-    # prefix cache hit.
     assert scheduler.get_num_unfinished_requests() == 0
-    for req in requests_copy[1:]:
-        assert req.num_cached_tokens >= num_blocks * BLOCK_SIZE
 
 
 def test_prefix_caching_for_multi_turn():
@@ -243,12 +247,15 @@ def test_prefix_caching_for_multi_turn():
     # Schedule the next-turn requests.
     for req in next_turn_requests:
         scheduler.add_request(req)
-    sched_outputs.append(scheduler.schedule())
+    sched_output = scheduler.schedule()
+    sched_outputs.append(sched_output)
 
     # Make sure the next-turn requests get prefix cache hit by the previous
     # requests.
     for req in next_turn_requests:
-        assert req.num_cached_tokens == req.num_prompt_tokens // BLOCK_SIZE * BLOCK_SIZE
+        assert sched_output.num_scheduled_tokens[req.request_id] == (
+            req.num_prompt_tokens % BLOCK_SIZE
+        )
 
 
 def test_abort_request_when_structured_output_fsm_cannot_advance():

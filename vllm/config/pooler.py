@@ -77,17 +77,31 @@ class PoolerConfig:
     Defaults to None (i.e. set to max_model_len).
     """
 
-    ## for classification models
+    ## for classification models — affine score calibration
+    logit_mean: float | None = None
+    """
+    If provided, subtract this value from classification logits before
+    activation. Used for affine score calibration (Platt scaling):
+    activation((logit - logit_mean) / logit_sigma). Defaults to None.
+    """
+
+    logit_sigma: float | None = None
+    """
+    If provided, divide the classification logits by this value after
+    mean subtraction. Used for affine score calibration (Platt scaling):
+    activation((logit - logit_mean) / logit_sigma). Defaults to None.
+    """
+
+    # Deprecated aliases — will be removed in v0.21
     logit_bias: float | None = None
     """
-    If provided, apply classification logit biases. Defaults to None.
+    Deprecated: Use logit_mean instead. Will be removed in v0.21.
     """
 
     logit_scale: float | None = None
     """
-    If provided, scale the classification logits by this factor before
-    activation. Combined with logit_bias, enables affine score calibration:
-    activation(logit_scale * (score - logit_bias)). Defaults to None.
+    Deprecated: Use logit_sigma instead (note: logit_sigma = 1/logit_scale).
+    Will be removed in v0.21.
     """
 
     ## for reward models
@@ -105,6 +119,39 @@ class PoolerConfig:
     """
 
     def __post_init__(self) -> None:
+        # Handle deprecated logit_bias → logit_mean
+        if self.logit_bias is not None:
+            if self.logit_mean is not None:
+                raise ValueError(
+                    "Cannot set both `logit_bias` and `logit_mean`. "
+                    "`logit_bias` is deprecated, use `logit_mean` instead."
+                )
+            logger.warning(
+                "`logit_bias` is deprecated and will be removed in v0.21. "
+                "Use `logit_mean` instead."
+            )
+            self.logit_mean = self.logit_bias
+            self.logit_bias = None
+
+        # Handle deprecated logit_scale → logit_sigma
+        if self.logit_scale is not None:
+            if self.logit_sigma is not None:
+                raise ValueError(
+                    "Cannot set both `logit_scale` and `logit_sigma`. "
+                    "`logit_scale` is deprecated, use `logit_sigma` instead."
+                )
+            logger.warning(
+                "`logit_scale` is deprecated and will be removed in v0.21. "
+                "Use `logit_sigma` instead (logit_sigma = 1/logit_scale)."
+            )
+            if self.logit_scale == 0:
+                raise ValueError("logit_scale cannot be 0 (division by zero)")
+            self.logit_sigma = 1.0 / self.logit_scale
+            self.logit_scale = None
+
+        if self.logit_sigma is not None and self.logit_sigma == 0:
+            raise ValueError("logit_sigma cannot be 0 (division by zero)")
+
         if pooling_type := self.pooling_type:
             if self.seq_pooling_type is not None:
                 raise ValueError(

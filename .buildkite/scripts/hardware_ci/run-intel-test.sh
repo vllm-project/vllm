@@ -25,22 +25,100 @@ export PYTHONPATH=".."
 ###############################################################################
 
 cleanup_docker() {
+  # Share the same lock with image pull to avoid cleanup/pull races on one node.
+  local docker_lock="/tmp/docker-pull.lock"
+  exec 9>"$docker_lock"
+  flock 9
+
   docker_root=$(docker info -f '{{.DockerRootDir}}')
   if [ -z "$docker_root" ]; then
     echo "Failed to determine Docker root directory." >&2
-    exit 1
+    flock -u 9
+    return 1
   fi
   echo "Docker root directory: $docker_root"
 
   disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
   threshold=70
   if [ "$disk_usage" -gt "$threshold" ]; then
-    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
-    docker image prune -f
-    docker volume prune -f && docker system prune --force --filter "until=72h" --all
-    echo "Docker images and volumes cleanup completed."
+    echo "Disk usage is above $threshold%. Running aggressive CI image cleanup..."
+    cleanup_old_ci_images "${REGISTRY}/${REPO}" "${image_name}" "${DOCKER_IMAGE_CLEANUP_HOURS:-72}" 1
   else
-    echo "Disk usage is below $threshold%. No cleanup needed."
+    echo "Disk usage is below $threshold%. Checking old CI images anyway."
+    cleanup_old_ci_images "${REGISTRY}/${REPO}" "${image_name}" "${DOCKER_IMAGE_CLEANUP_HOURS:-72}" 0
+  fi
+  echo "Old CI image cleanup completed."
+
+  flock -u 9
+}
+
+cleanup_old_ci_images() {
+  local repo_prefix="$1"
+  local current_image_ref="$2"
+  local ttl_hours="$3"
+  local aggressive_cleanup="$4"
+
+  if [[ -z "$repo_prefix" || "$repo_prefix" == "/" ]]; then
+    echo "Skip old-image cleanup: invalid repo prefix '${repo_prefix}'"
+    return 0
+  fi
+
+  if ! [[ "$ttl_hours" =~ ^[0-9]+$ ]]; then
+    echo "Invalid DOCKER_IMAGE_CLEANUP_HOURS='${ttl_hours}', fallback to 72"
+    ttl_hours=72
+  fi
+
+  local now_epoch cutoff_epoch
+  now_epoch=$(date +%s)
+  cutoff_epoch=$((now_epoch - ttl_hours * 3600))
+
+  local -a used_image_ids
+  mapfile -t used_image_ids < <(docker ps -aq | xargs -r docker inspect --format '{{.Image}}' | sort -u)
+
+  local removed_count=0
+  local examined_count=0
+  declare -A seen_ids=()
+
+  while read -r image_ref image_id; do
+    [[ -z "$image_ref" || -z "$image_id" ]] && continue
+    ((examined_count++))
+
+    # Keep the image this job is going to use.
+    if [[ "$image_ref" == "$current_image_ref" ]]; then
+      continue
+    fi
+
+    # Avoid duplicate deletes when multiple tags point to same image id.
+    if [[ -n "${seen_ids[$image_id]:-}" ]]; then
+      continue
+    fi
+    seen_ids[$image_id]=1
+
+    # Never delete images that are used by any container on this node.
+    if printf '%s\n' "${used_image_ids[@]}" | grep -qx "$image_id"; then
+      continue
+    fi
+
+    local created created_epoch
+    created=$(docker image inspect -f '{{.Created}}' "$image_id" 2>/dev/null || true)
+    [[ -z "$created" ]] && continue
+    created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+    [[ -z "$created_epoch" ]] && continue
+
+    if (( created_epoch < cutoff_epoch )) || [[ "$aggressive_cleanup" == "1" ]]; then
+      if docker image rm -f "$image_id" >/dev/null 2>&1; then
+        ((removed_count++))
+      fi
+    fi
+  done < <(docker image ls --no-trunc "$repo_prefix" --format '{{.Repository}}:{{.Tag}} {{.ID}}')
+
+  # Also trim old dangling layers; this is safe and does not remove referenced images.
+  docker image prune -f --filter "until=${ttl_hours}h" >/dev/null 2>&1 || true
+
+  if [[ "$aggressive_cleanup" == "1" ]]; then
+    echo "Examined ${examined_count} images under ${repo_prefix}, removed ${removed_count} unused images under disk pressure."
+  else
+    echo "Examined ${examined_count} images under ${repo_prefix}, removed ${removed_count} old images (>${ttl_hours}h)."
   fi
 }
 
@@ -240,7 +318,6 @@ fi
 cleanup_docker
 
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
 
 # --- Build or pull test image ---
 IMAGE="${IMAGE_TAG_XPU:-${image_name}}"
@@ -266,8 +343,6 @@ fi
 
 remove_docker_container() {
   docker rm -f "${container_name}" || true
-  docker image rm -f "${image_name}" || true
-  docker system prune -f || true
 }
 trap remove_docker_container EXIT
 
@@ -283,6 +358,7 @@ docker run \
     --ipc=host \
     --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
+    -v ${HOME}/.cache/huggingface:/root/.cache/huggingface \
     --entrypoint="" \
     -e "HF_TOKEN=${HF_TOKEN:-}" \
     -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}" \
