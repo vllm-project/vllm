@@ -209,7 +209,8 @@ def scatter_intermediate_shift_blocks(
         query_start_loc_p: cumulative offsets within the prefill chunk,
             shape ``[num_prefills + 1]``.
         state_indices_tensor_p: ``[num_prefills, max_blocks]`` cache slot ids.
-        block_idx_first_scheduled_p, block_idx_last_scheduled_p: ``[num_prefills]``
+        block_idx_first_scheduled_p: ``[num_prefills]`` first block to fill.
+        block_idx_last_scheduled_p: ``[num_prefills]`` last block (exclusive).
         num_computed_tokens_p: ``[num_prefills]`` tokens already cached
             entering this step (used to align to the prefill input).
         block_size: cache block size in tokens (= kernel chunk_size for
