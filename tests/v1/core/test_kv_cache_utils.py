@@ -1781,6 +1781,31 @@ def test_get_kv_cache_configs_attention_free():
     ]
 
 
+def test_report_kv_cache_config_uses_device_neutral_messages(
+    caplog_vllm, disable_log_dedup
+):
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=32))
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    kv_cache_spec = new_kv_cache_spec(block_size=16)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=kv_cache_spec.page_size_bytes * 4, shared_by=["layer_1"]
+            ),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_1"], kv_cache_spec)],
+    )
+    with caplog_vllm.at_level("INFO", logger="vllm"):
+        kv_cache_utils._report_kv_cache_config(vllm_config, kv_cache_config)
+
+    assert "Multiplying the KV cache size by the cp_world_size 2" in caplog_vllm.text
+    assert "KV cache size: 128 tokens" in caplog_vllm.text
+    assert "GPU KV cache size" not in caplog_vllm.text
+    assert "Multiplying the GPU KV cache size" not in caplog_vllm.text
+
+
 def test_generate_uniform_type_kv_cache_specs():
     # All layers are full attention, can be merged
     kv_cache_specs = {

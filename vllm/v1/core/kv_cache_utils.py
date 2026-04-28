@@ -1703,14 +1703,14 @@ def _report_kv_cache_config(
     if pcp_size * dcp_size > 1:
         num_tokens *= pcp_size * dcp_size
         logger.info(
-            "Multiplying the GPU KV cache size by the cp_world_size %d "
+            "Multiplying the KV cache size by the cp_world_size %d "
             "(pcp_world_size %d * dcp_world_size %d).",
             pcp_size * dcp_size,
             pcp_size,
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
+    logger.info_once("KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
@@ -1827,7 +1827,8 @@ def _auto_fit_max_model_len(
 ) -> None:
     """
     When max_model_len is set to -1, this function estimates the largest
-    context length that can be supported with the available GPU memory.
+    context length that can be supported with the available memory for the
+    KV cache.
     It uses binary search to find the maximum length that fits across all
     workers.
 
@@ -1861,15 +1862,16 @@ def _auto_fit_max_model_len(
 
     if auto_fit_max <= 0:
         raise ValueError(
-            "Cannot auto-fit max_model_len: not enough GPU memory available "
-            "to serve even a single token. Try increasing `gpu_memory_utilization`."
+            "Cannot auto-fit max_model_len: not enough memory available "
+            "for the KV cache to serve even a single token. "
+            "Try increasing `gpu_memory_utilization`."
         )
 
     if auto_fit_max >= original_max:
         # The model's full context length fits in memory
         logger.info_once(
             "Auto-fit max_model_len: full model context length %d fits in "
-            "available GPU memory",
+            "the available KV cache memory",
             original_max,
         )
     else:
@@ -1877,7 +1879,7 @@ def _auto_fit_max_model_len(
         vllm_config.model_config.max_model_len = auto_fit_max
         logger.info_once(
             "Auto-fit max_model_len: reduced from %d to %d to fit in "
-            "available GPU memory (%s GiB available for KV cache)",
+            "the available KV cache memory (%s GiB available for KV cache)",
             original_max,
             auto_fit_max,
             format_gib(limiting_worker_mem),
@@ -1980,8 +1982,8 @@ def get_kv_cache_configs(
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
 
-    # If original_max_model_len was -1, automatically
-    # determine the maximum model length that fits in available GPU memory.
+    # If original_max_model_len was -1, automatically determine the maximum
+    # model length that fits in the available memory for the KV cache.
     # We use per-worker projected groups to account for PP sharding.
     projected_groups_per_worker = [
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
