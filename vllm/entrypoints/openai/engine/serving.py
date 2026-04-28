@@ -65,7 +65,6 @@ from vllm.renderers.inputs.preprocess import (
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -73,6 +72,7 @@ from vllm.tracing import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
+from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -156,6 +156,19 @@ class OpenAIServing:
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
+
+        # Computed once at startup (cached by ``vllm_config`` identity) and
+        # stamped on non-streaming responses. Streaming chunks deliberately
+        # omit it to avoid per-chunk overhead.
+        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+
+        try:
+            self.system_fingerprint: str | None = get_system_fingerprint(
+                engine_client.vllm_config
+            )
+        except Exception:
+            # Never fail server startup over the fingerprint.
+            self.system_fingerprint = None
 
     async def beam_search(
         self,
@@ -615,8 +628,7 @@ class OpenAIServing:
         # let the parser handle the output.
         use_mistral_tool_parser = (
             isinstance(request, ChatCompletionRequest)
-            and tool_parser_cls is not None
-            and issubclass(tool_parser_cls, MistralToolParser)
+            and is_mistral_tool_parser(tool_parser_cls)
             and request._grammar_from_tool_parser
         )
 
