@@ -42,7 +42,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import torch
@@ -99,31 +99,33 @@ class KVCacheBlock(Protocol):
     def group_id(self) -> int | None: ...
 
 
-class KVCacheState(Protocol):
-    """Structural interface to the KV cache state for connectors.
+class KVCacheState(ABC):
+    """Abstract interface to the KV cache state for connectors.
 
     Provides block-level operations without exposing internal data structures.
     """
 
+    @abstractmethod
     def get_block(self, block_id: int) -> KVCacheBlock:
         """Get a read-only view of a block by ID."""
         ...
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    @abstractmethod
+    def touch(self, block_ids: list[int]) -> None:
         """Increment ref_cnt for blocks, preventing eviction."""
         ...
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    @abstractmethod
+    def free_blocks(self, block_ids: Iterable[int]) -> None:
         """Decrement ref_cnt, returning blocks to free queue at 0."""
         ...
 
-    def iter_blocks(
-        self, after_block: KVCacheBlock | None = None
-    ) -> Iterator[KVCacheBlock]:
+    @abstractmethod
+    def iter_blocks(self, after_block_id: int | None = None) -> Iterator[KVCacheBlock]:
         """Yield free blocks in LRU order starting after the given block.
 
         Args:
-            after_block: Resume iteration after this block, or from
+            after_block_id: Resume iteration after this block, or from
                 the head if None.
         """
         ...

@@ -10,10 +10,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVCacheBlock,
-    KVCacheState,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVCacheState
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -136,8 +133,8 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
-        self._cursor: KVCacheBlock | None = None
+        # Lazy mode: block_id of the last scanned block in the GPU free queue.
+        self._cursor: int | None = None
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
@@ -280,7 +277,7 @@ class SimpleCPUOffloadScheduler:
 
         gpu_block_ids: list[int] = []
         cpu_block_ids: list[int] = []
-        cpu_blocks_to_touch: list[KVCacheBlock] = []
+        cpu_blocks_to_touch = []
 
         for g in range(num_groups):
             cpu_blocks_g = cpu_hit_blocks[g]
@@ -309,8 +306,7 @@ class SimpleCPUOffloadScheduler:
 
         # Touch GPU blocks to prevent freeing during async load
         assert self._gpu_kv_cache_state is not None
-        gpu_state = self._gpu_kv_cache_state
-        gpu_state.touch([gpu_state.get_block(bid) for bid in gpu_block_ids])
+        self._gpu_kv_cache_state.touch(gpu_block_ids)
 
         assert self._reqs_to_load.get(req_id) is None
         self._reqs_to_load[req_id] = LoadRequestState(
@@ -394,7 +390,7 @@ class SimpleCPUOffloadScheduler:
         num_cpu_free = cpu_pool.get_num_free_blocks()
 
         # Validate cursor: stale if block was removed from free queue.
-        if self._cursor is not None and self._cursor.ref_cnt > 0:
+        if self._cursor is not None and gpu_state.get_block(self._cursor).ref_cnt > 0:
             self._cursor = None
 
         gpu_ids: list[int] = []
@@ -405,15 +401,12 @@ class SimpleCPUOffloadScheduler:
             if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
                 break
 
-            last_visited = block
+            last_visited = block.block_id
 
             bhash = block.block_hash
             if (
                 bhash is not None
-                and cpu_pool.cached_block_hash_to_block.get_one_block(
-                    bhash  # type: ignore[arg-type]
-                )
-                is None
+                and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None  # type: ignore[arg-type]
             ):
                 gpu_ids.append(block.block_id)
                 block_hashes.append(bhash)
@@ -427,7 +420,7 @@ class SimpleCPUOffloadScheduler:
             for cpu_blk, bhash in zip(cpu_blocks, block_hashes):  # type: ignore[assignment]
                 cpu_blk._block_hash = bhash  # type: ignore[assignment]
             # Touch GPU blocks to prevent eviction during async copy.
-            gpu_state.touch([gpu_state.get_block(bid) for bid in gpu_ids])
+            gpu_state.touch(gpu_ids)
         else:
             cpu_ids = []
 
@@ -554,7 +547,7 @@ class SimpleCPUOffloadScheduler:
                 gpu_blocks_this_step.update(gpu_block_ids)
 
                 # Touch GPU blocks to prevent freeing during async copy
-                gpu_state.touch([gpu_state.get_block(bid) for bid in gpu_block_ids])
+                gpu_state.touch(gpu_block_ids)
 
                 logger.debug(
                     "Request %s: Scheduling store of %d blocks to CPU (%d groups)",
@@ -634,8 +627,7 @@ class SimpleCPUOffloadScheduler:
         # Free CPU and GPU blocks' ref counts to turn them into prefix cache
         self.cpu_block_pool.free_blocks(cpu_blocks)
         assert self._gpu_kv_cache_state is not None
-        gpu_state = self._gpu_kv_cache_state
-        gpu_state.free_blocks(gpu_state.get_block(bid) for bid in gpu_block_ids)
+        self._gpu_kv_cache_state.free_blocks(gpu_block_ids)
 
     def has_pending_stores(self) -> bool:
         """Return True if there are in-flight store transfers."""
@@ -703,10 +695,7 @@ class SimpleCPUOffloadScheduler:
             )
             # Free GPU touch refs
             assert self._gpu_kv_cache_state is not None
-            gpu_state = self._gpu_kv_cache_state
-            gpu_state.free_blocks(
-                gpu_state.get_block(bid) for bid in state.transfer_meta.gpu_block_ids
-            )
+            self._gpu_kv_cache_state.free_blocks(state.transfer_meta.gpu_block_ids)
 
     def _cleanup_store_request(self, req_id: str) -> None:
         """Release store metadata for a request.

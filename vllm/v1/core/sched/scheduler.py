@@ -241,8 +241,10 @@ class Scheduler(SchedulerInterface):
         # Bind KV cache state to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
+            from vllm.v1.core.kv_connector import KVConnectorKVCacheState
+
             self.connector.bind_kv_cache_state(
-                self.kv_cache_manager.block_pool  # type: ignore[arg-type]
+                KVConnectorKVCacheState(self.kv_cache_manager.block_pool)
             )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
