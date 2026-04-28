@@ -7,6 +7,7 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -28,6 +29,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _fused_kv_compress_norm_rope_insert_sparse_attn,
 )
+from vllm.v1.attention.ops.deepseek_v4_ops.cache_utils import quantize_and_insert_k_cache
 from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
     MXFP4_BLOCK_SIZE,
 )
@@ -174,6 +176,54 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+def hadamard_transform_ref(x: torch.Tensor) -> torch.Tensor:
+    hidden_size = x.shape[-1]
+    assert hidden_size > 0 and (hidden_size & (hidden_size - 1)) == 0, (
+        f"Hidden size must be a power of 2, got {hidden_size}"
+    )
+    dtype = x.dtype
+    y = x.to(torch.float32).reshape(-1, hidden_size)
+    h = 1
+    while h < hidden_size:
+        y = y.view(-1, hidden_size // (2 * h), 2, h)
+        a = y[:, :, 0, :]
+        b = y[:, :, 1, :]
+        y = torch.cat((a + b, a - b), dim=-1)
+        h *= 2
+    y = y.view(*x.shape) * (hidden_size**-0.5)
+    return y.to(dtype)
+
+
+def apply_gptj_rope_ref(
+    x: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_dim: int,
+) -> torch.Tensor:
+    if rope_dim == 0 or x.numel() == 0:
+        return x
+    half_rot = rope_dim // 2
+    nope_dim = x.shape[-1] - rope_dim
+    dtype = x.dtype
+    x = x.to(torch.float32)
+    cache = cos_sin_cache.index_select(0, positions.to(torch.long))
+    cos = cache[:, :half_rot].to(torch.float32)
+    sin = cache[:, half_rot : 2 * half_rot].to(torch.float32)
+    view_shape = (positions.shape[0],) + (1,) * (x.dim() - 2) + (half_rot,)
+    cos = cos.view(view_shape)
+    sin = sin.view(view_shape)
+    rope = x[..., nope_dim:]
+    x_even = rope[..., 0::2]
+    x_odd = rope[..., 1::2]
+    rope_out = torch.stack(
+        (x_even * cos - x_odd * sin, x_odd * cos + x_even * sin),
+        dim=-1,
+    ).flatten(-2)
+    x = x.clone()
+    x[..., nope_dim:] = rope_out
+    return x.to(dtype)
+
+
 class DeepseekCompressor(nn.Module):
     def __init__(
         self,
@@ -239,6 +289,9 @@ class DeepseekCompressor(nn.Module):
         self._static_forward_context = (
             vllm_config.compilation_config.static_forward_context
         )
+        self._old_kv_state: dict[str, torch.Tensor] = {}
+        self._old_score_state: dict[str, torch.Tensor] = {}
+        self._old_need_hadamard = self.head_dim == 128
 
         if self.head_dim == 512:
             assert not use_fp4_cache, (
@@ -324,7 +377,6 @@ class DeepseekCompressor(nn.Module):
             TRITON_BLOCK_SIZE=triton.next_power_of_2(kv.shape[-1]),
             STATE_WIDTH=state_width,
             COMPRESS_RATIO=self.compress_ratio,
-            launch_pdl=False,
         )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
@@ -373,8 +425,194 @@ class DeepseekCompressor(nn.Module):
             SCALE_DIM=self._scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
             num_warps=self._num_warps,
-            launch_pdl=False,
         )
+
+    @property
+    def _state_width(self) -> int:
+        return self.coff * self.head_dim
+
+    @property
+    def _state_len(self) -> int:
+        return self.compress_ratio * self.coff
+
+    def _get_old_state(self, req_id: str, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        kv_state = self._old_kv_state.get(req_id)
+        score_state = self._old_score_state.get(req_id)
+        if kv_state is None or score_state is None or kv_state.device != device:
+            kv_state = torch.zeros(
+                (self._state_len, self._state_width),
+                dtype=torch.float32,
+                device=device,
+            )
+            score_state = torch.full(
+                (self._state_len, self._state_width),
+                float("-inf"),
+                dtype=torch.float32,
+                device=device,
+            )
+            self._old_kv_state[req_id] = kv_state
+            self._old_score_state[req_id] = score_state
+        return kv_state, score_state
+
+    def _clear_old_state(self, kv_state: torch.Tensor, score_state: torch.Tensor) -> None:
+        kv_state.zero_()
+        score_state.fill_(float("-inf"))
+
+    def _overlap_transform(self, tensor: torch.Tensor, fill_value: Any) -> torch.Tensor:
+        assert tensor.dim() == 3
+        assert tensor.shape[1:] == (self.compress_ratio, 2 * self.head_dim)
+        s, r, d = tensor.shape[0], self.compress_ratio, self.head_dim
+        new_tensor = tensor.new_full((s, 2 * r, d), fill_value)
+        new_tensor[:, r:] = tensor[:, :, d:]
+        new_tensor[1:, :r] = tensor[:-1, :, :d]
+        return new_tensor
+
+    def _ref_rms_norm(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.to(torch.float32)
+        x = x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + self.rms_norm_eps)
+        return x * self.norm.weight.to(torch.float32)
+
+    @staticmethod
+    def _compute_state_len(seq_len: int, ratio: int) -> int:
+        return seq_len % ratio + (ratio == 4) * ratio
+
+    def _forward_old(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb,
+    ) -> None:
+        num_tokens, _ = x.shape
+        kv_score = cublas_gemm_bf16_bf16_fp32(x, self.fused_wkv_wgate.weight)
+        kv, score = kv_score.split([self._state_width, self._state_width], dim=-1)
+
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+
+        state_metadata = attn_metadata[self.state_cache.prefix]
+        token_to_req_indices = state_metadata.token_to_req_indices[:num_tokens]
+        k_cache_metadata = attn_metadata[self.k_cache_prefix]
+        slot_mapping = k_cache_metadata.slot_mapping[:num_tokens]
+        kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+        req_ids = forward_context.additional_kwargs.get("req_ids")
+        if req_ids is None:
+            max_req_idx = int(token_to_req_indices.max().item()) + 1 if num_tokens > 0 else 0
+            req_ids = [str(i) for i in range(max_req_idx)]
+
+        _, counts = torch.unique_consecutive(token_to_req_indices.to(torch.int64), return_counts=True)
+        start = 0
+        for req_idx_tensor, count_tensor in zip(
+            torch.unique_consecutive(token_to_req_indices.to(torch.int64)), counts
+        ):
+            req_idx = int(req_idx_tensor.item())
+            count = int(count_tensor.item())
+            end = start + count
+            req_id = req_ids[req_idx]
+            kv_state, score_state = self._get_old_state(req_id, x.device)
+
+            positions_i = positions[start:end].to(torch.int64)
+            prefix_len = int(positions_i[0].item())
+            query_len = end - start
+            if prefix_len == 0:
+                self._clear_old_state(kv_state, score_state)
+
+            pre_state_len = self._compute_state_len(prefix_len, self.compress_ratio)
+            valid_kv_len = pre_state_len + query_len
+
+            temp_kv = torch.empty(
+                (valid_kv_len, self._state_width), dtype=torch.float32, device=x.device
+            )
+            temp_score = torch.empty_like(temp_kv)
+            if pre_state_len > 0:
+                temp_kv[:pre_state_len] = kv_state[:pre_state_len]
+                temp_score[:pre_state_len] = score_state[:pre_state_len]
+            temp_kv[pre_state_len:] = kv[start:end]
+            temp_score[pre_state_len:] = score[start:end]
+
+            post_state_len = self._compute_state_len(valid_kv_len, self.compress_ratio)
+            kv_state[:post_state_len] = temp_kv[valid_kv_len - post_state_len : valid_kv_len]
+            score_state[:post_state_len] = temp_score[
+                valid_kv_len - post_state_len : valid_kv_len
+            ]
+            if post_state_len < self._state_len:
+                kv_state[post_state_len:].zero_()
+                score_state[post_state_len:].fill_(float("-inf"))
+
+            compress_len = valid_kv_len // self.compress_ratio * self.compress_ratio
+            if compress_len == 0:
+                start = end
+                continue
+
+            kv_to_compress = temp_kv[:compress_len].view(
+                compress_len // self.compress_ratio,
+                self.compress_ratio,
+                self._state_width,
+            )
+            score_to_compress = temp_score[:compress_len].view_as(kv_to_compress)
+            score_to_compress = score_to_compress + self.ape.unsqueeze(0)
+
+            if self.overlap:
+                kv_to_compress = self._overlap_transform(kv_to_compress, 0.0)
+                score_to_compress = self._overlap_transform(
+                    score_to_compress, float("-inf")
+                )
+                kv_to_compress = kv_to_compress[1:]
+                score_to_compress = score_to_compress[1:]
+                if kv_to_compress.numel() == 0:
+                    start = end
+                    continue
+
+            kv_compressed = (
+                kv_to_compress * torch.softmax(score_to_compress, dim=1)
+            ).sum(dim=1)
+            kv_compressed = self._ref_rms_norm(kv_compressed)
+
+            first_compressed_pos = prefix_len
+            first_compressed_pos += self.compress_ratio - 1 - first_compressed_pos % self.compress_ratio
+            compressed_positions = torch.arange(
+                first_compressed_pos,
+                prefix_len + query_len,
+                self.compress_ratio,
+                device=x.device,
+                dtype=torch.int64,
+            )
+            if compressed_positions.numel() != kv_compressed.shape[0]:
+                raise RuntimeError(
+                    f"Compressed positions mismatch for req {req_id}: "
+                    f"{compressed_positions.numel()} vs {kv_compressed.shape[0]}"
+                )
+
+            kv_compressed = apply_gptj_rope_ref(
+                kv_compressed, compressed_positions, rotary_emb.cos_sin_cache, self.rope_head_dim
+            ).to(torch.bfloat16)
+            if self._old_need_hadamard:
+                kv_compressed = hadamard_transform_ref(kv_compressed)
+
+            local_output = torch.zeros(
+                (query_len, self.head_dim), dtype=torch.bfloat16, device=x.device
+            )
+            local_output[(compressed_positions - prefix_len).to(torch.long)] = kv_compressed
+
+            if self.head_dim == 512:
+                quantize_and_insert_k_cache(
+                    local_output,
+                    kv_cache,
+                    slot_mapping[start:end],
+                    block_size=kv_cache.shape[1],
+                    is_ue8m0=True,
+                )
+            else:
+                ops.indexer_k_quant_and_cache(
+                    local_output,
+                    kv_cache,
+                    slot_mapping[start:end],
+                    self._quant_block,
+                    "ue8m0",
+                )
+
+            start = end
 
 
 @triton.jit
