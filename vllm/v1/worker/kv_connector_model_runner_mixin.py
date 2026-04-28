@@ -328,7 +328,7 @@ class KVConnectorModelRunnerMixin:
         # The connector must support HMA
         if not supports_hma(get_kv_transfer_group()):
             return False
-        if len(kv_cache_config.kv_cache_groups) < 2:
+        if len(kv_cache_config.kv_cache_groups) < 1:
             return False
 
         # Currently, all groups must use AttentionSpec with uniform page size
@@ -424,8 +424,8 @@ class KVConnectorModelRunnerMixin:
         tensor_size = tensor_sizes.pop()
 
         page_size = first_spec.page_size_bytes
-        assert tensor_size % page_size == 0
-        num_blocks = tensor_size // page_size
+        num_blocks = kv_cache_config.num_blocks
+        assert tensor_size == page_size * num_blocks
         group_size = len(kv_cache_config.kv_cache_tensors)
         total_size = tensor_size * group_size
 
@@ -479,13 +479,10 @@ class KVConnectorModelRunnerMixin:
                 # prepend a group_size dimension into the shape
                 full_shape = (group_size,) + kv_cache_shape
 
-                try:
-                    kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                        include_num_layers_dimension=True
-                    )
-                    assert len(kv_cache_stride_order) == len(full_shape)
-                except (AttributeError, NotImplementedError):
-                    kv_cache_stride_order = tuple(range(len(full_shape)))
+                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=True
+                )
+                assert len(kv_cache_stride_order) == len(full_shape)
 
                 physical_shape = tuple(full_shape[j] for j in kv_cache_stride_order)
                 inv_order = [
