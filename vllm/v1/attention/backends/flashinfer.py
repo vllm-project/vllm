@@ -1246,17 +1246,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 # require_uniform=True (see split_decodes_and_prefills above)
                 # guarantees every decode-bucket request has the same
-                # query_len. For spec-decode verification, query_len =
-                # 1 + num_spec_tokens > 1 and we route through the prefill
-                # wrapper. A degenerate num_decode_tokens % num_decodes != 0
-                # can show up during dummy_run q_len=0 initialization; treat
-                # that as query_len=1 for robustness.
-                if num_decode_tokens % num_decodes == 0:
-                    query_len = num_decode_tokens // num_decodes
-                else:
+                # query_len, except padded slots which carry zero-length rows
+                # under the zero_rows CG padding strategy. Derive query_len
+                # from per-request qo_indptr deltas instead of
+                # num_decode_tokens / num_decodes — the aggregate form
+                # misroutes mixed real+padded batches (e.g. [5, 5, 0] gives
+                # 10 % 3 == 1, falsely selecting the FIDecode path).
+                # Defensive: scan all rows in case a padded zero row
+                # precedes a real row.
+                decode_query_lens = (
+                    qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+                )
+                nonzero_query_lens = decode_query_lens[decode_query_lens > 0]
+                if nonzero_query_lens.numel() == 0:
                     query_len = 1
+                else:
+                    query_len = int(nonzero_query_lens[0].item())
+                    is_uniform_or_padding = (decode_query_lens == query_len) | (
+                        decode_query_lens == 0
+                    )
+                    assert bool(is_uniform_or_padding.all().item()), (
+                        f"non-uniform decode bucket: {decode_query_lens.tolist()}"
+                    )
 
-                if query_len == 1:
+                if query_len <= 1:
                     num_input_tokens = num_decode_tokens
 
                     decode_wrapper = self._get_decode_wrapper(
