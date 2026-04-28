@@ -1034,8 +1034,8 @@ def test_logit_bias_greedy(rejection_sampler):
         [output_tokens[i][-1] for i in range(len(output_tokens))],
         device=logits.device,
     )
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        spec_tokens, device=logits.device
+    spec_decode_metadata = create_spec_decode_metadata(
+        spec_tokens, logits
     )
     mock_sampler_output(rejection_sampler, bonus_token_tensor)
     output = rejection_sampler(
@@ -1082,8 +1082,8 @@ def test_logit_bias_with_empty_draft_tokens(rejection_sampler):
         [output_tokens[i][-1] for i in range(len(output_tokens))],
         device=logits.device,
     )
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        spec_tokens, device=logits.device
+    spec_decode_metadata = create_spec_decode_metadata(
+        spec_tokens, logits
     )
     mock_sampler_output(rejection_sampler, bonus_token_tensor)
     output = rejection_sampler(
