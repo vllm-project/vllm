@@ -113,6 +113,14 @@ CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL --data-parallel-size 2 --data-parallel-
                                          --port 8001
 ```
 
+Alternatively, each rank can be launched with all DP-world GPUs visible and vLLM will select this rank's GPU(s) automatically (matching internal LB behavior). This requires `device_count() >= (data-parallel-rank + 1) * tensor-parallel-size * pipeline-parallel-size`:
+
+```bash
+# Both ranks see all GPUs; rank 0 picks cuda:0, rank 1 picks cuda:1.
+vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 0 --port 8000
+vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 --port 8001
+```
+
 For multi-node cases, the address/port of rank 0 must also be specified:
 
 ```bash
