@@ -1693,36 +1693,24 @@ def _report_kv_cache_config(
         vllm_config: The global VllmConfig
         kv_cache_config: The resolved KV cache configuration
     """
-    min_block_size = min(
-        [group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups]
-    )
-
-    # Log the KV cache size and maximum concurrency.
-    num_tokens = (
-        kv_cache_config.num_blocks
-        // len(kv_cache_config.kv_cache_groups)
-        * min_block_size
-    )
-    dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-    if pcp_size * dcp_size > 1:
-        num_tokens *= pcp_size * dcp_size
-        logger.info(
-            "Multiplying the GPU KV cache size by the cp_world_size %d "
-            "(pcp_world_size %d * dcp_world_size %d).",
-            pcp_size * dcp_size,
-            pcp_size,
-            dcp_size,
-        )
-    num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
-    max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+    max_model_len = vllm_config.model_config.max_model_len
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
     )
+
+    # GPU KV cache size in tokens = max_concurrency * max_model_len: the total
+    # tokens of context the pool can hold at peak utilization. Sourcing this
+    # from the concurrency calculation handles hybrid layouts correctly: SWA /
+    # chunked-local groups have a per-request block count that's capped by
+    # their window, so a naive `num_blocks // num_groups * block_size` formula
+    # underestimates capacity for these models. DCP/PCP sharding is already
+    # accounted for in each spec's `max_memory_usage_bytes`.
+    num_tokens = int(max_concurrency * max_model_len)
+
+    logger.info_once("GPU KV cache size: %s tokens", f"{num_tokens:,}")
     logger.info_once(
         "Maximum concurrency for %s tokens per request: %.2fx",
-        max_model_len_str,
+        f"{max_model_len:,}",
         max_concurrency,
     )
 
