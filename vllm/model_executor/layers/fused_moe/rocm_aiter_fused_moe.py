@@ -252,8 +252,13 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
-        if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
+        # mxfp4 i.e. w4a4, w4a8, w4a16 uses BLOCK_1X32
+        # mxfp6 and mxfp8 are unsupported in AITER currently and use emulation instead
+        if (
+            quant_config.use_mxfp4_w4a4
+            or quant_config.use_mxfp4_w4a8
+            or quant_config.use_mxfp4_w4a16
+        ):
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
