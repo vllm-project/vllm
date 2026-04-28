@@ -7,7 +7,7 @@ read its own shard rather than the entire checkpoint.
 
 Example usage:
 
-python save_sharded_state.py \
+python save_sharded_state_offline.py \
     --model /path/to/load \
     --tensor-parallel-size 8 \
     --output /path/to/save

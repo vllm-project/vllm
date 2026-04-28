@@ -6,7 +6,7 @@ of a Qwen model using the YARN method (rope_parameters)
 and run a simple chat example.
 
 Usage:
-    python examples/offline_inference/context_extension.py
+    python examples/features/context_extension/context_extension_offline.py
 """
 
 from vllm import LLM, RequestOutput, SamplingParams
