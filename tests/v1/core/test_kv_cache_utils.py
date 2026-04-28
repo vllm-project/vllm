@@ -2074,6 +2074,54 @@ def test_auto_fit_max_model_len_not_triggered():
     assert vllm_config.model_config.max_model_len == 16
 
 
+def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
+    """Auto-fit must size max_model_len against the override-clamped pool, not
+    the raw `available_memory`. Without this, auto-fit could pick a
+    max_model_len that no longer fits once `num_gpu_blocks_override` is applied.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    model_config.original_max_model_len = -1  # request auto-fit
+    vllm_config = VllmConfig(model_config=model_config)
+    # Cap the cache to 32 blocks regardless of available memory.
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),  # block_size=16
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory (1024 blocks per layer would fit max_model_len=16384).
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+
+    # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
+    # auto-fit at or below that.
+    assert 0 < vllm_config.model_config.max_model_len <= 32 * 16
+
+
+def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
+    """Admission check must use the override-clamped pool size, not raw
+    `available_memory`. Without this, startup could accept a max_model_len
+    that does not actually fit in `num_gpu_blocks_override` blocks.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    vllm_config = VllmConfig(model_config=model_config)
+    # 32 blocks is far too small for max_model_len=16384 (would need 1024).
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory: a bytes-only check against this would pass.
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+
+
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec()

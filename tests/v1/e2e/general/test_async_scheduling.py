@@ -324,10 +324,13 @@ def run_test(
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
-        # Force preemptions
-        dict(num_gpu_blocks_override=32)
+        # Force preemptions: with 32 blocks the cache holds at most a single
+        # max-length request, so the ~34 concurrent prompts contend and trigger
+        # preemption. (Prompts here are << max_model_len, so dropping
+        # max_model_len from 4096 to 512 doesn't change generation behavior.)
+        dict(num_gpu_blocks_override=32, max_model_len=512)
         if test_preemption
-        else dict(gpu_memory_utilization=0.9)
+        else dict(gpu_memory_utilization=0.9, max_model_len=4096)
     )
     spec_mml = (spec_config or {}).get("max_model_len")
     spec_method = (spec_config or {}).get("method", "none")
@@ -343,7 +346,6 @@ def run_test(
 
     with VllmRunner(
         model,
-        max_model_len=4096,
         enable_chunked_prefill=test_prefill_chunking,
         # Force prefill chunking
         max_num_batched_tokens=48 if test_prefill_chunking else None,
