@@ -127,6 +127,10 @@ RUN if [ ! -f vllm/rust/Cargo.toml ]; then \
 # Require the Rust frontend to be successfully built into the final wheel.
 ENV VLLM_REQUIRE_RUST_FRONTEND=1
 
+# Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
@@ -307,6 +311,10 @@ RUN if [ ! -f vllm/rust/Cargo.toml ]; then \
 
 # Require the Rust frontend to be successfully built into the final wheel.
 ENV VLLM_REQUIRE_RUST_FRONTEND=1
+
+# Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
 
 # Create /install directory for custom wheels
 RUN mkdir -p /install
