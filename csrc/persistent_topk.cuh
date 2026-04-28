@@ -18,7 +18,6 @@ namespace persistent {
 // Constants
 // ============================================================================
 
-constexpr int TopK = 2048;
 constexpr int kThreadsPerBlock = 1024;
 constexpr int RADIX = 256;
 
@@ -128,11 +127,12 @@ struct RadixRowState {
 
 struct PersistentTopKParams {
   const float* __restrict__ input;  // [num_rows, stride]
-  int32_t* __restrict__ output;     // [num_rows, TopK]
+  int32_t* __restrict__ output;     // [num_rows, top_k]
   int32_t* __restrict__ lengths;    // [num_rows]
   RadixRowState* row_states;        // large path: per-group state
   uint32_t num_rows;
   uint32_t stride;
+  uint32_t top_k;           // actual k value for output stride
   uint32_t chunk_size;      // large path: elements per CTA
   uint32_t ctas_per_group;  // 1=medium, >1=large
   uint32_t max_seq_len;     // max seq_len across all rows (for early CTA exit)
@@ -154,6 +154,7 @@ __device__ __forceinline__ uint32_t decode_bin(float x) {
   return key >> 5;
 }
 
+template <int TopK>
 __device__ __noinline__ void histogram_2048_topk(
     const float* __restrict__ logits, int32_t* __restrict__ output_indices,
     int32_t seq_len) {
@@ -418,6 +419,7 @@ __device__ __noinline__ void histogram_2048_topk(
 // by: DarkSharpness
 // which at the same time is an optimized topk kernel copied from tilelang
 // kernel
+template <int TopK>
 __device__ __noinline__ void histogram_256_topk(
     const float* __restrict__ logits, int* __restrict__ output_indices,
     int logits_offset, int seq_len) {
@@ -649,7 +651,7 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val,
 // Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 
-template <uint32_t VEC_SIZE>
+template <int TopK, uint32_t VEC_SIZE>
 __device__ void radix_topk(const float* __restrict__ row_input,
                            int32_t* __restrict__ row_output, uint32_t seq_len,
                            uint32_t my_chunk_start, uint32_t chunk_size,
@@ -857,7 +859,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 // see filtered_topk.cuh)
 // ============================================================================
 
-template <uint32_t VEC_SIZE = 1>
+template <int TopK = 2048, uint32_t VEC_SIZE = 1>
 __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     persistent_topk_kernel(PersistentTopKParams params) {
   const uint32_t tx = threadIdx.x;
@@ -915,7 +917,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     if (row_idx >= params.num_rows) break;
 
     const uint32_t seq_len = params.lengths[row_idx];
-    int32_t* row_output = params.output + row_idx * TopK;
+    int32_t* row_output = params.output + row_idx * params.top_k;
     const float* row_input = params.input + row_idx * params.stride;
 
     if (seq_len <= RADIX_THRESHOLD) {
@@ -927,19 +929,19 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
             row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
           }
         } else if (seq_len <= static_cast<uint32_t>(HIST2048_THRESHOLD)) {
-          histogram_2048_topk(row_input, row_output, seq_len);
+          histogram_2048_topk<TopK>(row_input, row_output, seq_len);
         } else {
-          histogram_256_topk(row_input, row_output, 0, seq_len);
+          histogram_256_topk<TopK>(row_input, row_output, 0, seq_len);
         }
       }
       continue;
     }
 
     const uint32_t my_chunk_start = cta_in_group * chunk_size;
-    radix_topk<VEC_SIZE>(row_input, row_output, seq_len, my_chunk_start,
-                         chunk_size, local_histogram, suffix_sum,
-                         shared_scalars, shared_ordered, state, cta_in_group,
-                         ctas_per_group, barrier_phase, iter, tx);
+    radix_topk<TopK, VEC_SIZE>(
+        row_input, row_output, seq_len, my_chunk_start, chunk_size,
+        local_histogram, suffix_sum, shared_scalars, shared_ordered, state,
+        cta_in_group, ctas_per_group, barrier_phase, iter, tx);
   }
 }
 
@@ -1011,7 +1013,6 @@ struct FilteredTopKTraits<float> {
   }
 };
 
-constexpr uint32_t FILTERED_TOPK_MAX_K = 2048;
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
@@ -1025,7 +1026,7 @@ constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
  * \tparam IdType Index type (int32_t)
  * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
  */
-template <typename DType, typename IdType, int VEC_SIZE>
+template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K = 2048>
 __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     FilteredTopKUnifiedKernel(const DType* __restrict__ input,
                               IdType* __restrict__ output,
@@ -1059,7 +1060,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   alignas(128) __shared__ int s_counter;
   alignas(128) __shared__ int s_threshold_bin_id;
   alignas(128) __shared__ int s_num_input[2];
-  alignas(128) __shared__ int s_indices[FILTERED_TOPK_MAX_K];
+  alignas(128) __shared__ int s_indices[MAX_K];
 
   auto& s_histogram = s_histogram_buf[0];
 
@@ -1280,7 +1281,7 @@ constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
   return static_cast<int>(g);
 }
 
-template <typename DType, typename IdType>
+template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
                                         IdType* lengths, uint32_t num_rows,
                                         uint32_t top_k_val, uint32_t max_len,
@@ -1297,7 +1298,7 @@ cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
 
 #define DISPATCH_VEC_SIZE(VS)                                               \
   if (vec_size == VS) {                                                     \
-    auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VS>;             \
+    auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VS, MAX_K>;      \
     FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                              \
         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));   \
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, grid, block, args, \
