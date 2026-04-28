@@ -98,9 +98,9 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if (
-                params.thinking_token_budget is not None
-                and self.vllm_config.reasoning_config is None
+            if params.thinking_token_budget is not None and (
+                self.vllm_config.reasoning_config is None
+                or not self.vllm_config.reasoning_config.enabled
             ):
                 raise ValueError(
                     "thinking_token_budget is set but reasoning_config is "
@@ -171,6 +171,45 @@ class InputProcessor:
         ):
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
+
+    def inject_into_mm_cache(
+        self,
+        mm_hashes: dict[str, list[str]],
+        mm_kwargs: dict[str, list],
+    ) -> None:
+        """Inject pre-processed mm_kwargs into the processor cache.
+
+        Call this when mm_kwargs have already been through the HF processor
+        externally (e.g. by a frontend that transfers pre-processed tensors
+        to the backend).  This ensures MM cache hit rate metrics are reported
+        accurately and avoids redundant processing on subsequent requests
+        with the same images.
+
+        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        since token expansion has already been handled externally.
+        """
+        cache = self.renderer.mm_processor_cache
+        if cache is None:
+            return
+        try:
+            for modality, hashes in mm_hashes.items():
+                items = mm_kwargs.get(modality, [])
+                for i, mm_hash in enumerate(hashes):
+                    if i < len(items) and items[i] is not None:
+                        # Insert into cache via get_and_update_item.
+                        # Use the returned item (may be an address for SHM
+                        # cache or the original item for LRU cache).
+                        items[i], _ = cache.get_and_update_item(
+                            (items[i], []),
+                            mm_hash,
+                        )
+            # Update cache stats to reflect the externally processed items
+            self.renderer.update_mm_cache_stats()
+        except Exception:
+            logger.warning(
+                "Failed to inject mm_kwargs into processor cache",
+                exc_info=True,
+            )
 
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
@@ -405,11 +444,11 @@ class InputProcessor:
             decoder_mm_positions = prompt_input["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds()
-                    if embed_length > self.mm_encoder_cache_size:
+                    num_embeds = mm_position.get_num_embeds()
+                    if num_embeds > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with length {embed_length}, which exceeds the "
+                            f"with {num_embeds} embedding tokens, which exceeds the "
                             f"pre-allocated encoder cache size "
                             f"{self.mm_encoder_cache_size}. Please reduce the input "
                             f"size or increase the encoder cache size "

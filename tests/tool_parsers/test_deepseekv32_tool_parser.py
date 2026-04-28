@@ -484,6 +484,58 @@ class TestExtractToolCallsStreaming:
         # Should have no tool call deltas yet
         assert all(not d.tool_calls for d in deltas)
 
+    def test_no_marker_leak_chunked(self, parser):
+        """Chunked streaming must NOT leak DSML start-marker fragments
+        as content (GitHub #40801)."""
+        full_text = build_tool_call("fn", {"k": "v"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=5)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"k": "v"}
+
+    def test_no_marker_leak_with_prefix_chunked(self, parser):
+        """Content before a tool call must not include start-marker
+        fragments when chunked (GitHub #40801)."""
+        full_text = "Hello!" + build_tool_call("fn", {"a": "b"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=5)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == "Hello!"
+        assert "DSML" not in content
+        assert "<｜" not in content
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"a": "b"}
+
+    def test_no_marker_leak_char_by_char(self, parser):
+        """Character-by-character streaming must not leak marker
+        fragments (GitHub #40801)."""
+        full_text = build_tool_call("fn", {"k": "v"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=1)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"k": "v"}
+
+    def test_no_marker_leak_all_split_points(self, parser):
+        """Start token split at every possible boundary must not
+        leak (GitHub #40801)."""
+        for chunk_size in range(1, len(FC_START) + 2):
+            p = make_parser()
+            full_text = build_tool_call("fn", {"k": "v"})
+            deltas = self._stream_chunked(p, full_text, chunk_size=chunk_size)
+            content = "".join(d.content for d in deltas if d.content is not None)
+            assert content == "", (
+                f"Leaked content {content!r} at chunk_size={chunk_size}"
+            )
+
+    def test_false_partial_marker_emitted(self, parser):
+        """Text ending with a prefix of the start token that turns out
+        NOT to be a marker must still be emitted as content."""
+        full_text = "<｜DSM some regular text"
+        deltas = self._stream_chunked(parser, full_text, chunk_size=3)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == full_text
+
 
 class TestDelimiterPreservation:
     """Regression: fast detokenization skipping DSML delimiters (PR #33964)."""

@@ -44,12 +44,6 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranslationRequest,
 )
-from vllm.entrypoints.pooling.pooling.protocol import (
-    IOProcessorRequest,
-    PoolingChatRequest,
-    PoolingCompletionRequest,
-    PoolingResponse,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -62,8 +56,7 @@ from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
-from vllm.pooling_params import PoolingParams
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -78,10 +71,8 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import (
-    collect_from_async_generator,
-    merge_async_iterators,
-)
+from vllm.utils.async_utils import collect_from_async_generator
+from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -101,17 +92,11 @@ class RendererChatRequest(RendererRequest, Protocol):
 
 
 CompletionLikeRequest: TypeAlias = (
-    CompletionRequest
-    | TokenizeCompletionRequest
-    | DetokenizeRequest
-    | PoolingCompletionRequest
+    CompletionRequest | TokenizeCompletionRequest | DetokenizeRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest
-    | BatchChatCompletionRequest
-    | TokenizeChatRequest
-    | PoolingChatRequest
+    ChatCompletionRequest | BatchChatCompletionRequest | TokenizeChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
@@ -121,7 +106,6 @@ AnyRequest: TypeAlias = (
     | ChatLikeRequest
     | SpeechToTextRequest
     | ResponsesRequest
-    | IOProcessorRequest
     | GenerateRequest
 )
 
@@ -130,7 +114,6 @@ AnyResponse: TypeAlias = (
     | ChatCompletionResponse
     | TranscriptionResponse
     | TokenizeResponse
-    | PoolingResponse
     | GenerateResponse
 )
 
@@ -146,12 +129,6 @@ class ServeContext(Generic[RequestT]):
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
     engine_inputs: list[EngineInput] | None = None
-
-    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
-        None
-    )
-    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
@@ -171,7 +148,6 @@ class OpenAIServing:
         super().__init__()
 
         self.engine_client = engine_client
-
         self.models = models
 
         self.request_logger = request_logger
@@ -179,8 +155,20 @@ class OpenAIServing:
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
-        self.io_processor = engine_client.io_processor
         self.input_processor = engine_client.input_processor
+
+        # Computed once at startup (cached by ``vllm_config`` identity) and
+        # stamped on non-streaming responses. Streaming chunks deliberately
+        # omit it to avoid per-chunk overhead.
+        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+
+        try:
+            self.system_fingerprint: str | None = get_system_fingerprint(
+                engine_client.vllm_config
+            )
+        except Exception:
+            # Never fail server startup over the fingerprint.
+            self.system_fingerprint = None
 
     async def beam_search(
         self,
@@ -381,155 +369,6 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    async def _preprocess(
-        self,
-        ctx: ServeContext,
-    ) -> ErrorResponse | None:
-        """
-        Default preprocessing hook. Subclasses may override to prepare `ctx`.
-        """
-        return None
-
-    def _build_response(
-        self,
-        ctx: ServeContext,
-    ) -> AnyResponse | ErrorResponse:
-        """
-        Default response builder. Subclass may override this method
-        to return the appropriate response object.
-        """
-        return self.create_error_response("unimplemented endpoint")
-
-    async def handle(
-        self,
-        ctx: ServeContext,
-    ) -> AnyResponse | ErrorResponse:
-        async for response in self._pipeline(ctx):
-            return response
-
-        return self.create_error_response("No response yielded from pipeline")
-
-    async def _pipeline(
-        self,
-        ctx: ServeContext,
-    ) -> AsyncGenerator[AnyResponse | ErrorResponse, None]:
-        """Execute the request processing pipeline yielding responses."""
-        if error := await self._check_model(ctx.request):
-            yield error
-        if error := self._validate_request(ctx):
-            yield error
-
-        preprocess_ret = await self._preprocess(ctx)
-        if isinstance(preprocess_ret, ErrorResponse):
-            yield preprocess_ret
-
-        generators_ret = await self._prepare_generators(ctx)
-        if isinstance(generators_ret, ErrorResponse):
-            yield generators_ret
-
-        collect_ret = await self._collect_batch(ctx)
-        if isinstance(collect_ret, ErrorResponse):
-            yield collect_ret
-
-        yield self._build_response(ctx)
-
-    def _validate_request(self, ctx: ServeContext) -> ErrorResponse | None:
-        truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens", None)
-
-        if (
-            truncate_prompt_tokens is not None
-            and truncate_prompt_tokens > self.model_config.max_model_len
-        ):
-            return self.create_error_response(
-                "truncate_prompt_tokens value is "
-                "greater than max_model_len."
-                " Please request a smaller truncation size."
-            )
-        return None
-
-    def _create_pooling_params(
-        self,
-        ctx: ServeContext,
-    ) -> PoolingParams | ErrorResponse:
-        if not hasattr(ctx.request, "to_pooling_params"):
-            return self.create_error_response(
-                "Request type does not support pooling parameters"
-            )
-
-        return ctx.request.to_pooling_params()
-
-    async def _prepare_generators(
-        self,
-        ctx: ServeContext,
-    ) -> ErrorResponse | None:
-        """Schedule the request and get the result generator."""
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        trace_headers = (
-            None
-            if ctx.raw_request is None
-            else await self._get_trace_headers(ctx.raw_request.headers)
-        )
-
-        pooling_params = self._create_pooling_params(ctx)
-        if isinstance(pooling_params, ErrorResponse):
-            return pooling_params
-
-        if ctx.engine_inputs is None:
-            return self.create_error_response("Engine prompts not available")
-
-        for i, engine_input in enumerate(ctx.engine_inputs):
-            request_id_item = f"{ctx.request_id}-{i}"
-
-            self._log_inputs(
-                request_id_item,
-                engine_input,
-                params=pooling_params,
-                lora_request=ctx.lora_request,
-            )
-
-            generator = self.engine_client.encode(
-                engine_input,
-                pooling_params,
-                request_id_item,
-                lora_request=ctx.lora_request,
-                trace_headers=trace_headers,
-                priority=getattr(ctx.request, "priority", 0),
-            )
-
-            generators.append(generator)
-
-        ctx.result_generator = merge_async_iterators(*generators)
-
-        return None
-
-    async def _collect_batch(
-        self,
-        ctx: ServeContext,
-    ) -> ErrorResponse | None:
-        """Collect batch results from the result generator."""
-        if ctx.engine_inputs is None:
-            return self.create_error_response("Engine prompts not available")
-
-        num_prompts = len(ctx.engine_inputs)
-        final_res_batch: list[PoolingRequestOutput | None]
-        final_res_batch = [None] * num_prompts
-
-        if ctx.result_generator is None:
-            return self.create_error_response("Result generator not available")
-
-        async for i, res in ctx.result_generator:
-            final_res_batch[i] = res
-
-        if None in final_res_batch:
-            return self.create_error_response(
-                "Failed to generate results for all prompts"
-            )
-
-        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
-
-        return None
-
     @staticmethod
     def create_error_response(
         message: str | Exception,
@@ -719,7 +558,7 @@ class OpenAIServing:
         self,
         request_id: str,
         inputs: PromptType | EngineInput,
-        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        params: SamplingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:
@@ -785,24 +624,44 @@ class OpenAIServing:
         tool_parser_cls: type[ToolParser] | None,
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
+        # When the Mistral grammar factory injected structured outputs,
+        # let the parser handle the output.
+        use_mistral_tool_parser = (
+            isinstance(request, ChatCompletionRequest)
+            and is_mistral_tool_parser(tool_parser_cls)
+            and request._grammar_from_tool_parser
+        )
+
         function_calls = list[FunctionCall]()
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+        if (
+            not use_mistral_tool_parser
+            and request.tool_choice
+            and isinstance(request.tool_choice, ToolChoiceFunction)
+        ):
             assert content is not None
-            # Forced Function Call
+            # Forced Function Call (Responses API)
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
             content = None  # Clear content since tool is called.
-        elif request.tool_choice and isinstance(
-            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        elif (
+            not use_mistral_tool_parser
+            and request.tool_choice
+            and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
         ):
+            # Named function with standard JSON-based parsing
             assert content is not None
-            # Forced Function Call
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
             content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required":
+        elif (
+            not use_mistral_tool_parser
+            and request.tool_choice == "required"
+            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
+        ):
+            # "required" with standard JSON-based parsing
             tool_calls = []
             with contextlib.suppress(ValidationError):
                 content = content or ""
@@ -817,17 +676,34 @@ class OpenAIServing:
                     )
                 )
             content = None  # Clear content since tool is called.
-        elif (
-            tool_parser_cls
-            and enable_auto_tools
-            and (request.tool_choice == "auto" or request.tool_choice is None)
+        elif tool_parser_cls and (
+            use_mistral_tool_parser
+            or (
+                enable_auto_tools
+                and (
+                    request.tool_choice == "auto"
+                    or request.tool_choice is None
+                    or (
+                        not tool_parser_cls.supports_required_and_named
+                        and request.tools
+                        and (
+                            request.tool_choice == "required"
+                            or isinstance(
+                                request.tool_choice,
+                                ChatCompletionNamedToolChoiceParam,
+                            )
+                        )
+                    )
+                )
+            )
         ):
+            # Automatic Tool Call Parsing (also used as fallback for
+            # required/named when supports_required_and_named=False)
             if tokenizer is None:
                 raise ValueError(
                     "Tokenizer not available when `skip_tokenizer_init=True`"
                 )
 
-            # Automatic Tool Call Parsing
             try:
                 tool_parser = tool_parser_cls(tokenizer, request.tools)
             except RuntimeError as e:

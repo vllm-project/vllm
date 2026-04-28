@@ -31,6 +31,8 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_version():
     # Test the version comparison logic using the private function
@@ -203,6 +205,22 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         pass
 
 
+@pytest.mark.forked
+def test_torch_compile_disable(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    with (
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
+        vllm_runner(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
 def test_splitting_ops_dynamic():
     # Default config
     config = VllmConfig()
@@ -216,12 +234,14 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            splitting_ops=["vllm::unified_attention"],
+            splitting_ops=["vllm::unified_attention_with_output"],
         )
     )
     # with inductor partition we use splitting_ops directly for
     # partition rules
-    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
+    assert config.compilation_config.splitting_ops == [
+        "vllm::unified_attention_with_output"
+    ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(
@@ -281,7 +301,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
             splitting_ops=[
-                "vllm::unified_attention",
+                "vllm::unified_attention_with_output",
                 "vllm::moe_forward",
                 "vllm::moe_forward_shared",
             ],
@@ -289,7 +309,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     )
     splitting_ops = config.compilation_config.splitting_ops
     assert splitting_ops == [
-        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
         "vllm::moe_forward",
         "vllm::moe_forward_shared",
     ]
@@ -387,7 +407,7 @@ def test_should_split():
         (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # filtered out 15 due to SP
+        # SP forces full-graph compilation, sizes are filtered by TP
         ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # limited by the max_tokens
         ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
@@ -445,6 +465,123 @@ def test_cudagraph_sizes_post_init(
         )
 
 
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if not cudagraph mode supported",
+)
+@pytest.mark.parametrize(
+    (
+        "cudagraph_mode",
+        "use_inductor_graph_partition",
+        "expected_enable_sp",
+        "expected_cudagraph_mode",
+        "expected_piecewise_compile",
+        "expected_capture_sizes",
+        "expected_max_size",
+    ),
+    [
+        (CUDAGraphMode.PIECEWISE, False, True, CUDAGraphMode.FULL, False, [2, 4], 4),
+        (
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            False,
+            True,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            False,
+            [2, 4],
+            4,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            False,
+            True,
+            CUDAGraphMode.FULL,
+            False,
+            [2, 4],
+            4,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            True,
+            True,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            True,
+            [2, 4],
+            4,
+        ),
+    ],
+)
+def test_sequence_parallelism_requires_full_graph_compilation(
+    cudagraph_mode: CUDAGraphMode,
+    use_inductor_graph_partition: bool,
+    expected_enable_sp: bool,
+    expected_cudagraph_mode: CUDAGraphMode,
+    expected_piecewise_compile: bool,
+    expected_capture_sizes: list[int],
+    expected_max_size: int,
+):
+    with patch.object(current_platform, "device_count", return_value=2):
+        vllm_config = VllmConfig(
+            parallel_config=ParallelConfig(tensor_parallel_size=2),
+            scheduler_config=SchedulerConfig(
+                max_num_seqs=128,
+                max_num_batched_tokens=2048,
+                max_model_len=2048,
+                is_encoder_decoder=False,
+            ),
+        )
+        vllm_config.model_config = MagicMock(
+            dtype=torch.float16,
+            enforce_eager=False,
+            is_moe=False,
+            disable_cascade_attn=False,
+            get_hidden_size=MagicMock(return_value=4096),
+        )
+        vllm_config.compilation_config = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_capture_sizes=[1, 2, 4, 15],
+            max_cudagraph_capture_size=None,
+            compile_sizes=["cudagraph_capture_sizes"],
+            use_inductor_graph_partition=use_inductor_graph_partition,
+            pass_config=PassConfig(
+                enable_sp=True,
+                fuse_gemm_comms=True,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+                sp_min_token_num=512,
+            ),
+            cudagraph_mode=cudagraph_mode,
+        )
+        vllm_config.compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=vllm_config.parallel_config.all2all_backend,
+            data_parallel_size=1,
+        )
+        vllm_config._set_compile_ranges()
+        vllm_config._set_cudagraph_sizes()
+
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        == use_inductor_graph_partition
+    )
+    assert (
+        bool(vllm_config.compilation_config.splitting_ops) == expected_piecewise_compile
+    )
+    assert vllm_config.compilation_config.pass_config.enable_sp == expected_enable_sp
+    assert (
+        vllm_config.compilation_config.pass_config.fuse_gemm_comms == expected_enable_sp
+    )
+    assert vllm_config.compilation_config.cudagraph_mode == expected_cudagraph_mode
+    assert (
+        vllm_config.compilation_config.cudagraph_capture_sizes == expected_capture_sizes
+    )
+    assert (
+        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
+    )
+    assert (
+        511 in vllm_config.compilation_config.compile_ranges_endpoints
+    ) == expected_enable_sp
+
+
 def test_cached_compilation_config(default_vllm_config):
     import torch
     from torch._inductor.utils import run_and_get_code
@@ -454,7 +591,7 @@ def test_cached_compilation_config(default_vllm_config):
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     dtype = torch.bfloat16
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     batch_size, num_qo_heads, head_size = 8, 16, 128
 
     # access and cache default compilation config
@@ -476,7 +613,7 @@ def test_cached_compilation_config(default_vllm_config):
         query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         query_quant = torch.compile(query_quant)
 
-        _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        _q_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
         query = torch.randn(
             batch_size, num_qo_heads * head_size, dtype=dtype, device=device
         )
@@ -611,6 +748,24 @@ def test_inductor_asserts_enabled_in_debug(monkeypatch):
         assert config.inductor_compile_config.get("size_asserts") is True
         assert config.inductor_compile_config.get("alignment_asserts") is True
         assert config.inductor_compile_config.get("scalar_asserts") is True
+
+
+def test_get_inductor_factors_includes_configs():
+    """Changing inductor or functorch config must change the cache key factors."""
+    from torch._functorch import config as functorch_config
+    from torch._inductor import config as inductor_config
+
+    from vllm.compilation.compiler_interface import get_inductor_factors
+
+    baseline = get_inductor_factors()
+
+    with inductor_config.patch("max_autotune", not inductor_config.max_autotune):
+        patched = get_inductor_factors()
+    assert baseline != patched, "inductor config change was not reflected"
+
+    with functorch_config.patch("donated_buffer", not functorch_config.donated_buffer):
+        patched = get_inductor_factors()
+    assert baseline != patched, "functorch config change was not reflected"
 
 
 def test_inductor_asserts_user_override(monkeypatch):

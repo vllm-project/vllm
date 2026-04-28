@@ -260,6 +260,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
+    "DeepseekV4ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
@@ -324,6 +327,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
@@ -335,7 +339,15 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
     "InternLM2VEForCausalLM": _HfExamplesInfo(
-        "OpenGVLab/Mono-InternVL-2B", trust_remote_code=True
+        "OpenGVLab/Mono-InternVL-2B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom config cannot be loaded with Transformers "
+                "v5 because `vision_config` is not always set"
+            )
+        },
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
@@ -416,6 +428,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
     ),
+    "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
@@ -474,6 +487,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Plamo2ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-2-1b",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Custom model code uses `_tied_weight_keys: list[str]` but "
+                "Transformers v5 now expects `_tied_weight_keys: dict[str, str]`"
+            )
+        },
     ),
     "Plamo3ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-3-nict-2b-base",
@@ -502,6 +522,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
         min_transformers_version="4.56.3",
     ),
+    "Rnj1ForCausalLM": _HfExamplesInfo(
+        "EssentialAI/rnj-1-instruct",
+        is_available_online=False,
+    ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
     "SarvamMoEForCausalLM": _HfExamplesInfo(
         "sarvamai/sarvam-30b",
@@ -514,6 +538,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_model_len=4096,
         is_available_online=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where "
+                "validate_rope() no longer accepts ignore_keys param"
+            )
+        },
     ),
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
@@ -552,11 +583,19 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "xverse/XVERSE-7B-Chat",
         tokenizer="meta-llama/Llama-2-7b",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
+            "(add_prefix_space / prepend_scheme mismatch).",
+        },
     ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
+    ),
+    "MiMoV2ForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True
     ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
@@ -580,6 +619,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "Alibaba-NLP/gte-base-en-v1.5",
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewModel"]},
+    ),
+    "JinaEmbeddingsV5Model": _HfExamplesInfo(
+        "jinaai/jina-embeddings-v5-text-small",
+        trust_remote_code=True,
     ),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "LlamaBidirectionalModel": _HfExamplesInfo(
@@ -645,10 +688,10 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["ColBERTLfm2Model"]},
     ),
+    "JinaForRanking": _HfExamplesInfo("jinaai/jina-reranker-v3"),
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
-        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -762,10 +805,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
+        "nvidia/audio-flamingo-3-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
+        "nvidia/music-flamingo-2601-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -814,11 +865,36 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         revision="refs/pr/17",
     ),
+    "Exaone4_5_ForConditionalGeneration": _HfExamplesInfo(
+        "LGAI-EXAONE/EXAONE-4.5-33B",
+        min_transformers_version="5.6.0",
+    ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
+        trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "vllm": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
+    ),
+    "FireRedLIDForConditionalGeneration": _HfExamplesInfo(
+        "PatchyTisa/FireRedLID-vllm",
+        trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "vllm": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
+        trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "vllm": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
@@ -833,6 +909,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
         min_transformers_version="5.0.0",
+    ),
+    "Granite4VisionForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-vision-4.1-4b",
+        is_available_online=False,
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
@@ -860,6 +940,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom config cannot be loaded with Transformers "
+                "v5 because `text_config` is not always set"
+            )
+        },
     ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
@@ -877,9 +964,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom Isaac code is not compatible with Transformers v5. "
+                "The model should be upstreamed to Transformers for "
+                "long-term support."
+            ),
+            "hf": (
+                "Isaac's remote model and processor code import or configure "
+                "APIs that changed in Transformers v5."
+            ),
+        },
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
-        "internlm/Intern-S1", trust_remote_code=True
+        "internlm/Intern-S1",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom tokenizer code is not compatible with Transformers v5."
+        },
     ),
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
@@ -968,13 +1072,30 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
-    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6", trust_remote_code=True),
+    "MiMoV2OmniForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni", trust_remote_code=True, is_available_online=False
+    ),
+    "MiniCPMO": _HfExamplesInfo(
+        "openbmb/MiniCPM-o-2_6",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
             "2.6": "openbmb/MiniCPM-V-2_6",
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
+        },
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "MiniCPMVBatchFeature is incompatible with its base class in "
+                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            )
         },
         trust_remote_code=True,
     ),
@@ -1030,14 +1151,70 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    # NemotronH_Nano_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2
+    # Use the same registry test as NemotronH_Nano_VL_V2 above
+    "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
+    ),
+    # NemotronH_Super_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2 as well
+    # Use the same registry test as NemotronH_Nano_VL_V2 above
+    "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
-        "xlangai/OpenCUA-7B", trust_remote_code=True
+        "xlangai/OpenCUA-7B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Tokenizer cannot be initialised in Transformers v5."
+        },
     ),
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-VL-7B",
         trust_remote_code=True,
         max_model_len=4096,
         enforce_eager=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
+                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
+            )
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
@@ -1049,12 +1226,24 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B",
         },
     ),
-    "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "Ovis2_5": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.5-2B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "Ovis2_6ForCausalLM": _HfExamplesInfo(
         "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
     ),
     "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
-        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
+        "AIDC-AI/Ovis2.6-30B-A3B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom processor code is not compatible with Transformers v5."
+        },
     ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
@@ -1074,7 +1263,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
     ),
     "Phi4ForCausalLMV": _HfExamplesInfo(
-        "microsoft/Phi-4-reasoning-vision-15B", trust_remote_code=True
+        "microsoft/Phi-4-reasoning-vision-15B",
+        trust_remote_code=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where HF model "
+                "custom code uses siglip2 internals "
+                "(filter_out_non_signature_kwargs) removed "
+                "by huggingface/transformers#43514"
+            )
+        },
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
@@ -1170,6 +1369,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         hf_overrides={
             "architectures": ["Tarsier2ForConditionalGeneration"],
             "model_type": "tarsier2",
+        },
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "Qwen2VLConfig was split into Qwen2VLConfig + "
+                "Qwen2VLTextConfig in transformers v5, breaking "
+                "attribute access (num_attention_heads, hidden_size, etc.)"
+            )
         },
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
@@ -1296,6 +1503,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
     ),
+    "DeepSeekV4MTPModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
@@ -1306,6 +1519,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
         enable_prefix_caching=False,
+    ),
+    "Exaone4_5_MTP": _HfExamplesInfo(
+        "LGAI-EXAONE/EXAONE-4.5-33B",
+        speculative_model="LGAI-EXAONE/EXAONE-4.5-33B",
+        min_transformers_version="5.6.0",
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
@@ -1326,6 +1544,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         min_transformers_version="5.1.0",
     ),
+    "HYV3MTPModel": _HfExamplesInfo(
+        "tencent/Hy3-preview",
+        speculative_model="tencent/Hy3-preview",
+    ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
         trust_remote_code=True,
@@ -1335,6 +1557,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-7B-RL",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
+    ),
+    "MiMoV2MTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Pro",
+        is_available_online=False,
+    ),
+    "MiMoV2OmniMTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
         "nvidia/Nemotron-Super-Placeholder",

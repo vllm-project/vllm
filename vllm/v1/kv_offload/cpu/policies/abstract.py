@@ -4,7 +4,7 @@ import ctypes
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_offload.abstract import OffloadKey
 
 
 class BlockStatus(ctypes.Structure):
@@ -45,29 +45,29 @@ class CachePolicy(ABC):
     def __init__(self, cache_capacity: int) -> None: ...
 
     @abstractmethod
-    def get(self, block_hash: BlockHash) -> BlockStatus | None:
+    def get(self, key: OffloadKey) -> BlockStatus | None:
         """Find block in data structures. Returns None if not present."""
 
     @abstractmethod
-    def insert(self, block_hash: BlockHash, block: BlockStatus) -> None:
+    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
         """Add a newly allocated block. For ARC: also removes from ghost lists."""
 
     @abstractmethod
-    def remove(self, block_hash: BlockHash) -> None:
+    def remove(self, key: OffloadKey) -> None:
         """Remove a block (used to clean up after a failed store)."""
 
     @abstractmethod
-    def touch(self, block_hashes: Iterable[BlockHash]) -> None:
+    def touch(self, keys: Iterable[OffloadKey]) -> None:
         """Mark blocks as recently used."""
 
     @abstractmethod
     def evict(
-        self, n: int, protected: set[BlockHash]
-    ) -> list[tuple[BlockHash, BlockStatus]] | None:
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         """
         Evict exactly n blocks, skipping any in protected.
 
-        Returns a list of (block_hash, block) for the evicted blocks,
+        Returns a list of (key, block) for the evicted blocks,
         or None if n evictions cannot be satisfied. The operation is atomic:
         if None is returned, no state changes are made.
 

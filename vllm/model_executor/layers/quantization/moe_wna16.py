@@ -130,7 +130,7 @@ class MoeWNA16Config(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         can_convert = cls.is_moe_wna16_compatible(hf_quant_cfg)
         if can_convert and user_quant == "moe_wna16":
