@@ -233,8 +233,15 @@ class AutoWeightsLoader:
     ):
         """
         Add tensor names that are not in the model params that may be in the
-        safetensors, e.g., batch normalization stats.
+        safetensors, e.g., batch normalization stats and registered buffers.
         """
+        # Add persistent registered buffers.
+        # Non-persistent buffers are excluded, matching PyTorch state_dict().
+        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        for buf_name, buf in module.named_buffers(recurse=False):
+            if buf_name not in child_params and buf_name not in non_persistent:
+                child_params[buf_name] = buf
+
         if isinstance(
             module,
             (
@@ -468,14 +475,8 @@ def _merge_multimodal_embeddings(
     input_dtype = inputs_embeds.dtype
 
     try:
-        # For debugging
-        # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
-
-        # NOTE: This can avoid D2H sync (#22105), but fails to
-        # raise an error if is_multimodal.sum() < len(mm_embeds_flat)
-        inputs_embeds.masked_scatter_(
-            is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype)
-        )
+        # If is_multimodal is on CPU this avoids a D2H sync
+        inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
     except RuntimeError as e:
         num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
@@ -488,7 +489,7 @@ def _merge_multimodal_embeddings(
                 f"multimodal tokens to {num_expected_tokens} placeholders"
             ) from e
 
-        raise ValueError("Error during masked scatter operation") from e
+        raise ValueError("Error during index put operation") from e
 
     return inputs_embeds
 

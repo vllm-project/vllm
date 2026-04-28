@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -29,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class MinimaxM2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
@@ -307,7 +308,7 @@ class MinimaxM2ToolParser(ToolParser):
             invoke_str = complete_invokes[self.current_tool_index]
             tool_call = self._parse_single_invoke(
                 invoke_str,
-                request.tools if request else None,
+                self.tools,
             )
             if not tool_call:
                 self.current_tool_index += 1
@@ -357,9 +358,7 @@ class MinimaxM2ToolParser(ToolParser):
             for tool_call_match in self.tool_call_complete_regex.findall(model_output):
                 # Find all invokes within this tool_call
                 for invoke_match in self.invoke_complete_regex.findall(tool_call_match):
-                    tool_call = self._parse_single_invoke(
-                        invoke_match, request.tools if request else None
-                    )
+                    tool_call = self._parse_single_invoke(invoke_match, self.tools)
                     if tool_call:
                         tool_calls.append(tool_call)
 

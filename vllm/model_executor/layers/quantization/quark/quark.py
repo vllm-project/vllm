@@ -5,6 +5,7 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -36,7 +37,6 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
-from vllm.transformers_utils.config import get_config
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -44,6 +44,10 @@ if TYPE_CHECKING:
 __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
+
+# model_type values that use dynamic MXFP4 re-quantization for
+# OCP MX fp4 Quark checkpoints
+_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3"})
 
 
 class QuarkConfig(QuantizationConfig):
@@ -63,19 +67,28 @@ class QuarkConfig(QuantizationConfig):
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
-        self.hf_config = get_config(
-            model=model_name,
-            trust_remote_code=False,  # or get from model_config if available
-            revision=revision,
-            config_format="auto",
-        )
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
+        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints."""
 
-        quant_config = getattr(self.hf_config, "quantization_config", None)
+        if (
+            getattr(hf_config, "model_type", None)
+            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
+        ):
+            return
+
+        quant_config = getattr(hf_config, "quantization_config", None)
         if quant_config is not None:
-            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
-            model_type = self.hf_config.model_type
-            if quant_dtype == "fp4" and model_type == "deepseek_v3":
+            quant_dtype = (
+                quant_config.get("global_quant_config", {})
+                .get("weight", {})
+                .get("dtype")
+            )
+            if quant_dtype == "fp4":
                 self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
@@ -101,7 +114,7 @@ class QuarkConfig(QuantizationConfig):
         :param hf_to_vllm_mapper: maps from hf model structure (the assumed
             structure of the qconfig) to vllm model structure
         """
-        quant_config_with_hf_to_vllm_mapper = {}
+        quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
             if isinstance(v, list):
@@ -376,6 +389,37 @@ class QuarkConfig(QuantizationConfig):
 
         return is_weight_mxfp4 and is_input_fp8
 
+    def _is_dynamic_per_token_w8a8(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        """Detect W8A8 INT8 with per-tensor or per-channel
+        weights and dynamic per-token input."""
+        if weight_quant is None or input_quant is None:
+            return False
+
+        is_int8_dtype = (
+            weight_quant.get("dtype") == "int8" and input_quant.get("dtype") == "int8"
+        )
+
+        is_valid_weight_scheme = weight_quant.get("qscheme") in [
+            "per_tensor",
+            "per_channel",
+        ]
+        is_per_token_input = input_quant.get("qscheme") == "per_channel"
+
+        is_dynamic_input = input_quant.get("is_dynamic") is True
+        is_weight_symmetric = weight_quant.get("symmetric") is True
+
+        return (
+            is_int8_dtype
+            and is_valid_weight_scheme
+            and is_per_token_input
+            and is_dynamic_input
+            and is_weight_symmetric
+        )
+
     def _is_w_ocp_mx_a_x(
         self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
@@ -543,6 +587,13 @@ class QuarkConfig(QuantizationConfig):
             )
             if is_w4a8_supported:
                 return QuarkW4A8_MXFP4_FP8(weight_config, input_config)
+        elif self._is_dynamic_per_token_w8a8(weight_config, input_config):
+            weight_qscheme = cast(str, weight_config.get("qscheme"))
+            return QuarkW8A8Int8(
+                qscheme=weight_qscheme,
+                is_static_input_scheme=False,
+                input_symmetric=input_config.get("symmetric"),
+            )
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX(
                 weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant

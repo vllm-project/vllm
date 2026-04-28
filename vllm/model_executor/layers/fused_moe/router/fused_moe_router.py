@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 
@@ -13,6 +14,13 @@ class FusedMoERouter(ABC):
     method that is used for routing hidden states based on router logits.
     """
 
+    @abstractmethod
+    def set_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        raise NotImplementedError
+
     @property
     @abstractmethod
     def routing_method_type(self) -> RoutingMethodType:
@@ -23,6 +31,8 @@ class FusedMoERouter(ABC):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the

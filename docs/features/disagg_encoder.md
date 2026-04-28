@@ -72,4 +72,4 @@ For the PD disaggregation part, the Prefill instance receives cache exactly the 
 
 `docs/features/disagg_prefill.md` shows the brief idea about the disaggregated prefill (v0)
 
-We create the example setup with the **NixlConnector** from `vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py` and referred to the `tests/v1/kv_connector/nixl_integration/toy_proxy_server.py` to facilitate the kv transfer between P and D;
+We create the example setup with the **NixlConnector** from `vllm/distributed/kv_transfer/kv_connector/v1/nixl/` and referred to the `tests/v1/kv_connector/nixl_integration/toy_proxy_server.py` to facilitate the kv transfer between P and D;

@@ -27,6 +27,7 @@ SKIP_TENSORS: set[str] = {
     "expert_global_to_physical",
     "expert_physical_to_global",
     "expert_local_to_global",
+    "e_score_correction_bias",
 }
 
 
@@ -94,17 +95,18 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
             layer.register_buffer(name, buffer)
 
 
-def materialize_layer(layer: torch.nn.Module) -> None:
+def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Materialize all meta tensors in a layer to actual tensors."""
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    for name, tensor in get_layer_tensors(layer).items():
-        if name not in SKIP_TENSORS:
-            setattr(layer, name, materialize_meta_tensor(tensor))
+    with info.restore_device:
+        for name, tensor in get_layer_tensors(layer).items():
+            if name not in SKIP_TENSORS:
+                setattr(layer, name, materialize_meta_tensor(tensor))
 
 
-class MetaCopyCounter(TorchDispatchMode):
+class CopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
 
@@ -122,7 +124,7 @@ class MetaCopyCounter(TorchDispatchMode):
         if kwargs is None:
             kwargs = {}
 
-        if func is torch.ops.aten.copy_.default and args[0].device.type == "meta":
+        if func is torch.ops.aten.copy_.default:
             assert args[0].numel() == args[1].numel()
             self.copied_numel += args[0].numel()
 
@@ -140,7 +142,6 @@ def get_numel_loaded(
     :return: number of elements loaded by the weight loader, the return value of the
         weight loader
     """
-    assert args.arguments["param"].device.type == "meta"
-    with MetaCopyCounter() as counter:
+    with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
     return counter.copied_numel, return_value

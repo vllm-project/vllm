@@ -6,7 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm import _oink_ops, envs
+# Import kernels
+import vllm.kernels  # noqa: F401
+from vllm import _oink_ops, envs, ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -51,23 +53,6 @@ def _is_oink_stride_compatible_2d(x_2d: torch.Tensor) -> bool:
     return (x_2d.stride(0) % divby) == 0
 
 
-def rms_norm(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from vllm import _custom_ops as ops
-
-    if envs.VLLM_BATCH_INVARIANT:
-        return rms_norm_batch_invariant(x, weight, variance_epsilon)
-    out = torch.empty_like(x)
-    ops.rms_norm(
-        out,
-        x,
-        weight,
-        variance_epsilon,
-    )
-    return out
-
-
 def fused_add_rms_norm(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -76,10 +61,6 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
-    if envs.VLLM_BATCH_INVARIANT:
-        return rms_norm_batch_invariant(
-            x + residual, weight, variance_epsilon
-        ), x + residual
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -95,7 +76,7 @@ def poly_norm(
     from vllm import _custom_ops as ops
 
     out = torch.empty_like(x)
-    ops.poly_norm(
+    ops.poly_norm(  # type: ignore[attr-defined]
         out,
         x,
         weight,
@@ -105,23 +86,16 @@ def poly_norm(
     return out
 
 
-def dispatch_rocm_rmsnorm_func(
-    with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
-):
+def dispatch_rocm_rmsnorm_func(dtype: torch.dtype, use_aiter: bool = False):
     use_aiter = use_aiter and dtype in [
         torch.float16,
         torch.bfloat16,
     ]
 
-    if use_aiter and with_fused_add:
-        return rocm_aiter_ops.rms_norm2d_with_add
     if use_aiter:
-        return rocm_aiter_ops.rms_norm
-
-    # fall back to CUDA implementation
-    if with_fused_add:
+        return rocm_aiter_ops.rms_norm2d_with_add
+    else:
         return fused_add_rms_norm
-    return rms_norm
 
 
 # --8<-- [start:rms_norm]
@@ -158,20 +132,14 @@ class RMSNorm(CustomOp):
 
         if current_platform.is_rocm():
             aiter_rmsnorm_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
-            self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
-                with_fused_add=False,
-                dtype=weight_dtype,
-                use_aiter=aiter_rmsnorm_enabled,
-            )
             self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
-                with_fused_add=True, dtype=weight_dtype, use_aiter=aiter_rmsnorm_enabled
+                dtype=weight_dtype, use_aiter=aiter_rmsnorm_enabled
             )
 
         # Optional: enable Oink Blackwell RMSNorm custom-op fast path on
         # compatible CUDA devices (e.g., SM100) when the external Oink
         # package is available. This is detected once at construction time
         # to avoid per-call device queries in the hot path.
-        self._use_oink_rmsnorm = False
         self._use_oink_fused_add_rmsnorm = False
         if (
             not current_platform.is_rocm()
@@ -203,7 +171,6 @@ class RMSNorm(CustomOp):
                 try:
                     device_index = torch.accelerator.current_device_index()
                     if _oink_ops.is_oink_available_for_device(device_index):
-                        self._use_oink_rmsnorm = True
                         self._use_oink_fused_add_rmsnorm = (
                             _oink_ops.has_fused_add_rms_norm()
                         )
@@ -215,7 +182,6 @@ class RMSNorm(CustomOp):
                         "RMSNorm; falling back to vLLM RMSNorm. Error: %s",
                         e,
                     )
-                    self._use_oink_rmsnorm = False
                     self._use_oink_fused_add_rmsnorm = False
 
     @staticmethod
@@ -270,6 +236,14 @@ class RMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        if residual is None:
+            # TODO(luka): address the weight=None passing issue more generally
+            return ir.ops.rms_norm(
+                x,
+                self.weight.data if self.has_weight else None,
+                self.variance_epsilon,
+                self.variance_size_override,
+            )
 
         return self.forward_static(
             x,
@@ -286,34 +260,13 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None and not envs.VLLM_BATCH_INVARIANT:
+            return ir.ops.rms_norm(
+                x, self.weight.data, self.variance_epsilon, self.variance_size_override
+            )
+
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
-
-        # Optional Oink SM100 fast path (no residual). This path is
-        # torch.compile-friendly via torch.ops.oink.rmsnorm and preserves
-        # 2D layouts (including padded rows) when using the Oink
-        # pointer-based kernel.
-        if (
-            residual is None
-            and getattr(self, "_use_oink_rmsnorm", False)
-            and x.is_cuda
-            and x.dim() >= 2
-            and self.has_weight
-            and not envs.VLLM_BATCH_INVARIANT
-            and self.weight.data.dtype == x.dtype
-            and self.weight.data.is_contiguous()
-        ):
-            orig_shape = x.shape
-            hidden_size = orig_shape[-1]
-            if _can_view_as_2d(x):
-                x_2d = x.view(-1, hidden_size)
-                if _is_oink_stride_compatible_2d(x_2d):
-                    y_2d = _oink_ops.rmsnorm(
-                        x_2d,
-                        self.weight.data,
-                        self.variance_epsilon,
-                    )
-                    return y_2d.view(orig_shape)
 
         # Optional Oink SM100 fast path (fused residual-add + RMSNorm, in-place).
         # This mirrors vLLM's fused_add_rms_norm semantics by mutating both
@@ -356,29 +309,34 @@ class RMSNorm(CustomOp):
                     )
                     return x, residual
 
-        add_residual = residual is not None
-        if add_residual:
+        if residual is not None:
             return fused_add_rms_norm(
                 x, residual, self.weight.data, self.variance_epsilon
             )
         else:
-            return rms_norm(x, self.weight.data, self.variance_epsilon)
+            assert envs.VLLM_BATCH_INVARIANT
+            return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
 
     def forward_hip(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None and not envs.VLLM_BATCH_INVARIANT:
+            return ir.ops.rms_norm(
+                x, self.weight.data, self.variance_epsilon, self.variance_size_override
+            )
+
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
-        add_residual = residual is not None
-        if add_residual:
+        if residual is not None:
             return self.rocm_norm_func_with_add(
                 x, residual, self.weight.data, self.variance_epsilon
             )
         else:
-            return self.rocm_norm_func(x, self.weight.data, self.variance_epsilon)
+            assert envs.VLLM_BATCH_INVARIANT
+            return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
 
     def forward_xpu(
         self,
@@ -414,77 +372,32 @@ class GemmaRMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    @staticmethod
-    def _forward_static_no_residual(
-        weight: torch.Tensor,
-        variance_epsilon: float,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward() without residual."""
-        orig_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x
-
-    @staticmethod
-    def _forward_static_with_residual(
-        weight: torch.Tensor,
-        variance_epsilon: float,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward() with residual."""
-        orig_dtype = x.dtype
-        x = (
-            x.float() + residual.float()
-            if orig_dtype == torch.float16
-            else x + residual
-        )
-        residual = x
-
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x, residual
-
     def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        if residual is None:
-            return self._forward_static_no_residual(
-                self.weight.data, self.variance_epsilon, x
+        orig_dtype = x.dtype
+        weight = self.weight.data.float() + 1.0
+        if residual is not None:
+            x = (
+                x.float() + residual.float()
+                if orig_dtype == torch.float16
+                else x + residual
             )
-        else:
-            return self._forward_static_with_residual(
-                self.weight.data, self.variance_epsilon, x, residual
-            )
+            residual = x
+        # ir.ops.rms_norm handles fp32 upcast internally
+        out = ir.ops.rms_norm(x, weight, self.variance_epsilon)
+        return (
+            out.to(orig_dtype) if residual is None else (out.to(orig_dtype), residual)
+        )
 
     def forward_cuda(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
-
-        if not getattr(self, "_is_compiled", False):
-            self._forward_static_no_residual = torch.compile(  # type: ignore
-                self._forward_static_no_residual
-            )
-            self._forward_static_with_residual = torch.compile(  # type: ignore
-                self._forward_static_with_residual
-            )
-            self._is_compiled = True
         return self.forward_native(x, residual)
 
 
@@ -561,9 +474,12 @@ class RMSNormGated(CustomOp):
         weight = self.weight.float()
         z = z.float() if z is not None else None
 
+        assert self.activation in ["silu", "sigmoid", "swish"]
+        act_fn = F.sigmoid if self.activation == "sigmoid" else F.silu
+
         # Apply gating before normalization if needed
         if z is not None and not self.norm_before_gate:
-            x = x * F.silu(z)
+            x = x * act_fn(z)
 
         # RMS Normalization
         if self.group_size is None:
@@ -582,7 +498,7 @@ class RMSNormGated(CustomOp):
 
         # Apply gating after normalization if needed
         if z is not None and self.norm_before_gate:
-            out = out * F.silu(z)
+            out = out * act_fn(z)
 
         return out.to(orig_dtype)
 
@@ -601,6 +517,11 @@ class RMSNormGated(CustomOp):
             norm_before_gate=self.norm_before_gate,
             activation=self.activation,
         )
+
+    def forward_xpu(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.forward_cuda(x, z)
 
 
 class LayerNorm(nn.Module):

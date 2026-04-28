@@ -12,7 +12,6 @@ import numpy as np
 import regex as re
 import torch
 from cachetools import LRUCache
-from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -181,6 +180,8 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
+        from diskcache import Cache
+
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
             "cache. It may consume a lot of disk space and should "

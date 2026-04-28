@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
@@ -44,8 +45,18 @@ class Llama3JsonToolParser(ToolParser):
     llama4_json are set.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    bot_token: str = "<|python_tag|>"
+    # Simple regex to find opening braces - we'll use JSON decoder for parsing
+    # This handles arbitrary nesting depth correctly
+    tool_call_start_regex: re.Pattern = re.compile(r"\{")
+    json_decoder: json.JSONDecoder = json.JSONDecoder()
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        tools: list[Tool] | None = None,
+    ):
+        super().__init__(tokenizer, tools)
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
@@ -55,14 +66,12 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list
-        self.bot_token = "<|python_tag|>"
-        self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
-            0
-        ]
-        # Simple regex to find opening braces - we'll use JSON decoder for parsing
-        # This handles arbitrary nesting depth correctly
-        self.tool_call_start_regex = re.compile(r"\{")
-        self.json_decoder = json.JSONDecoder()
+        self.bot_token_id = self.vocab.get(self.bot_token)
+        if self.bot_token_id is None:
+            raise RuntimeError(
+                "Llama3JsonToolParser could not locate the bot token "
+                f"'{self.bot_token}' in the tokenizer."
+            )
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest

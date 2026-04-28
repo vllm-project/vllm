@@ -18,6 +18,10 @@ class ShortConvAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["ShortConvAttentionMetadataBuilder"]:
         return ShortConvAttentionMetadataBuilder
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return True
+
 
 @dataclass
 class ShortConvAttentionMetadata(BaseMambaAttentionMetadata):
