@@ -491,6 +491,7 @@ class PoolsideV1ToolParser(ToolParser):
         delta = self._get_or_create_delta(pending)
         delta.id = self._tool_call_ids[self.current_tool_id]
         delta.type = "function"
+        assert delta.function is not None
         delta.function.name = tool_name
         if delta.function.arguments is None:
             delta.function.arguments = ""
@@ -530,6 +531,7 @@ class PoolsideV1ToolParser(ToolParser):
         if result is not None:
             self.prev_tool_call_arr[self.current_tool_id]["arguments"] = result
         delta = self._get_or_create_delta(pending)
+        assert delta.function is not None
         if delta.function.arguments is None:
             delta.function.arguments = ""
         delta.function.arguments += fragment
