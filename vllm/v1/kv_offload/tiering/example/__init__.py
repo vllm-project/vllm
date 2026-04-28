@@ -13,7 +13,7 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadKey, ReqContext
+from vllm.v1.kv_offload.abstract import OffloadKey, ReqContext
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -30,20 +30,6 @@ class _JobMetadata:
     job_id: JobId
     keys: list[OffloadKey]
     is_store: bool  # True for store jobs, False for load jobs
-
-
-class ExampleLoadStoreSpec(LoadStoreSpec):
-    """
-    Minimal LoadStoreSpec for ExampleSecondaryTier testing.
-
-    This spec is never actually used for I/O since ExampleSecondaryTier
-    stores blocks in memory. It exists to provide proper type semantics
-    and serve as a template for real secondary tier implementations.
-    """
-
-    @staticmethod
-    def medium() -> str:
-        return "Example"
 
 
 class ExampleSecondaryTier(SecondaryTierManager):
