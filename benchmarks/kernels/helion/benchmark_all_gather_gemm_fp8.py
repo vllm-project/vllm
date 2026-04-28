@@ -296,13 +296,13 @@ def benchmark_all_gather_gemm_fp8(M: int , N:int , K:int ,sp: int, world_size: i
     scale_a = scale_a.clamp(min=min_val, max=max_val)
     scale_b = scale_b.clamp(min=min_val, max=max_val)
     # preallocation for cuda graph capture
-    
-    a_shared_symm = dist._symmetric_memory.empty(
-        a_shared.shape,
-        dtype=a_shared.dtype,
-        device=a_shared.device
-    )
-    a_shared_symm.copy_(a_shared)
+    a_shared_symm=a_shared
+    #a_shared_symm = dist._symmetric_memory.empty(
+    #    a_shared.shape,
+    #    dtype=a_shared.dtype,
+    #    device=a_shared.device
+    #)
+    #a_shared_symm.copy_(a_shared)
 
     # BARRIER: Ensure all ranks have finished copying before kernel launch
     dist.barrier(group=dist_group)
@@ -334,6 +334,8 @@ def benchmark_all_gather_gemm_fp8(M: int , N:int , K:int ,sp: int, world_size: i
     #     print(f"[Rank:{rank}] Sanity check Testing shape M={M},N={N},K={K} with split {sp} (tokens per rank: {M_per_rank})")
     # sanity  check
     with torch.no_grad():
+        # if rank==0:
+        #     import pdb; pdb.set_trace()
         a_out, c = helion_kernel()
         ag_golden, mm_golden = baseline_kernel()
         torch.testing.assert_close(a_out, ag_golden), "All-gather outputs do not match"
@@ -351,8 +353,10 @@ def benchmark_all_gather_gemm_fp8(M: int , N:int , K:int ,sp: int, world_size: i
             with_stack=True,
             on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logdir/helion_M{M}_N{N}_K{K}_sp{sp}_RANK{rank}')
         ) as prof:
-            helion_kernel()
-            torch.cuda.synchronize()
+            for _ in range(10):
+                helion_kernel()
+                torch.cuda.synchronize()
+                prof.step()
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12))
         print(f"Profiling trace saved. To view: tensorboard --logdir=./logdir")
         # ---- Prepare the kernel for profiling (warmup) ----
@@ -366,8 +370,10 @@ def benchmark_all_gather_gemm_fp8(M: int , N:int , K:int ,sp: int, world_size: i
             with_stack=True,
             on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logdir/baseline_M{M}_N{N}_K{K}_sp{sp}_RANK{rank}')
         ) as prof:
-            baseline_kernel()
-            torch.cuda.synchronize()
+            for _ in range(10):
+                baseline_kernel()
+                torch.cuda.synchronize()
+                prof.step()
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12))
         print(f"Profiling trace saved. To view: tensorboard --logdir=./logdir")
     
@@ -435,7 +441,7 @@ if __name__ == "__main__":
         #(4096, 5120, 5120),
         #(8192, 8192, 8192)
         (8192, 8192, 2560),
-        #(8192, 8192, 14336)
+        (8192, 8192, 14336)
     ]
     import time 
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()
@@ -509,13 +515,8 @@ if __name__ == "__main__":
 
 """
 === Final Distributed Benchmark Results ===
-rank | shape                        | baseline_ms | kernel_ms | speedup(x) | baseline_peak(MB) | kernel_peak(MB) | mem_improve(x)
------+------------------------------+-------------+-----------+------------+-------------------+-----------------+---------------
-ALL  | M=8192,N=2560,K=8192splits=1 | 0.915       | 0.866     | 1.056      | 414.05            | 414.02          | 1.000         
-ALL  | M=8192,N=2560,K=8192splits=2 | 0.929       | 0.857     | 1.084      | 414.05            | 414.02          | 1.000         
-ALL  | M=8192,N=2560,K=8192splits=4 | 0.901       | 0.902     | 0.999      | 414.05            | 414.02          | 1.000         
-
-ALL  | M=8192,N=14336,K=8192splits=1 | 1.845       | 1.810     | 1.019      | 1058.10           | 1058.07         | 1.000         
-ALL  | M=8192,N=14336,K=8192splits=2 | 1.971       | 1.863     | 1.058      | 1058.10           | 1058.07         | 1.000         
-ALL  | M=8192,N=14336,K=8192splits=4 | 1.832       | 1.854     | 0.988      | 1058.10           | 1058.07         | 1.000         
+rank | shape                         | baseline_ms | kernel_ms | speedup(x) | baseline_peak(MB) | kernel_peak(MB) | mem_improve(x)
+-----+-------------------------------+-------------+-----------+------------+-------------------+-----------------+---------------
+ALL  | M=8192,N=2560,K=8192splits=1  | 0.717       | 0.789     | 0.909      | 348.05            | 348.02          | 1.000         
+ALL  | M=8192,N=14336,K=8192splits=1 | 1.736       | 1.791     | 0.969      | 992.10            | 992.07          | 1.000        
 """

@@ -211,11 +211,11 @@ def copy_engine_all_gather_w_progress(
     if symm_mem_group is None:
         raise RuntimeError("No symmetric memory group available")
 
-    symm_mem_hdl = dist._symmetric_memory.rendezvous(inp, group=symm_mem_group)
-    assert symm_mem_hdl is not None, "Failed to obtain symmetric memory handle"
+    symm_mem = get_symm_mem_workspace(group_name.group_name, inp.nbytes)
+    assert symm_mem is not None, "Failed to obtain symmetric memory handle"
 
-    rank = symm_mem_hdl.rank
-    world_size = symm_mem_hdl.world_size
+    rank = symm_mem.rank
+    world_size = symm_mem.world_size
     assert inp.numel() % splits_per_rank == 0, "inp.numel must be divisible by splits_per_rank"
     assert progress.numel() >= world_size * splits_per_rank, "progress size is insufficient"
 
@@ -224,24 +224,24 @@ def copy_engine_all_gather_w_progress(
     assert list(output.shape) == output_shape, "Mismatch in output shape"
     chunks = output.chunk(world_size * splits_per_rank)
 
-    symm_mem_hdl.barrier()
+    symm_mem.barrier()
     backend_stream.wait_stream(torch.cuda.current_stream())
 
     with torch.cuda.stream(backend_stream):
         for step in range(world_size):
             src_rank = (rank + step + 1) % world_size
             for split_id in range(splits_per_rank):
-                src_buf = symm_mem_hdl.get_buffer(
+                src_buf = symm_mem.get_buffer(
                     src_rank, chunks[0].shape, inp.dtype, chunks[0].numel() * split_id
                 )
                 chunks[src_rank * splits_per_rank + split_id].copy_(src_buf,non_blocking=True)
                 # Write progress signal
-                symm_mem_hdl.stream_write_value32(
+                symm_mem.stream_write_value32(
                     progress,
                     offset=src_rank * splits_per_rank + split_id,
                     val=1,
                 )
-        #symm_mem_hdl.barrier()
+        #symm_mem.barrier()
 
     return backend_stream
 
