@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+import pytest
+
+from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.utils import (
+    get_max_tokens,
+    sanitize_message,
+    should_include_usage,
+)
 
 
 def test_sanitize_message():
@@ -9,6 +16,25 @@ def test_sanitize_message():
         sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
         == "<_io.BytesIO object>"
     )
+
+
+@pytest.mark.parametrize(
+    ("stream_options", "expected"),
+    [
+        (None, (True, True)),
+        (StreamOptions(include_usage=False), (True, True)),
+        (
+            StreamOptions(include_usage=False, continuous_usage_stats=False),
+            (True, True),
+        ),
+        (
+            StreamOptions(include_usage=True, continuous_usage_stats=False),
+            (True, True),
+        ),
+    ],
+)
+def test_should_include_usage_force_enables_continuous_usage(stream_options, expected):
+    assert should_include_usage(stream_options, True) == expected
 
 
 class TestGetMaxTokens:
@@ -80,3 +106,15 @@ class TestGetMaxTokens:
             default_sampling_params={"max_tokens": 2048},
         )
         assert result == 512
+
+    def test_input_length_exceeds_max_model_len(self):
+        with pytest.raises(
+            ValueError,
+            match="Input length .* exceeds model's maximum context length .*",
+        ):
+            get_max_tokens(
+                max_model_len=100,
+                max_tokens=50,
+                input_length=150,
+                default_sampling_params={"max_tokens": 2048},
+            )

@@ -189,9 +189,9 @@ struct Sm90RowOrScalarBroadcastArray {
       }
 
       auto synchronize = [&] () { cutlass::arch::NamedBarrier::sync(thr_num, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier); };
-      Tensor tGS_gRow_flt = filter_zeros(tGS_gRow);
-      Tensor tGS_sRow_flt = filter_zeros(tGS_sRow);
-      Tensor tGS_cRow_flt = make_tensor(tGS_cRow.data(), make_layout(tGS_gRow_flt.shape(), tGS_cRow.stride()));
+      cute::Tensor tGS_gRow_flt = filter_zeros(tGS_gRow);
+      cute::Tensor tGS_sRow_flt = filter_zeros(tGS_sRow);
+      cute::Tensor tGS_cRow_flt = make_tensor(tGS_cRow.data(), make_layout(tGS_gRow_flt.shape(), tGS_cRow.stride()));
 
       for (int i = 0; i < size(tGS_gRow_flt); ++i) {
         if (get<1>(tGS_cRow_flt(i)) >= size<1>(CtaTileShapeMNK{})) {
@@ -211,8 +211,8 @@ struct Sm90RowOrScalarBroadcastArray {
     begin_loop(int epi_m, int epi_n) {
       if (epi_m == 0) { // Assumes M-major subtile loop
         if (!params.row_broadcast) return; // Do not issue LDS when row is scalar 
-        Tensor tSR_sRow_flt = filter_zeros(tSR_sRow(_,_,_,epi_m,epi_n));
-        Tensor tSR_rRow_flt = filter_zeros(tSR_rRow);
+        cute::Tensor tSR_sRow_flt = filter_zeros(tSR_sRow(_,_,_,epi_m,epi_n));
+        cute::Tensor tSR_rRow_flt = filter_zeros(tSR_rRow);
         copy(tSR_sRow_flt, tSR_rRow_flt);
       }
     }
@@ -241,9 +241,9 @@ struct Sm90RowOrScalarBroadcastArray {
     auto [m, n, k, l] = args.tile_coord_mnkl;
     using ThreadCount = decltype(size(args.tiled_copy));
 
-    Tensor mRow = make_tensor(make_gmem_ptr(params.ptr_row_array[l]), make_shape(M,N,1), params.dRow);
-    Tensor gRow = local_tile(mRow(_,_,l), take<0,2>(args.tile_shape_mnk), make_coord(m, n));          // (CTA_M, CTA_N)
-    Tensor sRow = make_tensor(make_smem_ptr(smem), 
+    cute::Tensor mRow = make_tensor(make_gmem_ptr(params.ptr_row_array[l]), make_shape(M,N,1), params.dRow);
+    cute::Tensor gRow = local_tile(mRow(_,_,l), take<0,2>(args.tile_shape_mnk), make_coord(m, n));          // (CTA_M, CTA_N)
+    cute::Tensor sRow = make_tensor(make_smem_ptr(smem), 
         make_shape(size<0>(CtaTileShapeMNK{}), size<1>(CtaTileShapeMNK{})), make_shape(_0{}, _1{}));  // (CTA_M, CTA_N)
     //// G2S: Gmem to Smem
     auto tiled_g2s = make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
@@ -251,16 +251,16 @@ struct Sm90RowOrScalarBroadcastArray {
                                             Stride<_0,          _1>>{}, 
                                      Layout<_1>{});   
     auto thr_g2s = tiled_g2s.get_slice(args.thread_idx);
-    Tensor tGS_gRow = thr_g2s.partition_S(gRow);
-    Tensor tGS_sRow = thr_g2s.partition_D(sRow);
+    cute::Tensor tGS_gRow = thr_g2s.partition_S(gRow);
+    cute::Tensor tGS_sRow = thr_g2s.partition_D(sRow);
 
     //// G2S: Coord 
     auto cRow = make_identity_tensor(make_shape(size<0>(CtaTileShapeMNK{}), size<1>(CtaTileShapeMNK{})));
-    Tensor tGS_cRow = thr_g2s.partition_S(cRow);
+    cute::Tensor tGS_cRow = thr_g2s.partition_S(cRow);
 
     //// S2R: Smem to Reg
-    Tensor tSR_sRow = sm90_partition_for_epilogue<ReferenceSrc>(sRow, args.epi_tile, args.tiled_copy, args.thread_idx);
-    Tensor tSR_rRow = make_tensor_like(take<0,3>(tSR_sRow));                                           // (CPY,CPY_M,CPY_N)
+    cute::Tensor tSR_sRow = sm90_partition_for_epilogue<ReferenceSrc>(sRow, args.epi_tile, args.tiled_copy, args.thread_idx);
+    cute::Tensor tSR_rRow = make_tensor_like(take<0,3>(tSR_sRow));                                           // (CPY,CPY_M,CPY_N)
 
     return ConsumerStoreCallbacks<decltype(tGS_gRow), decltype(tGS_sRow), decltype(tGS_cRow), decltype(tiled_g2s), decltype(tSR_sRow), decltype(tSR_rRow), decltype(args.tCcD), decltype(args.residue_cD), ThreadCount>(
       tGS_gRow, 
@@ -389,27 +389,35 @@ struct Sm90ColOrScalarBroadcastArray {
 
     CUTLASS_DEVICE void
     begin() {
-      Tensor pred = make_tensor<bool>(shape(tCgCol));
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < size(pred); ++i) {
-        pred(i) = get<0>(tCcCol(i)) < m;
-      }
-
       if (!params.col_broadcast) {
         fill(tCrCol, *(params.ptr_col_array[group]));
         return;
       }
 
-      // Filter so we don't issue redundant copies over stride-0 modes
-      // (only works if 0-strides are in same location, which is by construction)
-      copy_if(pred, filter(tCgCol), filter(tCrCol));
+      // tCgCol has layout (CPY,CPY_M,CPY_N,EPI_M,EPI_N) where CPY_N and
+      // EPI_N are stride-0 for the column broadcast. Slice those modes at
+      // index 0 to avoid redundant copies AND ensure pred/data consistency
+      static_assert(decltype(stride<2>(tCgCol))::value == 0, "Expected stride-0 CPY_N for col broadcast");
+      static_assert(decltype(stride<4>(tCgCol))::value == 0, "Expected stride-0 EPI_N for col broadcast");
+
+      auto tCgCol_s = tCgCol(_,_,0,_,0);      // (CPY,CPY_M,EPI_M)
+      auto tCrCol_s = tCrCol(_,_,0,_,0);      // (CPY,CPY_M,EPI_M)
+      auto tCcCol_s = tCcCol(_,_,0,_,0);      // (CPY,CPY_M,EPI_M)
+
+      cute::Tensor pred = make_tensor<bool>(shape(tCgCol_s));
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < size(pred); ++i) {
+        pred(i) = get<0>(tCcCol_s(i)) < m;
+      }
+
+      copy_if(pred, tCgCol_s, tCrCol_s);
     }
 
     template <typename ElementAccumulator, int FragmentSize>
     CUTLASS_DEVICE Array<Element, FragmentSize>
     visit(Array<ElementAccumulator, FragmentSize> const& frg_acc, int epi_v, int epi_m, int epi_n) {
       Array<Element, FragmentSize> frg_col;
-      Tensor tCrCol_mn = tCrCol(_,_,_,epi_m,epi_n);
+      cute::Tensor tCrCol_mn = tCrCol(_,_,_,epi_m,epi_n);
 
       CUTLASS_PRAGMA_UNROLL
       for (int i = 0; i < FragmentSize; ++i) {
@@ -431,16 +439,16 @@ struct Sm90ColOrScalarBroadcastArray {
     auto [M, N, K, L] = args.problem_shape_mnkl;
     auto [m, n, k, l] = args.tile_coord_mnkl;
 
-    Tensor mCol = make_tensor(make_gmem_ptr(params.ptr_col_array[l]), make_shape(M,N,1), params.dCol);
-    Tensor tCgCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
+    cute::Tensor mCol = make_tensor(make_gmem_ptr(params.ptr_col_array[l]), make_shape(M,N,1), params.dCol);
+    cute::Tensor tCgCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
       mCol, args.tile_shape_mnk, args.tile_coord_mnkl, args.epi_tile, args.tiled_copy, args.thread_idx);
-    Tensor tCrCol = make_tensor_like(tCgCol);                                          // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
+    cute::Tensor tCrCol = make_tensor_like(tCgCol);                                          // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
 
     // Generate an identity tensor matching the shape of the global tensor and 
     //  partition the same way, this will be used to generate the predicate
     //  tensor for loading
-    Tensor cCol = make_identity_tensor(mCol.shape());
-    Tensor tCcCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
+    cute::Tensor cCol = make_identity_tensor(mCol.shape());
+    cute::Tensor tCcCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
       cCol, args.tile_shape_mnk, args.tile_coord_mnkl, args.epi_tile, args.tiled_copy, args.thread_idx);
 
     return ConsumerStoreCallbacks(

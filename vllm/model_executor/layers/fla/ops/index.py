@@ -15,14 +15,12 @@ from .utils import tensor_cache
 
 
 @tensor_cache
-def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+def prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
 
 
 @tensor_cache
-def prepare_chunk_indices(
-    cu_seqlens: torch.LongTensor, chunk_size: int
-) -> torch.LongTensor:
+def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
     indices = torch.cat(
         [
             torch.arange(n)
@@ -33,9 +31,7 @@ def prepare_chunk_indices(
 
 
 @tensor_cache
-def prepare_chunk_offsets(
-    cu_seqlens: torch.LongTensor, chunk_size: int
-) -> torch.LongTensor:
+def prepare_chunk_offsets(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
     return torch.cat(
         [cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]
     ).cumsum(-1)

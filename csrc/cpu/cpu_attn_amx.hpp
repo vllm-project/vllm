@@ -420,7 +420,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
       const int64_t block_size, const int64_t block_size_stride) {
     // For AMX 2D tiles, size of each line is 64 bytes
     constexpr int64_t amx_tile_row_size = AMX_TILE_ROW_BYTES;
-    // For AMX B martix, N always is 16
+    // For AMX B matrix, N always is 16
     constexpr int64_t amx_b_tile_n_size = AMX_TILE_ROW_BYTES / 4;
     constexpr int64_t amx_b_tile_k_size = amx_tile_row_size / sizeof(scalar_t);
     // For now suppose block_size is divisible by amx_tile_column_num

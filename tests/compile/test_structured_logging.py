@@ -17,8 +17,10 @@ from vllm.config.compilation import (
 )
 from vllm.config.scheduler import SchedulerConfig
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 
 MLP_SIZE = 64
+DEVICE_TYPE = current_platform.device_type
 
 
 @support_torch_compile
@@ -71,7 +73,7 @@ class TraceStructuredCapture:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
     """Test that all expected vLLM artifacts are logged during compilation."""
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     capture = TraceStructuredCapture()
 
@@ -109,9 +111,9 @@ def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
         f"got {len(vllm_piecewise_split_graph)}"
     )
     compile_start_artifacts = capture.get("artifact", "vllm_piecewise_compile_start")
-    assert len(compile_start_artifacts) == 2, (
-        "Expected 2 vllm_piecewise_compile_start "
-        "(one for dynamic ranges, one for compile size), "
+    assert len(compile_start_artifacts) == 4, (
+        "Expected 4 vllm_piecewise_compile_start "
+        "(2 subgraphs x 2 ranges each: dynamic + compile size), "
         f"got {len(compile_start_artifacts)}"
     )
     submod_dumps = capture.get("graph_dump", r"vllm_submod_.*")

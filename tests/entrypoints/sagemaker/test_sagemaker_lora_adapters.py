@@ -88,7 +88,7 @@ async def test_sagemaker_load_adapter_invalid_files(
         basic_server_with_lora.url_for("adapters"),
         json={"name": "invalid-adapter", "src": str(invalid_files)},
     )
-    assert load_response.status_code == 400
+    assert load_response.status_code == 500
 
 
 @pytest.mark.asyncio

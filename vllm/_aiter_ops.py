@@ -8,11 +8,17 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
@@ -50,10 +56,33 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_gfx9
+        from vllm.platforms.rocm import on_mi3xx
 
-        return on_gfx9()
+        return on_mi3xx()
     return False
+
+
+@functools.cache
+def _load_gemm_tuned_configs(
+    q_dtype_w: torch.dtype, csv_path: str
+) -> set[tuple[int, int, int]]:
+    try:
+        df = pd.read_csv(csv_path).drop_duplicates()
+        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
+    except Exception:
+        return set()
+
+
+def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+    l_m = (
+        [1, 2, 4]
+        + list(range(8, 513, 8))
+        + [1024, 1536]
+        + [2**i for i in range(11, 19)]
+    )
+    return any((N, K, M) in configs for M in l_m)
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -137,6 +166,10 @@ def _rocm_aiter_fused_moe_fake(
     a2_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -332,13 +365,33 @@ def _rocm_aiter_fused_topk_fake(
     router_logits: torch.Tensor,
     top_k: int,
     gate_up: bool,
-) -> None:
-    # tuple[torch.Tensor, torch.Tensor]:
-    pass
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = x.shape[0]
+    topk_weights = torch.empty(
+        (num_tokens, top_k), dtype=torch.float32, device=x.device
+    )
+    topk_indices = torch.empty((num_tokens, top_k), dtype=torch.int32, device=x.device)
+    return topk_weights, topk_indices
 
 
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
+_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
+
+
+def check_aiter_fused_qk_rmsnorm() -> bool:
+    """Check if aiter provides fused_qk_rmsnorm (requires AITer >= PR #2442)."""
+    global _AITER_HAS_FUSED_QK_RMSNORM
+    if _AITER_HAS_FUSED_QK_RMSNORM is None:
+        try:
+            from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
+                fused_qk_rmsnorm,
+            )
+
+            _AITER_HAS_FUSED_QK_RMSNORM = True
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            _AITER_HAS_FUSED_QK_RMSNORM = False
+    return _AITER_HAS_FUSED_QK_RMSNORM
 
 
 def _check_aiter_mla_fp8_support() -> bool:
@@ -382,6 +435,12 @@ def _rocm_aiter_mla_decode_fwd_impl(
     logit_cap: float = 0.0,
     q_scale: torch.Tensor | None = None,
     kv_scale: torch.Tensor | None = None,
+    work_meta_data: torch.Tensor | None = None,
+    work_indptr: torch.Tensor | None = None,
+    work_info_set: torch.Tensor | None = None,
+    reduce_indptr: torch.Tensor | None = None,
+    reduce_final_map: torch.Tensor | None = None,
+    reduce_partial_map: torch.Tensor | None = None,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
@@ -394,6 +453,29 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    if work_meta_data is not None:
+        assert work_indptr is not None, (
+            "work_indptr must be provided with work_meta_data"
+        )
+        assert work_info_set is not None, (
+            "work_info_set must be provided with work_meta_data"
+        )
+        assert reduce_indptr is not None, (
+            "reduce_indptr must be provided with work_meta_data"
+        )
+        assert reduce_final_map is not None, (
+            "reduce_final_map must be provided with work_meta_data"
+        )
+        assert reduce_partial_map is not None, (
+            "reduce_partial_map must be provided with work_meta_data"
+        )
+        kwargs["work_meta_data"] = work_meta_data
+        kwargs["work_indptr"] = work_indptr
+        kwargs["work_info_set"] = work_info_set
+        kwargs["reduce_indptr"] = reduce_indptr
+        kwargs["reduce_final_map"] = reduce_final_map
+        kwargs["reduce_partial_map"] = reduce_partial_map
 
     mla_decode_fwd(
         q,
@@ -421,11 +503,17 @@ def _rocm_aiter_mla_decode_fwd_fake(
     logit_cap: float = 0.0,
     q_scale: torch.Tensor | None = None,
     kv_scale: torch.Tensor | None = None,
+    work_meta_data: torch.Tensor | None = None,
+    work_indptr: torch.Tensor | None = None,
+    work_info_set: torch.Tensor | None = None,
+    reduce_indptr: torch.Tensor | None = None,
+    reduce_final_map: torch.Tensor | None = None,
+    reduce_partial_map: torch.Tensor | None = None,
 ) -> None:
     pass
 
 
-def _rocm_aiter_gemm_a8w8_impl(
+def _rocm_aiter_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -442,7 +530,7 @@ def _rocm_aiter_gemm_a8w8_impl(
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
-def _rocm_aiter_gemm_a8w8_fake(
+def _rocm_aiter_w8a8_gemm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -454,6 +542,35 @@ def _rocm_aiter_gemm_a8w8_fake(
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
+
+
+def _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter import gemm_a8w8_bpreshuffle
+
+    output = gemm_a8w8_bpreshuffle(A, B, As, Bs, None, output_dtype)
+    if bias is not None:
+        output.add_(bias)
+    return output
+
+
+def _rocm_aiter_preshuffled_per_token_w8a8_gemm_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    return torch.empty(m, n, dtype=output_dtype, device=A.device)
 
 
 def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
@@ -861,6 +978,77 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _fused_mla_dual_rms_norm_impl(
+    x1: torch.Tensor,
+    x1_weight: torch.Tensor,
+    x2: torch.Tensor,
+    x2_weight: torch.Tensor,
+    x1_epsilon: float,
+    x2_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise ImportError(
+            "fused_qk_rmsnorm requires a newer AITer version "
+            "(>= PR #2442). Please upgrade aiter or disable the "
+            "fuse_mla_dual_rms_norm pass."
+        ) from exc
+
+    return fused_qk_rmsnorm(
+        q=x1,
+        q_weight=x1_weight,
+        q_eps=x1_epsilon,
+        k=x2,
+        k_weight=x2_weight,
+        k_eps=x2_epsilon,
+    )
+
+
+def _fused_mla_dual_rms_norm_fake(
+    x1: torch.Tensor,
+    x1_weight: torch.Tensor,
+    x2: torch.Tensor,
+    x2_weight: torch.Tensor,
+    x1_epsilon: float,
+    x2_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (torch.empty_like(x1), torch.empty_like(x2))
+
+
+def _rocm_aiter_gemm_a8wfp4_impl(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scales: torch.Tensor,
+    w_scales: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8wfp4 import gemm_a8wfp4
+
+    M, N = x.shape[0], w.shape[0]
+    y = torch.empty(M, N, dtype=out_dtype, device=x.device)
+    gemm_a8wfp4(
+        x=x,
+        w=w,
+        y=y,
+        x_scales=x_scales,
+        w_scales=w_scales,
+        dtype=out_dtype,
+        config=None,
+    )
+    return y
+
+
+def _rocm_aiter_gemm_a8wfp4_fake(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scales: torch.Tensor,
+    w_scales: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], w.shape[0], dtype=out_dtype, device=x.device)
+
+
 def _triton_rotary_embedding_impl(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -1237,11 +1425,15 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_gemm_a8w8",
-                op_func=_rocm_aiter_gemm_a8w8_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_gemm_a8w8_fake,
-                dispatch_key=current_platform.dispatch_key,
+                op_name="rocm_aiter_w8a8_gemm",
+                op_func=_rocm_aiter_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_w8a8_gemm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="_rocm_aiter_preshuffled_per_token_w8a8_gemm",
+                op_func=_rocm_aiter_preshuffled_per_token_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_preshuffled_per_token_w8a8_gemm_fake,
             )
 
             direct_register_custom_op(
@@ -1337,12 +1529,27 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8wfp4",
+                op_func=_rocm_aiter_gemm_a8wfp4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_a8wfp4_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             # Register rocm aiter rotary embedding custom op
             direct_register_custom_op(
                 op_name="rocm_aiter_triton_rotary_embedding",
                 op_func=_triton_rotary_embedding_impl,
                 mutates_args=["query", "key"],  # These tensors are modified in-place
                 fake_impl=_triton_rotary_embedding_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm",
+                op_func=_fused_mla_dual_rms_norm_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_dual_rms_norm_fake,
             )
 
             _OPS_REGISTERED = True
@@ -1392,6 +1599,10 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
+    def get_fused_mla_dual_rms_norm_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm.default
+
+    @staticmethod
     def rms_norm(
         x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
     ) -> torch.Tensor:
@@ -1409,7 +1620,7 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def gemm_a8w8(
+    def w8a8_gemm(
         A: torch.Tensor,
         B: torch.Tensor,
         As: torch.Tensor,
@@ -1417,7 +1628,20 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+        return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def preshuffled_per_token_w8a8_gemm(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
+            A, B, As, Bs, bias, output_dtype
+        )
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(
@@ -1558,6 +1782,8 @@ class rocm_aiter_ops:
         need_renorm: bool,
         routed_scaling_factor: float = 1.0,
     ) -> None:
+        if correction_bias.dtype != gating_output.dtype:
+            correction_bias = correction_bias.to(gating_output.dtype)
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
             correction_bias,
@@ -1614,6 +1840,12 @@ class rocm_aiter_ops:
         logit_cap: float = 0.0,
         q_scale: torch.Tensor | None = None,
         kv_scale: torch.Tensor | None = None,
+        work_meta_data: torch.Tensor | None = None,
+        work_indptr: torch.Tensor | None = None,
+        work_info_set: torch.Tensor | None = None,
+        reduce_indptr: torch.Tensor | None = None,
+        reduce_final_map: torch.Tensor | None = None,
+        reduce_partial_map: torch.Tensor | None = None,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -1628,6 +1860,12 @@ class rocm_aiter_ops:
             logit_cap=logit_cap,
             q_scale=q_scale,
             kv_scale=kv_scale,
+            work_meta_data=work_meta_data,
+            work_indptr=work_indptr,
+            work_info_set=work_info_set,
+            reduce_indptr=reduce_indptr,
+            reduce_final_map=reduce_final_map,
+            reduce_partial_map=reduce_partial_map,
         )
 
     @staticmethod
@@ -1647,7 +1885,19 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
-    def triton_fp4_gemm_dynamic_qaunt(
+    def gemm_a8wfp4(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a8wfp4(
+            x, w, x_scales, w_scales, out_dtype
+        )
+
+    @staticmethod
+    def triton_fp4_gemm_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
@@ -1813,8 +2063,26 @@ class rocm_aiter_ops:
         ]
 
     @staticmethod
+    def is_shuffled_per_token_w8a8_gemm_tuned(
+        N: int, K: int, q_dtype_w: torch.dtype
+    ) -> bool:
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = (
+            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
+        )
+        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+
+    @staticmethod
+    def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
+        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+
+    @staticmethod
     def shuffle_weight(
-        self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
         from aiter.ops.shuffle import shuffle_weight
 
@@ -1964,6 +2232,57 @@ class rocm_aiter_ops:
             K_QScale=K_QScale,
             V_QScale=V_QScale,
             out_=out_,
+        )
+
+    @staticmethod
+    def paged_attention_common(
+        Q: torch.Tensor,
+        K: torch.Tensor,
+        V: torch.Tensor,
+        tmp_out: torch.Tensor,
+        max_logits: torch.Tensor,
+        exp_sums: torch.Tensor,
+        max_seq_len: int,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables_stride0: int,
+        scale: float,
+        K_QScale_hip: torch.Tensor,
+        V_QScale_hip: torch.Tensor,
+        K_QScale_asm: torch.Tensor,
+        V_QScale_asm: torch.Tensor,
+        out_: torch.Tensor,
+        kv_cache_dtype: str,
+    ):
+        """
+        Paged attention common function.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.paged_attention_common
+        """
+        from aiter import paged_attention_common
+
+        return paged_attention_common(
+            Q=Q,
+            K=K,
+            V=V,
+            tmp_out=tmp_out,
+            max_logits=max_logits,
+            exp_sums=exp_sums,
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            block_tables_stride0=block_tables_stride0,
+            scale=scale,
+            K_QScale_hip=K_QScale_hip,
+            V_QScale_hip=V_QScale_hip,
+            K_QScale_asm=K_QScale_asm,
+            V_QScale_asm=V_QScale_asm,
+            out_=out_,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
 

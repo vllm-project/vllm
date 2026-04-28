@@ -39,7 +39,7 @@ def graph_quickreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
@@ -52,7 +52,7 @@ def graph_quickreduce(
         data = torch.zeros(1)
         data = data.to(device=device)
         torch.distributed.all_reduce(data, group=group)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         del data
 
         # we use the first group to communicate once
@@ -65,13 +65,11 @@ def graph_quickreduce(
         for sz in test_sizes:
             for dtype in [torch.float16, torch.bfloat16]:
                 with graph_capture(device=device) as graph_capture_context:
-                    inp1 = torch.randint(
-                        1, 23, (sz,), dtype=dtype, device=torch.cuda.current_device()
-                    )
-                    inp2 = torch.randint(
-                        -23, 1, (sz,), dtype=dtype, device=torch.cuda.current_device()
-                    )
-                    torch.cuda.synchronize()
+                    device_idx = torch.accelerator.current_device_index()
+                    inp1 = torch.randint(1, 23, (sz,), dtype=dtype, device=device_idx)
+                    inp2 = torch.randint(-23, 1, (sz,), dtype=dtype, device=device_idx)
+
+                    torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=graph_capture_context.stream):
                         for _ in range(num_communication):
@@ -95,7 +93,7 @@ def eager_quickreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
@@ -130,7 +128,7 @@ def test_custom_quick_allreduce(
     quant_mode,
 ):
     world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", quant_mode)
@@ -145,7 +143,7 @@ def qr_variable_input(rank, world_size):
     has been observed with the gpt_oss model).
     """
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     qr_max_size = None  # MB
     _ptr = ops.init_custom_qr(rank, world_size, qr_max_size)
     ranks = []
@@ -169,14 +167,13 @@ def qr_variable_input(rank, world_size):
     s1 = 1024
     while num < 50000:  # 50000 is sufficient to identify issues.
         dtype = torch.float16
+        device_idx = torch.accelerator.current_device_index()
         if num % 2 == 0:
             s2 = 1024
-            inp1 = torch.zeros(
-                (s1, s2), dtype=dtype, device=torch.cuda.current_device()
-            )
+            inp1 = torch.zeros((s1, s2), dtype=dtype, device=device_idx)
         else:
             s2 = 2048
-            inp1 = torch.ones((s1, s2), dtype=dtype, device=torch.cuda.current_device())
+            inp1 = torch.ones((s1, s2), dtype=dtype, device=device_idx)
         result = torch.empty_like(inp1)
         # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 NONE = 4
         ops.qr_all_reduce(_ptr, inp1, result, 3, cast_bf2half=True)
@@ -198,7 +195,7 @@ def qr_variable_input(rank, world_size):
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
 def test_custom_quick_allreduce_variable_input(tp_size, pipeline_parallel_size):
     world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
     multiprocessing.set_start_method("spawn", force=True)

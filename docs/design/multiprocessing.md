@@ -12,9 +12,8 @@ page for information on known issues and how to solve them.
 
 The use of Python multiprocessing in vLLM is complicated by:
 
-- The use of vLLM as a library and the inability to control the code using vLLM
-- Varying levels of incompatibilities between multiprocessing methods and vLLM
-  dependencies
+- using vLLM as a library, which limits control over its internal code;
+- incompatibilities between certain multiprocessing methods and vLLM dependencies.
 
 This document describes how vLLM deals with these challenges.
 
@@ -22,11 +21,9 @@ This document describes how vLLM deals with these challenges.
 
 [Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods) include:
 
-- `spawn` - spawn a new Python process. The default on Windows and macOS.
-
+- `spawn` - Spawn a new Python process. The default on Windows and macOS.
 - `fork` - Use `os.fork()` to fork the Python interpreter. The default on
   Linux for Python versions prior to 3.14.
-
 - `forkserver` - Spawn a server process that will fork a new process on request.
   The default on Linux for Python version 3.14 and newer.
 
@@ -36,8 +33,8 @@ This document describes how vLLM deals with these challenges.
 threads. If you are under macOS, using `fork` may cause the process to crash.
 
 `spawn` is more compatible with dependencies, but can be problematic when vLLM
-is used as a library. If the consuming code does not use a `__main__` guard (`if
-__name__ == "__main__":`), the code will be inadvertently re-executed when vLLM
+is used as a library. If the consuming code does not use a `__main__` guard
+(`if __name__ == "__main__":`), the code will be inadvertently re-executed when vLLM
 spawns a new process. This can lead to infinite recursion, among other problems.
 
 `forkserver` will spawn a new server process that will fork new processes on
@@ -57,8 +54,7 @@ Multiple vLLM dependencies indicate either a preference or requirement for using
 - <https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors>
 - <https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders>
 
-It is perhaps more accurate to say that there are known problems with using
-`fork` after initializing these dependencies.
+Known issues exist when using `fork` after initializing these dependencies.
 
 ## Current State (v0)
 
@@ -66,8 +62,8 @@ The environment variable `VLLM_WORKER_MULTIPROC_METHOD` can be used to control w
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/envs.py#L339-L342>
 
-When we know we own the process because the `vllm` command was used, we use
-`spawn` because it's the most widely compatible.
+If the main process is controlled via the `vllm` command,
+`spawn` is used because it's the most widely compatible.
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/scripts.py#L123-L140>
 
@@ -104,8 +100,8 @@ dependencies and code using vLLM as a library.
 ### Changes Made in v1
 
 There is not an easy solution with Python's `multiprocessing` that will work
-everywhere. As a first step, we can get v1 into a state where it does "best
-effort" choice of multiprocessing method to maximize compatibility.
+everywhere. As a first step, we can get v1 into a state where it does
+"best effort" choice of multiprocessing method to maximize compatibility.
 
 - Default to `fork`.
 - Use `spawn` when we know we control the main process (`vllm` was executed).
@@ -154,8 +150,8 @@ RuntimeError:
 ### Detect if a `__main__` guard is present
 
 It has been suggested that we could behave better if we could detect whether
-code using vLLM as a library has a `__main__` guard in place. This [post on
-stackoverflow](https://stackoverflow.com/questions/77220442/multiprocessing-pool-in-a-python-class-without-name-main-guard)
+code using vLLM as a library has a `__main__` guard in place. This
+[post on Stack Overflow](https://stackoverflow.com/questions/77220442/multiprocessing-pool-in-a-python-class-without-name-main-guard)
 was from a library author facing the same question.
 
 It is possible to detect whether we are in the original, `__main__` process, or
@@ -192,4 +188,4 @@ that works around these challenges.
 2. We can explore other libraries that may better suit our needs. Examples to
    consider:
 
-- <https://github.com/joblib/loky>
+    - <https://github.com/joblib/loky>

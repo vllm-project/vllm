@@ -21,6 +21,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -30,7 +31,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -324,7 +324,25 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
 
-        num_thumbnail_tokens = spatial_shapes[-1].prod() // (downsample_factor**2)
+        thumbnail_height_patches = int(spatial_shapes[-1][0].item())
+        thumbnail_width_patches = int(spatial_shapes[-1][1].item())
+        # HF computes thumbnail tokens as
+        # ceil(h_patches / downsample_factor) * ceil(w_patches / downsample_factor).
+        # We assert divisibility here so any processor/model drift is surfaced
+        # immediately instead of being hidden by floor division.
+        assert thumbnail_height_patches % downsample_factor == 0, (
+            "LFM2-VL thumbnail height patch grid must be divisible by "
+            f"downsample_factor, got height_patches={thumbnail_height_patches}, "
+            f"downsample_factor={downsample_factor}"
+        )
+        assert thumbnail_width_patches % downsample_factor == 0, (
+            "LFM2-VL thumbnail width patch grid must be divisible by "
+            f"downsample_factor, got width_patches={thumbnail_width_patches}, "
+            f"downsample_factor={downsample_factor}"
+        )
+        num_thumbnail_tokens = math.ceil(
+            thumbnail_height_patches / downsample_factor
+        ) * math.ceil(thumbnail_width_patches / downsample_factor)
         num_patches_tile = tile_size // encoder_patch_size
         dwn_num_patches_tile = math.ceil(num_patches_tile / downsample_factor)
         num_tiles_tokens = dwn_num_patches_tile * dwn_num_patches_tile

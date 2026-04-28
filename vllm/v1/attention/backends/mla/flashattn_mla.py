@@ -6,6 +6,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.attention import _FA3_DEFAULT_NUM_SPLITS
 from vllm.config.cache import CacheDType
@@ -18,17 +19,14 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
@@ -47,6 +45,7 @@ class FlashAttnMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
     ]
 
@@ -57,6 +56,10 @@ class FlashAttnMLABackend(MLACommonBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
@@ -76,7 +79,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -153,7 +156,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
                 or _FA3_DEFAULT_NUM_SPLITS
             )
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.max_num_splits = 1
 
     def _schedule_decode(
@@ -210,7 +213,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
 
         scheduler_metadata = self._schedule_decode(
@@ -322,7 +325,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
 
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]

@@ -43,7 +43,7 @@ def all_reduce_test_worker(
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_elements = 8
     all_tensors = [
@@ -69,7 +69,7 @@ def reduce_scatter_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     num_elements = 8
@@ -100,7 +100,7 @@ def all_gather_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_dimensions = 3
     tensor_size = list(range(2, num_dimensions + 2))
@@ -134,7 +134,7 @@ def broadcast_tensor_dict_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     test_dict = {
         # device tensor
@@ -171,7 +171,7 @@ def send_recv_tensor_dict_test_worker(
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     test_dict = {
@@ -317,7 +317,7 @@ def send_recv_test_worker(
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     size = 64

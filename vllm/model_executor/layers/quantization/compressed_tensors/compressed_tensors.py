@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
@@ -62,6 +63,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -179,6 +181,15 @@ class CompressedTensorsConfig(QuantizationConfig):
             else:
                 return quant_method
 
+        if isinstance(layer, ParallelLMHead):
+            try:
+                quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            except ValueError:
+                quant_scheme = None
+            if quant_scheme is not None:
+                layer.scheme = quant_scheme
+                return CompressedTensorsLinearMethod(self)
+
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
@@ -191,7 +202,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
-        targetting 'Linear' needs to also match
+        targeting 'Linear' needs to also match
         FusedMoE modules.
         """
         if (
@@ -391,6 +402,27 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_4_bits
             and is_group_size_32
             and is_symmetric
+        )
+
+    @staticmethod
+    def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
+        if quant_args is None:
+            return False
+
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = quant_args.symmetric
+        is_group_size_32 = quant_args.group_size == 32
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_8_bits = quant_args.num_bits == 8
+        is_mxfp8_scale_dtype = quant_args.scale_dtype == torch.uint8
+
+        return (
+            is_group_quant
+            and is_float_type
+            and is_8_bits
+            and is_group_size_32
+            and is_symmetric
+            and is_mxfp8_scale_dtype
         )
 
     @staticmethod
@@ -595,6 +627,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A16Mxfp4()
+
+        if self._is_mxfp8(weight_quant):
+            return CompressedTensorsW8A8Mxfp8()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
@@ -1087,6 +1122,17 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer._k_scale = layer.k_scale
         layer._v_scale = layer.v_scale
         layer._q_scale = layer.q_scale
+
+        # Set the _float variants that the attention backend uses.
+        def _to_scalar(tensor: torch.Tensor) -> float:
+            # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
+            if tensor.numel() > 1:
+                return tensor.max().item()
+            return tensor.item()
+
+        layer._k_scale_float = _to_scalar(layer.k_scale)
+        layer._v_scale_float = _to_scalar(layer.v_scale)
+        layer._q_scale_float = _to_scalar(layer.q_scale)
 
         # Discard all placeholders.
         del layer.k_scale

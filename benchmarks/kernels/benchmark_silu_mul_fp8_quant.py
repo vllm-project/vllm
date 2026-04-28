@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
 from vllm.triton_utils import tl, triton
@@ -251,7 +251,7 @@ def benchmark(
         kernel(
             y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
@@ -259,7 +259,7 @@ def benchmark(
     # Benchmark
     latencies: list[float] = []
     for _ in range(runs):
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         start_event.record()
         for i in range(iterations_per_run):
