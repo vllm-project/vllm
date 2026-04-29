@@ -136,8 +136,9 @@ def get_configs_compute_bound():
 
 
 def get_weight_shapes(tp_size):
-    # NOTE(HandH1998): The weight shapes only works for DeepSeek-V3.
-    # Modify them, if you tune for another different model.
+    # NOTE(HandH1998): The weight shapes below cover DeepSeek-V3 and
+    # DeepSeek-V4-Flash expert GEMM shapes. Modify them if tuning for a
+    # different model.
     # cannot TP
     total = [
         (512 + 64, 7168),
@@ -155,9 +156,20 @@ def get_weight_shapes(tp_size):
         (24576, 1536),
         (12288, 7168),
         (4096, 7168),
+        # DSv4-Flash expert down projection — under TP-within-expert, N=7168 is split.
+        (7168, 2048),
     ]
     # K can TP
-    k_tp = [(7168, 18432), (7168, 16384), (7168, 2048)]
+    # (2048, 7168) is DeepSeek-V4-Flash expert gate/up — under TP-within-expert,
+    # the hidden dim (K=7168) is split.
+    k_tp = [(7168, 18432), (7168, 16384), (7168, 2048), (2048, 7168)]
+
+    # DeepSeek-V4-Flash expert shapes (intermediate_size=2048 per expert).
+    # gate/up: (N=2048, K=7168), down: (N=7168, K=2048).
+    # Under expert-parallel deployment neither dim is split, so list the
+    # raw shapes here. The TP-split variants are folded into k_tp and n_tp
+    # below so both deployments are covered.
+    dsv4_flash = [(2048, 7168), (7168, 2048)]
 
     weight_shapes = []
     for t in total:
@@ -168,6 +180,8 @@ def get_weight_shapes(tp_size):
     for k_t in k_tp:
         new_t = (k_t[0], k_t[1] // tp_size)
         weight_shapes.append(new_t)
+    for s in dsv4_flash:
+        weight_shapes.append(s)
     return weight_shapes
 
 
