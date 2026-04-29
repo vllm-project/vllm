@@ -4,8 +4,12 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from xgrammar import StructuralTag, get_model_structural_tag
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -115,6 +119,32 @@ class OpenAIToolParser(ToolParser):
 
     def support_structural_tag(self) -> bool:
         return True
-    
-    def get_model_structural_tag_id(self) -> str:
-        return "harmony"
+
+    def get_structural_tag(self, request: ChatCompletionRequest) -> StructuralTag:
+        def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
+            if isinstance(tool, dict):
+                return tool
+            if hasattr(tool, "model_dump"):
+                return tool.model_dump()
+            if hasattr(tool, "dict"):
+                return tool.dict()
+            raise TypeError(f"Unsupported tool type: {type(tool)}")
+
+        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+            converted_tool_choice = request.tool_choice.model_dump()
+            converted_tools = []
+            for tool in request.tools:
+                tool_dict = _tool_to_dict(tool)
+                tool_name = tool_dict.get("function", {}).get("name")
+                if tool_name == request.tool_choice.function.name:
+                    converted_tools.append(tool_dict)
+        else:
+            converted_tool_choice = request.tool_choice
+            converted_tools = [_tool_to_dict(tool) for tool in request.tools]
+
+        return get_model_structural_tag(
+            model="harmony",
+            tools=converted_tools,
+            tool_choice=converted_tool_choice,
+            reasoning=request.include_reasoning,
+        )

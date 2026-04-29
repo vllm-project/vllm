@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 import json
 
-from xgrammar import StructuralTag, get_model_structural_tag
+from xgrammar import StructuralTag
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -142,65 +142,12 @@ class ToolParser:
             )
         return request
     
-    def get_model_structural_tag_id(self) -> str:
-        """
-        Return the model ID for the builtin structural tag.
-        """
-        raise NotImplementedError()
-
-    def empty_thinking_as_non_thinking(self) -> bool:
-        """
-        It decides how to handle non-thinking mode. If True, non-thinking mode will force the
-        LLM output an empty thinking. If False, thinking tags like <think> or </think> are not
-        allowed and will not be output by the LLM.
-        """
-        return True
-
     def get_structural_tag(
         self, request: ChatCompletionRequest
     ) -> StructuralTag:
-
-        def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
-            if isinstance(tool, dict):
-                return tool
-            if hasattr(tool, "model_dump"):
-                return tool.model_dump()
-            if hasattr(tool, "dict"):
-                return tool.dict()
-            raise TypeError(f"Unsupported tool type: {type(tool)}")
-
-        model_id = self.get_model_structural_tag_id()
-        thinking_mode = request.include_reasoning
-        tool_choice_type = (
-            request.tool_choice.model_dump() if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam) else request.tool_choice
+        raise NotImplementedError(
+            "ToolParser.get_structural_tag has not been implemented!"
         )
-        tool_dicts = []
-
-        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-            for tool in request.tools:
-                tool_dict = _tool_to_dict(tool)
-                tool_name = tool_dict.get("function", {}).get("name")
-                if tool_name == request.tool_choice.function.name:
-                    tool_dicts.append(tool_dict)
-        else:
-            tool_dicts = [_tool_to_dict(tool) for tool in request.tools]
-
-        if thinking_mode:
-            return get_model_structural_tag(
-                model=model_id,
-                tools=tool_dicts,
-                tool_choice=tool_choice_type,
-                reasoning=True,
-                force_empty_reasoning=False,
-            )
-        else:
-            return get_model_structural_tag(
-                model=model_id,
-                tools=tool_dicts,
-                tool_choice=tool_choice_type,
-                reasoning=not self.empty_thinking_as_non_thinking(),
-                force_empty_reasoning=self.empty_thinking_as_non_thinking(),
-            )
 
     def support_structural_tag(self) -> bool:
         return False
