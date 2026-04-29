@@ -21,6 +21,8 @@ from vllm.tokenizers import get_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionNamedFunction,
 )
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 
@@ -855,6 +857,26 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
         tools=sample_tools,
         tool_choice="auto",
     )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+    
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+    
+    if sample_tools:
+        tool = sample_tools[0]
+        req = ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=sample_tools,
+            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
+        )
     tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
