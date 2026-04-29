@@ -126,11 +126,15 @@ def sparse_attn_indexer(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # Dummy byte allocation to simulate peak materialized logits memory.
+        # Flat prefill is capped by chunking; paged prefill is unchunked and can
+        # materialize [max_num_batched_tokens, max_context_len] fp32 logits.
+        if use_paged_prefill:
+            max_logits_bytes = hidden_states.shape[0] * max_model_len * 4
+        else:
+            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
         )
 
         return sparse_attn_indexer_fake(

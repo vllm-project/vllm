@@ -541,6 +541,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.use_paged_prefill:
                 # Paged prefill avoids the gathered-K workspace, so keep it as
                 # one full prefill span instead of applying flat chunk limits.
+                # The materialized logits are still O(tokens * context).
                 paged_metadata = build_paged_prefill_metadata(
                     num_decodes,
                     num_decodes + num_prefills,
