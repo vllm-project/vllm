@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +18,7 @@ from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -51,13 +51,16 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferResult,
     TransferSpec,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 
-def to_keys(int_ids: list[int]) -> list[OffloadKey]:
-    return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+def to_key(int_hash: int) -> OffloadKey:
+    return make_offload_key(str(int_hash).encode(), 0)
+
+
+def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
+    return [to_key(i) for i in int_hashes]
 
 
 class MockLoadStoreSpec(LoadStoreSpec):
@@ -115,7 +118,8 @@ class MockOffloadingSpec(OffloadingSpec):
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda keys: MockLoadStoreSpec(keys)
+        self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
+        self.manager.lookup.return_value = False
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
@@ -228,14 +232,14 @@ class RequestRunner:
         self.scheduler_connector: OffloadingConnector = scheduler_connector
 
         # extract mocked OffloadingManager of scheduler connector
-        connector_scheduler = scheduler_connector.connector_scheduler
-        assert connector_scheduler is not None
-        manager = connector_scheduler.manager
+        self.connector_scheduler = scheduler_connector.connector_scheduler
+        assert self.connector_scheduler is not None
+        manager = self.connector_scheduler.manager
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert len(connector_scheduler.config.kv_group_configs) == 1
-        kv_group_config = connector_scheduler.config.kv_group_configs[0]
+        assert len(self.connector_scheduler.config.kv_group_configs) == 1
+        kv_group_config = self.connector_scheduler.config.kv_group_configs[0]
         assert kv_group_config.gpu_block_size == gpu_block_size
         assert kv_group_config.offloaded_block_size == offloaded_block_size
 
@@ -265,7 +269,11 @@ class RequestRunner:
             slot_mapping={},
         )
 
-    def new_request(self, token_ids: list[int]):
+    def new_request(
+        self,
+        token_ids: list[int],
+        kv_transfer_params: dict | None = None,
+    ):
         self.req_id += 1
 
         sampling_params = SamplingParams(max_tokens=1000)
@@ -278,6 +286,8 @@ class RequestRunner:
             pooling_params=None,
             block_hasher=self._block_hasher,
         )
+        if kv_transfer_params is not None:
+            req.kv_transfer_params = kv_transfer_params
 
         self.scheduler.add_request(req)
 
@@ -358,7 +368,12 @@ class RequestRunner:
         prev_scheduler_output = None
         prev_model_runner_output = None
         while True:
-            assert self.scheduler.requests
+            # Strict-always-False frees the request immediately on EOS, but
+            # the worker may still have a deferred store queued. In production
+            # the next request's step drains it; in single-request tests we
+            # must keep stepping until the scheduler sees no in-flight jobs.
+            if not self.scheduler.requests and not self.connector_scheduler._jobs:
+                break
 
             scheduler_output = self.scheduler.schedule()
             self._update_gpu_block_idx()
@@ -381,6 +396,10 @@ class RequestRunner:
             finished_sending, finished_recving = self.worker_connector.get_finished(
                 scheduler_output.finished_req_ids
             )
+            worker_meta = (
+                self.worker_connector.build_connector_worker_meta()
+                or OffloadingWorkerMetadata()
+            )
 
             self.worker_connector.clear_connector_metadata()
 
@@ -389,6 +408,7 @@ class RequestRunner:
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
                 token_id=token_id or 0,
+                kv_connector_worker_meta=worker_meta,
             )
 
             prev_token_id = token_id
@@ -409,7 +429,7 @@ class RequestRunner:
             if (
                 prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
-                and self.scheduler.requests
+                and (self.scheduler.requests or self.connector_scheduler._jobs)
             ):
                 # continue for one more step to allow offloading to kick off
                 continue
@@ -424,25 +444,8 @@ class RequestRunner:
 
         self._parse_transfers()
 
-        # run one more step to update finished stored
         if EOS_TOKEN_ID in decoded_tokens:
             assert not self.scheduler.running
-
-            while self.scheduler.requests:
-                scheduler_output = self.scheduler.schedule()
-
-                finished_sending, finished_recving = self.worker_connector.get_finished(
-                    scheduler_output.finished_req_ids
-                )
-
-                assert not finished_recving
-
-                model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-                model_runner_output.kv_connector_output = KVConnectorOutput(
-                    finished_sending=finished_sending
-                )
-
-                self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
     def run(
         self,

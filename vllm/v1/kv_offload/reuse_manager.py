@@ -8,7 +8,7 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
 """
 
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
+    ReqContext,
 )
 
 
@@ -26,8 +27,9 @@ class FilterReusedOffloadingManager(OffloadingManager):
     All methods are delegated to the *backing* manager.  Two methods are
     intercepted:
 
-    * ``lookup`` — records each visited key in an internal LRU counter.
     * ``prepare_store`` — filters out keys that have not yet
+    * ``lookup`` — records the visited key in an internal LRU
+      counter, then delegates to the backing manager.
       crossed the threshold *before* calling the backing
       ``prepare_store``.
 
@@ -65,27 +67,26 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # Intercepted methods
     # ------------------------------------------------------------------
 
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
-        """Record each key, then delegate lookup to backing manager."""
-        keys = list(keys)
-        for key in keys:
-            if key in self.counts:
-                self.counts.move_to_end(key)
-                self.counts[key] += 1
-            else:
-                if len(self.counts) >= self.max_tracker_size:
-                    self.counts.popitem(last=False)  # evict LRU
-                self.counts[key] = 1
-        return self._backing.lookup(keys)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        """Record the key, then delegate lookup to backing manager."""
+        if key in self.counts:
+            self.counts.move_to_end(key)
+            self.counts[key] += 1
+        else:
+            if len(self.counts) >= self.max_tracker_size:
+                self.counts.popitem(last=False)  # evict LRU
+            self.counts[key] = 1
+        return self._backing.lookup(key, req_context)
 
-    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
+    def prepare_store(
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
         """Filter out blocks below threshold, then delegate to backing.
 
         Filtering is evaluated *before* calling the backing manager's
         ``prepare_store`` so that blocks that would be skipped do not
         consume any CPU offload capacity.
         """
-        keys = list(keys)
         eligible = [
             key for key in keys if self.counts.get(key, 0) >= self.store_threshold
         ]
@@ -93,16 +94,18 @@ class FilterReusedOffloadingManager(OffloadingManager):
         # Passing an empty list is intentional and safe — CPUOffloadingManager
         # handles it correctly, returning a PrepareStoreOutput with empty lists.
         # Delegate to the backing manager with only the eligible keys.
-        return self._backing.prepare_store(eligible)
+        return self._backing.prepare_store(eligible, req_context)
 
     # ------------------------------------------------------------------
     # Delegated methods
     # ------------------------------------------------------------------
 
-    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
-        return self._backing.prepare_load(keys)
+    def prepare_load(
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
+        return self._backing.prepare_load(keys, req_context)
 
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Sequence[OffloadKey]) -> None:
         return self._backing.touch(keys)
 
     def complete_load(self, keys: Iterable[OffloadKey]) -> None:

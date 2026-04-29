@@ -13,6 +13,30 @@ BATCH_SIZE = 1024
 VOCAB_SIZE = 128 * 1024
 
 
+def _flashinfer_topk_topp_supported() -> bool:
+    """True iff the FlashInfer top-k/top-p sampler is usable on this host.
+
+    Mirrors the gate in `TopKTopPSampler.__init__`: CUDA + flashinfer
+    importable + GPU compute capability supported by the FlashInfer
+    backend.
+    """
+    if not current_platform.is_cuda():
+        return False
+    try:
+        import flashinfer  # noqa: F401
+
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    except ImportError:
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    return FlashInferBackend.supports_compute_capability(capability)
+
+
+FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
+
+
 @pytest.fixture(autouse=True)
 def reset_default_device():
     """
@@ -127,7 +151,7 @@ def test_flashinfer_sampler():
 # =============================================================================
 
 
-@pytest.mark.skipif("CPU" in DEVICE_TYPE, reason="CUDA/XPU not available")
+@pytest.mark.skipif("cpu" in DEVICE_TYPE, reason="CUDA/XPU not available")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -568,3 +592,280 @@ class TestTritonTopkTopp:
             finite_in = (logits[i] > float("-inf")).sum().item()
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
+
+
+# =============================================================================
+# FlashInfer top-k/top-p robustness tests
+# =============================================================================
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="FlashInfer top-k/top-p sampler requires CUDA "
+    "and a GPU with FlashInfer support.",
+)
+class TestFlashInferTopkToppRobustness:
+    """Robustness of FlashInfer top-k / top-p sampling to NaN / Inf logits.
+
+    The FlashInfer sampler is enabled by default on supported GPUs. A
+    single poisoned request (NaN / +Inf / -Inf in row 0) must not:
+
+    1. crash or hang the process;
+    2. produce out-of-range token ids (anything outside ``[0, vocab)``);
+    3. corrupt other batch rows — neighbours of a poisoned row must
+       still receive valid token ids (regression for cross-row
+       corruption in a DP batch where one bad request would otherwise
+       poison its peers).
+
+    The reference is "no crash + valid token ids", not bit-exact equality
+    against the PyTorch-native path.
+    """
+
+    BATCH = 8
+    VOCAB = 32768
+    TOPK = 50
+    TOPP = 0.9
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device(DEVICE_TYPE)
+        self.generator = Generator(device=DEVICE_TYPE).manual_seed(1234)
+
+    def _make_logits(self, pattern: str) -> torch.Tensor:
+        """Build (BATCH, VOCAB) logits with `pattern` applied to row 0
+        (rows 1..B-1 stay clean so we can detect cross-row corruption)."""
+        logits = (
+            torch.randn(
+                self.BATCH,
+                self.VOCAB,
+                generator=self.generator,
+                dtype=torch.float32,
+            )
+            * 5.0
+        )
+        if pattern == "clean":
+            return logits
+        if pattern == "nan_one_row":
+            logits[0, :] = float("nan")
+        elif pattern == "nan_few":
+            # Scatter 16 NaNs across row 0, keep the rest finite.
+            idx = torch.randperm(self.VOCAB, generator=self.generator)[:16]
+            logits[0, idx] = float("nan")
+        elif pattern == "nan_at_top":
+            # Poison the top-32 highest-scoring positions of row 0 — worst
+            # case for top-k since these are exactly the tokens that would
+            # otherwise be selected. Use argsort instead of topk to avoid
+            # a known compute-sanitizer false positive in mbtopk.
+            top_idx = logits[0].argsort(descending=True)[:32]
+            logits[0, top_idx] = float("nan")
+        elif pattern == "nan_all_rows":
+            logits[:, :] = float("nan")
+        elif pattern == "pos_inf_one_row":
+            logits[0, :] = float("inf")
+        elif pattern == "neg_inf_one_row":
+            logits[0, :] = float("-inf")
+        elif pattern == "mixed_inf_nan":
+            assert self.BATCH >= 3
+            logits[0, :] = float("nan")
+            logits[1, :] = float("inf")
+            logits[2, :] = float("-inf")
+        elif pattern == "degenerate_flat":
+            logits[:, :] = 1.0
+        else:
+            raise ValueError(f"unknown pattern: {pattern}")
+        return logits
+
+    def _check_tokens(self, tokens: torch.Tensor, ctx: str):
+        assert tokens.dim() == 1, f"{ctx}: expected 1-D output, got {tokens.shape}"
+        assert tokens.shape[0] == self.BATCH, (
+            f"{ctx}: expected batch size {self.BATCH}, got {tokens.shape[0]}"
+        )
+        ids = tokens.tolist()
+        min_id, max_id = min(ids), max(ids)
+        assert 0 <= min_id < self.VOCAB and 0 <= max_id < self.VOCAB, (
+            f"{ctx}: token id(s) outside [0, {self.VOCAB}): min={min_id}, max={max_id}"
+        )
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            "clean",
+            "nan_one_row",
+            "nan_few",
+            "nan_at_top",
+            "nan_all_rows",
+            "pos_inf_one_row",
+            "neg_inf_one_row",
+            "mixed_inf_nan",
+            "degenerate_flat",
+        ],
+    )
+    @pytest.mark.parametrize("path", ["topk_only", "topp_only", "topk_topp"])
+    def test_flashinfer_handles_pathological_logits(self, pattern: str, path: str):
+        """flashinfer_sample must return valid ids even on poisoned logits.
+
+        Direct call into ``flashinfer_sample`` — exactly the code path
+        ``TopKTopPSampler.forward_cuda`` takes when FI is enabled.
+        """
+        from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample
+
+        logits = self._make_logits(pattern)
+        k = (
+            torch.full(
+                (self.BATCH,),
+                self.TOPK,
+                device=DEVICE_TYPE,
+                dtype=torch.int32,
+            )
+            if path in ("topk_only", "topk_topp")
+            else None
+        )
+        p = (
+            torch.full(
+                (self.BATCH,),
+                self.TOPP,
+                device=DEVICE_TYPE,
+                dtype=torch.float32,
+            )
+            if path in ("topp_only", "topk_topp")
+            else None
+        )
+
+        # flashinfer_sample may mutate its input in-place; pass a clone so
+        # the parametrize iterations stay independent.
+        tokens = flashinfer_sample(logits.clone().contiguous(), k, p, {})
+        # Surface any async CUDA error synchronously (e.g. illegal memory
+        # access from a malformed FlashInfer call) so it's attributed to
+        # this test rather than a later, unrelated GPU op.
+        torch.accelerator.synchronize()
+        self._check_tokens(tokens, ctx=f"pattern={pattern}, path={path}")
+
+
+# =============================================================================
+# FlashInfer top-k/top-p distribution-match tests
+# =============================================================================
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="FlashInfer top-k/top-p sampler requires CUDA "
+    "and a GPU with FlashInfer support.",
+)
+class TestFlashInferDistributionMatch:
+    """Chi-square goodness-of-fit: FlashInfer and PyTorch-native samplers
+    both reproduce the expected token distribution after top-k / top-p.
+
+    Regression guard against historical FlashInfer distribution-shift.
+    Each impl is compared to the theoretical distribution (softmax of
+    filtered logits); if both pass they are statistically equivalent
+    to each other by transitivity.
+    """
+
+    VOCAB = 32
+    N_SAMPLES = 50_000
+    ALPHA = 1e-6
+    SEED = 0
+
+    @pytest.mark.parametrize(
+        "topk,topp",
+        [
+            (8, None),
+            (16, None),
+            (None, 0.5),
+            (None, 0.7),
+            (None, 0.99),
+            (8, 0.9),
+            (4, 0.5),
+        ],
+    )
+    def test_distribution_matches_theoretical(self, topk, topp):
+        from scipy.stats import chisquare
+
+        from vllm.v1.sample.ops.topk_topp_sampler import (
+            apply_top_k_top_p,
+            flashinfer_sample,
+            random_sample,
+        )
+
+        torch.set_default_device(DEVICE_TYPE)
+        torch.manual_seed(self.SEED)
+
+        # Same logits row used for both impls so the comparison is fair.
+        logits_one = (
+            torch.randn(
+                (1, self.VOCAB),
+                dtype=torch.float32,
+            )
+            * 2.0
+        )
+
+        # Theoretical expected distribution from PyTorch-native filter.
+        k_one = torch.tensor([topk], dtype=torch.int32) if topk is not None else None
+        p_one = torch.tensor([topp], dtype=torch.float32) if topp is not None else None
+        masked = apply_top_k_top_p_pytorch(logits_one.clone(), k_one, p_one)
+        expected_probs = masked.softmax(dim=-1).flatten().cpu().numpy()
+        expected_counts = expected_probs * self.N_SAMPLES
+
+        # Build a batch of N identical rows for both impls.
+        batch = logits_one.expand(self.N_SAMPLES, self.VOCAB).contiguous()
+        k_batch = (
+            torch.full((self.N_SAMPLES,), topk, dtype=torch.int32)
+            if topk is not None
+            else None
+        )
+        p_batch = (
+            torch.full((self.N_SAMPLES,), topp, dtype=torch.float32)
+            if topp is not None
+            else None
+        )
+
+        # FlashInfer dispatch path.
+        fi_tokens = flashinfer_sample(batch.contiguous(), k_batch, p_batch, {})
+        fi_counts = torch.bincount(fi_tokens, minlength=self.VOCAB).cpu().numpy()
+        self._chi2_check(
+            fi_counts,
+            expected_counts,
+            chisquare,
+            label=f"flashinfer top-k={topk} top-p={topp}",
+        )
+
+        # PyTorch-native dispatch path (Triton-routed filter + Gumbel sample).
+        processed = apply_top_k_top_p(batch.clone(), k_batch, p_batch)
+        probs = processed.softmax(dim=-1, dtype=torch.float32)
+        pt_tokens = random_sample(probs, {})
+        pt_counts = torch.bincount(pt_tokens, minlength=self.VOCAB).cpu().numpy()
+        self._chi2_check(
+            pt_counts,
+            expected_counts,
+            chisquare,
+            label=f"native top-k={topk} top-p={topp}",
+        )
+
+    def _chi2_check(self, empirical, expected, chisquare_fn, *, label):
+        import numpy as np
+
+        # Hard check: the sampler must never produce a token outside the
+        # expected support (zero theoretical probability).
+        outside = (expected == 0) & (empirical > 0)
+        assert not outside.any(), (
+            f"{label}: sampled out-of-support tokens "
+            f"(zero expected prob): indices={outside.nonzero()[0].tolist()}"
+        )
+        # Skip chi-square in the degenerate case where the support
+        # collapses to a single token (e.g. very restrictive joint
+        # top-k + top-p): all samples must land there and the hard
+        # check above already verified they do.
+        in_support = expected > 0
+        if int(in_support.sum()) <= 1:
+            return
+        # Soft check: chi-square goodness-of-fit on in-support tokens.
+        # Cast to float64 so the rescaling step below stays within
+        # scipy.chisquare's strict 1.5e-8 sum-equality tolerance.
+        emp = empirical[in_support].astype(np.float64)
+        exp = expected[in_support].astype(np.float64)
+        exp = exp * (emp.sum() / exp.sum())
+        chi2, p_value = chisquare_fn(emp, exp)
+        assert p_value > self.ALPHA, (
+            f"{label}: distribution differs from theoretical: "
+            f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
+        )
