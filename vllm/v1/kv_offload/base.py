@@ -128,7 +128,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_load(
         self,
-        keys: Iterable[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         """
@@ -147,7 +147,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Iterable[OffloadKey]):
+    def touch(self, keys: Sequence[OffloadKey]):
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
@@ -169,7 +169,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_store(
         self,
-        keys: Iterable[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         """

@@ -27,8 +27,6 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
     make_offload_key,
 )
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
-from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
