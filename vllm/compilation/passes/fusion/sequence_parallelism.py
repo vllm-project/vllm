@@ -93,27 +93,6 @@ def get_sequence_parallelism_threshold(
     return int(min_size // (hidden_size * element_size))
 
 
-def get_effective_sp_min_token_num(config: VllmConfig) -> int | None:
-    """Return the effective token threshold for SP compile-range gating.
-
-    `sp_min_token_num` is additionally capped by `max_num_batched_tokens` so
-    the pass never activates outside the scheduler's reachable batch-size
-    window.
-    """
-    if config.model_config is None:
-        return None
-
-    min_token_num = config.compilation_config.pass_config.sp_min_token_num
-    if min_token_num is None:
-        return None
-
-    max_batched = config.scheduler_config.max_num_batched_tokens
-    if max_batched is not None:
-        min_token_num = min(min_token_num, max_batched)
-
-    return min_token_num
-
-
 def get_first_out_wrapper(
     fn: Callable[..., Sequence[torch.Tensor]],
 ) -> Callable[..., torch.Tensor]:
@@ -388,7 +367,13 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
-        self.min_token_num = get_effective_sp_min_token_num(config)
+        self.min_token_num = None
+        if config.model_config is not None:
+            self.min_token_num = config.compilation_config.pass_config.sp_min_token_num
+            if self.min_token_num is not None:
+                max_batched = config.scheduler_config.max_num_batched_tokens
+                if max_batched is not None:
+                    self.min_token_num = min(self.min_token_num, max_batched)
         if self.min_token_num is not None:
             logger.debug_once(
                 f"Sequence parallelism min token threshold: {self.min_token_num}",
