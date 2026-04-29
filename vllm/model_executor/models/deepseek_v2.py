@@ -82,7 +82,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    sequence_parallel_chunk,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -963,6 +966,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.is_v32 = hasattr(config, "index_topk")
 
+        _skip_topk = False
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
@@ -980,6 +984,21 @@ class DeepseekV2MLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
+
+            # Enable IndexCache for DeepSeek models to reduce redundant top-k
+            # token selection computations in sparse attention.
+            use_index_cache = getattr(config, "use_index_cache", False)
+            if use_index_cache:
+                # IndexCache config
+                # Refer: https://arxiv.org/abs/2603.12201 for more details.
+                _index_topk_freq = getattr(config, "index_topk_freq", 1)
+                _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+                layer_id = extract_layer_index(prefix)
+                if _index_topk_pattern is None:
+                    _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
+                elif 0 <= layer_id < len(_index_topk_pattern):
+                    _skip_topk = _index_topk_pattern[layer_id] == "S"
+
         else:
             self.indexer_rope_emb = None
             self.indexer = None
@@ -1017,6 +1036,7 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            skip_topk=_skip_topk,
         )
 
     def forward(
