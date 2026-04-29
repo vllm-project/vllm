@@ -441,7 +441,7 @@ class INCConfig(QuantizationConfig):
                     sym=sym,
                 )
 
-            logger.warning(
+            logger.debug(
                 "ARK backend is unavailable for layer %s; "
                 "falling back to the default XPU INC path. Error: %s",
                 prefix,
@@ -481,7 +481,7 @@ class INCConfig(QuantizationConfig):
                     sym=sym,
                 )
 
-            logger.warning(
+            logger.debug(
                 "ARK backend is unavailable for layer %s; "
                 "falling back to the default CPU INC path. Error: %s",
                 prefix,
@@ -625,7 +625,7 @@ def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None, Any | Non
     """Return ARK availability, error details, and cached instance."""
     try:
         import auto_round_kernel
-        from auto_round_extension.ark import QuantLinear  # noqa: F401
+        from auto_round_kernel.qlinear import QuantLinear
 
     except ImportError as error:
         return False, str(error), None, None
