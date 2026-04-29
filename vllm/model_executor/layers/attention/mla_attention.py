@@ -1005,6 +1005,7 @@ def unified_mla_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
