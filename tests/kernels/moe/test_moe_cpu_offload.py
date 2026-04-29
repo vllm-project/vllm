@@ -27,6 +27,19 @@ class _MockMoELayer(torch.nn.Module):
         )
 
 
+class _MockPrefetchLayer(_MockMoELayer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.moe_offload_cache = None
+
+    def move_moe_offload_cache_to_device(self, device: torch.device) -> None:
+        self.moe_offload_cache.ensure_targets_on_device(device)
+        self.w13_weight = torch.nn.Parameter(
+            self.moe_offload_cache.target_for("w13_weight"),
+            requires_grad=False,
+        )
+
+
 def test_local_expert_token_counts_without_expert_map():
     topk_ids = torch.tensor([[2, 1], [2, -1], [3, 2], [9, 1]])
 
@@ -303,6 +316,130 @@ def test_expert_cache_protects_current_prefetch_wave_from_eviction():
     )
 
     assert cache.resident_expert_ids() == {2, 3}
+
+
+def test_prefetch_prepare_marks_missing_without_loading():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="prefetch",
+    )
+    cache.ensure_experts_resident({0: 10}, evict_unrequested=False)
+
+    waves = cache.prepare_prefetch_request({0: 3, 2: 4})
+
+    assert waves == [{0: 3}]
+    assert cache.resident_expert_ids() == {0}
+    assert cache.working_experts == {0, 2}
+    assert cache.missing_experts == {2}
+
+
+def test_prefetch_pager_loads_missing_without_mutating_missing_list():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="prefetch",
+    )
+
+    assert cache.prepare_prefetch_request({2: 4}) == []
+    assert cache.pager_step()
+
+    assert cache.resident_expert_ids() == {2}
+    assert cache.missing_experts == {2}
+    assert cache.active_experts[2].gpu_slot_id == 0
+    assert cache._free_slots == [1]
+    assert torch.equal(cache.target_for("w13_weight")[0], layer.w13_weight[2])
+
+
+def test_prefetch_pager_does_not_evict_working_expert():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="prefetch",
+    )
+    cache.ensure_experts_resident({0: 10, 1: 1}, evict_unrequested=False)
+
+    waves = cache.prepare_prefetch_request({0: 5, 2: 4})
+    assert waves == [{0: 5}]
+    assert cache.pager_step()
+
+    assert cache.resident_expert_ids() == {0, 2}
+    assert cache.active_experts[0].gpu_slot_id == 0
+    assert cache.active_experts[2].gpu_slot_id == 1
+
+
+def test_prefetch_finish_clears_completed_working_entries():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="prefetch",
+    )
+    cache.prepare_prefetch_request({1: 4, 2: 3})
+
+    cache.finish_prefetch_request({1, 2})
+
+    assert cache.working_experts == set()
+    assert cache.missing_experts == {1, 2}
+
+
+def test_prefetch_prepare_can_wait_for_pager_loaded_wave():
+    layer = _MockMoELayer()
+    cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="prefetch",
+    )
+    cache.start_prefetch_pager()
+
+    try:
+        waves = cache.prepare_prefetch_request(
+            {1: 4, 2: 3},
+            wait_for_resident=True,
+        )
+    finally:
+        cache.stop_prefetch_pager()
+
+    assert waves == [{1: 4, 2: 3}]
+    assert cache.resident_expert_ids() == {1, 2}
+    assert cache.missing_experts == {1, 2}
+
+
+def test_prefetch_runtime_replaces_cpu_placeholder_with_execution_target():
+    layer = _MockPrefetchLayer()
+    layer.moe_offload_cache = ExpertCache.from_cpu_sources(
+        layer_id=3,
+        active_expert_budget=2,
+        sources={"w13_weight": layer.w13_weight.detach()},
+        device=torch.device("cpu"),
+        mode="prefetch",
+    )
+    layer.w13_weight = torch.nn.Parameter(
+        layer.moe_offload_cache.target_for("w13_weight"),
+        requires_grad=False,
+    )
+
+    assert layer.w13_weight.shape[0] == 0
+
+    layer.move_moe_offload_cache_to_device(torch.device("cpu"))
+
+    assert layer.w13_weight.shape == (2, 3, 2)
+    assert layer.w13_weight.data_ptr() == layer.moe_offload_cache.target_for(
+        "w13_weight"
+    ).data_ptr()
 
 
 def test_expert_cache_retires_loaded_experts():

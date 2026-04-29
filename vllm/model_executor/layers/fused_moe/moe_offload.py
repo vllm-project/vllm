@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from threading import Condition, Event, RLock, Thread
 from typing import Literal
 
 import torch
@@ -15,6 +16,8 @@ ExpertState = Literal["loading", "resident", "executing", "evicting"]
 GPU_MEMORY_RETRY_SECONDS = 5
 GPU_MEMORY_RETRY_LIMIT = 10
 PAGER_LOG_INTERVAL_SECONDS = 5.0
+PAGER_POLL_SECONDS = 0.005
+PAGER_MAIN_WAIT_SECONDS = 0.002
 MAX_LOGGED_EXPERT_IDS = 16
 
 logger = init_logger(__name__)
@@ -82,6 +85,12 @@ class ExpertCache:
         self._bytes_by_expert = self._compute_bytes_by_expert()
         self._target_device = self.expert_tensors[0].target.device
         self._last_pager_summary_time = 0.0
+        self.working_experts: set[int] = set()
+        self.missing_experts: set[int] = set()
+        self._pager_lock = RLock()
+        self._pager_condition = Condition(self._pager_lock)
+        self._pager_stop = Event()
+        self._pager_thread: Thread | None = None
 
     @classmethod
     def from_layer(
@@ -250,6 +259,9 @@ class ExpertCache:
             )
         self._free_slots = list(range(self._slot_count))
         self.active_experts.clear()
+        with self._pager_lock:
+            self.working_experts.clear()
+            self.missing_experts.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -309,6 +321,31 @@ class ExpertCache:
         while len(self.active_experts) >= self.active_expert_budget:
             self._evict_one(protected_expert_ids)
 
+    def _reserve_pager_slot_locked(
+        self,
+    ) -> tuple[int, int | None] | None:
+        if self._free_slots:
+            return self._free_slots.pop(0), None
+
+        candidates = [
+            entry
+            for entry in self.active_experts.values()
+            if (
+                entry.state != "executing"
+                and entry.expert_id not in self.working_experts
+            )
+        ]
+        if not candidates:
+            return None
+
+        victim = min(
+            candidates,
+            key=lambda entry: (entry.recent_token_count, entry.last_used_step),
+        )
+        victim.state = "evicting"
+        del self.active_experts[victim.expert_id]
+        return victim.gpu_slot_id, victim.expert_id
+
     @staticmethod
     def _format_expert_ids(expert_ids: set[int]) -> str:
         sorted_ids = sorted(expert_ids)
@@ -340,7 +377,7 @@ class ExpertCache:
         self._last_pager_summary_time = now
 
         active_experts = set(self.active_experts)
-        logger.info(
+        logger.debug(
             "MoE expert pager layer=%d event=%s active_model_list=%s "
             "working_model_list=%s missing_model_list=%s resident=%d/%d "
             "free_slots=%d step=%d",
@@ -439,6 +476,147 @@ class ExpertCache:
                 working_experts=required_experts,
                 missing_experts=set(),
             )
+
+    def start_prefetch_pager(self) -> None:
+        if self.mode != "prefetch" or self.use_identity_slots:
+            return
+        if self._pager_thread is not None:
+            return
+        self._pager_stop.clear()
+        self._pager_thread = Thread(
+            target=self._prefetch_pager_loop,
+            name=f"moe-prefetch-pager-layer-{self.layer_id}",
+            daemon=True,
+        )
+        self._pager_thread.start()
+
+    def stop_prefetch_pager(self) -> None:
+        self._pager_stop.set()
+        with self._pager_condition:
+            self._pager_condition.notify_all()
+
+    def _prefetch_pager_loop(self) -> None:
+        while not self._pager_stop.is_set():
+            loaded = self.pager_step()
+            if loaded:
+                continue
+            with self._pager_condition:
+                self._pager_condition.wait(timeout=PAGER_POLL_SECONDS)
+
+    def prepare_prefetch_request(
+        self,
+        expert_token_counts: dict[int, int],
+        *,
+        wait_for_resident: bool = False,
+    ) -> list[dict[int, int]]:
+        """Publish routed demand and return resident expert waves to compute."""
+        if self.mode != "prefetch" or self.use_identity_slots:
+            return self.expert_batches_for_counts(expert_token_counts)
+        if not expert_token_counts:
+            return []
+
+        self._fit_auto_budget_to_available_memory(len(expert_token_counts))
+        requested_experts = set(expert_token_counts)
+        with self._pager_condition:
+            self.step += 1
+            self.working_experts = set(requested_experts)
+            missing_experts = requested_experts - set(self.active_experts)
+            self.missing_experts = set(missing_experts)
+            if missing_experts:
+                self._log_pager_state(
+                    event="miss",
+                    working_experts=self.working_experts,
+                    missing_experts=self.missing_experts,
+                    force=True,
+                )
+            self._pager_condition.notify_all()
+            while wait_for_resident and missing_experts:
+                self._pager_condition.wait(timeout=PAGER_MAIN_WAIT_SECONDS)
+                missing_experts = requested_experts - set(self.active_experts)
+            resident_counts = {
+                expert_id: token_count
+                for expert_id, token_count in expert_token_counts.items()
+                if expert_id in self.active_experts
+            }
+            for expert_id, token_count in resident_counts.items():
+                entry = self.active_experts[expert_id]
+                entry.last_used_step = self.step
+                entry.recent_token_count = token_count
+
+        sorted_counts = sorted(
+            resident_counts.items(), key=lambda item: (-item[1], item[0])
+        )
+        return [
+            dict(sorted_counts[index : index + self.active_expert_budget])
+            for index in range(0, len(sorted_counts), self.active_expert_budget)
+        ]
+
+    def finish_prefetch_request(self, expert_ids: set[int]) -> None:
+        if self.mode != "prefetch" or self.use_identity_slots:
+            return
+        with self._pager_condition:
+            self.working_experts.difference_update(expert_ids)
+            self._log_pager_state(
+                event="summary",
+                working_experts=self.working_experts,
+                missing_experts=self.missing_experts,
+            )
+            self._pager_condition.notify_all()
+
+    def pager_step(self) -> bool:
+        """Load one missing expert into an evictable GPU slot."""
+        if self.mode != "prefetch" or self.use_identity_slots:
+            return False
+
+        self.ensure_targets_on_device(self._target_device)
+        with self._pager_condition:
+            missing_candidates = sorted(
+                expert_id
+                for expert_id in self.missing_experts
+                if expert_id not in self.active_experts
+            )
+            if not missing_candidates:
+                return False
+            expert_id = missing_candidates[0]
+            reserved = self._reserve_pager_slot_locked()
+            if reserved is None:
+                self._log_pager_state(
+                    event="wait",
+                    working_experts=self.working_experts,
+                    missing_experts=self.missing_experts,
+                )
+                return False
+            slot_id, _victim_id = reserved
+
+        try:
+            self._load_expert(expert_id, slot_id)
+        except Exception:
+            with self._pager_condition:
+                if slot_id not in self._free_slots:
+                    self._free_slots.append(slot_id)
+                    self._free_slots.sort()
+                self._pager_condition.notify_all()
+            raise
+
+        with self._pager_condition:
+            self.active_experts[expert_id] = ActiveExpertEntry(
+                layer_id=self.layer_id,
+                expert_id=expert_id,
+                gpu_slot_id=slot_id,
+                state="resident",
+                weight_bytes=self._bytes_by_expert[expert_id],
+                loaded_step=self.step,
+                last_used_step=self.step,
+                recent_token_count=0,
+            )
+            self._log_pager_state(
+                event="load",
+                working_experts=self.working_experts,
+                missing_experts=self.missing_experts,
+                force=True,
+            )
+            self._pager_condition.notify_all()
+        return True
 
     def resident_expert_ids(self) -> set[int]:
         return set(self.active_experts)

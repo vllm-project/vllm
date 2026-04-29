@@ -350,39 +350,53 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             if not token_counts:
                 return torch.zeros_like(x)
             if layer.moe_gpu_prefetch_enabled:
+                layer.move_moe_offload_cache_to_device(x.device)
                 output: torch.Tensor | None = None
-                for expert_counts in (
-                    layer.moe_offload_cache.expert_batches_for_counts(token_counts)
-                ):
-                    layer.moe_offload_cache.ensure_experts_resident(
-                        expert_counts,
-                        evict_unrequested=False,
-                    )
-                    wave_experts = set(expert_counts)
-                    wave_topk_ids, wave_topk_weights = (
-                        layer.moe_offload_cache.make_wave_tensors(
-                            topk_ids,
-                            topk_weights,
-                            local_expert_ids=wave_experts,
-                            expert_map=layer.expert_map,
+                desired_batches = layer.moe_offload_cache.expert_batches_for_counts(
+                    token_counts
+                )
+                for desired_counts in desired_batches:
+                    try:
+                        for expert_counts in (
+                            layer.moe_offload_cache.prepare_prefetch_request(
+                                desired_counts,
+                                wait_for_resident=True,
+                            )
+                        ):
+                            wave_experts = set(expert_counts)
+                            wave_topk_ids, wave_topk_weights = (
+                                layer.moe_offload_cache.make_wave_tensors(
+                                    topk_ids,
+                                    topk_weights,
+                                    local_expert_ids=wave_experts,
+                                    expert_map=layer.expert_map,
+                                )
+                            )
+                            staged_num_experts = int(layer.w13_weight.shape[0])
+                            wave_output = self.moe_kernel.apply(
+                                hidden_states=x,
+                                w1=layer.w13_weight,
+                                w2=layer.w2_weight,
+                                topk_weights=wave_topk_weights,
+                                topk_ids=wave_topk_ids,
+                                activation=layer.activation,
+                                apply_router_weight_on_input=(
+                                    layer.apply_router_weight_on_input
+                                ),
+                                global_num_experts=staged_num_experts,
+                                expert_map=None,
+                                shared_experts_input=None,
+                            )
+                            output = (
+                                wave_output
+                                if output is None
+                                else output + wave_output
+                            )
+                    finally:
+                        layer.moe_offload_cache.finish_prefetch_request(
+                            set(desired_counts)
                         )
-                    )
-                    staged_num_experts = int(layer.w13_weight.shape[0])
-                    wave_output = self.moe_kernel.apply(
-                        hidden_states=x,
-                        w1=layer.w13_weight,
-                        w2=layer.w2_weight,
-                        topk_weights=wave_topk_weights,
-                        topk_ids=wave_topk_ids,
-                        activation=layer.activation,
-                        apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                        global_num_experts=staged_num_experts,
-                        expert_map=None,
-                        shared_experts_input=None,
-                    )
-                    output = wave_output if output is None else output + wave_output
-                if output is not None:
-                    return output
+                return output if output is not None else torch.zeros_like(x)
 
             output: torch.Tensor | None = None
             expert_batches = layer.moe_offload_cache.expert_batches_for_counts(

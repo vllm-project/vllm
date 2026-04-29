@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import random
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import Literal, cast, get_args, overload
@@ -700,13 +701,20 @@ class FusedMoE(PluggableLayer):
         )
         if self.moe_gpu_startup_prefetch_enabled:
             prefetch_count = self.moe_gpu_prefetch_budget or 1
+            prefetch_count = min(prefetch_count, int(self.local_num_experts))
+            rng = random.Random(self.layer_id)
+            prefetch_expert_ids = rng.sample(
+                range(int(self.local_num_experts)),
+                k=prefetch_count,
+            )
             self.moe_offload_cache.ensure_experts_resident(
-                {expert_id: 0 for expert_id in range(prefetch_count)},
+                {expert_id: 0 for expert_id in prefetch_expert_ids},
                 evict_unrequested=False,
             )
         for name in sources:
             if name in ("w13_weight", "w2_weight", "w13_bias", "w2_bias"):
                 replace_parameter(self, name, self.moe_offload_cache.target_for(name))
+        self.moe_offload_cache.start_prefetch_pager()
 
     def move_moe_offload_cache_to_device(self, device: torch.device) -> None:
         if self.moe_offload_cache is None:
