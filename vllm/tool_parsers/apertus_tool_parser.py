@@ -340,7 +340,7 @@ class ApertusToolParser(ToolParser):
         is_inside_tools = prefix_idx > suffix_idx
 
         json_completed = False
-        json_end_idx = None
+        json_end_idx: int | None = None
 
         # Check if the JSON array successfully closed implicitly
         if is_inside_tools:
@@ -373,7 +373,7 @@ class ApertusToolParser(ToolParser):
             )
 
         if just_finished:
-            if json_completed:
+            if json_completed and json_end_idx is not None:
                 # The tool block finished in this chunk via implicit JSON completion
                 # Ensure we strictly isolate
                 # and extract only trailing text that is part of `delta_text`
