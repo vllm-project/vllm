@@ -163,7 +163,7 @@ class ToolParser:
         model_id = self.get_model_structural_tag_id()
         thinking_mode = request.include_reasoning
         tool_choice_type = (
-            "forced" if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam) else request.tool_choice
+            request.tool_choice.model_dump() if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam) else request.tool_choice
         )
         tool_dicts = []
         
