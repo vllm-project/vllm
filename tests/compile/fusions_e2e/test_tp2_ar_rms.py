@@ -37,7 +37,7 @@ from .models import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_like(), reason="Only test CUDA"
+    not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm"
 )
 
 
