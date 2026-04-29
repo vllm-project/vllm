@@ -29,6 +29,7 @@ HEAD_DIM = 128
 MXFP4_BLOCK_SIZE = 32
 DEEPGEMM_WORKSPACE_SIZE = 4096
 DEEPGEMM_MAX_LOGITS_MB = 16
+DEEPGEMM_MAX_LOGITS_BYTES = DEEPGEMM_MAX_LOGITS_MB * 1024 * 1024
 NUM_SMS = torch.cuda.get_device_properties(
     torch.cuda.current_device()
 ).multi_processor_count
@@ -185,7 +186,7 @@ class DeepGemmFlatChunk:
             compressed_seq_lens_cpu,
             query_lens_cpu,
             DEEPGEMM_WORKSPACE_SIZE,
-            DEEPGEMM_MAX_LOGITS_MB * 1024 * 1024,
+            DEEPGEMM_MAX_LOGITS_BYTES,
         )
         self.chunks = []
         for req_slice, query_slice in chunk_specs:
@@ -391,11 +392,14 @@ class DeepGemmPagedChunk:
         ) // compress_ratio
 
         block_table = block_table_cpu.cuda()
+        # The paged path reads K directly from the KV cache, so it does not
+        # need the flat path's gathered-K workspace bound.
+        paged_chunk_workspace_size = int(compressed_seq_lens_cpu.sum().item())
         chunk_specs = split_indexer_prefill_chunks(
             compressed_seq_lens_cpu,
             query_lens_cpu,
-            DEEPGEMM_WORKSPACE_SIZE,
-            DEEPGEMM_MAX_LOGITS_MB * 1024 * 1024,
+            paged_chunk_workspace_size,
+            DEEPGEMM_MAX_LOGITS_BYTES,
         )
 
         self.chunks: list[DeepGemmPagedChunk.Metadata] = []
@@ -546,17 +550,6 @@ def export_sweep_graph(
     results_df: pd.DataFrame, output_path: str, log_axis: bool
 ) -> None:
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import LogFormatterSciNotation, LogLocator
-
-    def label_log_y_subticks(ax) -> None:
-        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(5,)))
-        ax.yaxis.set_minor_formatter(
-            LogFormatterSciNotation(
-                base=10,
-                labelOnlyBase=False,
-                minor_thresholds=(float("inf"), float("inf")),
-            )
-        )
 
     fig, (latency_ax, memory_ax) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
 
@@ -577,8 +570,6 @@ def export_sweep_graph(
     latency_ax.tick_params(axis="x", labelbottom=True)
     if log_axis:
         latency_ax.set_xscale("log", base=10)
-        latency_ax.set_yscale("log")
-        label_log_y_subticks(latency_ax)
     latency_ax.grid(True, axis="y", alpha=0.25)
     latency_ax.legend()
 
@@ -587,8 +578,6 @@ def export_sweep_graph(
     memory_ax.set_ylabel("MiB")
     if log_axis:
         memory_ax.set_xscale("log", base=10)
-        memory_ax.set_yscale("log")
-        label_log_y_subticks(memory_ax)
     memory_ax.grid(True, axis="y", alpha=0.25)
     memory_ax.legend()
 
