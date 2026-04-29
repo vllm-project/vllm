@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,13 @@ def env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_text(name: str, default: str | None = None) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip() or default
 
 
 def run_command(
@@ -187,6 +194,7 @@ class RunRequest:
     watchdog_interval_s: int
     render_devices: tuple[str, ...]
     artifact_mode: bool
+    fallback_image: str | None
     artifact_glob: str
     execution_mode: str
     num_nodes: int
@@ -195,15 +203,21 @@ class RunRequest:
 
     @classmethod
     def from_env(cls, argv: list[str]) -> "RunRequest":
-        commit = os.environ.get("BUILDKITE_COMMIT")
+        commit = env_text("BUILDKITE_COMMIT")
         if not commit:
             raise RuntimeError("BUILDKITE_COMMIT is required")
 
         artifact_mode = env_flag("VLLM_CI_USE_ARTIFACTS")
-        execution_mode = os.environ.get("VLLM_CI_EXECUTION_MODE", "single-node")
-        configured_image = os.environ.get("DOCKER_IMAGE_NAME")
+        execution_mode = env_text("VLLM_CI_EXECUTION_MODE", "single-node")
+        configured_image = env_text("DOCKER_IMAGE_NAME")
+        fallback_image = None
         if artifact_mode:
-            image = os.environ.get("VLLM_CI_BASE_IMAGE", "rocm/vllm-dev:ci_base")
+            image = env_text("VLLM_CI_BASE_IMAGE", "rocm/vllm-dev:ci_base")
+            fallback_image = cls._resolve_fallback_image(
+                commit=commit,
+                base_image=image,
+                configured_image=configured_image,
+            )
             if configured_image and configured_image != image:
                 log.warning(
                     "Ignoring DOCKER_IMAGE_NAME=%s because "
@@ -236,6 +250,7 @@ class RunRequest:
                 if token.startswith("/dev/")
             ),
             artifact_mode=artifact_mode,
+            fallback_image=fallback_image,
             artifact_glob=os.environ.get(
                 "VLLM_CI_ARTIFACT_GLOB", DEFAULT_ARTIFACT_GLOB
             ),
@@ -244,6 +259,26 @@ class RunRequest:
             num_gpus_per_node=int(os.environ.get("VLLM_NUM_GPUS_PER_NODE", "1")),
             node_commands=node_commands,
         )
+
+    @staticmethod
+    def _resolve_fallback_image(
+        *,
+        commit: str,
+        base_image: str,
+        configured_image: str | None,
+    ) -> str | None:
+        fallback_image = env_text("VLLM_CI_FALLBACK_IMAGE")
+        if not fallback_image and configured_image and configured_image != base_image:
+            fallback_image = configured_image
+        if not fallback_image:
+            fallback_image = f"rocm/vllm-ci:{commit}"
+        if fallback_image == base_image:
+            log.warning(
+                "Ignoring ROCm fallback image because it matches the base image: %s",
+                base_image,
+            )
+            return None
+        return fallback_image
 
     @staticmethod
     def _resolve_commands(argv: list[str]) -> str:
@@ -387,14 +422,27 @@ class ArtifactPackage:
         self.install_dir.mkdir(parents=True)
         log.info("Extracting ROCm vLLM artifact: %s", archive)
         with tarfile.open(archive, "r:gz") as tar:
-            dest = self.install_dir.resolve()
-            for member in tar.getmembers():
-                member_path = (dest / member.name).resolve()
-                if dest not in (member_path, *member_path.parents):
-                    raise RuntimeError(
-                        f"Refusing to extract unsafe artifact path: {member.name}"
-                    )
-            tar.extractall(self.install_dir)
+            tar.extractall(
+                self.install_dir,
+                members=self._validated_archive_members(tar),
+            )
+
+    def _validated_archive_members(self, tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+        dest = self.install_dir.resolve()
+        members = tar.getmembers()
+        for member in members:
+            member_path = (dest / member.name).resolve()
+            if dest not in (member_path, *member_path.parents):
+                raise RuntimeError(
+                    f"Refusing to extract unsafe artifact path: {member.name}"
+                )
+            if member.islnk() or member.issym():
+                raise RuntimeError(f"Refusing to extract artifact link: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                raise RuntimeError(
+                    f"Refusing to extract unsupported artifact entry: {member.name}"
+                )
+        return members
 
     def _validate(self) -> None:
         wheels = list(self.install_dir.glob("*.whl"))
@@ -1125,11 +1173,10 @@ class ArtifactCollector:
 class AmdTestRunner:
     def __init__(self, request: RunRequest) -> None:
         self.request = request
-        self.artifacts = ArtifactCollector(request)
-        self.artifact_package = ArtifactPackage(request)
 
     def run(self) -> int:
         started_at = datetime.now(timezone.utc)
+        active_request = self.request
         artifact_dir: Path | None = None
         result = RunResult(
             mode=self.request.execution_mode,
@@ -1139,20 +1186,19 @@ class AmdTestRunner:
 
         try:
             self._check_gpus()
-            self._ensure_image()
-            artifact_dir = self.artifact_package.prepare()
-            log.info("Test name: %s", self.request.test_name or "<unset>")
-            log.info("Image: %s", self.request.image)
-            log.info("Execution mode: %s", self.request.execution_mode)
-            if self.request.execution_mode == "multi-node":
-                runner = MultiNodeRunner(self.request, artifact_dir)
+            active_request, artifact_dir = self._prepare_execution()
+            log.info("Test name: %s", active_request.test_name or "<unset>")
+            log.info("Image: %s", active_request.image)
+            log.info("Execution mode: %s", active_request.execution_mode)
+            if active_request.execution_mode == "multi-node":
+                runner = MultiNodeRunner(active_request, artifact_dir)
             else:
-                runner = ContainerRunner(self.request, artifact_dir)
+                runner = ContainerRunner(active_request, artifact_dir)
             result.container_name = runner.container_name
-            watchdog = Watchdog(self.request, result.container_name or "node0")
+            watchdog = Watchdog(active_request, result.container_name or "node0")
             watchdog.start()
-            if self.request.commands:
-                log.info("Commands: %s", self.request.commands)
+            if active_request.commands:
+                log.info("Commands: %s", active_request.commands)
             result = runner.run()
         except Exception as exc:
             log.error("amd test runner failed: %s", exc)
@@ -1160,19 +1206,45 @@ class AmdTestRunner:
             if watchdog is not None:
                 watchdog.stop(result.exit_code)
 
-        return self.artifacts.finalize(
+        return ArtifactCollector(active_request).finalize(
             result,
             started_at=started_at,
             watchdog_path=watchdog.log_path if watchdog is not None else None,
         )
 
-    def _ensure_image(self) -> None:
-        if self._image_exists_locally(self.request.image):
-            log.info("Image available locally: %s", self.request.image)
+    def _prepare_execution(self) -> tuple[RunRequest, Path | None]:
+        if not self.request.artifact_mode:
+            self._ensure_image(self.request.image)
+            return self.request, None
+
+        try:
+            self._ensure_image(self.request.image)
+            return self.request, ArtifactPackage(self.request).prepare()
+        except Exception as exc:
+            if not self.request.fallback_image:
+                raise
+
+            log.warning(
+                "ROCm artifact setup failed before tests; falling back to %s: %s",
+                self.request.fallback_image,
+                exc,
+            )
+            fallback_request = replace(
+                self.request,
+                image=self.request.fallback_image,
+                artifact_mode=False,
+                fallback_image=None,
+            )
+            self._ensure_image(fallback_request.image)
+            return fallback_request, None
+
+    def _ensure_image(self, image: str) -> None:
+        if self._image_exists_locally(image):
+            log.info("Image available locally: %s", image)
             return
-        if self._docker_pull(self.request.image):
+        if self._docker_pull(image):
             return
-        raise RuntimeError(f"Failed to pull test image: {self.request.image}")
+        raise RuntimeError(f"Failed to pull test image: {image}")
 
     def _check_gpus(self) -> None:
         try:
