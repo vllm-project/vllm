@@ -113,7 +113,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     self.vllm_config.model_config.max_model_len,
                     self.kv_cache_spec.block_size,
                 )
-                + self.kv_cache_spec.num_speculative_blocks
+                + kv_cache_spec.num_speculative_blocks
             )
             # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d: torch.Tensor = torch.empty(
