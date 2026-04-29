@@ -1218,7 +1218,7 @@ class OpenAIServingChat(OpenAIServing):
                     history_tool_call_cnt,
                 )
             return (
-                ChatMessage(role=role, reasoning=reasoning, content=content),
+                ChatMessage(role=role, reasoning=reasoning, content=content or ""),
                 False,
                 history_tool_call_cnt,
             )
@@ -1236,13 +1236,13 @@ class OpenAIServingChat(OpenAIServing):
                     history_tool_call_cnt,
                 )
             return (
-                ChatMessage(role=role, reasoning=reasoning, content=content),
+                ChatMessage(role=role, reasoning=reasoning, content=content or ""),
                 False,
                 history_tool_call_cnt,
             )
 
         # No tool choice or explicitly disabled.
-        if not request.tool_choice or request.tool_choice == "none":
+        if request.tool_choice is None or request.tool_choice == "none":
             return (
                 ChatMessage(role=role, reasoning=reasoning, content=content),
                 False,
