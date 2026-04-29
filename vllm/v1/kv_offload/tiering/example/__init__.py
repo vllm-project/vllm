@@ -222,14 +222,14 @@ class ExampleSecondaryTier(SecondaryTierManager):
         # Return simplified JobResult (only job_id and success)
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def touch(self, keys: Iterable[OffloadKey]):
+    def touch(self, keys: Sequence[OffloadKey]):
         """
         Mark blocks as recently used (move to end of LRU list).
 
         Args:
             keys: Blocks to mark as recently used.
         """
-        for key in reversed(list(keys)):
+        for key in reversed(keys):
             if key in self.blocks:
                 self.blocks.move_to_end(key)
 

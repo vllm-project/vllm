@@ -146,7 +146,7 @@ class SecondaryTierManager(ABC):
         """
         return
 
-    def touch(self, keys: Iterable[OffloadKey]):
+    def touch(self, keys: Sequence[OffloadKey]):
         """
         Mark blocks as recently used for eviction policy.
 

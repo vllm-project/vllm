@@ -20,7 +20,7 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import (
@@ -279,7 +279,7 @@ class TieringOffloadingManager(OffloadingManager):
         tier.submit_load(job_metadata)
 
     def prepare_load(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         """
         Prepare blocks to be loaded from primary tier to GPU.
@@ -302,14 +302,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         return self.primary_tier.prepare_load(keys, req_context)
 
-    def touch(self, keys: Iterable[OffloadKey]):
+    def touch(self, keys: Sequence[OffloadKey]):
         """
         Mark blocks as recently used in all tiers.
 
         Args:
             keys: Blocks to mark as recently used.
         """
-        keys = list(keys)
         self.primary_tier.touch(keys)
         for tier in self.secondary_tiers:
             tier.touch(keys)
@@ -327,7 +326,7 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.complete_load(keys)
 
     def prepare_store(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         """
         Prepare blocks to be stored from GPU to primary tier.
