@@ -383,7 +383,12 @@ def all_reduce_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(hidden_size, token_num, dtype=dtype, use_aiter=use_aiter)
+        if test_model_cls is TestAllReduceRMSNormModel:
+            model = test_model_cls(
+                hidden_size, token_num, dtype=dtype, use_aiter=use_aiter
+            )
+        else:
+            model = test_model_cls(hidden_size, token_num, dtype=dtype)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 
