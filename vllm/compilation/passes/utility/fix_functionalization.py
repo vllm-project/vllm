@@ -196,7 +196,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                 for user in list(q_pe_out.users):
                     if is_func(user, torch.ops.aten.copy.default):
                         copy_temp = user
-                slice_temp = user.args[0]
+                slice_temp = copy_temp.args[0]
                 for user in list(copy_temp.users):
                     if is_func(user, torch.ops.aten.slice_scatter.default):
                         slice_scatter_temp = user
