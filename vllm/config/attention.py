@@ -112,42 +112,32 @@ class AttentionConfig:
         if self.mla_prefill_backend is not None:
             return
 
-        # Check for deprecated flags and migrate them
-        deprecated_flag_used = False
-
+        # Check for deprecated flags and migrate them.
+        # Only the first flag encountered sets the backend.
         if self.use_cudnn_prefill:
-            deprecated_flag_used = True
-            self.mla_prefill_backend = MLAPrefillBackendEnum.CUDNN
+            if self.mla_prefill_backend is None:
+                self.mla_prefill_backend = MLAPrefillBackendEnum.CUDNN
             logger.warning_once(
                 "use_cudnn_prefill is deprecated and will be removed in "
-                "v0.17. Use --attention-config.mla_prefill_backend="
+                "v0.22. Use --attention-config.mla_prefill_backend="
                 "CUDNN instead."
             )
 
         if self.use_trtllm_ragged_deepseek_prefill:
-            if deprecated_flag_used:
-                logger.warning_once(
-                    "Multiple deprecated MLA prefill flags are set. "
-                    "use_trtllm_ragged_deepseek_prefill will be ignored in "
-                    "favor of use_cudnn_prefill. Use "
-                    "--attention-config.mla_prefill_backend instead."
-                )
-            else:
-                deprecated_flag_used = True
+            if self.mla_prefill_backend is None:
                 self.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
-                logger.warning_once(
-                    "use_trtllm_ragged_deepseek_prefill is deprecated and "
-                    "will be removed in v0.17. Use "
-                    "--attention-config.mla_prefill_backend=TRTLLM_RAGGED "
-                    "instead."
-                )
+            logger.warning_once(
+                "use_trtllm_ragged_deepseek_prefill is deprecated and "
+                "will be removed in v0.22. Use "
+                "--attention-config.mla_prefill_backend=TRTLLM_RAGGED "
+                "instead."
+            )
 
-        if self.disable_flashinfer_prefill and not deprecated_flag_used:
-            # disable_flashinfer_prefill means "use FLASH_ATTN instead"
-            # This is only relevant if no other backend was explicitly selected
-            self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
+        if self.disable_flashinfer_prefill:
+            if self.mla_prefill_backend is None:
+                self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
             logger.warning_once(
                 "disable_flashinfer_prefill is deprecated and will be removed "
-                "in v0.17. Use --attention-config.mla_prefill_backend="
+                "in v0.22. Use --attention-config.mla_prefill_backend="
                 "FLASH_ATTN instead."
             )
