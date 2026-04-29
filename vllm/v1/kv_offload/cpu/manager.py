@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Literal
 
 from vllm.v1.kv_offload.abstract import (
@@ -90,7 +90,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     def prepare_load(
         self,
-        keys: Iterable[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         blocks = []
@@ -102,7 +102,7 @@ class CPUOffloadingManager(OffloadingManager):
             blocks.append(block)
         return self._get_load_store_spec(keys, blocks)
 
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Sequence[OffloadKey]) -> None:
         self._policy.touch(keys)
 
     def complete_load(self, keys: Iterable[OffloadKey]) -> None:
@@ -114,13 +114,11 @@ class CPUOffloadingManager(OffloadingManager):
 
     def prepare_store(
         self,
-        keys: Iterable[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
-        keys_list = list(keys)
-
         # filter out blocks that are already stored
-        keys_to_store = [k for k in keys_list if self._policy.get(k) is None]
+        keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
         if not keys_to_store:
             return PrepareStoreOutput(
@@ -135,7 +133,7 @@ class CPUOffloadingManager(OffloadingManager):
         if num_blocks_to_evict > 0:
             # Blocks from the original input are excluded from eviction candidates:
             # a block that was already stored must remain in the cache after this call.
-            protected = set(keys_list)
+            protected = set(keys)
             evicted = self._policy.evict(num_blocks_to_evict, protected)
             if evicted is None:
                 return None
