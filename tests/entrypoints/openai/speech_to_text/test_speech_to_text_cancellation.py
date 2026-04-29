@@ -84,6 +84,32 @@ async def test_non_streaming_cancel_aborts_engine_requests(
         call.args[2] for call in engine_client.generate.call_args_list
     ]
     assert generated_request_ids == expected_request_ids
-    for request_id in expected_request_ids:
-        engine_client.abort.assert_any_await(request_id)
-    assert engine_client.abort.await_count == len(expected_request_ids)
+    engine_client.abort.assert_awaited_once_with(expected_request_ids)
+
+
+@pytest.mark.asyncio
+async def test_language_detection_cancel_aborts_engine_request():
+    engine_client = SimpleNamespace(
+        generate=Mock(return_value=_never_finishes()),
+        abort=AsyncMock(),
+    )
+
+    server = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    server.engine_client = engine_client
+    server.asr_config = SimpleNamespace()
+    server.tokenizer = Mock()
+    server.model_cls = SimpleNamespace(
+        get_language_detection_prompt=Mock(return_value={"prompt": "detect"}),
+        get_language_token_ids=Mock(return_value=[1]),
+        parse_language_detection_output=Mock(),
+    )
+
+    request_id = "transcribe-outer-request-lang_detect"
+    task = asyncio.create_task(server._detect_language(Mock(), request_id))
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    engine_client.abort.assert_awaited_once_with(request_id)

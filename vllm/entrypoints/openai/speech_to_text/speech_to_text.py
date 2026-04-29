@@ -163,10 +163,17 @@ class OpenAISpeechToText(OpenAIServing):
             request_id,
         )
 
-        final_output: RequestOutput
-        async for final_output in result_generator:
-            if final_output.finished:
-                break
+        try:
+            final_output: RequestOutput
+            async for final_output in result_generator:
+                if final_output.finished:
+                    break
+        except asyncio.CancelledError:
+            await asyncio.gather(
+                self.engine_client.abort(request_id),
+                return_exceptions=True,
+            )
+            raise
 
         token_ids = list(final_output.outputs[0].token_ids)
         lang = self.model_cls.parse_language_detection_output(
@@ -463,38 +470,50 @@ class OpenAISpeechToText(OpenAIServing):
             for idx in range(len(engine_inputs))
         ]
         list_result_generator = []
-        for request_id_item, engine_input in zip(engine_request_ids, engine_inputs):
-            self._log_inputs(
-                request_id_item,
-                engine_input,
-                params=sampling_params,
-                lora_request=lora_request,
-            )
-
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-
-            if isinstance(sampling_params, BeamSearchParams):
-                generator = self.beam_search(
-                    prompt=engine_input,
-                    params=sampling_params,
-                    request_id=request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                )
-            else:
-                generator = self.engine_client.generate(
-                    engine_input,
-                    sampling_params,
+        try:
+            for request_id_item, engine_input in zip(engine_request_ids, engine_inputs):
+                self._log_inputs(
                     request_id_item,
+                    engine_input,
+                    params=sampling_params,
                     lora_request=lora_request,
-                    trace_headers=trace_headers,
                 )
 
-            list_result_generator.append(generator)
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
+
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.beam_search(
+                        prompt=engine_input,
+                        params=sampling_params,
+                        request_id=request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+                else:
+                    generator = self.engine_client.generate(
+                        engine_input,
+                        sampling_params,
+                        request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+
+                list_result_generator.append(generator)
+        except asyncio.CancelledError:
+            logger.info(
+                "Request %s cancelled; aborting %d transcription engine request(s).",
+                request_id,
+                len(engine_request_ids),
+            )
+            await asyncio.gather(
+                self.engine_client.abort(engine_request_ids),
+                return_exceptions=True,
+            )
+            raise
 
         separator = asr_inter_chunk_separator(
             request.language, self.model_cls.no_space_languages
@@ -591,7 +610,7 @@ class OpenAISpeechToText(OpenAIServing):
                 len(engine_request_ids),
             )
             await asyncio.gather(
-                *(self.engine_client.abort(req_id) for req_id in engine_request_ids),
+                self.engine_client.abort(engine_request_ids),
                 return_exceptions=True,
             )
             raise
