@@ -448,7 +448,7 @@ class MistralTokenizer(TokenizerLike):
         # Transformers should be passed arguments it knows.
         if self.version >= 15:
             _reasoning_effort = kwargs.get("reasoning_effort")
-            if _reasoning_effort is not None:
+            if _reasoning_effort is not None and _reasoning_effort != "none":
                 version_kwargs["reasoning_effort"] = _reasoning_effort
 
         messages, tools = _prepare_apply_chat_template_tools_and_messages(
