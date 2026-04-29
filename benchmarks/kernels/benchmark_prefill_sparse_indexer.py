@@ -4,7 +4,6 @@
 import argparse
 import gc
 import random
-from dataclasses import dataclass
 from functools import partial
 
 import pandas as pd
@@ -16,12 +15,13 @@ from vllm.model_executor.layers.sparse_attn_indexer import kv_cache_as_quant_vie
 from vllm.third_party.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
-    get_paged_mqa_logits_metadata,
 )
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
+    build_paged_prefill_metadata,
     build_prefill_chunk_metadata,
+    split_indexer_paged_prefill_chunks,
     split_indexer_prefill_chunks,
 )
 
@@ -288,16 +288,6 @@ class DeepGemmFlat:
 
 
 class DeepGemmPaged:
-    @dataclass
-    class Metadata:
-        token_start: int
-        token_end: int
-        indices: Tensor
-        context_lens: Tensor
-        block_table: Tensor
-        schedule_metadata: Tensor
-        max_context_len: int
-
     def __init__(
         self,
         block_table_cpu: Tensor,
@@ -316,25 +306,11 @@ class DeepGemmPaged:
             (total_query_len, topk), dtype=torch.int32, device="cuda"
         )
 
-        req_ids = torch.arange(query_lens_cpu.numel(), device="cpu")
-        all_req_idx = torch.repeat_interleave(
-            req_ids, query_lens_cpu, output_size=total_query_len
-        )
-        token_idx = torch.arange(total_query_len, dtype=torch.int32, device="cpu")
-        query_offsets = token_idx - query_start_loc_cpu[all_req_idx]
-        all_context_lens = (
-            seq_lens_cpu[all_req_idx] - query_lens_cpu[all_req_idx] + query_offsets + 1
-        ) // compress_ratio
-
         block_table = block_table_cpu.cuda()
         if do_chunk:
-            # The paged path reads K directly from the KV cache, so it does not
-            # need the flat path's gathered-K workspace bound.
-            paged_chunk_workspace_size = int(compressed_seq_lens_cpu.sum().item())
-            chunk_specs = split_indexer_prefill_chunks(
+            chunk_specs = split_indexer_paged_prefill_chunks(
                 compressed_seq_lens_cpu,
                 query_lens_cpu,
-                paged_chunk_workspace_size,
                 DEEPGEMM_MAX_LOGITS_BYTES,
             )
         else:
@@ -342,32 +318,22 @@ class DeepGemmPaged:
                 (slice(0, query_lens_cpu.numel()), slice(0, total_query_len))
             ]
 
-        self.chunks: list[DeepGemmPaged.Metadata] = []
+        self.chunks = []
         for req_slice, query_slice in chunk_specs:
-            if int(compressed_seq_lens_cpu[req_slice].sum().item()) == 0:
-                continue
-
-            token_start = int(query_start_loc_cpu[req_slice.start].item())
-            token_end = token_start + query_slice.stop
-            token_start += query_slice.start
-            token_slice = slice(token_start, token_end)
-
-            req_idx = all_req_idx[token_slice].cuda()
-            indices = req_idx.to(torch.int32)
-            context_lens = all_context_lens[token_slice].cuda().view(-1, 1)
-            schedule_metadata = get_paged_mqa_logits_metadata(
-                context_lens, block_size, NUM_SMS, indices=indices
+            metadata = build_paged_prefill_metadata(
+                req_slice.start,
+                req_slice.stop,
+                query_start_loc_cpu,
+                seq_lens_cpu,
+                compressed_seq_lens_cpu,
+                block_table,
+                compress_ratio,
+                block_size,
+                NUM_SMS,
+                query_slice=query_slice,
             )
-            chunk = DeepGemmPaged.Metadata(
-                token_start,
-                token_end,
-                indices,
-                context_lens,
-                block_table[req_idx],
-                schedule_metadata,
-                int(compressed_seq_lens_cpu[req_slice].max().item()),
-            )
-            self.chunks.append(chunk)
+            if metadata is not None:
+                self.chunks.append(metadata)
 
         self.num_chunks = len(self.chunks)
         if not self.chunks:

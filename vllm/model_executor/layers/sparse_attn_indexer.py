@@ -127,10 +127,10 @@ def sparse_attn_indexer(
             )
 
         # Dummy byte allocation to simulate peak materialized logits memory.
-        # Flat prefill is capped by chunking; paged prefill is unchunked and can
-        # materialize [max_num_batched_tokens, max_context_len] fp32 logits.
+        # Materialized paged-prefill logits are still large, but chunking bounds
+        # them by the paged chunk size.
         if use_paged_prefill:
-            max_logits_bytes = hidden_states.shape[0] * max_model_len * 4
+            max_logits_bytes = min(hidden_states.shape[0], 2048) * max_model_len * 4
         else:
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
@@ -193,47 +193,50 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        paged_metadata = prefill_metadata.paged_metadata
-        if paged_metadata is not None:
+        if prefill_metadata.paged_chunks:
             # Paged prefill has already expanded each query token into its own
             # varlen row, so it uses the decode-shaped DeepGEMM/top-k kernels.
             paged_kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
-            num_tokens = paged_metadata.context_lens.shape[0]
-            token_slice = slice(paged_metadata.token_start, paged_metadata.token_end)
-            q_slice = q_quant[token_slice].view(num_tokens, 1, *q_quant.shape[1:])
-            if use_fp4_cache:
-                q_slice = q_slice.view(torch.int8)
-                assert q_scale is not None
-                q_scale_slice = q_scale[token_slice].view(
-                    num_tokens, 1, *q_scale.shape[1:]
+            for paged_metadata in prefill_metadata.paged_chunks:
+                num_tokens = paged_metadata.context_lens.shape[0]
+                token_slice = slice(
+                    paged_metadata.token_start, paged_metadata.token_end
                 )
-            else:
-                q_scale_slice = None
+                q_slice = q_quant[token_slice].view(num_tokens, 1, *q_quant.shape[1:])
+                if use_fp4_cache:
+                    q_slice = q_slice.view(torch.int8)
+                    assert q_scale is not None
+                    q_scale_slice = q_scale[token_slice].view(
+                        num_tokens, 1, *q_scale.shape[1:]
+                    )
+                else:
+                    q_scale_slice = None
 
-            logits = fp8_fp4_paged_mqa_logits(
-                (q_slice, q_scale_slice),
-                paged_kv_cache,
-                weights[token_slice],
-                paged_metadata.context_lens,
-                paged_metadata.block_table,
-                paged_metadata.schedule_metadata,
-                max_model_len=paged_metadata.max_context_len,
-                clean_logits=False,
-                indices=paged_metadata.indices,
-            )
-            topk_indices = topk_indices_buffer[
-                paged_metadata.token_start : paged_metadata.token_end, :topk_tokens
-            ]
-            torch.ops._C.top_k_per_row_decode(
-                logits,
-                1,
-                paged_metadata.context_lens,
-                topk_indices,
-                logits.shape[0],
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+                logits = fp8_fp4_paged_mqa_logits(
+                    (q_slice, q_scale_slice),
+                    paged_kv_cache,
+                    weights[token_slice],
+                    paged_metadata.context_lens,
+                    paged_metadata.block_table,
+                    paged_metadata.schedule_metadata,
+                    max_model_len=paged_metadata.max_context_len,
+                    clean_logits=False,
+                    indices=paged_metadata.indices,
+                )
+                topk_indices = topk_indices_buffer[
+                    paged_metadata.token_start : paged_metadata.token_end,
+                    :topk_tokens,
+                ]
+                torch.ops._C.top_k_per_row_decode(
+                    logits,
+                    1,
+                    paged_metadata.context_lens,
+                    topk_indices,
+                    logits.shape[0],
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
         if prefill_metadata.chunks:
             # Get the full shared workspace buffers once (will allocate on first use).
