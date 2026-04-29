@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai_harmony import Message, Role
+from openai_harmony import Message, Role, SystemContent
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -842,6 +842,32 @@ class TestGetSystemMessage:
                 assert channel in valid_channels, (
                     f"{channel} missing when with_custom_tools={with_tools}"
                 )
+
+    @pytest.mark.parametrize(
+        "effort",
+        [
+            "none",  # Should be ignored (not a valid Harmony level)
+            "minimal",  # Unsupported, should be ignored
+            None,  # No effort specified
+            "low",
+            "medium",
+            "high",
+        ],
+    )
+    def test_reasoning_effort_handling(self, effort: str | None) -> None:
+        """Verify get_system_message handles various reasoning_effort values."""
+        from vllm.entrypoints.openai.parser.harmony_utils import REASONING_EFFORT
+
+        sys_msg = get_system_message(reasoning_effort=effort)
+        assert sys_msg.author.role == Role.SYSTEM
+
+        system_content = sys_msg.content[0]
+        if effort in REASONING_EFFORT:
+            assert system_content.reasoning_effort == REASONING_EFFORT[effort]
+        else:
+            # Unsupported / None values leave the default unchanged
+            default_effort = SystemContent.new().reasoning_effort
+            assert system_content.reasoning_effort == default_effort
 
 
 class TestResponseInputToHarmonyReasoningItem:
