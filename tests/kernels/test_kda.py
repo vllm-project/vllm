@@ -28,11 +28,12 @@ def naive_recurrent_kda(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Naive recurrent KDA reference, ported from FLA's naive.py."""
     dtype = v.dtype
-    B, T, H, K, V = *q.shape, v.shape[-1]
+    B, T, H, K = q.shape
+    V = v.shape[-1]
     if scale is None:
         scale = K**-0.5
 
-    q, k, v, g, beta = map(lambda x: x.to(torch.float), [q, k, v, g, beta])
+    q, k, v, g, beta = (x.to(torch.float) for x in [q, k, v, g, beta])
     q = q * scale
 
     S = k.new_zeros(B, H, K, V).to(q)
