@@ -108,7 +108,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         enable_multimodal = (
             config.model_config.is_multimodal_model
-            and not config.model_config.multimodal_config.language_model_only
+            and (multimodal_config := config.model_config.multimodal_config)
+            and not multimodal_config.language_model_only
         )
         if enable_multimodal:
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
