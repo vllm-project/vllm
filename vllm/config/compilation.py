@@ -408,7 +408,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    mode: CompilationMode = None  # type: ignore[assignment]
+    mode: CompilationMode = RuntimeDefault()
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -470,7 +470,7 @@ class CompilationConfig:
     backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
 
-    ir_enable_torch_wrap: bool = None  # type: ignore[assignment]
+    ir_enable_torch_wrap: bool = RuntimeDefault()
     """If True, enable vllm_ir torch custom op wrapping during the forward pass.
     When False, torch custom op wrapping is disabled, allowing Dynamo to trace the
     selected implementation directly or avoiding torch custom op overhead in eager mode.
@@ -568,7 +568,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = None  # type: ignore[assignment]
+    cudagraph_mode: CUDAGraphMode = RuntimeDefault()
     """
     The mode of the cudagraph:
 
@@ -609,7 +609,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: list[int] = None  # type: ignore[assignment]
+    cudagraph_capture_sizes: list[int] = RuntimeDefault()
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
@@ -630,7 +630,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = None  # type: ignore[assignment]
+    use_inductor_graph_partition: bool = RuntimeDefault()
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -653,7 +653,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = None  # type: ignore[assignment]
+    max_cudagraph_capture_size: int = RuntimeDefault()
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest
@@ -850,22 +850,6 @@ class CompilationConfig:
                 f"got: {value}"
             )
         return value
-
-    @field_validator(
-        "level",
-        "mode",
-        "cudagraph_mode",
-        "max_cudagraph_capture_size",
-        "use_inductor_graph_partition",
-        "ir_enable_torch_wrap",
-        mode="wrap",
-    )
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        """Skip validation if the value is `None` when initialisation is delayed."""
-        if value is None:
-            return value
-        return handler(value)
 
     def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")

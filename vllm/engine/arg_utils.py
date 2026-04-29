@@ -2112,15 +2112,15 @@ class EngineArgs:
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
-        if self.cudagraph_capture_sizes is not None:
-            if compilation_config.cudagraph_capture_sizes is not None:
+        if isinstance(self.cudagraph_capture_sizes, list):
+            if isinstance(compilation_config.cudagraph_capture_sizes, list):
                 raise ValueError(
                     "cudagraph_capture_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
             compilation_config.cudagraph_capture_sizes = self.cudagraph_capture_sizes
-        if self.max_cudagraph_capture_size is not None:
-            if compilation_config.max_cudagraph_capture_size is not None:
+        if isinstance(self.max_cudagraph_capture_size, int):
+            if isinstance(compilation_config.max_cudagraph_capture_size, int):
                 raise ValueError(
                     "max_cudagraph_capture_size and compilation_config."
                     "max_cudagraph_capture_size are mutually exclusive"
