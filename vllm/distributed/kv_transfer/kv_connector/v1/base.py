@@ -86,49 +86,96 @@ class KVCacheBlockView(Protocol):
     """Read-only view of a KV cache block exposed to connectors."""
 
     @property
-    def block_id(self) -> int: ...
+    def block_id(self) -> int:
+        """Unique integer identifier for this block."""
+        ...
+
     @property
-    def ref_cnt(self) -> int: ...
+    def ref_cnt(self) -> int:
+        """Reference count. A block with ref_cnt == 0 is in the free queue."""
+        ...
+
     @property
-    def is_null(self) -> bool: ...
+    def is_null(self) -> bool:
+        """True for the singleton null block (block_id 0, never allocatable).
+
+        Null blocks act as placeholders for positions that don't need
+        KV storage — for example, tokens that fall outside a sliding
+        window or positions occupied by non-attention layers (SSMs).
+        """
+        ...
+
     @property
-    def block_hash(self) -> bytes | None: ...
+    def block_hash(self) -> bytes | None:
+        """Hash derived from the token sequence and the KV cache group id.
+
+        Used as the key for prefix-cache lookups.  None if the block has
+        not been hashed yet (e.g. still being filled).
+        """
+        ...
+
     @property
-    def content_hash(self) -> bytes | None: ...
+    def content_hash(self) -> bytes | None:
+        """Hash derived from the token sequence only (no group id suffix).
+
+        This is the group-independent portion of ``block_hash``.  Two
+        blocks in different KV cache groups that cover the same token
+        range share the same ``content_hash`` but differ in ``block_hash``.
+        None if the block has not been hashed yet.
+        """
+        ...
+
     @property
-    def group_id(self) -> int | None: ...
+    def group_id(self) -> int | None:
+        """KV cache group this block belongs to, or None if not yet hashed."""
+        ...
 
 
 class SchedulerContext(ABC):
-    """Abstract interface to the KV cache state for connectors.
+    """Abstract interface to scheduler state for connectors.
 
-    Provides block-level operations without exposing internal data structures.
+    Provides block-level operations (inspect, touch, free, iterate)
+    without exposing internal scheduler data structures.  Bound to a
+    connector via ``KVConnectorBase_V1.bind_scheduler_context``.
     """
 
     @abstractmethod
     def get_block(self, block_id: int) -> KVCacheBlockView:
-        """Get a read-only view of a block by ID."""
+        """Return a read-only view of the block with the given id."""
         ...
 
     @abstractmethod
     def touch(self, block_ids: list[int]) -> None:
-        """Increment ref_cnt for blocks, preventing eviction."""
+        """Increment ref_cnt for the given blocks, preventing eviction.
+
+        Blocks that are touched are moved to the back of the free queue
+        so they are evicted last.
+        """
         ...
 
     @abstractmethod
     def free_blocks(self, block_ids: Iterable[int]) -> None:
-        """Decrement ref_cnt, returning blocks to free queue at 0."""
+        """Decrement ref_cnt for the given blocks.
+
+        When a block's ref_cnt reaches 0 it is returned to the free
+        queue and becomes eligible for eviction.
+        """
         ...
 
     @abstractmethod
     def iter_blocks(
         self, after_block_id: int | None = None
     ) -> Iterator[KVCacheBlockView]:
-        """Yield free blocks in LRU order starting after the given block.
+        """Iterate over free-queue blocks in eviction (LRU) order.
+
+        Yields ``KVCacheBlockView`` objects starting from the head of
+        the free queue (least-recently used).  Callers can use this to
+        scan candidate blocks for offloading or reclamation.
 
         Args:
-            after_block_id: Resume iteration after this block, or from
-                the head if None.
+            after_block_id: If given, start iteration after this block
+                rather than from the head.  Useful for resuming a
+                previous scan.
         """
         ...
 
