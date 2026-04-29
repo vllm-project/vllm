@@ -14,8 +14,22 @@
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16, NEON, VXE };
 
-template <ISA isa, typename scalar_t, int64_t head_dim>
-class AttentionImpl {};
+// Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
+enum class Fp8KVCacheDataType {
+  kAuto = 0,
+  kFp8E4M3 = 1,
+  kFp8E5M2 = 2,
+};
+
+struct AttentionInput;
+
+template <ISA isa, typename scalar_t, int64_t head_dim,
+          typename kv_cache_scalar_t = scalar_t>
+class AttentionImpl {
+ public:
+  void init_from_input(const AttentionInput*) {}
+  float get_output_v_scale() const noexcept { return 1.0f; }
+};
 
 struct AttentionWorkItemGroup {
   int32_t req_id;
@@ -780,6 +794,9 @@ struct AttentionInput {
   int32_t sliding_window_left;
   int32_t sliding_window_right;
   float softcap;
+  // FP8 KV cache scales (used by FP8 attention implementations)
+  float k_scale_fp8 = 1.0f;
+  float v_scale_fp8 = 1.0f;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \
@@ -1374,6 +1391,13 @@ class AttentionMainLoop {
       }
 
       attention_impl_t attn_impl;
+      constexpr bool fp8_kv = std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                              std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+      float output_v_scale = 1.0f;
+      if constexpr (fp8_kv) {
+        attn_impl.init_from_input(input);
+        output_v_scale = attn_impl.get_output_v_scale();
+      }
 
       // general information
       const int32_t q_head_num = input->num_heads;
@@ -1753,7 +1777,7 @@ class AttentionMainLoop {
                                reinterpret_cast<query_t*>(input->output) +
                                    output_buffer_offset,
                                sum_buffer, actual_q_heads_per_kv,
-                               actual_q_token_num, q_head_num);
+                               actual_q_token_num, q_head_num, output_v_scale);
                 } else {
                   const int32_t stride =
                       actual_q_heads_per_kv * split_kv_q_token_num_threshold;
@@ -1823,7 +1847,7 @@ class AttentionMainLoop {
               split_output_buffer,
               reinterpret_cast<query_t*>(input->output) + output_buffer_offset,
               split_sum_buffer, actual_q_heads_per_kv, curr_output_token_num,
-              q_head_num);
+              q_head_num, output_v_scale);
         }
       }
     }
@@ -1947,8 +1971,8 @@ class AttentionMainLoop {
                     query_t* __restrict__ curr_output_buffer,
                     float* __restrict__ sum_buffer,
                     const int32_t q_heads_per_kv,
-                    const int32_t actual_q_token_num,
-                    const int32_t q_head_num) {
+                    const int32_t actual_q_token_num, const int32_t q_head_num,
+                    const float v_scale = 1.0f) {
     // final output
     using output_vec_t = typename VecTypeTrait<query_t>::vec_t;
 
@@ -1962,7 +1986,7 @@ class AttentionMainLoop {
           curr_partial_output_buffer;
       query_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
       for (int32_t head_idx = 0; head_idx < q_heads_per_kv; ++head_idx) {
-        vec_op::FP32Vec16 inv_sum_scale_vec(1.0 / *curr_sum_buffer);
+        vec_op::FP32Vec16 inv_sum_scale_vec(v_scale / *curr_sum_buffer);
 
         for (int32_t i = 0; i < group_num_per_head; ++i) {
           vec_op::FP32Vec16 vec(curr_partial_output_buffer_iter);
