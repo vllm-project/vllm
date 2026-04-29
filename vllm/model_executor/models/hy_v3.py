@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -225,6 +225,7 @@ class HYV3Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-5,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
@@ -284,6 +285,7 @@ class HYV3Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
@@ -323,6 +325,7 @@ class HYV3DecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -340,6 +343,7 @@ class HYV3DecoderLayer(nn.Module):
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -392,7 +396,8 @@ class HYV3Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -414,6 +419,7 @@ class HYV3Model(nn.Module):
             lambda prefix: HYV3DecoderLayer(
                 config=config,
                 cache_config=cache_config,
+                model_config=model_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),

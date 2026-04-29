@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -131,6 +131,7 @@ class Param2MoEAttention(nn.Module):
         self,
         config,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -209,6 +210,7 @@ class Param2MoEAttention(nn.Module):
             scale=self.scaling,
             num_kv_heads=self.num_local_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
@@ -424,6 +426,7 @@ class Param2MoEDecoderLayer(nn.Module):
         self.self_attn = Param2MoEAttention(
             config=config,
             cache_config=cache_config,
+            model_config=vllm_config.model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )

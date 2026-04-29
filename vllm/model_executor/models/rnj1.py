@@ -12,7 +12,7 @@ from torch import nn
 from transformers import Gemma3TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
@@ -99,6 +99,7 @@ class Rnj1Attention(nn.Module):
         head_dim: int,
         max_position_embeddings: int,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attn_logits_soft_cap: float | None = None,
         prefix: str = "",
@@ -167,6 +168,7 @@ class Rnj1Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             attn_type=AttentionType.DECODER,
             logits_soft_cap=attn_logits_soft_cap,
@@ -202,6 +204,7 @@ class Rnj1DecoderLayer(nn.Module):
         self,
         config: Gemma3TextConfig,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -215,6 +218,7 @@ class Rnj1DecoderLayer(nn.Module):
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             attn_logits_soft_cap=None,
             prefix=f"{prefix}.self_attn",
@@ -269,7 +273,8 @@ class Rnj1DecoderLayer(nn.Module):
 class Rnj1Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -284,7 +289,7 @@ class Rnj1Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Rnj1DecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config, cache_config, model_config, quant_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
         )

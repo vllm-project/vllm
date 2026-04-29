@@ -27,7 +27,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -374,6 +374,7 @@ class Gemma4Attention(nn.Module):
         max_position_embeddings: int,
         use_k_eq_v: bool = False,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attn_logits_soft_cap: float | None = None,
         prefix: str = "",
@@ -493,6 +494,7 @@ class Gemma4Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
@@ -542,6 +544,7 @@ class Gemma4DecoderLayer(nn.Module):
         self,
         config,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -586,6 +589,7 @@ class Gemma4DecoderLayer(nn.Module):
             max_position_embeddings=config.max_position_embeddings,
             use_k_eq_v=use_k_eq_v,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
             prefix=f"{prefix}.self_attn",
@@ -956,7 +960,8 @@ class Gemma4CrossDecoderLayers(nn.Module):
 class Gemma4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = _get_text_config(vllm_config.model_config.hf_config)
+        model_config = vllm_config.model_config
+        config = _get_text_config(model_config.hf_config)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -1041,6 +1046,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             lambda prefix: Gemma4DecoderLayer(
                 config,
                 cache_config=cache_config,
+                model_config=model_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),
