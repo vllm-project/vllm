@@ -97,7 +97,8 @@ def indexer_k_quant_and_cache_triton(
     # In real layout, we store the first portion as kv cache value
     # and second portion as kv cache scale
     kv_cache = kv_cache.view(num_blocks, -1)
-    kv_cache_value = kv_cache[:, : block_size * head_dim]
+    fp8_dtype = current_platform.fp8_dtype()
+    kv_cache_value = kv_cache[:, : block_size * head_dim].view(fp8_dtype)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
     grid = (num_tokens,)
@@ -329,36 +330,38 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n, heads, head_dim = q_fp8.shape
     num_blocks, block_size, _, _ = kv_cache_fp8.shape
 
-    from aiter.ops.triton.attention.pa_mqa_logits import (
-        deepgemm_fp8_paged_mqa_logits,
-    )
+    if rocm_aiter_ops.is_enabled():
+        aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
-    # if aiter_paged_mqa_logits_module is not None:
-    batch_size, next_n, heads, _ = q_fp8.shape
-    out_logits = torch.full(
-        [batch_size * next_n, max_model_len],
-        float("-inf"),
-        device="cuda",
-        dtype=torch.float32,
-    )
-    deepgemm_fp8_paged_mqa_logits(
-        q_fp8,
-        kv_cache_fp8,
-        weights,
-        out_logits,
-        context_lens,
-        block_tables,
-        max_model_len,
-        ChunkK=256,
-        Preshuffle=block_size == 64,
-        KVBlockSize=block_size,
-        WavePerEU=2,
-    )
-    return out_logits
-    # else:
-    #     return fp8_paged_mqa_logits_torch(
-    #         q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
-    #     )
+    if aiter_paged_mqa_logits_module is not None:
+        deepgemm_fp8_paged_mqa_logits = (
+            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
+        )
+        batch_size, next_n, heads, _ = q_fp8.shape
+        out_logits = torch.full(
+            [batch_size * next_n, max_model_len],
+            float("-inf"),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        deepgemm_fp8_paged_mqa_logits(
+            q_fp8,
+            kv_cache_fp8,
+            weights,
+            out_logits,
+            context_lens,
+            block_tables,
+            max_model_len,
+            ChunkK=256,
+            Preshuffle=block_size == 64,
+            KVBlockSize=block_size,
+            WavePerEU=2,
+        )
+        return out_logits
+    else:
+        return fp8_paged_mqa_logits_torch(
+            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+        )
 
 
 # Take from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L84
