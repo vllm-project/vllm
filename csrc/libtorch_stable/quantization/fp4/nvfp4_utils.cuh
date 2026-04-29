@@ -22,15 +22,26 @@
 
 #include "cuda_vec_utils.cuh"
 
-#if defined(NVFP4_ENABLE_ELTS16) && defined(CUDA_VERSION) && \
-    CUDA_VERSION >= 12090
+// NOTE: This guard gates the 16-elements-per-thread ("PACK16") fast path
+// used on SM100+ with CUDA 12.9+. The refactor in #35105 switched the guard
+// here from `CUDART_VERSION` to `CUDA_VERSION`, which is only defined by
+// the driver-API header `<cuda.h>`. `<cuda.h>` is not in the transitive
+// include closure of this TU on CUDA 13.0. As a consequence, the PACK16
+// branch is silently disabled and the kernel falls back to 8 elements per
+// thread / 128-bit loads, which reduces performance by ~20% on
+// bandwidth-bound shapes.
+//
+// To resolve the regression, restore the pre-refactor guard and stick with
+// `CUDART_VERSION` here.
+#if defined(NVFP4_ENABLE_ELTS16) && defined(CUDART_VERSION) && \
+    CUDART_VERSION >= 12090
   #define ELTS_PER_THREAD 16
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
-constexpr bool CVT_FP4_PACK16 = true;
+  #define CVT_FP4_PACK16 1
 #else
   #define ELTS_PER_THREAD 8
 constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
-constexpr bool CVT_FP4_PACK16 = false;
+  #define CVT_FP4_PACK16 0
 #endif
 
 constexpr int CVT_FP4_SF_VEC_SIZE = 16;

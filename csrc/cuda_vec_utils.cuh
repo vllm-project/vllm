@@ -18,8 +18,21 @@
 // Device-side: SM100+ architecture with CUDA 12.9+ toolkit, which
 // together enable 256-bit (v8.u32) PTX load/store instructions.
 // Use for PTX instruction selection with architecture fallback paths.
+//
+// NOTE: this guard originally checked `CUDA_VERSION` (as introduced by
+// #35105). `CUDA_VERSION` is only defined by `<cuda.h>` (the driver API
+// header); none of the headers included above are guaranteed to pull in
+// `<cuda.h>` transitively, and on CUDA 13.0 in particular they do not.
+// That silently forced `VLLM_256B_PTX_ENABLED = 0` in every TU that
+// transitively included this header, which in turn made `ld256_cg_or_zero`
+// and friends unusable on SM100, collapsing the NVFP4 quant kernel to the
+// 128-bit-load path (~20% slower at bandwidth-bound shapes).
+//
+// `CUDART_VERSION` is defined by `<cuda_runtime_api.h>` (pulled in above
+// via `<cuda_runtime.h>`) on every toolkit we support, and numerically
+// tracks `CUDA_VERSION`, so it's the correct macro to gate on here.
 #if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
-    defined(CUDA_VERSION) && CUDA_VERSION >= 12090
+    defined(CUDART_VERSION) && CUDART_VERSION >= 12090
   #define VLLM_256B_PTX_ENABLED 1
 #else
   #define VLLM_256B_PTX_ENABLED 0

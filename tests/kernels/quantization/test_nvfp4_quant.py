@@ -227,6 +227,43 @@ def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
     torch.testing.assert_close(scale_ans, scale_ref)
 
 
+@torch.inference_mode()
+def test_cudart_version_guard_pack16() -> None:
+    """Regression test for CUDA_VERSION → CUDART_VERSION macro guard fix.
+
+    On CUDA 13.0+, CUDA_VERSION (driver-API header) is not transitively
+    defined, silently disabling the PACK16 (16-element/thread) path and
+    collapsing quant kernels to PACK8 (~20% slower). CUDART_VERSION is
+    always defined via <cuda_runtime.h>.  If the guard were broken, this
+    test would still pass numerically but the CI run on CUDA 13.0 would
+    surface the perf regression.  We verify correctness on a shape that
+    exercises both PACK16 and PACK8 thread counts.
+    """
+    cuda_ver = torch.version.cuda
+    if cuda_ver is None:
+        pytest.skip("CUDA not available")
+    major, minor = (int(x) for x in cuda_ver.split(".")[:2])
+    if major * 1000 + minor * 10 < 12090:
+        pytest.skip("PACK16 path only enabled on CUDA >= 12.9")
+
+    # Shape chosen so n is a large multiple of 16 (SF vec size),
+    # exercising the 16-element-per-thread code path on SM100+.
+    m, n = 128, 8192
+    torch.set_default_device("cuda:0")
+    set_random_seed(0)
+    x = torch.randn((m, n), dtype=torch.float16)
+    tensor_amax = torch.abs(x).max().to(torch.float32)
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+
+    out, out_scale = ops.scaled_fp4_quant(x, global_scale)
+    out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
+
+    scale_ans = recover_swizzled_scales(out_scale, m, n)
+    out_ans = cast_from_fp4(out, m, n)
+    torch.testing.assert_close(out_ans, out_ref)
+    torch.testing.assert_close(scale_ans, scale_ref)
+
+
 @pytest.mark.parametrize("pad_shape", PAD_SHAPES)
 @torch.inference_mode()
 def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> None:
