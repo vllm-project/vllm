@@ -1807,6 +1807,16 @@ class Qwen3VLForConditionalGeneration(
             max_frames_per_video=max_frames,
         )
 
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        if "image_grid_thw" in mm_kwargs:
+            return "image"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config,
@@ -1823,24 +1833,26 @@ class Qwen3VLForConditionalGeneration(
         )
         return (min_budget, max_budget)
 
-    def _get_mm_data(
+    def _get_pixel_values_by_modality(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> tuple[torch.Tensor, list[tuple[int, int, int]], str, str]:
-        """Extract modality-specific data from mm_kwargs.
-
-        Returns:
-            (pixel_values, grid_thw, pv_key, grid_key)
-        """
-        if "image_grid_thw" in mm_kwargs:
-            pv = mm_kwargs["pixel_values"]
-            thw = mm_kwargs["image_grid_thw"]
-            return pv, thw, "pixel_values", "image_grid_thw"
-        elif "video_grid_thw" in mm_kwargs:
-            pv = mm_kwargs["pixel_values_videos"]
-            thw = mm_kwargs["video_grid_thw"]
-            return pv, thw, "pixel_values_videos", "video_grid_thw"
+    ) -> torch.Tensor:
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            return mm_kwargs["pixel_values"]
+        elif modality == "video":
+            return mm_kwargs["pixel_values_videos"]
         raise AssertionError("This line should be unreachable.")
+
+    def _get_grid_thw_by_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[tuple[int, int, int]]:
+        grid_thw_key = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
+        grid_thw = mm_kwargs[grid_thw_key]
+        if not isinstance(grid_thw, list):
+            grid_thw = grid_thw.tolist()
+        return grid_thw
 
     def get_encoder_cudagraph_item_specs(
         self,
@@ -1849,9 +1861,7 @@ class Qwen3VLForConditionalGeneration(
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         m = self.visual.spatial_merge_size
-        _, grid_thw, _, _ = self._get_mm_data(mm_kwargs)
-        if not isinstance(grid_thw, list):
-            grid_thw = grid_thw.tolist()
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return [
             EncoderItemSpec(
                 input_size=t * h * w,
@@ -1865,12 +1875,20 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
-        pixel_values, grid_thw, pv_key, grid_key = self._get_mm_data(mm_kwargs)
-        if not isinstance(grid_thw, list):
-            grid_thw = grid_thw.tolist()
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
 
         if len(indices) == 0:
-            return {pv_key: pixel_values[:0], grid_key: []}
+            if self.get_input_modality(mm_kwargs) == "image":
+                return {
+                    "pixel_values": pixel_values[:0],
+                    "image_grid_thw": [],
+                }
+            else:
+                return {
+                    "pixel_values_videos": pixel_values[:0],
+                    "video_grid_thw": [],
+                }
 
         # Compute cumulative patch offsets for slicing pixel_values
         patches_per_item = [t * h * w for t, h, w in grid_thw]
@@ -1883,7 +1901,16 @@ class Qwen3VLForConditionalGeneration(
         )
         selected_grid = [grid_thw[i] for i in indices]
 
-        return {pv_key: selected_pv, grid_key: selected_grid}
+        if self.get_input_modality(mm_kwargs) == "image":
+            return {
+                "pixel_values": selected_pv,
+                "image_grid_thw": selected_grid,
+            }
+        else:
+            return {
+                "pixel_values_videos": selected_pv,
+                "video_grid_thw": selected_grid,
+            }
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1972,16 +1999,15 @@ class Qwen3VLForConditionalGeneration(
         max_batch_size: int,
         max_frames_per_batch: int,
     ):
-        _, grid_thw_list, _, grid_key = self._get_mm_data(mm_kwargs)
-        if not isinstance(grid_thw_list, list):
-            grid_thw_list = grid_thw_list.tolist()
+        modality = self.get_input_modality(mm_kwargs)
+        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
-        if grid_key == "grid_thw":
+        if modality == "image":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
-        elif grid_key == "video_grid_thw":
+        elif modality == "video":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
@@ -1996,9 +2022,8 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         buffers: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        pixel_values, grid_thw, _, _ = self._get_mm_data(mm_kwargs)
-        if not isinstance(grid_thw, list):
-            grid_thw = grid_thw.tolist()
+        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
 
     def _parse_and_validate_image_input(
