@@ -572,36 +572,26 @@ def validate_args(args):
             stacklevel=2,
         )
     elif args.dataset_name == "hf":
-        if (
-            args.dataset_path
-            in (
-                VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
-                | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
-                | ConversationDataset.SUPPORTED_DATASET_PATHS
-            )
-            or args.hf_name
-            in (
-                VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
-                | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
-                | ConversationDataset.SUPPORTED_DATASET_PATHS
-            )
+        if args.dataset_path in (
+            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            | ConversationDataset.SUPPORTED_DATASET_PATHS
+        ) or args.hf_name in (
+            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm-chat", (
                 f"{args.dataset_path} needs to use vllm-chat as the backend."
             )
-        elif (
-            args.dataset_path
-            in (
-                InstructCoderDataset.SUPPORTED_DATASET_PATHS
-                | AIMODataset.SUPPORTED_DATASET_PATHS
-                | ASRDataset.SUPPORTED_DATASET_PATHS
-            )
-            or args.hf_name
-            in (
-                InstructCoderDataset.SUPPORTED_DATASET_PATHS
-                | AIMODataset.SUPPORTED_DATASET_PATHS
-                | ASRDataset.SUPPORTED_DATASET_PATHS
-            )
+        elif args.dataset_path in (
+            InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
+        ) or args.hf_name in (
+            InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
