@@ -100,6 +100,10 @@ class FlexAttentionBackend(AttentionBackend):
         return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         """FlexAttention supports full attention for image tokens."""
         return True
@@ -326,15 +330,9 @@ class BlockSparsityHint(NamedTuple):
 
 
 def copy_to_persistent(dst, src):
-    try:
-        dst = dst.as_strided(src.shape, src.stride())
-    except RuntimeError as e:
-        raise RuntimeError(
-            f"Fail to re-stride a persistent tensor of shape {dst.shape} "
-            f"for a tensor of shape {src.shape}"
-        ) from e
-    dst.copy_(src)
-    return dst
+    sliced = dst[tuple(slice(0, s) for s in src.shape)]
+    sliced.copy_(src)
+    return sliced
 
 
 @dataclass
