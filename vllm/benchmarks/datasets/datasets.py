@@ -2365,6 +2365,7 @@ class SpecBench(CustomDataset):
             random.shuffle(self.data)
 
     def sample(
+        self,
         **kwargs,
     ) -> list[SampleRequest]:
         # leverage CustomDataset sample
