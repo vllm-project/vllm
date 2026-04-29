@@ -172,9 +172,10 @@ class IquestMoeSparseMoeBlock(nn.Module):
         shared_expert_intermediate_size = getattr(
             config, "shared_expert_intermediate_size", config.moe_intermediate_size
         )
-        if shared_expert_intermediate_size <= 0:
-            shared_expert_intermediate_size = config.moe_intermediate_size
-        use_shared_expert_gate = getattr(config, "use_shared_expert_gate", False)
+        use_shared_expert = shared_expert_intermediate_size > 0
+        use_shared_expert_gate = use_shared_expert and getattr(
+            config, "use_shared_expert_gate", False
+        )
 
         if use_shared_expert_gate:
             self.shared_expert_gate = ReplicatedLinear(
@@ -186,15 +187,19 @@ class IquestMoeSparseMoeBlock(nn.Module):
             )
         else:
             self.shared_expert_gate = None
-        self.shared_expert = IquestMoeMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=shared_expert_intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            reduce_results=False,
-            expert_gate=self.shared_expert_gate,
-            prefix=f"{prefix}.shared_expert",
-        )
+
+        if use_shared_expert:
+            self.shared_expert = IquestMoeMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=shared_expert_intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+                expert_gate=self.shared_expert_gate,
+                prefix=f"{prefix}.shared_expert",
+            )
+        else:
+            self.shared_expert = None
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_expert,
