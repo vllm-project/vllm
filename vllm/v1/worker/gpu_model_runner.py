@@ -629,7 +629,7 @@ class GPUModelRunner(
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
-            is_spec_decode=bool(self.vllm_config.speculative_config),
+            num_spec_tokens=self.num_spec_tokens,
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
                 self.device,
@@ -645,6 +645,7 @@ class GPUModelRunner(
             or self.vllm_config.reasoning_config is not None,
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config=self.vllm_config.reasoning_config,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -882,6 +883,9 @@ class GPUModelRunner(
         """
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
+
+    def post_kv_cache_wake_up(self) -> None:
+        self.init_fp8_kv_scales()
 
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
@@ -2184,6 +2188,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            positions=self.positions[:num_tokens_padded],
         )
 
         if self.dcp_world_size > 1:
@@ -4671,6 +4676,16 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). Safe to
+            # rebind here: hidden_states was already consumed for sampling
+            # above and is not used again in this branch.
+            alt = getattr(
+                self.get_model(), "get_mtp_target_hidden_states", lambda: None
+            )()
+            if alt is not None:
+                hidden_states = alt
+
             num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
@@ -5863,7 +5878,7 @@ class GPUModelRunner(
         saved_override = self.cache_config.num_gpu_blocks_override
         self.cache_config.num_gpu_blocks_override = min_blocks
         minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0, suppress_log=True
+            self.vllm_config, kv_cache_groups, available_memory=0
         )
         self.cache_config.num_gpu_blocks_override = saved_override
 
@@ -6493,10 +6508,11 @@ class GPUModelRunner(
                 block_sizes=block_sizes,
                 kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
-                is_spec_decode=bool(self.vllm_config.speculative_config),
+                num_spec_tokens=self.num_spec_tokens,
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
+                reasoning_config=self.vllm_config.reasoning_config,
             )
 
         assert self._init_block_sizes == block_sizes, (
@@ -6587,9 +6603,15 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
+                    # For MLA with compression, storage_block_size != block_size
+                    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                        shape_block_size = kv_cache_spec.storage_block_size
+                    else:
+                        shape_block_size = kernel_block_size
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
-                        kernel_block_size,
+                        shape_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
@@ -6613,12 +6635,31 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+
+                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    if kv_cache_spec.page_size_padded is not None:
+                        # Use strided view to handle page_size_bytes that
+                        # include padding. This follows
+                        # the same pattern as MambaSpec handling below.
+                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                        # (i.e. the first physical dimension is the block
+                        # index), which holds for MLA backends but NOT for
+                        # standard attention backends whose shape starts with
+                        # a K/V dimension of size 2.
+                        dtype_size = get_dtype_size(dtype)
+                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                        strides = list(torch.empty(kv_cache_shape).stride())
+                        strides[inv_order[0]] = page_stride
+                        kv_cache = torch.as_strided(
+                            raw_tensor,
+                            size=kv_cache_shape,
+                            stride=tuple(strides),
+                        )
+                    else:
+                        # No padding — safe to use a contiguous view.
+                        kv_cache = raw_tensor.view(kv_cache_shape)
+                    kv_caches[layer_name] = kv_cache.permute(*inv_order)
+
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]

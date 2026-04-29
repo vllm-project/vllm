@@ -486,11 +486,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         device=self.device,
                     ),
                 )
+
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
+            # target returns a persistent buffer sized at max_num_batched_tokens;
+            # slice to the active token count that propose() expects.
+            spec_hidden_states = hidden_states
+            if hasattr(self.model, "get_mtp_target_hidden_states"):
+                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             self.speculator.propose(
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
                 slot_mappings=slot_mappings_by_layer,
-                last_hidden_states=hidden_states,
+                last_hidden_states=spec_hidden_states,
                 aux_hidden_states=aux_hidden_states,
                 num_sampled=torch.ones(
                     input_batch.num_reqs, dtype=torch.int32, device=self.device
@@ -549,6 +558,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, sample_hidden_states
         gc.collect()
 
+    def post_kv_cache_wake_up(self) -> None:
+        self.block_tables.init_block_table_layout_tensors()
+
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
@@ -581,7 +593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            self.cudagraph_manager.capture(
+            captured_attn_states = self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
                 self.input_buffers,
@@ -593,7 +605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
             )
             if self.speculator is not None:
-                self.speculator.capture_model()
+                self.speculator.capture(captured_attn_states)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -808,7 +820,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
-
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1233,11 +1244,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
+            # target returns a persistent buffer sized at max_num_batched_tokens;
+            # slice to the active token count that propose() expects.
+            spec_hidden_states = hidden_states
+            if hasattr(self.model, "get_mtp_target_hidden_states"):
+                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings_by_layer,
-                hidden_states,
+                spec_hidden_states,
                 aux_hidden_states,
                 num_sampled,
                 num_rejected,
