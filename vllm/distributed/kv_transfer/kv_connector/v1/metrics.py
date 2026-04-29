@@ -22,6 +22,19 @@ class KVConnectorStats:
     metrics or otherwise important telemetry from the connector.
     All sub-classes need to be serializable as stats are sent from worker to
     logger process.
+
+    The logging pipeline is:
+
+    * workers record connector-specific observations;
+    * scheduler/logging code passes those observations to
+      :meth:`KVConnectorLogging.observe`;
+    * observations from multiple calls are accumulated with :meth:`aggregate`;
+    * :meth:`reduce` summarizes the accumulated pool for the log line.
+
+    Depending on the connector and runtime topology, the stats object passed to
+    the logger can already contain observations aggregated across workers, such
+    as all tensor-parallel ranks. Connector implementations should document the
+    scope represented by their observations before they are reduced.
     """
 
     data: dict[str, Any] = field(default_factory=dict)
@@ -33,6 +46,9 @@ class KVConnectorStats:
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         """
         Aggregate stats with another `KVConnectorStats` object.
+
+        Implementations usually concatenate observation series so a later
+        :meth:`reduce` call summarizes the combined observation pool.
         """
         raise NotImplementedError
 
@@ -51,6 +67,15 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """
+    Accumulates KV connector observations and emits periodic log summaries.
+
+    `observe()` may receive stats that have already been aggregated by the
+    connector across workers. The logger keeps accumulating those observations
+    with the connector's `aggregate()` implementation until `log()` calls
+    `reduce()` and emits a single "KV Transfer metrics" line for the interval.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:

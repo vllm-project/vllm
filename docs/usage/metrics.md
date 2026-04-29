@@ -45,6 +45,30 @@ The following metrics are exposed:
 
 --8<-- "docs/generated/metrics/nixl_connector.inc.md"
 
+When NixlConnector logs a line such as `KV Transfer metrics: Num successful
+transfers=4, Avg xfer time (ms)=1.381, ...`, the summary is computed from the
+combined pool of rank-level transfer observations collected during the logging
+interval. In tensor-parallel deployments, each TP rank records its own NIXL
+transfer telemetry and the observations from all ranks are concatenated before
+averages, percentiles, and throughput are computed.
+
+Interpret the log fields as follows:
+
+- `Num successful transfers` is the total count of successful rank-level
+  transfers across all ranks.
+- `Avg xfer time (ms)`, `P90 xfer time (ms)`, `Avg post time (ms)`, and
+  `P90 post time (ms)` are computed over the combined distribution of
+  rank-level timings.
+- `Avg MB per transfer` is the average transferred size of an individual
+  rank-level transfer, not the total bytes moved by one engine-level KV cache
+  operation.
+- `Throughput (MB/s)` is total transferred MB divided by the sum of transfer
+  durations across the combined rank-level observations. This is an average
+  rank-level transfer rate, not aggregate system throughput over wall-clock
+  time.
+- `Avg number of descriptors` is averaged over individual rank-level
+  transfers.
+
 ## Model Flops Utilization (MFU) Performance Metrics
 
 These metrics are available via `--enable-mfu-metrics`:

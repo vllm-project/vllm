@@ -21,7 +21,22 @@ from vllm.v1.metrics.utils import create_metric_per_engine
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """
+    Container for NIXL transfer performance metrics.
+
+    Each tensor-parallel rank records rank-local transfer telemetry with
+    :meth:`record_transfer`. During logging, stats from all ranks are aggregated
+    into one combined observation pool before :meth:`reduce` computes summary
+    values. As a result, "Num successful transfers" is the total rank-level
+    transfer count across all ranks, averages and percentiles are computed over
+    individual rank-level transfers, and "Avg MB per transfer" is not the total
+    bytes moved by one engine-level KV cache operation.
+
+    "Throughput (MB/s)" is computed as total transferred MB across the combined
+    rank-level observations divided by the sum of their transfer durations. This
+    is an average over rank-level transfer observations, not aggregate system
+    throughput over wall-clock time.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -78,11 +93,14 @@ class NixlKVConnectorStats(KVConnectorStats):
             for k, v in other.data.items():
                 accumulator = self.data[k]
                 assert isinstance(accumulator, list)
+                # Concatenate rank/worker-local observations. Summary stats are
+                # computed later over this combined pool, not per rank.
                 accumulator.extend(v)
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        # Compute compact representative stats suitable for CLI logging. In TP
+        # deployments, this operates on observations aggregated from all ranks.
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
             # the interval were unsuccessful, Prom will report failures stats instead.
@@ -106,9 +124,14 @@ class NixlKVConnectorStats(KVConnectorStats):
         assert n == self.num_successful_transfers
 
         total_mb = mb.sum()
+        # Average bytes per rank-level transfer in the combined observation
+        # pool, not bytes per engine-level KV cache operation.
         avg_mb = total_mb / n
 
         total_time_seconds = xfer_time.sum()
+        # This is total MB divided by summed rank-level transfer time, so it is
+        # an average per-rank transfer rate rather than wall-clock aggregate
+        # system throughput.
         throughput_mb_s = total_mb / total_time_seconds
 
         return {
