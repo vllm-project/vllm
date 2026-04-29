@@ -294,7 +294,7 @@ def forward_attention(
                 value,
                 key_cache,
                 value_cache,
-                attn_metadata.slot_mapping,
+                common_attn_metadata.slot_mapping,
                 "auto",
                 layer._k_scale,
                 layer._v_scale,
@@ -305,7 +305,7 @@ def forward_attention(
                 key=key,
                 value=value,
                 kv_cache=adapted_kv_cache,
-                slot_mapping=attn_metadata.slot_mapping,
+                slot_mapping=common_attn_metadata.slot_mapping,
             )
     return instance.forward(
         layer=layer,

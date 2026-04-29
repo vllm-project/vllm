@@ -83,7 +83,6 @@ class TreeAttentionMetadata:
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
     num_prefill_tokens: int = 0
     num_decode_tokens: int = 0
@@ -117,7 +116,6 @@ class TreeAttentionMetadata:
             max_seq_len=int(kv_seqlens.max().item()),
             seq_lens=kv_seqlens,
             block_table=self.block_table[self.num_decodes :],
-            slot_mapping=self.slot_mapping[self.num_decode_tokens :],
         )
         return self._cached_prefill_metadata
 
@@ -142,7 +140,6 @@ class TreeAttentionMetadata:
             max_seq_len=int(kv_seqlens.max().item()),
             seq_lens=kv_seqlens,
             block_table=self.block_table[: self.num_decodes],
-            slot_mapping=self.slot_mapping[: self.num_decode_tokens],
             tree_attn_bias=self.tree_attn_bias,
         )
         return self._cached_decode_metadata
@@ -197,7 +194,6 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         kv_seqlens = common_attn_metadata.seq_lens
         max_seq_len = common_attn_metadata.max_seq_len
         block_table = common_attn_metadata.block_table_tensor
-        slot_mapping = common_attn_metadata.slot_mapping
 
         return TreeAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -210,7 +206,6 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             max_seq_len=max_seq_len,
             seq_lens=kv_seqlens,
             block_table=block_table,
-            slot_mapping=slot_mapping,
             tree_attn_bias=self.tree_attn_bias,
         )
 
