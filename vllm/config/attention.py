@@ -67,6 +67,14 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
+    flex_batch_invariant_block_m: int = 16
+    """BLOCK_M tile size for flex attention in batch-invariant mode.
+    Must be a power of 2 >= 16."""
+
+    flex_batch_invariant_block_n: int = 16
+    """BLOCK_N tile size for flex attention in batch-invariant mode.
+    Must be a power of 2 >= 16."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs

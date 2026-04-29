@@ -24,6 +24,7 @@ from torch.nn.attention.flex_attention import (
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.config.vllm import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -986,6 +987,15 @@ class FlexAttentionImpl(AttentionImpl):
                 "FlexAttention does not support quantized kv-cache. Yet"
             )
 
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            attn_cfg = vllm_config.attention_config
+            self.batch_invariant_block_m = attn_cfg.flex_batch_invariant_block_m
+            self.batch_invariant_block_n = attn_cfg.flex_batch_invariant_block_n
+        else:
+            self.batch_invariant_block_m = 16
+            self.batch_invariant_block_n = 16
+
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
         """View a 3d tensor as 4D."""
@@ -1128,8 +1138,15 @@ class FlexAttentionImpl(AttentionImpl):
         assert attn_metadata.block_mask is not None
         block_m, block_n = attn_metadata.block_mask.BLOCK_SIZE
 
+        if envs.VLLM_BATCH_INVARIANT:
+            block_m = self.batch_invariant_block_m
+            block_n = self.batch_invariant_block_n
+
         kernel_options = get_kernel_options(
-            query, block_m, block_n, attn_metadata.direct_build
+            query,
+            block_m,
+            block_n,
+            attn_metadata.direct_build,
         )
         out = flex_attention_compiled(
             query,
@@ -1171,8 +1188,19 @@ def get_kernel_options(
         return candidate
 
     if envs.VLLM_BATCH_INVARIANT:
-        kernel_options["BLOCK_M"] = 16
-        kernel_options["BLOCK_N"] = 16
+        if (
+            block_m < 16
+            or (block_m & (block_m - 1)) != 0
+            or block_n < 16
+            or (block_n & (block_n - 1)) != 0
+        ):
+            raise ValueError(
+                "flex_batch_invariant_block_m and "
+                "flex_batch_invariant_block_n must be a power of 2 >= 16, "
+                f"got {block_m}, {block_n}"
+            )
+        kernel_options["BLOCK_M"] = block_m
+        kernel_options["BLOCK_N"] = block_n
         kernel_options["IS_DIVISIBLE"] = False
         return kernel_options
     if use_direct_build:
