@@ -27,7 +27,7 @@ The class provides the following primitives:
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, NewType
 
@@ -109,7 +109,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_load(
         self,
-        keys: Iterable[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         """
@@ -128,7 +128,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Iterable[OffloadKey]):
+    def touch(self, keys: Sequence[OffloadKey]):
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
@@ -150,7 +150,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_store(
         self,
-        keys: Iterable[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         """
