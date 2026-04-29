@@ -70,7 +70,10 @@ from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
+from vllm.tool_parsers.streaming import (
+    extract_named_tool_call_streaming,
+    extract_required_tool_call_streaming,
+)
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 
@@ -773,43 +776,24 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_text = previous_text + delta_text
                                 current_text = ""
 
-                            if function_name_returned[i]:
-                                delta_tool_call = DeltaToolCall(
-                                    function=DeltaFunctionCall(arguments=delta_text),
-                                    index=i,
+                            delta_message, function_name_returned[i] = (
+                                extract_named_tool_call_streaming(
+                                    delta_text=delta_text,
+                                    function_name=tool_choice_function_name,
+                                    function_name_returned=function_name_returned[i],
+                                    tool_call_idx=history_tool_call_cnt,
+                                    tool_call_id_type=self.tool_call_id_type,
+                                    tokenizer=tokenizer,
+                                    tool_call_array_index=i,
                                 )
-                            else:
-                                # Generate ID based on tokenizer type
-                                if is_mistral_tokenizer(tokenizer):
-                                    from vllm.tool_parsers.mistral_tool_parser import (
-                                        MistralToolCall,
-                                    )
-
-                                    tool_call_id = MistralToolCall.generate_random_id()
-                                else:
-                                    tool_call_id = make_tool_call_id(
-                                        id_type=self.tool_call_id_type,
-                                        func_name=tool_choice_function_name,
-                                        idx=history_tool_call_cnt,
-                                    )
-                                delta_tool_call = DeltaToolCall(
-                                    id=tool_call_id,
-                                    type="function",
-                                    function=DeltaFunctionCall(
-                                        name=tool_choice_function_name,
-                                        arguments=delta_text,
-                                    ),
-                                    index=i,
-                                )
-                                function_name_returned[i] = True
-                                history_tool_call_cnt += 1
-
-                            delta_message = DeltaMessage(
-                                tool_calls=[
-                                    delta_tool_call,
-                                ]
                             )
-                            tools_streamed[i] = True
+                            if (
+                                delta_message
+                                and delta_message.tool_calls
+                                and delta_message.tool_calls[0].id is not None
+                            ):
+                                history_tool_call_cnt += 1
+                                tools_streamed[i] = True
 
                     # Skip when tool_choice_uses_parser so it falls through
                     # to the auto tool_parser branches below.
