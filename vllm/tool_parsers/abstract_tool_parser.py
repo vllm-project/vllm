@@ -18,6 +18,7 @@ from openai.types.responses.function_tool import FunctionTool
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+    ChatCompletionNamedToolChoiceParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -133,7 +134,7 @@ class ToolParser:
 
         # Step 2: apply xgrammar's built-in tool calling support.
         # XGrammar will support tool_choice="none" in the future. Currently, we only support tool_choice="auto" and tool_choice="required".
-        need_tool_calling = request.tool_choice == "auto" or request.tool_choice == "required"
+        need_tool_calling = request.tool_choice == "auto" or request.tool_choice == "required" or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
         if self.support_structural_tag() and need_tool_calling:
             structure_tag = self.get_structural_tag(request)
             request.structured_outputs = StructuredOutputsParams(
@@ -161,20 +162,31 @@ class ToolParser:
         
         model_id = self.get_model_structural_tag_id()
         thinking_mode = request.include_reasoning
+        tool_choice_type = (
+            "forced" if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam) else request.tool_choice
+        )
+        tool_dicts = []
+        
+        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+            for tool in request.tools:
+                if tool.function.name == request.tool_choice.function.name:
+                    tool_dicts.append(tool.model_dump())
+        else:
+            tool_dicts = [tool.model_dump() for tool in request.tools]
         
         if thinking_mode:
             return get_model_structural_tag(
                 model=model_id,
-                tools=request.tools,
-                tool_choice=request.tool_choice,
+                tools=tool_dicts,
+                tool_choice=tool_choice_type,
                 reasoning=True,
                 force_empty_reasoning=False,
             )
         else:
             return get_model_structural_tag(
                 model=model_id,
-                tools=request.tools,
-                tool_choice=request.tool_choice,
+                tools=tool_dicts,
+                tool_choice=tool_choice_type,
                 reasoning=not self.empty_thinking_as_non_thinking(),
                 force_empty_reasoning=self.empty_thinking_as_non_thinking(),
             )
