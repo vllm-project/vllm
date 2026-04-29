@@ -102,7 +102,7 @@ def backend_to_kernel_cls(
         return FlashInferExperts
 
     elif backend == UnquantizedMoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
