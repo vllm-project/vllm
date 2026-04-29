@@ -481,6 +481,13 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
+                reasoning_parser_kwargs={
+                    "chat_template_kwargs": self._effective_chat_template_kwargs(
+                        request
+                    ),
+                }
+                if self.parser and self.parser.reasoning_parser_cls is not None
+                else None,
             )
             generators.append(generator)
 
@@ -627,6 +634,7 @@ class OpenAIServingResponses(OpenAIServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
 
@@ -650,6 +658,7 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
             async for res in generator:
