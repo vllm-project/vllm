@@ -401,6 +401,11 @@ class OpenAIServingCompletion(OpenAIServing):
                                 ),
                             )
                         ],
+                        kv_transfer_params=(
+                            res.kv_transfer_params
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                     # Stamp on terminal chunk only when no trailing usage chunk
                     # will follow (that one is the true final message).
