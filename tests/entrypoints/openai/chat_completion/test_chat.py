@@ -1018,6 +1018,15 @@ def test_chat_completion_request_accepts_model_specific_reasoning_effort():
     assert chat_params.chat_template_kwargs["reasoning_effort"] == "max"
 
 
+def test_chat_completion_request_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="Input should be"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="extra_high",
+        )
+
+
 def test_chat_completion_request_n_parameter_various_values():
     """Test n parameter with various values."""
     for n_value in [1, 2, 5, 10]:

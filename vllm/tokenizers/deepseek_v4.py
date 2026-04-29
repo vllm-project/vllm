@@ -40,19 +40,16 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 messages.insert(0, {"role": "system"})
                 messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
-            # DeepSeek V4 maps OpenAI-compatible effort names onto the
-            # reference values consumed by the encoder.
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
                 reasoning_effort = None
-            elif thinking_mode == "thinking":
-                reasoning_effort = {
-                    "low": "high",
-                    "medium": "high",
-                    "xhigh": "max",
-                }.get(reasoning_effort, reasoning_effort)
-            if reasoning_effort not in ("max", "high"):
+            elif reasoning_effort == "none":
+                thinking_mode = "chat"
                 reasoning_effort = None
+            elif reasoning_effort in ("max", "xhigh"):
+                reasoning_effort = "max"
+            else:
+                reasoning_effort = "high"
 
             encode_config = dict(
                 thinking_mode=thinking_mode,
