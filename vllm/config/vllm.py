@@ -942,6 +942,27 @@ class VllmConfig:
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
+        # If the user explicitly set a cudagraph_mode that requires piecewise
+        # compilation but a lower compilation mode, upgrade `mode` to
+        # VLLM_COMPILE rather than silently turning the cudagraph off.
+        # Only honoured when the user explicitly set cudagraph_mode (not None);
+        # default values come from the optimization level and are still subject
+        # to the platform-side fallbacks in `resolve_cudagraph_mode_and_sizes`.
+        if (
+            self.compilation_config.cudagraph_mode is not None
+            and self.compilation_config.cudagraph_mode
+                .requires_piecewise_compilation()
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        ):
+            logger.warning(
+                "cudagraph_mode=%s requires CompilationMode.VLLM_COMPILE; "
+                "upgrading from mode=%s. Pass cudagraph_mode=NONE to keep "
+                "the eager mode.",
+                self.compilation_config.cudagraph_mode,
+                self.compilation_config.mode,
+            )
+            self.compilation_config.mode = CompilationMode.VLLM_COMPILE
+
         # By default, enable torch wrapping only when using custom Inductor lowering
         if self.compilation_config.ir_enable_torch_wrap is None:
             self.compilation_config.ir_enable_torch_wrap = (
@@ -970,18 +991,6 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
-
-        if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-        ):
-            logger.info(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
