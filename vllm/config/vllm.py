@@ -1432,6 +1432,10 @@ class VllmConfig:
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
             range(256, max_graph_size + 1, 16))
 
+        `max_num_batched_tokens` is also appended to the list if it fits
+        within `max_cudagraph_capture_size`, so the max batch size is captured
+        even when off-stride.
+
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
 
@@ -1520,6 +1524,12 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
+                # ensure max_num_tokens is captured if within max capture size
+                if (
+                    max_num_tokens <= max_cudagraph_capture_size
+                    and max_num_tokens not in cudagraph_capture_sizes
+                ):
+                    cudagraph_capture_sizes.append(max_num_tokens)
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
