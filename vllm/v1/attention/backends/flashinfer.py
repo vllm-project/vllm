@@ -86,12 +86,6 @@ logger = init_logger(__name__)
 trtllm_gen_workspace_buffer = None
 
 
-def _use_dflash_split_prefill(causal: bool, use_dcp: bool) -> bool:
-    if causal or use_dcp:
-        return False
-    return True
-
-
 def _get_trtllm_gen_workspace_buffer():
     global trtllm_gen_workspace_buffer
     if trtllm_gen_workspace_buffer is None:
@@ -247,24 +241,6 @@ class BatchMergedPrefillWrapper:
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
             new_tokens_workspace, get_kv_cache_layout()
         )
-        self._split_context_qo_indptr: list[torch.Tensor] = []
-        self._split_context_paged_kv_indptr: list[torch.Tensor] = []
-        self._split_context_paged_kv_indices: list[torch.Tensor] = []
-        self._split_context_last_page_len: list[torch.Tensor] = []
-        self._split_query_indptr: list[torch.Tensor] = []
-        self._split_page_size = 0
-        self._split_num_qo_heads = 0
-        self._split_num_context_qo_heads = 0
-        self._split_num_kv_heads = 0
-        self._split_head_dim = 0
-        self._split_sm_scale = 0.0
-        self._split_window_left = 0
-        self._split_logits_soft_cap: float | None = None
-        self._split_q_data_type: torch.dtype | None = None
-        self._split_kv_cache_dtype: torch.dtype | None = None
-        self._split_causal = True
-        self._split_prefill_fixed_split_size = -1
-        self._split_disable_split_kv = False
 
     def plan(
         self,
@@ -286,82 +262,37 @@ class BatchMergedPrefillWrapper:
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
     ):
-        self._split_context_qo_indptr = []
-        self._split_context_paged_kv_indptr = []
-        self._split_context_paged_kv_indices = []
-        self._split_context_last_page_len = []
-        self._split_query_indptr = []
-        split_prefill = _use_dflash_split_prefill(causal, self.use_dcp)
-        if split_prefill:
-            self._split_page_size = page_size
-            self._split_num_qo_heads = num_qo_heads
-            self._split_num_context_qo_heads = num_qo_heads * dcp_world_size
-            self._split_num_kv_heads = num_kv_heads
-            self._split_head_dim = head_dim
-            self._split_sm_scale = sm_scale
-            self._split_window_left = window_left
-            self._split_logits_soft_cap = logits_soft_cap
-            self._split_q_data_type = q_data_type
-            self._split_kv_cache_dtype = kv_cache_dtype
-            self._split_causal = causal
-            self._split_prefill_fixed_split_size = prefill_fixed_split_size
-            self._split_disable_split_kv = disable_split_kv
-            num_reqs = qo_indptr_cpu.shape[0] - 1
-            for req_idx in range(num_reqs):
-                q_start = int(qo_indptr_cpu[req_idx].item())
-                q_end = int(qo_indptr_cpu[req_idx + 1].item())
-                kv_start = int(paged_kv_indptr_cpu[req_idx].item())
-                kv_end = int(paged_kv_indptr_cpu[req_idx + 1].item())
-                req_qo_indptr = torch.tensor(
-                    [0, q_end - q_start], dtype=torch.int32, device="cpu"
-                )
-                req_paged_kv_indptr = torch.tensor(
-                    [0, kv_end - kv_start], dtype=torch.int32, device="cpu"
-                )
-                req_indices = paged_kv_indices[kv_start:kv_end]
-                req_last_page_len = paged_kv_last_page_len_cpu[
-                    req_idx : req_idx + 1
-                ].contiguous()
-                self._split_context_qo_indptr.append(req_qo_indptr)
-                self._split_context_paged_kv_indptr.append(req_paged_kv_indptr)
-                self._split_context_paged_kv_indices.append(req_indices)
-                self._split_context_last_page_len.append(req_last_page_len)
-                req_query_indptr = torch.tensor(
-                    [0, q_end - q_start], dtype=torch.int32, device="cpu"
-                )
-                self._split_query_indptr.append(req_query_indptr)
-        else:
-            self._context.plan(
-                qo_indptr=qo_indptr_cpu,
-                paged_kv_indptr=paged_kv_indptr_cpu,
-                paged_kv_indices=paged_kv_indices,
-                paged_kv_last_page_len=paged_kv_last_page_len_cpu,
-                num_qo_heads=num_qo_heads * dcp_world_size,
-                num_kv_heads=num_kv_heads,
-                head_dim_qk=head_dim,
-                page_size=page_size,
-                causal=False,
-                sm_scale=sm_scale,
-                window_left=window_left,
-                logits_soft_cap=logits_soft_cap,
-                q_data_type=q_data_type,
-                kv_data_type=kv_cache_dtype,
-                fixed_split_size=prefill_fixed_split_size,
-                disable_split_kv=disable_split_kv,
-            )
-            self._new_tokens.plan(
-                qo_indptr=qo_indptr_cpu,
-                kv_indptr=qo_indptr_cpu,
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim_qk=head_dim,
-                head_dim_vo=head_dim,
-                causal=causal,
-                sm_scale=sm_scale,
-                window_left=window_left,
-                logits_soft_cap=logits_soft_cap,
-                q_data_type=q_data_type,
-            )
+        self._context.plan(
+            qo_indptr=qo_indptr_cpu,
+            paged_kv_indptr=paged_kv_indptr_cpu,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len_cpu,
+            num_qo_heads=num_qo_heads * dcp_world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
+            causal=False,
+            sm_scale=sm_scale,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+            kv_data_type=kv_cache_dtype,
+            fixed_split_size=prefill_fixed_split_size,
+            disable_split_kv=disable_split_kv,
+        )
+        self._new_tokens.plan(
+            qo_indptr=qo_indptr_cpu,
+            kv_indptr=qo_indptr_cpu,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            head_dim_vo=head_dim,
+            causal=causal,
+            sm_scale=sm_scale,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+        )
 
     def run(
         self,
@@ -390,47 +321,6 @@ class BatchMergedPrefillWrapper:
                 get_dcp_group(),
                 return_lse=True,
             )
-        elif len(self._split_context_qo_indptr) > 0:
-            context_outputs: list[torch.Tensor] = []
-            context_lses: list[torch.Tensor] = []
-            query_offset = 0
-            for req_idx in range(len(self._split_context_qo_indptr)):
-                q_len = int(self._split_context_qo_indptr[req_idx][1].item())
-                req_query = prefill_query[query_offset : query_offset + q_len]
-                assert self._split_q_data_type is not None
-                assert self._split_kv_cache_dtype is not None
-                self._context.plan(
-                    qo_indptr=self._split_context_qo_indptr[req_idx],
-                    paged_kv_indptr=self._split_context_paged_kv_indptr[req_idx],
-                    paged_kv_indices=self._split_context_paged_kv_indices[req_idx],
-                    paged_kv_last_page_len=(
-                        self._split_context_last_page_len[req_idx]
-                    ),
-                    num_qo_heads=self._split_num_context_qo_heads,
-                    num_kv_heads=self._split_num_kv_heads,
-                    head_dim_qk=self._split_head_dim,
-                    page_size=self._split_page_size,
-                    causal=False,
-                    sm_scale=self._split_sm_scale,
-                    window_left=self._split_window_left,
-                    logits_soft_cap=self._split_logits_soft_cap,
-                    q_data_type=self._split_q_data_type,
-                    kv_data_type=self._split_kv_cache_dtype,
-                    fixed_split_size=self._split_prefill_fixed_split_size,
-                    disable_split_kv=self._split_disable_split_kv,
-                )
-                req_output, req_lse = self._context.run(
-                    req_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    return_lse=True,
-                )
-                context_outputs.append(req_output)
-                context_lses.append(req_lse)
-                query_offset += q_len
-            output_context = torch.cat(context_outputs, dim=0)
-            lse_context = torch.cat(context_lses, dim=0)
         else:
             output_context, lse_context = self._context.run(
                 prefill_query,
@@ -441,45 +331,12 @@ class BatchMergedPrefillWrapper:
             )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
-        if len(self._split_query_indptr) > 0:
-            query_outputs: list[torch.Tensor] = []
-            query_lses: list[torch.Tensor] = []
-            query_start = 0
-            for req_idx in range(len(self._split_query_indptr)):
-                q_len = int(self._split_query_indptr[req_idx][1].item())
-                req_slice = slice(query_start, query_start + q_len)
-                assert self._split_q_data_type is not None
-                self._new_tokens.plan(
-                    qo_indptr=self._split_query_indptr[req_idx],
-                    kv_indptr=self._split_query_indptr[req_idx],
-                    num_qo_heads=self._split_num_qo_heads,
-                    num_kv_heads=self._split_num_kv_heads,
-                    head_dim_qk=self._split_head_dim,
-                    head_dim_vo=self._split_head_dim,
-                    causal=self._split_causal,
-                    sm_scale=self._split_sm_scale,
-                    window_left=self._split_window_left,
-                    logits_soft_cap=self._split_logits_soft_cap,
-                    q_data_type=self._split_q_data_type,
-                )
-                req_output, req_lse = self._new_tokens.run(
-                    prefill_query[req_slice],
-                    key[req_slice],
-                    value[req_slice],
-                    return_lse=True,
-                )
-                query_outputs.append(req_output)
-                query_lses.append(req_lse)
-                query_start += q_len
-            output_query = torch.cat(query_outputs, dim=0)
-            lse_query = torch.cat(query_lses, dim=0)
-        else:
-            output_query, lse_query = self._new_tokens.run(
-                prefill_query,
-                key,
-                value,
-                return_lse=True,
-            )
+        output_query, lse_query = self._new_tokens.run(
+            prefill_query,
+            key,
+            value,
+            return_lse=True,
+        )
         lse_query = lse_query.transpose(0, 1).contiguous()
 
         merge_attn_states(
@@ -1313,6 +1170,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
             )
             assert qo_indptr_prefill_cpu.shape[0] == num_prefills + 1
+            # FlashInfer's PrefillSplitQOKVIndptr scheduler reads qo_indptr
+            # as int32 host memory. Producers like the dflash drafter feed
+            # `query_start_loc_cpu` derived from `np.arange(...)` (which is
+            # int64 by default), and reinterpreting an int64 buffer as int32
+            # makes the scheduler see `[v, 0, v, 0, ...]` and crash with
+            # "qo_indptr[i+1] - qo_indptr[i] should be non-negative". Force
+            # int32+contiguous here as a defensive guard for both the
+            # batched merged-prefill path and the regular causal path below.
+            if qo_indptr_prefill_cpu.dtype != torch.int32:
+                qo_indptr_prefill_cpu = qo_indptr_prefill_cpu.to(
+                    torch.int32
+                ).contiguous()
 
             if prefill_use_trtllm:
                 # Create GPU versions
@@ -1364,7 +1233,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
-                        paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
+                        paged_kv_last_page_len_cpu=(
+                            paged_kv_last_page_len_prefill_cpu
+                        ),
                         page_size=self.page_size,
                         num_qo_heads=self.num_qo_heads,
                         dcp_world_size=self.dcp_world_size,
@@ -1745,41 +1616,27 @@ class FlashInferImpl(AttentionImpl):
                 assert prefill_wrapper is not None
                 if use_dcp or not attn_metadata.causal:
                     assert isinstance(prefill_wrapper, BatchMergedPrefillWrapper)
-                    if not (
-                        _use_dflash_split_prefill(
-                            attn_metadata.causal,
-                            prefill_wrapper.use_dcp,
-                        )
-                        and len(prefill_wrapper._split_context_qo_indptr) > 0
-                    ):
-                        assert (
-                            prefill_wrapper._context._window_left
-                            == self.window_left
-                        )
-                        assert prefill_wrapper._context._logits_soft_cap == (
-                            self.logits_soft_cap or 0.0
-                        )
-                        assert prefill_wrapper._context._sm_scale == self.scale
-                        assert not prefill_wrapper._context._causal
-                    if not (
-                        _use_dflash_split_prefill(
-                            attn_metadata.causal,
-                            prefill_wrapper.use_dcp,
-                        )
-                        and len(prefill_wrapper._split_query_indptr) > 0
-                    ):
-                        assert (
-                            prefill_wrapper._new_tokens._window_left
-                            == self.window_left
-                        )
-                        assert prefill_wrapper._new_tokens._logits_soft_cap == (
-                            self.logits_soft_cap or 0.0
-                        )
-                        assert prefill_wrapper._new_tokens._sm_scale == self.scale
-                        assert (
-                            prefill_wrapper._new_tokens._causal
-                            == attn_metadata.causal
-                        )
+                    assert (
+                        prefill_wrapper._context._window_left
+                        == self.window_left
+                    )
+                    assert prefill_wrapper._context._logits_soft_cap == (
+                        self.logits_soft_cap or 0.0
+                    )
+                    assert prefill_wrapper._context._sm_scale == self.scale
+                    assert not prefill_wrapper._context._causal
+                    assert (
+                        prefill_wrapper._new_tokens._window_left
+                        == self.window_left
+                    )
+                    assert prefill_wrapper._new_tokens._logits_soft_cap == (
+                        self.logits_soft_cap or 0.0
+                    )
+                    assert prefill_wrapper._new_tokens._sm_scale == self.scale
+                    assert (
+                        prefill_wrapper._new_tokens._causal
+                        == attn_metadata.causal
+                    )
 
                     prefill_wrapper.run(
                         layer,
