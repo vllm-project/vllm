@@ -1171,10 +1171,6 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     assert '\\"hello world\\"' not in raw_arguments
 
 
-def test_support_builtin_structural_tag(qwen3_tool_parser: Qwen3CoderToolParser):
-    assert qwen3_tool_parser.support_structural_tag() is True
-
-
 def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],

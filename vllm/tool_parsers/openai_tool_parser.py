@@ -117,10 +117,9 @@ class OpenAIToolParser(ToolParser):
             "Not being used, manual parsing in serving_chat.py"  # noqa: E501
         )
 
-    def support_structural_tag(self) -> bool:
-        return True
-
-    def get_structural_tag(self, request: ChatCompletionRequest) -> StructuralTag:
+    def get_structural_tag(
+        self, request: ChatCompletionRequest
+    ) -> StructuralTag | None:
         def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
             if isinstance(tool, dict):
                 return tool

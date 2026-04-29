@@ -20,7 +20,9 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
     tool_call_start_token: str = "<｜DSML｜tool_calls>"
     tool_call_end_token: str = "</｜DSML｜tool_calls>"
     
-    def get_structural_tag(self, request: ChatCompletionRequest) -> StructuralTag:
+    def get_structural_tag(
+        self, request: ChatCompletionRequest
+    ) -> StructuralTag | None:
         def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
             if isinstance(tool, dict):
                 return tool

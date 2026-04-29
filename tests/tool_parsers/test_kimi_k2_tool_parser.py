@@ -629,10 +629,6 @@ class TestStreamingIntervals:
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
 
-def test_support_builtin_structural_tag(parser: KimiK2ToolParser):
-    assert parser.support_structural_tag() is True
-
-
 def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     parser: KimiK2ToolParser,
     sample_tools: list[ChatCompletionToolsParam],

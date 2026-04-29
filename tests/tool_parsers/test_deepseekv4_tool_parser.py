@@ -129,10 +129,6 @@ def test_streaming_extracts_complete_invokes():
     assert names == ["search"]
     assert json.loads(reconstruct_args(deltas)) == {"query": "deepseek v4"}
 
-def test_support_builtin_structural_tag():
-    assert make_parser().support_structural_tag() is True
-
-
 def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:

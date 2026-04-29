@@ -278,10 +278,9 @@ class KimiK2ToolParser(ToolParser):
             logger.exception("Error trying to handle streaming tool call.")
             return None  # do not stream a delta. skip this token ID.
 
-    def support_structural_tag(self) -> bool:
-        return True
-
-    def get_structural_tag(self, request: ChatCompletionRequest) -> StructuralTag:
+    def get_structural_tag(
+        self, request: ChatCompletionRequest
+    ) -> StructuralTag | None:
         def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
             if isinstance(tool, dict):
                 return tool

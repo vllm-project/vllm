@@ -307,10 +307,6 @@ def test_extract_tool_calls_with_content(
     assert extracted_info.content == final_content
 
 
-def test_support_builtin_structural_tag(openai_tool_parser: OpenAIToolParser):
-    assert openai_tool_parser.support_structural_tag() is True
-
-
 def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     openai_tool_parser: OpenAIToolParser,
     sample_tools: list[ChatCompletionToolsParam],

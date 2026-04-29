@@ -843,10 +843,6 @@ def test_convert_param_value_checked_helper(parser):
     assert parser._convert_param_value("null", "object") is None
 
 
-def test_support_builtin_structural_tag():
-    assert make_parser().support_structural_tag() is True
-
-
 def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:

@@ -134,23 +134,24 @@ class ToolParser:
 
         # Step 2: apply xgrammar's built-in tool calling support.
         # XGrammar will support tool_choice="none" in the future. Currently, we only support tool_choice="auto" and tool_choice="required".
-        need_tool_calling = request.tool_choice == "auto" or request.tool_choice == "required" or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-        if self.support_structural_tag() and need_tool_calling:
+        need_tool_calling = (
+            request.tool_choice == "auto"
+            or request.tool_choice == "required"
+            or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+        )
+        if need_tool_calling:
             structure_tag = self.get_structural_tag(request)
-            request.structured_outputs = StructuredOutputsParams(
-                structural_tag=json.dumps(structure_tag.model_dump()),
-            )
+            if structure_tag is not None:
+                request.structured_outputs = StructuredOutputsParams(
+                    structural_tag=json.dumps(structure_tag.model_dump()),
+                )
+
         return request
     
     def get_structural_tag(
         self, request: ChatCompletionRequest
-    ) -> StructuralTag:
-        raise NotImplementedError(
-            "ToolParser.get_structural_tag has not been implemented!"
-        )
-
-    def support_structural_tag(self) -> bool:
-        return False
+    ) -> StructuralTag | None:
+        return None
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
