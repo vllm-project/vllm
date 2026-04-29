@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.abstract import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
@@ -265,10 +266,12 @@ class TieringOffloadingManager(OffloadingManager):
         job_id = self._next_job_id()
 
         # Track this load job
+        store_spec = primary_store_result.store_spec
+        assert isinstance(store_spec, CPULoadStoreSpec)
         job_metadata = JobMetadata(
             job_id=job_id,
             keys=primary_store_result.keys_to_store,
-            block_ids=primary_store_result.store_spec.block_ids,
+            block_ids=store_spec.block_ids,
             req_context=req_context,
         )
         self._load_jobs[job_id] = job_metadata
@@ -407,6 +410,7 @@ class TieringOffloadingManager(OffloadingManager):
             job_id = self._next_job_id()
 
             # Track this store job
+            assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
             job_metadata = JobMetadata(
                 job_id=job_id,
                 keys=keys_list,
