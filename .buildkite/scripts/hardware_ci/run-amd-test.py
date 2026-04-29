@@ -139,6 +139,19 @@ def amd_smi_list_gpu_count() -> int:
     )
 
 
+def make_results_dir(artifact_mode: bool) -> Path:
+    root = os.environ.get("VLLM_CI_RESULTS_ROOT")
+    if root is None and artifact_mode:
+        root = str(Path.cwd() / ".buildkite" / "amd-ci-results")
+
+    if root is None:
+        return Path(tempfile.mkdtemp(prefix="vllm-ci-results-"))
+
+    root_path = Path(root).resolve()
+    root_path.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="vllm-ci-results-", dir=root_path))
+
+
 @dataclass(frozen=True)
 class RunRequest:
     commit: str
@@ -188,7 +201,7 @@ class RunRequest:
             image=image,
             commands=cls._resolve_commands(argv),
             test_name=os.environ.get("VLLM_TEST_GROUP_NAME") or None,
-            results_dir=Path(tempfile.mkdtemp(prefix="vllm-ci-results-")),
+            results_dir=make_results_dir(artifact_mode),
             hf_cache=hf_cache,
             timeout_s=int(os.environ.get("CONTAINER_TIMEOUT_S", "10200")),
             watchdog_interval_s=int(os.environ.get("WATCHDOG_INTERVAL_S", "15")),
