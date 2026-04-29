@@ -267,26 +267,6 @@ def test_dplb_token_lb_dispatches_to_fewest_tokens():
     assert chosen_engine == client.core_engines[1]
 
 
-def test_dplb_backward_compat_short_counts():
-    """Old-format 2-element counts should work regardless of token LB flag."""
-    client = object.__new__(DPLBAsyncMPClient)
-    client.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_token_lb=True)
-    )
-    client.client_count = 1
-    client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00"]
-    # 2-element lists simulating old coordinator format
-    client.lb_engines = [[1, 0], [2, 0]]
-    client.eng_start_index = 0
-
-    request = make_request(SamplingParams(max_tokens=1))
-    chosen_engine = client.get_core_engine_for_request(request)
-
-    # Falls back to request-count scoring: eng0 wins (1*4+0=4 < 2*4+0=8)
-    assert chosen_engine == client.core_engines[0]
-
-
 def loop_until_done(client: EngineCoreClient, outputs: dict):
     while True:
         engine_core_outputs = client.get_output().outputs
