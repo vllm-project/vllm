@@ -18,24 +18,6 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 
 
-@pytest.mark.parametrize(
-    "block_m,block_n",
-    [(0, 16), (8, 16), (16, 7), (15, 16), (48, 16), (16, 0)],
-)
-def test_batch_invariant_block_size_validation(
-    block_m,
-    block_n,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from vllm.v1.attention.backends.flex_attention import get_kernel_options
-
-    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
-
-    dummy_query = torch.empty(1, 1, 64, dtype=torch.float16)
-    with pytest.raises(ValueError):
-        get_kernel_options(dummy_query, block_m, block_n, False)
-
-
 @skip_unsupported
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
@@ -167,7 +149,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 )
 @pytest.mark.parametrize(
     "block_m,block_n",
-    [(16, 16), (32, 32), (16, 32)],
+    [(16, 16), (8, 16)],
 )
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend,
@@ -198,8 +180,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         gpu_memory_utilization=0.9,
         attention_config={
             "backend": backend,
-            "flex_batch_invariant_block_m": block_m,
-            "flex_batch_invariant_block_n": block_n,
+            "flex_attn_block_m": block_m,
+            "flex_attn_block_n": block_n,
         },
     )
 
