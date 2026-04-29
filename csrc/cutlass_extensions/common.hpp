@@ -160,8 +160,13 @@ template <typename Kernel>
 struct enable_sm120_family : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
-#if defined __CUDA_ARCH__ && (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300)
+#if defined __CUDA_ARCH__
+  #if (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300)
     Kernel::operator()(std::forward<Args>(args)...);
+  #else
+    printf("This kernel only support sm12x.\n");
+    asm("trap;");
+  #endif
 #endif
   }
 };
