@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import queue
+import random
 import sys
 import uuid
 import weakref
@@ -1492,17 +1493,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
 
         # Pre-admission requests are not tracked in reqs_in_flight. Without
-        # an explicit rank, ask every local DP engine and accept the first
-        # connector that recognizes the transfer params.
-        results = await asyncio.gather(
-            *[
-                self._call_utility_async(
-                    method, request_id, kv_transfer_params, reason, engine=engine
-                )
-                for engine in self.core_engines
-            ]
+        # an explicit rank, send the cleanup through one local DP engine; the
+        # empty NIXL recv only needs one D-side worker to notify the P side.
+        engine = random.choice(self.core_engines)
+        return await self._call_utility_async(
+            method,
+            request_id,
+            kv_transfer_params,
+            reason,
+            engine=engine,
         )
-        return any(results)
 
     @staticmethod
     async def process_engine_outputs(

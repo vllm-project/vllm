@@ -518,7 +518,9 @@ class NixlConnectorScheduler:
             "remote_host",
             "remote_port",
         )
-        if not all(kv_transfer_params.get(param) for param in required_params):
+        if not all(
+            kv_transfer_params.get(param) is not None for param in required_params
+        ):
             logger.warning(
                 "Cannot clean up rejected NIXL remote-prefill request %s; "
                 "missing required KVTransferParams. reason=%s params=%s",
