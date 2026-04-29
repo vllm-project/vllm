@@ -241,7 +241,7 @@ def fp8_paged_mqa_logits_torch(
             device=q.device,
             dtype=torch.float32,
         )
-        if context_lens.dim > 1:
+        if context_lens.dim() > 1:
             context_lens = context_lens.squeeze(-1)
         kv_cache_flat = kv_cache.view(-1, block_size * (dim + 4))
         for i in range(batch_size):
@@ -254,8 +254,12 @@ def fp8_paged_mqa_logits_torch(
             pages = block_tables[i, :num_pages]
             cache = kv_cache_flat[pages]
             scale_offset = block_size * dim
-            cache_value = cache[..., :scale_offset].view(dtype=fp8_dtype).to(torch.float32)
-            cache_scale = cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
+            cache_value = (
+                cache[..., :scale_offset].view(dtype=fp8_dtype).to(torch.float32)
+            )
+            cache_scale = (
+                cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
+            )
             cache_value = cache_value.view(padded_seq_len, dim)
             cache_scale = cache_scale.view(padded_seq_len)
             score = F.linear(cache_value, q_i)
