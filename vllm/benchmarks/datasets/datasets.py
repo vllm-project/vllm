@@ -1825,6 +1825,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
+            limit_mm_per_prompt=getattr(args, "random_mm_limit_mm_per_prompt", None),
         )
 
     elif args.dataset_name == "sonnet":
@@ -1869,6 +1870,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             dataset_class = VisionArenaDataset
             args.hf_split = args.hf_split if args.hf_split else "train"
             args.hf_subset = None
+            hf_kwargs["limit_mm_per_prompt"] = getattr(
+                args, "random_mm_limit_mm_per_prompt", None
+            )
         elif (
             args.dataset_path in MMVUDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MMVUDataset.SUPPORTED_DATASET_PATHS
@@ -2260,7 +2264,8 @@ class CustomMMDataset(CustomDataset):
     }
     ```
 
-    NOTE: Only the first image file in "image_files" is used for each sample request.
+    NOTE: All images in "image_files" are used per request, capped by
+    ``limit_mm_per_prompt["image"]`` (default 1 for back-compat).
 
     This is used to benchmark multimodal LLMs on arbitrary datasets.
     """
@@ -2275,6 +2280,7 @@ class CustomMMDataset(CustomDataset):
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        limit_mm_per_prompt: dict[str, int] | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # load all data if needed
@@ -2287,6 +2293,8 @@ class CustomMMDataset(CustomDataset):
                 num_requests,
             )
 
+        image_cap = (limit_mm_per_prompt or {}).get("image", 1)
+
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
@@ -2294,14 +2302,14 @@ class CustomMMDataset(CustomDataset):
             prompt = item["prompt"]
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            images = item["image_files"]
-            if len(images) > 1:
-                logger.warning(
-                    "Multiple image files found for sample %d. "
-                    "Only the first image will be used.",
-                    i,
-                )
-            mm_content = process_image(images[0])
+            raw_images = item["image_files"][:image_cap] if image_cap > 0 else []
+            mm_items = [process_image(img) for img in raw_images]
+            if not mm_items:
+                mm_content = None
+            elif len(mm_items) == 1:
+                mm_content = mm_items[0]
+            else:
+                mm_content = mm_items
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -2736,6 +2744,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         no_oversample: bool = False,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
+        limit_mm_per_prompt: dict[str, int] | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
@@ -2743,6 +2752,7 @@ class VisionArenaDataset(HuggingFaceDataset):
             raise ValueError(f"Unsupported dataset path: {self.hf_name}")
 
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        image_cap = (limit_mm_per_prompt or {}).get("image", 1)
 
         sampled_requests = []
         for i, item in enumerate(self.data):
@@ -2750,7 +2760,14 @@ class VisionArenaDataset(HuggingFaceDataset):
                 break
 
             prompt = parser_fn(item)
-            mm_content = process_image(item["images"][0])
+            raw_images = item["images"][:image_cap] if image_cap > 0 else []
+            mm_items = [process_image(img) for img in raw_images]
+            if not mm_items:
+                mm_content = None
+            elif len(mm_items) == 1:
+                mm_content = mm_items[0]
+            else:
+                mm_content = mm_items
             prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
