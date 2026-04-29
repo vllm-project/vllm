@@ -242,7 +242,10 @@ __global__ void vecMatMul_kernel(const scalar_t* mat, const scalar_t* vec,
   auto mat_f4 = reinterpret_cast<const float4*>(mat);
   auto vec_h2 = reinterpret_cast<const scalar2_t*>(vec);
   auto out_h2 = reinterpret_cast<scalar2_t*>(out);
-  __shared__ float reduction_smem[ROWS_PER_BLOCK][WARP_SIZE];
+  // [WARP_SIZE][ROWS_PER_BLOCK]: row stride (ROWS_PER_BLOCK × 4 B) does not
+  // align with the 32-bank LDS period, so Stage 2 writes land on distinct
+  // banks.
+  __shared__ float reduction_smem[WARP_SIZE][ROWS_PER_BLOCK];
   // Base offset into mat_f4 for the first float4 of the first row this block
   // owns.
   const int block_base_addr =
@@ -288,7 +291,7 @@ __global__ void vecMatMul_kernel(const scalar_t* mat, const scalar_t* vec,
   // 0..ROWS_PER_BLOCK-1 each write their row's partial sum to smem in parallel
   // (lane i writes row i).
   if (lane < ROWS_PER_BLOCK) {
-    reduction_smem[lane][warp_id] = acc[lane];
+    reduction_smem[warp_id][lane] = acc[lane];
   }
   __syncthreads();
 
@@ -301,9 +304,9 @@ __global__ void vecMatMul_kernel(const scalar_t* mat, const scalar_t* vec,
   const int num_warps = blockDim.x / WARP_SIZE;
   if (row_group_id < ROWS_PER_BLOCK) {
     float partial = 0.f;
-    for (int w = row_group_thread_id; w < num_warps;
-         w += THREADS_PER_ROW_GROUP) {
-      partial += reduction_smem[row_group_id][w];
+    for (int warp_idx = row_group_thread_id; warp_idx < num_warps;
+         warp_idx += THREADS_PER_ROW_GROUP) {
+      partial += reduction_smem[warp_idx][row_group_id];
     }
 #pragma unroll
     for (int mask = THREADS_PER_ROW_GROUP / 2; mask >= 1; mask /= 2) {
