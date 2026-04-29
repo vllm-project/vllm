@@ -458,10 +458,12 @@ class OpenAISpeechToText(OpenAIServing):
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
 
+        engine_request_ids = [
+            request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
+            for idx in range(len(engine_inputs))
+        ]
         list_result_generator = []
-        for i, engine_input in enumerate(engine_inputs):
-            request_id_item = f"{request_id}_{i}"
-
+        for request_id_item, engine_input in zip(engine_request_ids, engine_inputs):
             self._log_inputs(
                 request_id_item,
                 engine_input,
@@ -583,7 +585,16 @@ class OpenAISpeechToText(OpenAIServing):
                     )
             return final_response
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            logger.info(
+                "Request %s cancelled; aborting %d transcription engine request(s).",
+                request_id,
+                len(engine_request_ids),
+            )
+            await asyncio.gather(
+                *(self.engine_client.abort(req_id) for req_id in engine_request_ids),
+                return_exceptions=True,
+            )
+            raise
 
     async def _speech_to_text_stream_generator(
         self,
