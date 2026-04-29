@@ -25,7 +25,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     make_block_hash_with_group_id,
 )
-from vllm.v1.core.kv_connector import KVConnectorKVCacheState
+from vllm.v1.core.kv_connector import KVConnectorSchedulerContext
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
@@ -163,7 +163,7 @@ def make_scheduler(
         enable_caching=True,
         hash_block_size=BLOCK_SIZE,
     )
-    sched.bind_kv_cache_state(KVConnectorKVCacheState(gpu_block_pool))
+    sched.bind_scheduler_context(KVConnectorSchedulerContext(gpu_block_pool))
 
     return SchedulerFixture(
         scheduler=sched,

@@ -82,7 +82,7 @@ logger = init_logger(__name__)
 
 
 @runtime_checkable
-class KVCacheBlock(Protocol):
+class KVCacheBlockView(Protocol):
     """Read-only view of a KV cache block exposed to connectors."""
 
     @property
@@ -99,14 +99,14 @@ class KVCacheBlock(Protocol):
     def group_id(self) -> int | None: ...
 
 
-class KVCacheState(ABC):
+class SchedulerContext(ABC):
     """Abstract interface to the KV cache state for connectors.
 
     Provides block-level operations without exposing internal data structures.
     """
 
     @abstractmethod
-    def get_block(self, block_id: int) -> KVCacheBlock:
+    def get_block(self, block_id: int) -> KVCacheBlockView:
         """Get a read-only view of a block by ID."""
         ...
 
@@ -121,7 +121,9 @@ class KVCacheState(ABC):
         ...
 
     @abstractmethod
-    def iter_blocks(self, after_block_id: int | None = None) -> Iterator[KVCacheBlock]:
+    def iter_blocks(
+        self, after_block_id: int | None = None
+    ) -> Iterator[KVCacheBlockView]:
         """Yield free blocks in LRU order starting after the given block.
 
         Args:
@@ -496,16 +498,22 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
-    def bind_kv_cache_state(self, kv_cache_state: KVCacheState) -> None:
-        """Bind the KV cache state to the connector.
+    def bind_scheduler_context(self, scheduler_context: SchedulerContext) -> None:
+        """Bind scheduler-side state to the connector.
 
-        Called by the scheduler after the KV cache manager is constructed.
-        Connectors that need to interact with the KV cache state should
-        override this method.
+        Called once by the scheduler after the KV cache manager is
+        initialized.  The provided ``SchedulerContext`` gives connectors
+        a controlled interface to inspect and manipulate KV cache blocks
+        (e.g. touch, free, iterate the free queue) without depending on
+        scheduler internals.
+
+        Connectors that need access to scheduler state should override
+        this method to store the reference.
 
         Args:
-            kv_cache_state: Provides block-level operations for the
-                connector (touch, free, iterate).
+            scheduler_context: Scheduler-provided context that exposes
+                block-level operations (get_block, touch, free_blocks,
+                iter_blocks).
         """
         return
 

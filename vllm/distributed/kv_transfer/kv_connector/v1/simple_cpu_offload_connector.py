@@ -10,10 +10,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVCacheState,
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SchedulerContext,
     SupportsHMA,
 )
 from vllm.logger import init_logger
@@ -165,9 +165,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Scheduler-side methods ---
 
-    def bind_kv_cache_state(self, kv_cache_state: KVCacheState) -> None:
+    def bind_scheduler_context(self, scheduler_context: SchedulerContext) -> None:
         if self.scheduler_manager is not None:
-            self.scheduler_manager.bind_kv_cache_state(kv_cache_state)
+            self.scheduler_manager.bind_scheduler_context(scheduler_context)
 
     def get_num_new_matched_tokens(
         self,

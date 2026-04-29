@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVCacheState
+from vllm.distributed.kv_transfer.kv_connector.v1.base import SchedulerContext
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -123,7 +123,7 @@ class SimpleCPUOffloadScheduler:
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
 
         # GPU KV cache state - bound after scheduler builds kv_cache_manager
-        self._gpu_kv_cache_state: KVCacheState | None = None
+        self._gpu_kv_cache_state: SchedulerContext | None = None
 
         # Load metadata
         self._reqs_to_load: dict[str, LoadRequestState] = {}
@@ -203,10 +203,10 @@ class SimpleCPUOffloadScheduler:
                 target += cdiv(max_num_batched_tokens, spec.block_size)
         return int(target * (1 + WATERMARK_RATIO))
 
-    def bind_kv_cache_state(self, kv_cache_state: KVCacheState) -> None:
-        """Bind GPU KV cache state so that we can touch blocks during stores.
+    def bind_scheduler_context(self, scheduler_context: SchedulerContext) -> None:
+        """Bind scheduler context so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
-        self._gpu_kv_cache_state = kv_cache_state
+        self._gpu_kv_cache_state = scheduler_context
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
