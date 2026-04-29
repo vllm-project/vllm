@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import operator
 from collections.abc import Callable
 from typing import Any
 
@@ -336,11 +337,121 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
+    @staticmethod
+    def _dedup_and_duplicate_for_fusion(graph: fx.Graph) -> tuple[int, int]:
+        """Two-stage graph transform to enable RMSNorm+Quant fusion.
+
+        Stage 1 — Dedup: when the same RMSNorm feeds multiple *identical*
+        quant ops (same target, same args), merge them to avoid redundant
+        computation and reduce fan-out so the fusion pattern can match.
+
+        Stage 2 — Duplicate: for remaining multi-consumer norms where
+        quant ops differ (can't dedup), clone the norm so each fusable
+        quant gets a dedicated 1-to-1 norm node.
+        """
+        _RMS = {
+            "vllm.rocm_aiter_rms_norm.default",
+            "vllm_ir.rms_norm.default",
+        }
+        _FUSABLE_QUANT = {
+            "vllm.rocm_aiter_group_fp8_quant.default",
+        }
+
+        def _quant_key(node: fx.Node) -> tuple:
+            return (str(node.target), tuple(
+                (a.name if isinstance(a, fx.Node) else a)
+                for a in node.args
+            ))
+
+        def _find_getitems(quant_node: fx.Node) -> dict[int, fx.Node]:
+            gi: dict[int, fx.Node] = {}
+            for u in quant_node.users:
+                if (u.op == "call_function"
+                        and u.target is operator.getitem
+                        and isinstance(u.args[1], int)):
+                    gi[u.args[1]] = u
+            return gi
+
+        deduped = 0
+        duplicated = 0
+
+        for node in list(graph.nodes):
+            if node.op != "call_function" or str(node.target) not in _RMS:
+                continue
+
+            fusable = [
+                u for u in node.users
+                if u.op == "call_function"
+                and str(u.target) in _FUSABLE_QUANT
+            ]
+            if len(fusable) <= 1:
+                continue
+
+            groups: dict[tuple, list[fx.Node]] = {}
+            for q in fusable:
+                k = _quant_key(q)
+                groups.setdefault(k, []).append(q)
+
+            for _key, quants in groups.items():
+                if len(quants) <= 1:
+                    continue
+                keep = quants[0]
+                keep_gi = _find_getitems(keep)
+                for redundant in quants[1:]:
+                    red_gi = _find_getitems(redundant)
+                    for idx, red_getitem in red_gi.items():
+                        if idx in keep_gi:
+                            red_getitem.replace_all_uses_with(keep_gi[idx])
+                    for idx in sorted(red_gi.keys(), reverse=True):
+                        graph.erase_node(red_gi[idx])
+                    graph.erase_node(redundant)
+                    deduped += 1
+
+        for node in list(graph.nodes):
+            if node.op != "call_function" or str(node.target) not in _RMS:
+                continue
+            if len(node.users) <= 1:
+                continue
+
+            fusable = [
+                u for u in node.users
+                if u.op == "call_function"
+                and str(u.target) in _FUSABLE_QUANT
+            ]
+            if not fusable:
+                continue
+
+            other = [u for u in node.users if u not in fusable]
+            to_clone = fusable if other else fusable[1:]
+            for qu in to_clone:
+                with graph.inserting_before(qu):
+                    c = graph.call_function(
+                        node.target, node.args, node.kwargs
+                    )
+                    c.meta = node.meta.copy()
+                    qu.replace_input_with(node, c)
+                    duplicated += 1
+
+        if deduped > 0 or duplicated > 0:
+            from torch._inductor.fx_passes.post_grad import (
+                stable_topological_sort,
+            )
+            stable_topological_sort(graph)
+            graph.lint()
+        return deduped, duplicated
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        deduped, duplicated = self._dedup_and_duplicate_for_fusion(graph)
+        if deduped > 0 or duplicated > 0:
+            logger.info(
+                "Pre-fusion: deduped %d redundant quants, "
+                "duplicated %d norms", deduped, duplicated
+            )
         self.matched_count = self.patterns.apply(graph)
-        logger.debug(
-            "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
+        logger.info(
+            "%s Replaced %s patterns",
+            self.__class__.__name__, self.matched_count
         )
 
     def uuid(self) -> str:
