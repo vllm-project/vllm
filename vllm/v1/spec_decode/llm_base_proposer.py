@@ -1543,14 +1543,13 @@ class SpecDecodeBaseProposer:
 
         if hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
-                del self.model.model.topk_indices_buffer
-            self.model.model.topk_indices_buffer = (
-                target_language_model.model.topk_indices_buffer
-            )
-            logger.info(
-                "Detected MTP model with topk_indices_buffer. "
-                "Sharing target model topk_indices_buffer with the draft model."
-            )
+                self.model.model.topk_indices_buffer.set_(
+                    target_language_model.model.topk_indices_buffer
+                )
+                logger.info(
+                    "Detected MTP model with topk_indices_buffer. "
+                    "Sharing target model topk_indices_buffer with the draft model."
+                )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
