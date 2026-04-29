@@ -22,6 +22,7 @@ from vllm.config import (
     get_current_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.utils import Range
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -214,6 +215,24 @@ def test_sequence_parallelism_pass(
         )
 
     run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
+
+
+def test_sequence_parallelism_pass_requires_full_graph_compilation():
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.use_inductor_graph_partition = False
+    vllm_config.compilation_config.splitting_ops = [
+        "vllm::unified_attention_with_output"
+    ]
+
+    sequence_parallelism_pass = object.__new__(SequenceParallelismPass)
+    sequence_parallelism_pass.compilation_config = vllm_config.compilation_config
+    sequence_parallelism_pass.min_token_num = 1
+
+    with pytest.raises(
+        AssertionError,
+        match="SequenceParallelismPass requires full-graph compilation",
+    ):
+        sequence_parallelism_pass.is_applicable_for_range(Range(start=8, end=8))
 
 
 def sequence_parallelism_pass_on_test_model(
