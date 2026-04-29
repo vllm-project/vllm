@@ -22,6 +22,7 @@ CI_BASE_LABEL_OVERRIDE_PATH=""
 SCRIPT_TMP_DIR=""
 BAKE_CONFIG_FILE=""
 BAKE_FILES=()
+BAKE_TARGETS=()
 
 cleanup() {
     if [[ -n "${SCRIPT_TMP_DIR}" && -d "${SCRIPT_TMP_DIR}" ]]; then
@@ -33,6 +34,35 @@ trap cleanup EXIT
 clean_docker_tag() {
     local input="$1"
     echo "${input}" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+is_url_like() {
+    local value="${1:-}"
+    [[ "${value}" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// || "${value}" == git@*:* ]]
+}
+
+is_full_git_sha() {
+    local value="${1:-}"
+    [[ "${value}" =~ ^[0-9a-fA-F]{40}$ ]]
+}
+
+select_cache_branch_name() {
+    local candidate=""
+    local var=""
+
+    for var in \
+        ROCM_CACHE_BRANCH_NAME \
+        BUILDKITE_PULL_REQUEST_HEAD_BRANCH \
+        BUILDKITE_HEAD_BRANCH \
+        BUILDKITE_BRANCH \
+        VLLM_BRANCH; do
+        candidate="${!var:-}"
+        [[ -n "${candidate}" ]] || continue
+        is_url_like "${candidate}" && continue
+        is_full_git_sha "${candidate}" && continue
+        printf '%s\n' "${candidate}"
+        return 0
+    done
 }
 
 cache_scope_suffix() {
@@ -291,10 +321,13 @@ create_and_bootstrap_builder() {
 
 init_config() {
     TARGET="${1:-test-ci}"
+    BAKE_TARGETS=("${TARGET}")
     CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci-rocm.hcl}"
     VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake-rocm.hcl}"
     BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
     BUILDKIT_SOCKET="${BUILDKIT_SOCKET:-/run/buildkit/buildkitd.sock}"
+    PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950}"
+    export PYTORCH_ROCM_ARCH
 
     SCRIPT_TMP_DIR=$(mktemp -d -t ci-bake-rocm.XXXXXX)
     CI_HCL_PATH="${SCRIPT_TMP_DIR}/ci.hcl"
@@ -435,6 +468,8 @@ setup_builder() {
 }
 
 prepare_git_cache_metadata() {
+    local cache_branch_name=""
+
     if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
         echo "Shallow clone detected - deepening for cache key computation"
         git fetch --deepen=1 origin 2>/dev/null || true
@@ -452,14 +487,21 @@ prepare_git_cache_metadata() {
         echo "Using provided PARENT_COMMIT: ${PARENT_COMMIT}"
     fi
 
-    if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" && -n "${BUILDKITE_BRANCH:-}" ]]; then
+    if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
+        cache_branch_name=$(select_cache_branch_name)
+    fi
+
+    if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" && -n "${cache_branch_name}" ]]; then
         ROCM_CACHE_BRANCH_TAG=$(
-            compose_cache_branch_tag "$(get_buildkite_repo_slug)" "${BUILDKITE_BRANCH}"
+            compose_cache_branch_tag "$(get_buildkite_repo_slug)" "${cache_branch_name}"
         )
         export ROCM_CACHE_BRANCH_TAG
-        echo "Computed ROCm branch cache tag: ${ROCM_CACHE_BRANCH_TAG}"
+        echo "Computed ROCm branch cache tag: ${ROCM_CACHE_BRANCH_TAG} (from ${cache_branch_name})"
     elif [[ -n "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
         echo "Using provided ROCM_CACHE_BRANCH_TAG: ${ROCM_CACHE_BRANCH_TAG}"
+    elif [[ -n "${BUILDKITE_BRANCH:-}" ]]; then
+        echo "Skipping ROCm branch cache tag: no usable branch name found"
+        echo "  BUILDKITE_BRANCH=${BUILDKITE_BRANCH}"
     fi
 
     if [[ -z "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" \
@@ -564,9 +606,89 @@ extract_dependency_pins() {
     done
 }
 
+dependency_cache_ref_exists() {
+    local cache_ref="$1"
+    docker buildx imagetools inspect "${cache_ref}" >/dev/null 2>&1
+}
+
+resolve_ci_base_dependency_targets() {
+    local mode="${ROCM_DEP_CACHE_EXPORT_MODE:-missing}"
+    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+    local rixl_ref=""
+    local rocshmem_ref=""
+    local deepep_ref=""
+    local -a seed_targets=()
+
+    [[ "${TARGET}" == "ci-base-rocm-ci-with-deps" ]] || return 0
+
+    case "${mode}" in
+        always)
+            echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches"
+            return 0
+            ;;
+        never)
+            BAKE_TARGETS=("ci-base-rocm-ci")
+            echo "ROCM_DEP_CACHE_EXPORT_MODE=never; building ci_base without dependency cache exports"
+            return 0
+            ;;
+        missing|"")
+            ;;
+        *)
+            echo "Error: ROCM_DEP_CACHE_EXPORT_MODE must be one of: missing, always, never"
+            exit 1
+            ;;
+    esac
+
+    if [[ -n "${RIXL_BRANCH:-}" && -n "${UCX_BRANCH:-}" ]]; then
+        rixl_ref="${cache_repo}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH}"
+        if dependency_cache_ref_exists "${rixl_ref}"; then
+            echo "RIXL dependency cache exists: ${rixl_ref}"
+        else
+            echo "RIXL dependency cache missing; will seed: ${rixl_ref}"
+            seed_targets+=("rixl-rocm-ci")
+        fi
+    fi
+
+    if [[ -n "${ROCSHMEM_BRANCH:-}" ]]; then
+        rocshmem_ref="${cache_repo}:rocshmem-rocm-${ROCSHMEM_BRANCH}"
+        if dependency_cache_ref_exists "${rocshmem_ref}"; then
+            echo "ROCShmem dependency cache exists: ${rocshmem_ref}"
+        else
+            echo "ROCShmem dependency cache missing; will seed: ${rocshmem_ref}"
+            seed_targets+=("rocshmem-rocm-ci")
+        fi
+    fi
+
+    if [[ -n "${DEEPEP_BRANCH:-}" && -n "${ROCSHMEM_BRANCH:-}" ]]; then
+        deepep_ref="${cache_repo}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}"
+        if dependency_cache_ref_exists "${deepep_ref}"; then
+            echo "DeepEP dependency cache exists: ${deepep_ref}"
+        else
+            echo "DeepEP dependency cache missing; will seed: ${deepep_ref}"
+            seed_targets+=("deepep-rocm-ci")
+        fi
+    fi
+
+    # DeepEP inherits from ROCShmem. If ROCShmem is being seeded, seed DeepEP too
+    # so the pair stays consistent for future ci_base rebuilds.
+    if printf '%s\n' "${seed_targets[@]}" | grep -qx "rocshmem-rocm-ci" \
+        && ! printf '%s\n' "${seed_targets[@]}" | grep -qx "deepep-rocm-ci" \
+        && [[ -n "${DEEPEP_BRANCH:-}" ]]; then
+        echo "ROCShmem cache is missing; also seeding DeepEP cache"
+        seed_targets+=("deepep-rocm-ci")
+    fi
+
+    BAKE_TARGETS=("${seed_targets[@]}" "ci-base-rocm-ci")
+    if [[ ${#seed_targets[@]} -eq 0 ]]; then
+        echo "All dependency caches exist; building ci_base without dependency cache exports"
+    else
+        echo "Resolved ci_base bake targets: ${BAKE_TARGETS[*]}"
+    fi
+}
+
 print_bake_config() {
     echo "--- :page_facing_up: Resolved bake configuration"
-    docker buildx bake "${BAKE_FILES[@]}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}"
+    docker buildx bake "${BAKE_FILES[@]}" --print "${BAKE_TARGETS[@]}" | tee "${BAKE_CONFIG_FILE}"
 
     if command -v buildkite-agent >/dev/null 2>&1 && [[ -n "${BUILDKITE_BUILD_NUMBER:-}" ]]; then
         buildkite-agent artifact upload "${BAKE_CONFIG_FILE}" || true
@@ -645,7 +767,7 @@ run_bake() {
     local build_rc=0
 
     echo "--- :docker: Building ${TARGET}"
-    docker buildx bake "${BAKE_FILES[@]}" --progress plain "${TARGET}" || build_rc=$?
+    docker buildx bake "${BAKE_FILES[@]}" --progress plain "${BAKE_TARGETS[@]}" || build_rc=$?
 
     if [[ ${build_rc} -eq 0 ]]; then
         echo "--- :white_check_mark: Build complete"
@@ -729,6 +851,7 @@ main() {
     prepare_git_cache_metadata
     write_ci_base_label_override
     extract_dependency_pins
+    resolve_ci_base_dependency_targets
     print_bake_config
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then
         echo "BAKE_PRINT_ONLY=1 set; skipping build"
