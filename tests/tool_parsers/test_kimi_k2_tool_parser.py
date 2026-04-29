@@ -15,6 +15,8 @@ from tests.tool_parsers.utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionNamedFunction,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -657,12 +659,7 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
             messages=[],
             model="m",
             tools=sample_tools,
-            tool_choice={
-                "type": "function",
-                "function": {
-                    "name": tool.function.name,
-                },
-            },
+            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
         )
     tag = kimi_k2_tool_parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
