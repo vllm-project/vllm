@@ -48,7 +48,7 @@ class TestInplaceOp:
             result_regular = _custom_mm2.maybe_inplace(x, w)
 
         # check that the regular op does not modify x
-        torch.testing.assert_close(x, x1)
+        torch.testing.assert_close(x, x1, atol=0, rtol=0)
 
         with _custom_mm2.set_priority(["inplace"]):
             result_inplace: Tensor = _custom_mm2.maybe_inplace(x, w)
@@ -73,7 +73,7 @@ class TestInplaceOp:
             result_inplace = _custom_mm2(x, w)
 
         # check that x was not modified by either impl
-        torch.testing.assert_close(x, x1)
+        torch.testing.assert_close(x, x1, atol=0, rtol=0)
 
         torch.testing.assert_close(result_inplace, x1 @ w + 2)
         torch.testing.assert_close(result_regular, x1 @ w + 1)

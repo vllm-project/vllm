@@ -9,9 +9,12 @@ from typing import Any, ClassVar, Protocol, overload
 import torch
 from torch.library import Library, infer_schema
 
+from vllm.ir.tolerances import DEFAULT_TOLERANCES, ToleranceSpec
 from vllm.ir.util import hash_source, weak_cache
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy, tensors_str_no_data
+
+InputGenerator = Callable[..., tuple[Any, ...]]
 
 vllm_ir_lib = Library("vllm_ir", "FRAGMENT")
 
@@ -53,7 +56,6 @@ def register_op(f: Callable[..., Any]) -> "IrOp": ...
 def register_op(
     *,
     name: str | None = None,
-    has_reduction: bool = False,
     activations: list[str] | None = None,
     allow_inplace: bool = False,
 ) -> Callable[[Callable[..., Any]], "IrOp"]: ...
@@ -63,7 +65,6 @@ def register_op(
     f: Callable | None = None,
     *,
     name: str | None = None,
-    has_reduction: bool = False,
     activations: list[str] | None = None,
     allow_inplace: bool = False,
 ) -> "IrOp | Callable[[Callable], IrOp]":
@@ -72,7 +73,6 @@ def register_op(
 
     :param f: the native implementation of the op
     :param name: the name of the op, defaults to the function name
-    :param has_reduction: is this op is a reduction op, which affects batch-invariance
     :param activations: list of activation params, defaults to params starting with 'x'
     :param allow_inplace: add a maybe_inplace overload that allows inplace impls
     :return: the IrOp object if f is provided, otherwise a decorator
@@ -91,7 +91,7 @@ def register_op(
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
         assert op_name not in IrOp.registry
-        op = IrOp(op_name, _f, has_reduction, activations, allow_inplace)
+        op = IrOp(op_name, _f, activations, allow_inplace)
         IrOp.registry[op_name] = op
         return op
 
@@ -142,7 +142,6 @@ class IrOp:
         self,
         name: str,
         native_impl: Callable,
-        has_reduction: bool,
         activations: list[str] | None = None,
         allow_inplace: bool = False,
     ):
@@ -165,7 +164,6 @@ class IrOp:
             ]
 
         self.name = name
-        self.has_reduction = has_reduction
         self.activations = activations
         self.activation_indices = [
             i
@@ -175,6 +173,8 @@ class IrOp:
         self.impls: dict[str, IrOpImpl] = {}
         self._priority_impls: list[CallableOpImpl] = []
         self._schema_str = infer_schema(native_impl, mutates_args=[])
+        self._input_generator: InputGenerator | None = None
+        self._tolerance_overrides: ToleranceSpec = {}
         self.allow_inplace = allow_inplace
 
         # native implementation
@@ -185,10 +185,8 @@ class IrOp:
             # always supported
             supported=True,
             supports_args=None,
-            # Native implementation is always batch-invariant
-            # (batch invariance is controlled at the torch level)
-            batch_invariant=True,
-            compiled=True,  # Native can be compiled
+            # Native can be compiled
+            compiled=True,
         )
 
         # By default, fake routes directly to native,
@@ -233,7 +231,6 @@ class IrOp:
         *,
         supported: bool = True,
         supports_args: Callable[..., bool] | None = None,
-        batch_invariant: bool | None = None,
         inplace: bool = False,
         compiled: bool = False,
     ):
@@ -281,14 +278,7 @@ class IrOp:
 
         def _register_impl(f: Callable):
             impl = IrOpImpl(
-                self,
-                provider,
-                f,
-                supported,
-                supports_args,
-                batch_invariant,
-                inplace,
-                compiled,
+                self, provider, f, supported, supports_args, inplace, compiled
             )
             self.impls[provider] = impl
 
@@ -378,13 +368,7 @@ class IrOp:
         return [p.provider for p in self._priority_impls]
 
     @contextlib.contextmanager
-    def set_priority(
-        self,
-        priority: list[str],
-        *,
-        batch_invariant_only: bool = False,
-        compile: bool = False,
-    ):
+    def set_priority(self, priority: list[str], *, compile: bool = False):
         """
         Context manager to set the dispatch priority for implementations for this op.
 
@@ -408,10 +392,6 @@ class IrOp:
                 impl = self.impls[p]
                 if not impl.supported:
                     # Skip unsupported implementations
-                    continue
-
-                if batch_invariant_only and not impl.batch_invariant:
-                    # Skip non-batch-invariant implementations
                     continue
 
                 filtered_impls.append(maybe_compile(impl))
@@ -445,6 +425,80 @@ class IrOp:
 
     def supported_providers(self) -> list[str]:
         return [p.provider for p in self.impls.values() if p.supported]
+
+    @property
+    def has_input_generator(self) -> bool:
+        return self._input_generator is not None
+
+    def register_input_generator(self, fn: InputGenerator) -> InputGenerator:
+        self._input_generator = fn
+        return fn
+
+    def generate_inputs(self, **kwargs: Any) -> tuple[Any, ...]:
+        if self._input_generator is None:
+            raise RuntimeError(
+                f"No input generator registered for op '{self.name}'. "
+                f"Use @ir.ops.{self.name}.register_input_generator"
+            )
+        return self._input_generator(**kwargs)
+
+    def override_tolerance(
+        self, dtype: torch.dtype, *, atol: float, rtol: float
+    ) -> None:
+        self._tolerance_overrides[dtype] = {"atol": atol, "rtol": rtol}
+
+    def get_tolerance(self, dtype: torch.dtype) -> dict[str, float]:
+        if dtype in self._tolerance_overrides:
+            return self._tolerance_overrides[dtype]
+        if dtype in DEFAULT_TOLERANCES:
+            return DEFAULT_TOLERANCES[dtype]
+        raise ValueError(
+            f"No tolerance defined for dtype {dtype} in op '{self.name}'. "
+            f"Use op.override_tolerance({dtype}, atol=..., rtol=...) "
+            f"or add {dtype} to DEFAULT_TOLERANCES."
+        )
+
+
+class IrOpInplaceOverload:
+    def __init__(self, op: IrOp):
+        params, returns = op._schema_str.split(" -> ")
+        n_outputs = returns.count("Tensor")
+
+        assert returns.count("Tensor") == len(op.activations), (
+            "Inplace overload requires the same number of outputs as activations."
+        )
+
+        assert returns.count(",") == n_outputs - 1, (
+            "Inplace overload only supports Tensor outputs for now."
+        )
+
+        self.op = op
+        self.name = f"{op.name}.maybe_inplace"
+        self._schema_str = infer_schema(
+            op.impls["native"].impl_fn, mutates_args=op.activations
+        )
+
+        # torch registration
+        vllm_ir_lib.define(self.name + self._schema_str)
+        vllm_ir_lib.impl(
+            self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
+        )
+        # fake goes to default overload for now
+        vllm_ir_lib._register_fake(self.name, self.op._fake_call)
+
+        assert hasattr(getattr(torch.ops.vllm_ir, self.op.name), "maybe_inplace")
+        self.torch_op = getattr(torch.ops.vllm_ir, self.op.name).maybe_inplace
+
+    def __call__(self, *args, **kwargs) -> Any:
+        if not _ENABLE_TORCH_WRAP:
+            return self._inner_call(*args, **kwargs)
+
+        return self.torch_op(*args, **kwargs)
+
+    def _inner_call(self, *args, **kwargs) -> Any:
+        # Calling the maybe_inplace overload means we can use inplace impls directly.
+        impl = self.op.dispatch(*args, **kwargs)
+        return impl.impl_fn(*args, **kwargs)
 
 
 class IrOpInplaceOverload:
@@ -503,7 +557,6 @@ class IrOpImpl:
         impl_fn: Callable,
         supported: bool,
         supports_args: Callable[..., bool] | None,
-        batch_invariant: bool,
         inplace: bool = False,
         compiled: bool = False,
     ):
@@ -576,7 +629,6 @@ class IrOpImpl:
         self.uncompiled_impl_fn = impl_fn  # Always the uncompiled version
         self.supported = supported
         self._supports_args = supports_args
-        self.batch_invariant = batch_invariant
         self.inplace = inplace
         self.compiled = compiled  # Whether this impl can be compiled
         self._compiled_wrapper: IrOpImplCompiledWrapper | None = None

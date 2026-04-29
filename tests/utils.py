@@ -1826,6 +1826,7 @@ class TestFP8Layer(torch.nn.Module):
             self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
             self.input_scale = None
             self.weight_scale = None
+            self.weight_block_size = [block_size, block_size]
             if transpose_weights:
                 self.weight = self.weight.t()
         else:
@@ -1856,6 +1857,7 @@ class TestFP8Layer(torch.nn.Module):
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )
+        self.kernel.process_weights_after_loading(self)
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()

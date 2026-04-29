@@ -592,9 +592,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
 
-    def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
-        return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
-
     @property
     def quant_method(self):
         return self.base_layer.quant_method
@@ -613,7 +610,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
 
-        # source_layer is FusedMoE or SharedFusedMoE
+        # source_layer is FusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
 
 
@@ -775,5 +772,5 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        # source_layer is FusedMoE or SharedFusedMoE
+        # source_layer is FusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1

@@ -46,7 +46,7 @@ class MaybeInplaceModel(nn.Module):
         x_normed1, residual_out1 = ops.fused_add_rms_norm.maybe_inplace(
             x, residual1, self.weight1, 1e-5
         )
-        # Second maybe_inplace - x_normed1 is donated
+        # Second maybe_inplace - residual2 is donated
         x_normed2, residual_out2 = ops.fused_add_rms_norm.maybe_inplace(
             x_normed1, residual2, self.weight2, 1e-5
         )
@@ -105,13 +105,12 @@ class MixedModel(nn.Module):
 @pytest.mark.parametrize(
     "model_class,expected_clones,expected_functionalized",
     [
-        (MaybeInplaceModel, 0, 2),  # Both activations donated, no clones needed
-        (
-            FunctionalModel,
-            0,
-            0,
-        ),  # No donation, no clones (functional ops don't need clones)
-        (MixedModel, 0, 1),  # One donated, one not
+        # Both activations donated, all clones eliminated
+        (MaybeInplaceModel, 0, 2),
+        # No donation, no clones (functional ops don't need clones)
+        (FunctionalModel, 0, 0),
+        # One donated, one not
+        (MixedModel, 0, 1),
     ],
 )
 def test_inplace_functionalization(

@@ -9,6 +9,7 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
+    ReqContext,
 )
 from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -83,16 +84,15 @@ class CPUOffloadingManager(OffloadingManager):
 
     # --- OffloadingManager interface ---
 
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
-        hit_count = 0
-        for key in keys:
-            block = self._policy.get(key)
-            if block is None or not block.is_ready:
-                break
-            hit_count += 1
-        return hit_count
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        block = self._policy.get(key)
+        return block is not None and block.is_ready
 
-    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
+    def prepare_load(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> LoadStoreSpec:
         blocks = []
         for key in keys:
             block = self._policy.get(key)
@@ -112,7 +112,11 @@ class CPUOffloadingManager(OffloadingManager):
             assert block.ref_cnt > 0, f"Block {key!r} ref_cnt is already 0"
             block.ref_cnt -= 1
 
-    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
+    def prepare_store(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> PrepareStoreOutput | None:
         keys_list = list(keys)
 
         # filter out blocks that are already stored

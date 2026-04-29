@@ -20,6 +20,7 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
     from .fusion.rocm_aiter_fusion import (
+        MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -159,6 +160,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
 
+            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
+                self.passes += [MLADualRMSNormFusionPass(config)]
+
             if self.pass_config.fuse_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
@@ -196,7 +200,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
         passes.append(self.clone_elimination.uuid())
-        # passes.append(self.post_cleanup.uuid())
+        passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
         # Include the compile range in the uuid to ensure that inductor

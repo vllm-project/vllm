@@ -21,7 +21,7 @@ def poly_norm(
     from vllm import _custom_ops as ops
 
     out = torch.empty_like(x)
-    ops.poly_norm(
+    ops.poly_norm(  # type: ignore[attr-defined]
         out,
         x,
         weight,
@@ -137,6 +137,9 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None and envs.VLLM_BATCH_INVARIANT:
+            assert self.variance_size_override is None
+            return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
         return self.forward_native(x, residual)
 
     def forward_xpu(
@@ -275,9 +278,12 @@ class RMSNormGated(CustomOp):
         weight = self.weight.float()
         z = z.float() if z is not None else None
 
+        assert self.activation in ["silu", "sigmoid", "swish"]
+        act_fn = F.sigmoid if self.activation == "sigmoid" else F.silu
+
         # Apply gating before normalization if needed
         if z is not None and not self.norm_before_gate:
-            x = x * F.silu(z)
+            x = x * act_fn(z)
 
         # RMS Normalization
         if self.group_size is None:
@@ -296,7 +302,7 @@ class RMSNormGated(CustomOp):
 
         # Apply gating after normalization if needed
         if z is not None and self.norm_before_gate:
-            out = out * F.silu(z)
+            out = out * act_fn(z)
 
         return out.to(orig_dtype)
 

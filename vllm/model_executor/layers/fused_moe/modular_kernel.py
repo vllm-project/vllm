@@ -1261,7 +1261,7 @@ class FusedMoEKernelModularImpl:
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.

@@ -63,6 +63,8 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Defaults not present on node.args but required for replacement tracing
         bound_args = ir_op._py_signature.bind(*node.args)
         bound_args.apply_defaults()
+        # It is not safe to run functional passes (like DCE) on the replacements
+        # as they might not be functional.
         match.replace_by_example(
             ir_op_impl.func_impl_fn, bound_args.args, run_functional_passes=False
         )
