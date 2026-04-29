@@ -457,12 +457,6 @@ def convert_to_fp8_moe_kernel_format(
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        cutlass_uses_trtllm_ptpc = (
-            fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
-            and per_out_ch_quant
-            and w13_input_scale is None
-            and w2_input_scale is None
-        )
         w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
             layer=layer,
             w13=w13,
@@ -472,10 +466,7 @@ def convert_to_fp8_moe_kernel_format(
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
             per_out_ch_quant=per_out_ch_quant,
-            is_trtllm=(
-                fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
-                or cutlass_uses_trtllm_ptpc
-            ),
+            is_trtllm=fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM,
         )
     elif fp8_backend == Fp8MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
@@ -528,7 +519,7 @@ def make_fp8_moe_quant_config(
         )
 
     if (
-        fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+        fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         and block_shape is None
         and per_act_token_quant
         and per_out_ch_quant

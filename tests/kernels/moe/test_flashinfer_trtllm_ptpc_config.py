@@ -7,11 +7,14 @@ from enum import IntEnum
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe as fi_cutlass_moe
+import vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe as fi_trtllm_moe
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8ExpertsModular,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
@@ -24,14 +27,18 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
+)
 
 
-def test_flashinfer_cutlass_ptpc_quant_config_preserves_dynamic_scales():
+def test_flashinfer_trtllm_ptpc_quant_config_preserves_dynamic_scales():
     w1_scale = torch.ones((2, 4), dtype=torch.float32)
     w2_scale = torch.ones((2, 3), dtype=torch.float32)
 
     quant_config = make_fp8_moe_quant_config(
-        fp8_backend=Fp8MoeBackend.FLASHINFER_CUTLASS,
+        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=None,
@@ -52,7 +59,31 @@ def test_flashinfer_cutlass_ptpc_quant_config_preserves_dynamic_scales():
     assert torch.equal(quant_config.g1_alphas, w1_scale)
 
 
-def test_flashinfer_cutlass_ptpc_apply_uses_trtllm_routed_moe(
+def test_flashinfer_cutlass_does_not_claim_ptpc_quant_scheme():
+    assert not FlashInferExperts._supports_quant_scheme(
+        kFp8StaticChannelSym,
+        kFp8DynamicTokenSym,
+    )
+
+
+def test_flashinfer_trtllm_claims_ptpc_quant_scheme(monkeypatch):
+    monkeypatch.setattr(
+        fi_trtllm_moe,
+        "has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe",
+        lambda: True,
+    )
+
+    assert TrtLlmFp8ExpertsModular._supports_quant_scheme(
+        kFp8StaticChannelSym,
+        kFp8DynamicTokenSym,
+    )
+
+
+def test_flashinfer_trtllm_ptpc_supports_swigluoai_alias():
+    assert TrtLlmFp8ExpertsModular._supports_activation(MoEActivation.SWIGLUOAI)
+
+
+def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(
     monkeypatch,
 ):
     core_module = types.ModuleType("flashinfer.fused_moe.core")
@@ -83,12 +114,12 @@ def test_flashinfer_cutlass_ptpc_apply_uses_trtllm_routed_moe(
         return torch.full((3, 5), 3, dtype=torch.bfloat16)
 
     monkeypatch.setattr(
-        fi_cutlass_moe,
+        fi_trtllm_moe,
         "trtllm_moe_pack_topk_ids_weights",
         fake_pack_topk_ids_weights,
     )
     monkeypatch.setattr(
-        fi_cutlass_moe,
+        fi_trtllm_moe,
         "flashinfer_trtllm_fp8_per_channel_scale_routed_moe",
         fake_trtllm_fp8_per_channel_scale_routed_moe,
     )
@@ -104,18 +135,15 @@ def test_flashinfer_cutlass_ptpc_apply_uses_trtllm_routed_moe(
         per_act_token_quant=True,
         per_out_ch_quant=True,
     )
-    experts = object.__new__(FlashInferExperts)
+    experts = object.__new__(TrtLlmFp8ExpertsModular)
     experts.quant_config = quant_config
-    experts.use_deepseek_fp8_block_scale = False
-    experts.out_dtype = torch.bfloat16
-    experts.tp_size = 1
-    experts.tp_rank = 0
-    experts.ep_size = 1
     experts.ep_rank = 0
     experts.max_capture_size = 1
-    experts.num_experts = 2
+    experts.local_num_experts = 2
+    experts.topk = 1
+    experts.intermediate_size_per_partition = 3
+    experts.routing_method_type = RoutingMethodType.TopK
     experts.moe_config = types.SimpleNamespace(
-        intermediate_size_per_partition=3,
         routing_method=RoutingMethodType.TopK,
     )
 
@@ -134,7 +162,7 @@ def test_flashinfer_cutlass_ptpc_apply_uses_trtllm_routed_moe(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        activation=MoEActivation.SILU,
+        activation=MoEActivation.SWIGLUOAI,
         global_num_experts=2,
         expert_map=None,
         a1q_scale=a1q_scale,
@@ -161,7 +189,7 @@ def test_flashinfer_cutlass_ptpc_apply_uses_trtllm_routed_moe(
     assert torch.equal(output, torch.full((3, 5), 3, dtype=torch.bfloat16))
 
 
-def test_flashinfer_cutlass_ptpc_prepare_uses_trtllm_weight_layout(monkeypatch):
+def test_flashinfer_trtllm_ptpc_prepare_uses_trtllm_weight_layout(monkeypatch):
     flashinfer_module = types.ModuleType("flashinfer")
     shuffle_calls: list[tuple[tuple[int, ...], int]] = []
 
@@ -182,7 +210,9 @@ def test_flashinfer_cutlass_ptpc_prepare_uses_trtllm_weight_layout(monkeypatch):
     flashinfer_module.reorder_rows_for_gated_act_gemm = (  # type: ignore[attr-defined]
         fake_reorder_rows_for_gated_act_gemm
     )
-    flashinfer_module.shuffle_matrix_a = fake_shuffle_matrix_a  # type: ignore[attr-defined]
+    flashinfer_module.shuffle_matrix_a = (  # type: ignore[attr-defined]
+        fake_shuffle_matrix_a
+    )
     monkeypatch.setitem(sys.modules, "flashinfer", flashinfer_module)
 
     intermediate = 16
@@ -209,7 +239,7 @@ def test_flashinfer_cutlass_ptpc_prepare_uses_trtllm_weight_layout(monkeypatch):
     w2_scale = torch.arange(hidden_size, dtype=torch.float32).reshape(1, hidden_size, 1)
 
     out_w13, out_w2, out_w13_scale, out_w2_scale = convert_to_fp8_moe_kernel_format(
-        fp8_backend=Fp8MoeBackend.FLASHINFER_CUTLASS,
+        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
         layer=layer,
         w13=w13,
         w2=w2,
@@ -245,7 +275,7 @@ def test_flashinfer_cutlass_ptpc_prepare_uses_trtllm_weight_layout(monkeypatch):
     ]
 
 
-def test_flashinfer_cutlass_prepare_pads_and_swaps_per_channel_w13_scales():
+def test_flashinfer_prepare_pads_and_swaps_per_channel_w13_scales():
     intermediate = 3
     hidden_size = 5
     padded_intermediate = 16
@@ -295,7 +325,7 @@ def test_flashinfer_cutlass_prepare_pads_and_swaps_per_channel_w13_scales():
     assert layer.moe_config.intermediate_size_per_partition == padded_intermediate
 
 
-def test_flashinfer_cutlass_prepare_uses_quant_flag_not_scale_shape():
+def test_flashinfer_prepare_uses_quant_flag_not_scale_shape():
     intermediate = 3
     hidden_size = 5
     layer = types.SimpleNamespace(
