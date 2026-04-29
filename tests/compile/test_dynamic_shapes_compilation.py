@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
@@ -17,7 +18,6 @@ from vllm.config.compilation import (
     DynamicShapesType,
 )
 from vllm.forward_context import set_forward_context
-from vllm.tokenizers import get_tokenizer
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -28,7 +28,7 @@ def get_test_models():
         "Qwen/Qwen2-7B-Instruct",
         "meta-llama/Llama-3.1-8B",
     ]
-    if is_torch_equal_or_newer("2.12.0"):
+    if is_torch_equal_or_newer("2.12.0.dev"):
         models.append("Qwen/Qwen3-4B-Instruct-2507")
     return models
 
@@ -84,30 +84,37 @@ def test_dynamic_shapes_compilation(
         max_model_len=1024,
     )
 
-    output = model.generate(prompt)
-    result = output[0].outputs[0].text
-    # Example of setting the sampling parameters
-    tokenizer = get_tokenizer(model_name)
-    yes_tokens = tokenizer.encode("yes", add_special_tokens=False)
-    no_tokens = tokenizer.encode("no", add_special_tokens=False)
-    allowed_ids = list(set(yes_tokens + no_tokens))
-    sampling_params = SamplingParams(
-        max_tokens=1, temperature=0, allowed_token_ids=allowed_ids
-    )
+    sampling_params = SamplingParams(max_tokens=5, temperature=0, logprobs=10)
+    test_prompts = [prompt, "The capital of France is"]
 
-    output = model.generate(
-        "answer with yes or no is " + result + " rubbish for prompt " + prompt + "?",
-        sampling_params=sampling_params,
-    )
-    result = output[0].outputs[0].text
-    assert result == "yes"
+    compiled_outputs = []
+    for p in test_prompts:
+        output = model.generate(p, sampling_params)[0].outputs[0]
+        assert len(output.text.strip()) > 0, "Compiled model produced empty output"
+        compiled_outputs.append((output.token_ids, output.text, output.logprobs))
 
-    # Clean up GPU memory
     del model
     gc.collect()
     torch.accelerator.empty_cache()
     torch.accelerator.synchronize()
-    print("GPU memory cleared")
+
+    eager_model = LLM(model=model_name, enforce_eager=True, max_model_len=1024)
+    eager_outputs = []
+    for p in test_prompts:
+        output = eager_model.generate(p, sampling_params)[0].outputs[0]
+        assert len(output.text.strip()) > 0, "Eager model produced empty output"
+        eager_outputs.append((output.token_ids, output.text, output.logprobs))
+    del eager_model
+    gc.collect()
+    torch.accelerator.empty_cache()
+    torch.accelerator.synchronize()
+
+    check_logprobs_close(
+        outputs_0_lst=eager_outputs,
+        outputs_1_lst=compiled_outputs,
+        name_0="eager",
+        name_1="compiled",
+    )
 
 
 @pytest.mark.parametrize("use_aot_compile", ["0", "1"])

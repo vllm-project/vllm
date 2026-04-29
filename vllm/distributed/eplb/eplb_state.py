@@ -1147,9 +1147,7 @@ def _move_to_workspace(
     move_from_buffer(
         expert_weights=model_state.model.expert_weights[result.layer_idx],
         expert_weights_buffers=model_state.expert_buffer,
-        is_unchanged=result.is_unchanged,
-        is_received_locally=result.is_received_locally,
-        recv_metadata=result.recv_metadata,
+        transfer_metadata=result.transfer_metadata,
         new_indices=result.new_physical_to_logical_map.numpy(),
         ep_rank=ep_rank,
     )
