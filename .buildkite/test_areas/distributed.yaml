@@ -164,6 +164,8 @@ steps:
   - vllm/v1/engine/llm_engine.py
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
+  - tests/distributed/test_mnnvl_alltoall.py
+
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -207,6 +209,9 @@ steps:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
+    - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+
+    
 
 - label: 2 Node Test (4 GPUs)
   timeout_in_minutes: 30
