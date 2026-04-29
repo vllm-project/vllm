@@ -1039,11 +1039,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         input_size = self.hidden_size
         if skip_v:
             output_size = (
-                self.num_heads * self.head_size
-                + self.num_kv_heads * self.head_size
+                self.num_heads * self.head_size + self.num_kv_heads * self.head_size
             ) * tp_size
             self.output_sizes = [
-                self.num_heads * self.head_size * tp_size,   # q_proj
+                self.num_heads * self.head_size * tp_size,  # q_proj
                 self.num_kv_heads * self.head_size * tp_size,  # k_proj
             ]
         else:
@@ -1258,7 +1257,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_offsets.append(
                     (
                         "v",
-                        (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
+                        (self.total_num_heads + self.total_num_kv_heads)
+                        * self.head_size,
                         self.total_num_kv_heads * self.v_head_size,
                     )
                 )

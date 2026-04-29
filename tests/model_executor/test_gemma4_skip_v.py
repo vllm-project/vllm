@@ -21,10 +21,10 @@ import torch
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_qkv(
     hidden: int,
@@ -60,7 +60,6 @@ HEAD_DIM = 16
 
 
 class TestQKVParallelLinearSkipV:
-
     def test_weight_shape_skip_v_false(self, dist_init):
         proj = _make_qkv(HIDDEN, NUM_Q, NUM_KV, HEAD_DIM, skip_v=False)
         q_size = NUM_Q * HEAD_DIM
@@ -77,7 +76,7 @@ class TestQKVParallelLinearSkipV:
     def test_output_sizes_skip_v_true(self, dist_init):
         proj = _make_qkv(HIDDEN, NUM_Q, NUM_KV, HEAD_DIM, skip_v=True)
         assert len(proj.output_sizes) == 2
-        assert proj.output_sizes[0] == NUM_Q * HEAD_DIM   # q
+        assert proj.output_sizes[0] == NUM_Q * HEAD_DIM  # q
         assert proj.output_sizes[1] == NUM_KV * HEAD_DIM  # k
 
     def test_output_sizes_skip_v_false(self, dist_init):
@@ -122,6 +121,7 @@ class TestQKVParallelLinearSkipV:
 # (only RMSNorm + raw torch ops; default_vllm_config is sufficient)
 # ---------------------------------------------------------------------------
 
+
 class TestGemma4KeqVMathEquivalence:
     """
     Verify that deriving V via v_norm(k_pre) gives the same result as the
@@ -154,7 +154,7 @@ class TestGemma4KeqVMathEquivalence:
         # ---- old path: W_v == W_k (weight duplication) ----
         W_v = W_k.clone()
         k_pre = x @ W_k.T
-        v_pre = x @ W_v.T            # identical to k_pre
+        v_pre = x @ W_v.T  # identical to k_pre
         k_pre_4d = k_pre.unflatten(-1, (num_kv, head_dim))
         v_pre_4d = v_pre.unflatten(-1, (num_kv, head_dim))
         k_old = k_norm(k_pre_4d).flatten(-2, -1)
