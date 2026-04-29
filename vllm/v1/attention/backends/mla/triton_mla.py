@@ -67,6 +67,10 @@ class TritonMLABackend(MLACommonBackend):
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True

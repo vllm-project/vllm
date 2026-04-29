@@ -62,6 +62,10 @@ class AiterMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
 
 @dataclass
 class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
@@ -265,9 +269,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             qo_indptr = self.qo_indptr[: 1 + num_reqs]
 
         else:
-            qo_indptr = torch.arange(
-                0, num_reqs + 1, step=1, dtype=torch.int32, device=device
-            )
+            # Eager / PIECEWISE-cudagraph branch: use the proper cumulative
+            # query offsets. The previous implementation synthesized
+            # `arange(0, num_reqs+1)`, which assumed one query per request
+            # and corrupted the indptr whenever a verify step had qseqlen > 1
+            # (Eagle3 / dflash spec decode), causing the AITER ASM kernel to
+            # mis-attribute query rows and produce the dflash "!!!!" output.
+            qo_indptr = query_start_loc_device[: num_reqs + 1]
 
         # The aiter MLA ASM kernel only supports qseqlen=1 (single-token
         # decode). With speculative decoding, the verification step has
