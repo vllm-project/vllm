@@ -45,6 +45,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        init_cache: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
@@ -65,7 +66,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             and head_size in [64, 128, 256, 512]
         )
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+            init_cache=init_cache,
         )
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
@@ -211,7 +218,9 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Avoid compute cache repeatedly
+        kwargs.pop("init_cache", None)
+        super().__init__(*args, **kwargs, init_cache=False)
         cache_fp32 = self._compute_cos_sin_cache()
         self.register_buffer("cos_sin_cache", cache_fp32, persistent=False)
 
