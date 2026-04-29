@@ -131,18 +131,13 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.fuse_allreduce_rms:
-                # Run allreduce+rms fusion before sequence parallel / AsyncTP.
-                # SequenceParallelismPass rewrites all_reduce+rms_norm into
-                # reduce_scatter+rms_norm+all_gather, which can otherwise hide
-                # candidates from AllReduceFusionPass and force the graph back
-                # onto generic TP all-reduce kernels.
-                self.passes += [AllReduceFusionPass(config)]
-
             if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
+
+            if self.pass_config.fuse_allreduce_rms:
+                self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.fuse_minimax_qk_norm:
                 self.passes += [MiniMaxQKNormPass(config)]
