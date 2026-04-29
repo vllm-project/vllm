@@ -748,20 +748,16 @@ class Scheduler(SchedulerInterface):
                         num_encoder_tokens=num_encoder_tokens,
                     )
                 ):
-                    if self.kv_cache_manager.can_fit_full_sequence_in_empty_cache(
+                    if self._reject_or_defer_request_for_kv_capacity(
+                        request_queue,
                         request,
-                        num_new_computed_tokens=num_new_local_computed_tokens,
-                        new_computed_blocks=new_computed_blocks,
-                        num_external_computed_tokens=num_external_computed_tokens,
-                        num_encoder_tokens=num_encoder_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        num_external_computed_tokens,
+                        num_encoder_tokens,
                     ):
-                        if request.has_encoder_inputs:
-                            self.encoder_cache_manager.free(request)
-                        break
-
-                    request = request_queue.pop_request()
-                    self._reject_request_for_kv_capacity(request)
-                    continue
+                        continue
+                    break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -776,22 +772,16 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
-                    if self.kv_cache_manager.can_fit_full_sequence_in_empty_cache(
+                    if self._reject_or_defer_request_for_kv_capacity(
+                        request_queue,
                         request,
-                        num_new_computed_tokens=num_new_local_computed_tokens,
-                        new_computed_blocks=new_computed_blocks,
-                        num_external_computed_tokens=num_external_computed_tokens,
-                        num_encoder_tokens=num_encoder_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        num_external_computed_tokens,
+                        num_encoder_tokens,
                     ):
-                        # NOTE: we need to untouch the request from the encode
-                        # cache manager.
-                        if request.has_encoder_inputs:
-                            self.encoder_cache_manager.free(request)
-                        break
-
-                    request = request_queue.pop_request()
-                    self._reject_request_for_kv_capacity(request)
-                    continue
+                        continue
+                    break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -979,6 +969,30 @@ class Scheduler(SchedulerInterface):
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
+
+    def _reject_or_defer_request_for_kv_capacity(
+        self,
+        request_queue: RequestQueue,
+        request: Request,
+        num_new_computed_tokens: int,
+        new_computed_blocks: KVCacheBlocks | None,
+        num_external_computed_tokens: int,
+        num_encoder_tokens: int,
+    ) -> bool:
+        if self.kv_cache_manager.can_fit_full_sequence_in_empty_cache(
+            request,
+            num_new_computed_tokens=num_new_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+            num_external_computed_tokens=num_external_computed_tokens,
+            num_encoder_tokens=num_encoder_tokens,
+        ):
+            if request.has_encoder_inputs:
+                self.encoder_cache_manager.free(request)
+            return False
+
+        request = request_queue.pop_request()
+        self._reject_request_for_kv_capacity(request)
+        return True
 
     def _reject_request_for_kv_capacity(self, request: Request) -> None:
         reason = (
