@@ -29,12 +29,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
 )
 from vllm.tool_parsers.utils import partial_tag_overlap
 
-# Marker the model emits to close its thinking section. The
-# structured-output FSM must allow arbitrary content up to and
-# including this marker before the schema constraint engages,
-# otherwise the model — which always starts inside <think> when
-# enable_thinking=true — can never close the reasoning section.
-_THINKING_END_MARKER = "</think>\n\n"
+# Marker the model emits to close the thinking section.
+# FSM allows any content up to and including this marker before schema starts.
+# Used to separate reasoning from schema-conforming JSON output.
+_THINKING_END_TRIGGER = "</think>"
+_THINKING_END_BEGIN = "</think>\n\n"
 
 logger = init_logger(__name__)
 
@@ -123,10 +122,10 @@ class DeepSeekV32ToolParser(ToolParser):
             request.structured_outputs = StructuredOutputsParams(
                 structural_tag=json.dumps(
                     {
-                        "triggers": [_THINKING_END_MARKER],
+                        "triggers": [_THINKING_END_TRIGGER],
                         "structures": [
                             {
-                                "begin": _THINKING_END_MARKER,
+                                "begin": _THINKING_END_BEGIN,
                                 "schema": schema,
                                 "end": "",
                             }
