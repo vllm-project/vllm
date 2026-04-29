@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -22,6 +23,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.post("/collective_rpc")
+@instrument(span_name="POST /collective_rpc")
 async def collective_rpc(raw_request: Request):
     try:
         body = await raw_request.json()

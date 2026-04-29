@@ -103,7 +103,7 @@ class EngineCoreClient(ABC):
         return InprocClient(vllm_config, executor_class, log_stats)
 
     @staticmethod
-    @instrument(span_name="Overall Loading")
+    @instrument(span_name="Overall Loading", propagate_env=True)
     def make_async_mp_client(
         vllm_config: VllmConfig,
         executor_class: type[Executor],
@@ -716,7 +716,7 @@ def _process_utility_output(
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    @instrument(span_name="SyncMPClient init")
+    @instrument(span_name="SyncMPClient init", propagate_env=True)
     def __init__(
         self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
     ):
@@ -887,7 +887,7 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    @instrument(span_name="AsyncMPClient init")
+    @instrument(span_name="AsyncMPClient init", propagate_env=True)
     def __init__(
         self,
         vllm_config: VllmConfig,

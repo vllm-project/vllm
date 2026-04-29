@@ -512,7 +512,7 @@ def download_gguf(
     return local_files[0]
 
 
-@instrument(span_name="Download weights - HF")
+@instrument(span_name="Download weights - HF", propagate_env=True)
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -18,6 +19,7 @@ def models(request: Request) -> OpenAIServingModels:
 
 
 @router.get("/v1/models")
+@instrument(span_name="GET /v1/models")
 async def show_available_models(raw_request: Request):
     handler = models(raw_request)
 

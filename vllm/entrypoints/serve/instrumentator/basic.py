@@ -8,6 +8,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 from vllm.version import __version__ as VLLM_VERSION
 
 router = APIRouter()
@@ -29,6 +30,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/load")
+@instrument(span_name="GET /load")
 async def get_server_load_metrics(request: Request):
     # This endpoint returns the current server load metrics.
     # It tracks requests utilizing the GPU from the following routes:
@@ -52,6 +54,7 @@ async def get_server_load_metrics(request: Request):
 
 
 @router.get("/version")
+@instrument(span_name="GET /version")
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)

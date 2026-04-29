@@ -18,6 +18,7 @@ from vllm.entrypoints.serve.lora.protocol import (
     UnloadLoRAAdapterRequest,
 )
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 router = APIRouter()
@@ -40,6 +41,7 @@ def attach_router(app: FastAPI):
         },
     )
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
+    @instrument(span_name="POST /v1/load_lora_adapter")
     async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
         handler: OpenAIServingModels = models(raw_request)
         response = await handler.load_lora_adapter(request)
@@ -58,6 +60,7 @@ def attach_router(app: FastAPI):
     @router.post(
         "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
     )
+    @instrument(span_name="POST /v1/unload_lora_adapter")
     async def unload_lora_adapter(
         request: UnloadLoRAAdapterRequest, raw_request: Request
     ):

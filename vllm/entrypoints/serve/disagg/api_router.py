@@ -27,6 +27,7 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -80,6 +81,7 @@ def attach_router(app: FastAPI):
     if getattr(app.state.args, "tokens_only", False):
 
         @router.post("/abort_requests")
+        @instrument(span_name="POST /abort_requests")
         async def abort_requests(raw_request: Request):
             """
             Abort one or more requests. To be used in a

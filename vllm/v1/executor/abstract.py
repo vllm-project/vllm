@@ -91,7 +91,7 @@ class Executor(ABC):
             )
         return executor_class
 
-    @instrument(span_name="Executor init")
+    @instrument(span_name="Executor init", propagate_env=True)
     def __init__(
         self,
         vllm_config: VllmConfig,

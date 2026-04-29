@@ -218,7 +218,7 @@ class WorkerWrapperBase:
         envs = envs_list[self.rpc_rank]
         update_environment_variables(envs)
 
-    @instrument(span_name="Worker init")
+    @instrument(span_name="Worker init", propagate_env=True)
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.

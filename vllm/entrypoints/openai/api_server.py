@@ -310,6 +310,14 @@ def build_app(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
+    # Add tracing middleware last so it is the outermost wrapper.
+    # This extracts W3C trace context (traceparent/tracestate) from HTTP
+    # headers and attaches it to the OTel context before any route handler
+    # or inner middleware runs, so @instrument spans are properly parented.
+    from vllm.tracing.middleware import TraceContextMiddleware
+
+    app.add_middleware(TraceContextMiddleware)
+
     app = sagemaker_standards_bootstrap(app)
     return app
 
@@ -530,7 +538,7 @@ def validate_api_server_args(args):
         )
 
 
-@instrument(span_name="API server setup")
+@instrument(span_name="API server setup", propagate_env=True)
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, Response
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -20,6 +21,7 @@ router = APIRouter()
 
 
 @router.post("/sleep")
+@instrument(span_name="POST /sleep")
 async def sleep(raw_request: Request):
     # get POST params
     level = raw_request.query_params.get("level", "1")
@@ -31,6 +33,7 @@ async def sleep(raw_request: Request):
 
 
 @router.post("/wake_up")
+@instrument(span_name="POST /wake_up")
 async def wake_up(raw_request: Request):
     tags = raw_request.query_params.getlist("tags")
     if tags == []:
@@ -44,6 +47,7 @@ async def wake_up(raw_request: Request):
 
 
 @router.get("/is_sleeping")
+@instrument(span_name="GET /is_sleeping")
 async def is_sleeping(raw_request: Request):
     is_sleeping = await engine_client(raw_request).is_sleeping()
     return JSONResponse(content={"is_sleeping": is_sleeping})

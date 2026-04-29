@@ -18,6 +18,7 @@ from vllm.entrypoints.serve.elastic_ep.middleware import (
     set_scaling_elastic_ep,
 )
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -39,6 +40,7 @@ router = APIRouter()
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
+@instrument(span_name="POST /scale_elastic_ep")
 async def scale_elastic_ep(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -88,6 +90,7 @@ async def scale_elastic_ep(raw_request: Request):
 
 
 @router.post("/is_scaling_elastic_ep")
+@instrument(span_name="POST /is_scaling_elastic_ep")
 async def is_scaling_elastic_ep(raw_request: Request):
     return JSONResponse({"is_scaling_elastic_ep": get_scaling_elastic_ep()})
 

@@ -228,7 +228,7 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
-    @instrument(span_name="Prepare model")
+    @instrument(span_name="Prepare model", propagate_env=True)
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
@@ -809,7 +809,7 @@ class EngineCoreProc(EngineCore):
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
     addresses: EngineZmqAddresses
 
-    @instrument(span_name="EngineCoreProc init")
+    @instrument(span_name="EngineCoreProc init", propagate_env=True)
     def __init__(
         self,
         vllm_config: VllmConfig,

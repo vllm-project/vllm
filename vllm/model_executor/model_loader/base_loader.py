@@ -39,7 +39,7 @@ class BaseModelLoader(ABC):
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
-    @instrument(span_name="Load model")
+    @instrument(span_name="Load model", propagate_env=True)
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:

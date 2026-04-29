@@ -359,7 +359,7 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     return total
 
 
-@instrument(span_name="DeepGemm warmup")
+@instrument(span_name="DeepGemm warmup", propagate_env=True)
 def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     total = _count_warmup_iterations(model, max_tokens)
     if total == 0:

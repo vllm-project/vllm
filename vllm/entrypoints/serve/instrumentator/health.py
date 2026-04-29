@@ -7,6 +7,7 @@ from fastapi.responses import Response
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 from vllm.v1.engine.exceptions import EngineDeadError
 
 logger = init_logger(__name__)
@@ -20,6 +21,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health", response_class=Response)
+@instrument(span_name="GET /health")
 async def health(raw_request: Request) -> Response:
     """Health check."""
     client = engine_client(raw_request)

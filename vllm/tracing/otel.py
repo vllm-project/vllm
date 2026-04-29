@@ -7,7 +7,7 @@ import inspect
 import os
 import traceback
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from vllm.logger import init_logger
@@ -131,7 +131,8 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
     return None
 
 
-def instrument_otel(func, span_name, attributes, record_exception):
+def instrument_otel(func, span_name, attributes, record_exception,
+                    propagate_env):
     """Internal wrapper logic for sync and async functions."""
 
     # Pre-calculate static code attributes once (these don't change)
@@ -146,6 +147,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     final_span_name = span_name or func.__qualname__
     module_name = func.__module__
+    env_cm = propagate_trace_to_env if propagate_env else nullcontext
 
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
@@ -158,7 +160,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
                 attributes=code_attrs,
                 record_exception=record_exception,
             ),
-            propagate_trace_to_env(),
+            env_cm(),
         ):
             return await func(*args, **kwargs)
 
@@ -173,7 +175,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
                 attributes=code_attrs,
                 record_exception=record_exception,
             ),
-            propagate_trace_to_env(),
+            env_cm(),
         ):
             return func(*args, **kwargs)
 
