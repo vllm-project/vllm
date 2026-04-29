@@ -85,6 +85,9 @@ at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
                               at::Tensor& w_scales,
                               std::optional<at::Tensor> bias);
 
+void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
+                         const std::string& activation);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -137,6 +140,8 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       const torch::Tensor block_table,
                                       torch::Tensor slot_mapping,
                                       const int64_t block_size);
+
+void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
 void eagle_prepare_inputs_padded_kernel_impl(
@@ -231,6 +236,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCPU, &gelu_quick);
 
+#if (defined(__aarch64__) && !defined(__APPLE__))
+
+  ops.def(
+      "activation_lut_bf16(Tensor! out, Tensor input, str activation)"
+      " -> ()");
+  ops.impl("activation_lut_bf16", torch::kCPU, &activation_lut_bf16);
+
+#endif  // (defined(__aarch64__) && !defined(__APPLE__))
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -249,7 +263,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
       "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
+      "                 Tensor cos_sin_cache, bool is_neox, int "
+      "rope_dim_offset=0, bool inverse=False) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
@@ -418,6 +433,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "positions, Tensor block_table, Tensor(a3!) slot_mapping, SymInt "
       "block_size) -> ()",
       &compute_slot_mapping_kernel_impl);
+
+  ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
   // Speculative decoding kernels
   ops.def(

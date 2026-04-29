@@ -9,9 +9,12 @@ from typing import Any, ClassVar, overload
 import torch
 from torch.library import Library, infer_schema
 
+from vllm.ir.tolerances import DEFAULT_TOLERANCES, ToleranceSpec
 from vllm.ir.util import hash_source, weak_cache
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy, tensors_str_no_data
+
+InputGenerator = Callable[..., tuple[Any, ...]]
 
 vllm_ir_lib = Library("vllm_ir", "FRAGMENT")
 
@@ -113,6 +116,8 @@ class IrOp:
         self.impls: dict[str, IrOpImpl] = {}
         self._priority_impls: list[IrOpImpl] = []
         self._schema_str = infer_schema(native_impl, mutates_args=[])
+        self._input_generator: InputGenerator | None = None
+        self._tolerance_overrides: ToleranceSpec = {}
 
         # native implementation
         self.impls["native"] = IrOpImpl(
@@ -315,6 +320,38 @@ class IrOp:
 
     def supported_providers(self) -> list[str]:
         return [p.provider for p in self.impls.values() if p.supported]
+
+    @property
+    def has_input_generator(self) -> bool:
+        return self._input_generator is not None
+
+    def register_input_generator(self, fn: InputGenerator) -> InputGenerator:
+        self._input_generator = fn
+        return fn
+
+    def generate_inputs(self, **kwargs: Any) -> tuple[Any, ...]:
+        if self._input_generator is None:
+            raise RuntimeError(
+                f"No input generator registered for op '{self.name}'. "
+                f"Use @ir.ops.{self.name}.register_input_generator"
+            )
+        return self._input_generator(**kwargs)
+
+    def override_tolerance(
+        self, dtype: torch.dtype, *, atol: float, rtol: float
+    ) -> None:
+        self._tolerance_overrides[dtype] = {"atol": atol, "rtol": rtol}
+
+    def get_tolerance(self, dtype: torch.dtype) -> dict[str, float]:
+        if dtype in self._tolerance_overrides:
+            return self._tolerance_overrides[dtype]
+        if dtype in DEFAULT_TOLERANCES:
+            return DEFAULT_TOLERANCES[dtype]
+        raise ValueError(
+            f"No tolerance defined for dtype {dtype} in op '{self.name}'. "
+            f"Use op.override_tolerance({dtype}, atol=..., rtol=...) "
+            f"or add {dtype} to DEFAULT_TOLERANCES."
+        )
 
 
 class IrOpImpl:

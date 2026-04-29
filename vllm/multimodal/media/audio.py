@@ -10,6 +10,7 @@ import pybase64
 import torch
 
 from vllm.logger import init_logger
+from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
@@ -28,15 +29,9 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 
-try:
-    import resampy
-except ImportError:
-    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
-
-
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
+# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`,
+# soundfile being the main audio loading backend. Used to validate if an audio
+# loading error is due to a server error vs a client error (invalid audio file).
 # 0 = sf_error(NULL) race condition: when multiple threads fail sf_open_virtual
 #     concurrently, one thread may clear the global error before another reads it,
 #     producing code=0 ("Garbled error message from libsndfile" in soundfile).
@@ -129,7 +124,7 @@ def load_audio_soundfile(
         y = np.mean(y, axis=tuple(range(y.ndim - 1)))
 
     if sr is not None and sr != native_sr:
-        y = resampy.resample(y, sr_orig=native_sr, sr_new=sr)
+        y = resample_audio_pyav(y, orig_sr=native_sr, target_sr=sr)
         return y, int(sr)
     return y, native_sr
 

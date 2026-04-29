@@ -299,6 +299,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
 
+    task: str | None
+    """Model-specific task marker. Currently passed through for DeepSeek V4."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -332,6 +335,9 @@ class ConversationMessage(TypedDict, total=False):
 
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
+
+    task: str | None
+    """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
 
 # Passed in by user
@@ -1550,9 +1556,24 @@ def _parse_chat_message_content(
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
                 result_msg["tool_call_id"] = parsed_msg["tool_call_id"]
+            # Normalize tool message content from OpenAI array format to plain
+            # string. Clients like Claude Code / Cursor send tool results as
+            # [{"type": "text", "text": "..."}], but most chat templates only
+            # handle string content for tool messages.
+            msg_content = result_msg.get("content")
+            if isinstance(msg_content, list):
+                texts = [
+                    item.get("text", "")
+                    for item in msg_content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                ]
+                result_msg["content"] = "\n".join(texts) if texts else ""
 
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
+
+        if "task" in message and isinstance(message["task"], str):
+            result_msg["task"] = message["task"]
 
         if role == "developer":
             result_msg["tools"] = message.get("tools", None)

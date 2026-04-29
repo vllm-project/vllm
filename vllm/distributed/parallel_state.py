@@ -394,8 +394,10 @@ class GroupCoordinator:
             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
 
-        self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
-            torch.ops._C, "init_shm_manager"
+        self.use_cpu_custom_send_recv = (
+            current_platform.is_cpu()
+            and self.device_communicator
+            and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
 
     def create_mq_broadcaster(
