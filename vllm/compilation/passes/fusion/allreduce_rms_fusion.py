@@ -900,8 +900,6 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
 # TODO: make BasePattern to inherit from VllmPatternReplacement
 class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
-    FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
-
     def __init__(
         self,
         epsilon: float,
@@ -912,6 +910,7 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
         super().__init__(dtype, device)
         self.dtype = dtype
         self.epsilon = epsilon
+        self.FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
 
     def get_inputs(self) -> list[torch.Tensor]:
         return [self.empty(5, 16), self.empty(16)]
@@ -946,8 +945,6 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
 
 
 class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
-    FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
-
     def __init__(
         self,
         epsilon: float,
@@ -961,6 +958,7 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(
             epsilon, match_rocm_aiter=use_aiter_rmsnorm
         )
+        self.FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
 
     def get_inputs(self) -> list[torch.Tensor]:
         input, residual, weight = self.rmsnorm_matcher.inputs()
