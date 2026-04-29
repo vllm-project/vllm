@@ -187,9 +187,10 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
+        query = self.empty(5, self.num_heads, self.head_size)
         key = self.empty(5, self.num_kv_heads, self.head_size)
         cos_sin_cache = self.empty(4096, self.rotary_dim)
-        return [positions, key, cos_sin_cache]
+        return [positions, query, key, cos_sin_cache]
 
     def forward_custom(
         self,
