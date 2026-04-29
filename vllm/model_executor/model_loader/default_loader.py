@@ -76,7 +76,11 @@ class DefaultModelLoader(BaseModelLoader):
         self.local_expert_ids: set[int] | None = None
 
         extra_config = load_config.model_loader_extra_config
-        allowed_keys = {"enable_multithread_load", "num_threads"}
+        allowed_keys = {
+            "enable_multithread_load",
+            "num_threads",
+            "enable_weights_track",
+        }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -85,6 +89,10 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{load_config.load_format}: "
                 f"{unexpected_keys}"
             )
+
+        self.enable_weights_track: bool | None = extra_config.get(
+            "enable_weights_track", None
+        )
 
     def _prepare_weights(
         self,
@@ -377,7 +385,6 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
-        weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
@@ -386,8 +393,36 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
         # We only enable strict check for non-quantized models
-        # that have loaded weights tracking currently.
-        if model_config.quantization is None and loaded_weights is not None:
+        # that have loaded weights tracking by default.
+        default_enable_weights_track = (
+            model_config.quantization is None and loaded_weights is not None
+        )
+        enable_weights_track = (
+            self.enable_weights_track
+            if self.enable_weights_track is not None
+            else default_enable_weights_track
+        )
+        if enable_weights_track:
+            self.track_weights_loading(model, loaded_weights)
+
+    def track_weights_loading(
+        self, model: nn.Module, loaded_weights: set[str] | None
+    ) -> None:
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        if loaded_weights is not None:
+            # ignore online quantization scales
+            for name, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                has_postprocess_quant = getattr(
+                    quant_method, "process_weights_after_loading", None
+                )
+                # ignore kv_cache scale and online quant scale,
+                # which can be missing in checkpoints
+                if has_online_quant or has_postprocess_quant:
+                    for param_name, _ in module.named_parameters():
+                        full_name = f"{name}.{param_name}" if name else param_name
+                        loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError(
