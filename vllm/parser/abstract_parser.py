@@ -459,7 +459,10 @@ class DelegatingParser(Parser):
             (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         ):
             # Forced Function Call
-            assert content is not None
+            if not content:
+                # No content generated (e.g. max_tokens reached during
+                # reasoning). Do not fabricate an empty tool call.
+                return function_calls, content
             function_calls.append(
                 FunctionCall(name=self._get_function_name(request), arguments=content)
             )

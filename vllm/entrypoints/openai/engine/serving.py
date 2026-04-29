@@ -638,7 +638,10 @@ class OpenAIServing:
             and request.tool_choice
             and isinstance(request.tool_choice, ToolChoiceFunction)
         ):
-            assert content is not None
+            if not content:
+                # No content generated (e.g. max_tokens reached during
+                # reasoning). Do not fabricate an empty tool call.
+                return None, content
             # Forced Function Call (Responses API)
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
@@ -650,8 +653,11 @@ class OpenAIServing:
             and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
             and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
         ):
+            if not content:
+                # No content generated (e.g. max_tokens reached during
+                # reasoning). Do not fabricate an empty tool call.
+                return None, content
             # Named function with standard JSON-based parsing
-            assert content is not None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )

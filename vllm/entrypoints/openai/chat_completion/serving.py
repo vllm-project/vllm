@@ -1140,6 +1140,177 @@ class OpenAIServingChat(OpenAIServing):
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
+    def _build_tool_call_class_items(
+        self,
+        tool_calls: list[FunctionCall],
+        tool_call_class: type[ToolCall],
+        tokenizer: TokenizerLike,
+        history_tool_call_cnt: int,
+    ) -> tuple[list[ToolCall], int]:
+        """Build ToolCall items from FunctionCalls, generating IDs as needed."""
+        items: list[ToolCall] = []
+        for tc in tool_calls:
+            if tc.id:
+                items.append(tool_call_class(id=tc.id, function=tc))
+            elif is_mistral_tokenizer(tokenizer):
+                items.append(tool_call_class(function=tc))
+            else:
+                generated_id = make_tool_call_id(
+                    id_type=self.tool_call_id_type,
+                    func_name=tc.name,
+                    idx=history_tool_call_cnt,
+                )
+                items.append(tool_call_class(id=generated_id, function=tc))
+            history_tool_call_cnt += 1
+        return items, history_tool_call_cnt
+
+    def _build_full_generator_message(
+        self,
+        request: ChatCompletionRequest,
+        reasoning: str | None,
+        content: str | None,
+        tool_calls: list[FunctionCall] | None,
+        tool_call_class: type[ToolCall],
+        tokenizer: TokenizerLike,
+        history_tool_call_cnt: int,
+    ) -> tuple[ChatMessage, bool, int]:
+        """Build the ChatMessage for a non-streaming output.
+
+        Returns a tuple of (message, auto_tools_called,
+        updated_history_tool_call_cnt).
+        """
+        role = self.get_chat_request_role(request)
+        use_mistral_tool_parser = request._grammar_from_tool_parser
+
+        if use_mistral_tool_parser:
+            from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
+
+            tool_call_items = MistralToolParser.build_non_streaming_tool_calls(
+                tool_calls
+            )
+            auto_tools_called = bool(
+                tool_call_items
+                and (request.tool_choice is None or request.tool_choice == "auto")
+            )
+            return (
+                ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tool_calls=tool_call_items,
+                ),
+                auto_tools_called,
+                history_tool_call_cnt,
+            )
+
+        # Named and required tool choices are handled regardless of whether
+        # auto tool parsing is enabled.
+        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+            if tool_calls:
+                items, history_tool_call_cnt = self._build_tool_call_class_items(
+                    tool_calls, tool_call_class, tokenizer, history_tool_call_cnt
+                )
+                return (
+                    ChatMessage(
+                        role=role,
+                        reasoning=reasoning,
+                        content="",
+                        tool_calls=items,
+                    ),
+                    False,
+                    history_tool_call_cnt,
+                )
+            return (
+                ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content or "",
+                ),
+                False,
+                history_tool_call_cnt,
+            )
+
+        if request.tool_choice == "required":
+            if tool_calls:
+                items, history_tool_call_cnt = self._build_tool_call_class_items(
+                    tool_calls, tool_call_class, tokenizer, history_tool_call_cnt
+                )
+                return (
+                    ChatMessage(
+                        role=role,
+                        content="",
+                        tool_calls=items,
+                        reasoning=reasoning,
+                    ),
+                    False,
+                    history_tool_call_cnt,
+                )
+            return (
+                ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content or "",
+                ),
+                False,
+                history_tool_call_cnt,
+            )
+
+        # No tool choice or explicitly disabled.
+        if not request.tool_choice or request.tool_choice == "none":
+            return (
+                ChatMessage(role=role, reasoning=reasoning, content=content),
+                False,
+                history_tool_call_cnt,
+            )
+
+        # Auto tool choice: only parse tools when both the flag and parser
+        # are available.
+        if request.tool_choice == "auto" or request.tool_choice is None:
+            if self.enable_auto_tools and self.tool_parser and tool_calls:
+                items, history_tool_call_cnt = self._build_tool_call_class_items(
+                    tool_calls, tool_call_class, tokenizer, history_tool_call_cnt
+                )
+                return (
+                    ChatMessage(
+                        role=role,
+                        reasoning=reasoning,
+                        content=content,
+                        tool_calls=items,
+                    ),
+                    True,
+                    history_tool_call_cnt,
+                )
+            return (
+                ChatMessage(role=role, reasoning=reasoning, content=content),
+                False,
+                history_tool_call_cnt,
+            )
+
+        # Any other unsupported tool_choice value falls through.
+        logger.error(
+            "Error in chat_completion_full_generator - cannot determine"
+            " if tools should be extracted. Returning a standard chat "
+            "completion."
+        )
+        return (
+            ChatMessage(role=role, reasoning=reasoning, content=content),
+            False,
+            history_tool_call_cnt,
+        )
+
+    @staticmethod
+    def _compute_full_generator_finish_reason(
+        request: ChatCompletionRequest,
+        output: CompletionOutput,
+        auto_tools_called: bool,
+    ) -> str:
+        """Determine the finish_reason for a non-streaming choice."""
+        if auto_tools_called:
+            return "tool_calls"
+        if request.tool_choice == "required" and output.finish_reason == "stop":
+            return "tool_calls"
+        return output.finish_reason if output.finish_reason else "stop"
+
     async def chat_completion_full_generator(
         self,
         request: ChatCompletionRequest,
@@ -1257,9 +1428,6 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning = None
                 content = output.text
 
-            auto_tools_called = False
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
             tool_calls, content = self._parse_tool_calls_from_content(
                 request=request,
                 tokenizer=tokenizer,
@@ -1274,190 +1442,27 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_call_class = ToolCall
 
-            use_mistral_tool_parser = request._grammar_from_tool_parser
-            if use_mistral_tool_parser:
-                from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
-
-                tool_call_items = MistralToolParser.build_non_streaming_tool_calls(
-                    tool_calls
-                )
-                if tool_call_items:
-                    auto_tools_called = (
-                        request.tool_choice is None or request.tool_choice == "auto"
-                    )
-                message = ChatMessage(
-                    role=role,
+            message, auto_tools_called, history_tool_call_cnt = (
+                self._build_full_generator_message(
+                    request=request,
                     reasoning=reasoning,
                     content=content,
-                    tool_calls=tool_call_items,
+                    tool_calls=tool_calls,
+                    tool_call_class=tool_call_class,
+                    tokenizer=tokenizer,
+                    history_tool_call_cnt=history_tool_call_cnt,
                 )
+            )
 
-            elif (not self.enable_auto_tools or not self.tool_parser) and (
-                not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and request.tool_choice != "required"
-            ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            ):
-                assert tool_calls is not None and len(tool_calls) > 0
-                tool_call_class_items = []
-                for idx, tc in enumerate(tool_calls):
-                    # Use native ID if available (e.g., Kimi K2),
-                    # otherwise generate ID with correct id_type
-                    if tc.id:
-                        tool_call_class_items.append(
-                            tool_call_class(id=tc.id, function=tc)
-                        )
-                    else:
-                        # Generate ID using the correct format (kimi_k2 or random),
-                        # but leave it to the class if it's Mistral to preserve
-                        # 9-char IDs
-                        if is_mistral_tokenizer(tokenizer):
-                            tool_call_class_items.append(tool_call_class(function=tc))
-                        else:
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt,
-                            )
-                            tool_call_class_items.append(
-                                tool_call_class(id=generated_id, function=tc)
-                            )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content="",
-                    tool_calls=tool_call_class_items,
-                )
-
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_class_items = []
-                tool_calls = tool_calls or []
-                for idx, tool_call in enumerate(tool_calls):
-                    # Use native ID if available,
-                    # otherwise generate ID with correct id_type
-                    if tool_call.id:
-                        tool_call_class_items.append(
-                            tool_call_class(id=tool_call.id, function=tool_call)
-                        )
-                    else:
-                        # Generate ID using the correct format (kimi_k2 or random),
-                        # but leave it to the class if it's Mistral to preserve
-                        # 9-char IDs
-                        if is_mistral_tokenizer(tokenizer):
-                            tool_call_class_items.append(
-                                tool_call_class(function=tool_call)
-                            )
-                        else:
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tool_call.name,
-                                idx=history_tool_call_cnt,
-                            )
-                            tool_call_class_items.append(
-                                tool_call_class(id=generated_id, function=tool_call)
-                            )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    content="",
-                    tool_calls=tool_call_class_items,
-                    reasoning=reasoning,
-                )
-
-            # if the request doesn't use tool choice
-            # OR specifies to not use a tool
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-
-            # handle when there are tools and tool choice is auto
-            elif (
-                request.tools
-                and (request.tool_choice == "auto" or request.tool_choice is None)
-                and self.enable_auto_tools
-                and self.tool_parser
-            ):
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
-                auto_tools_called = tool_calls is not None and len(tool_calls) > 0
-                if tool_calls:
-                    tool_call_items = []
-                    for idx, tc in enumerate(tool_calls):
-                        # Use native ID if available (e.g., Kimi K2),
-                        # otherwise generate ID with correct id_type
-                        if tc.id:
-                            tool_call_items.append(
-                                tool_call_class(id=tc.id, function=tc)
-                            )
-                        else:
-                            # Generate ID using the correct format (kimi_k2 or random),
-                            # but leave it to the class if it's Mistral to preserve
-                            # 9-char IDs
-                            if is_mistral_tokenizer(tokenizer):
-                                tool_call_items.append(tool_call_class(function=tc))
-                            else:
-                                generated_id = make_tool_call_id(
-                                    id_type=self.tool_call_id_type,
-                                    func_name=tc.name,
-                                    idx=history_tool_call_cnt,
-                                )
-                                tool_call_items.append(
-                                    tool_call_class(id=generated_id, function=tc)
-                                )
-                        history_tool_call_cnt += 1
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=tool_call_items,
-                    )
-
-                else:
-                    # FOR NOW make it a chat message; we will have to detect
-                    # the type to make it later.
-                    ret_content = content
-
-                    # try to use content return from tool parser first,
-                    # tool parser may do some modify for the content.
-                    if content and len(content) > 0:
-                        ret_content = content
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=ret_content,
-                    )
-
-            # undetermined case that is still important to handle
-            else:
-                logger.error(
-                    "Error in chat_completion_full_generator - cannot determine"
-                    " if tools should be extracted. Returning a standard chat "
-                    "completion."
-                )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-            # In OpenAI's API, when a tool is called, the finish_reason is:
-            # "tool_calls" for "auto" or "required" tool calls,
-            # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
-                request.tool_choice
-                and request.tool_choice == "required"
-                and output.finish_reason == "stop"
+            finish_reason = self._compute_full_generator_finish_reason(
+                request, output, auto_tools_called
             )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls"
-                if is_finish_reason_tool_calls
-                else output.finish_reason
-                if output.finish_reason
-                else "stop",
+                finish_reason=finish_reason,
                 stop_reason=output.stop_reason,
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
