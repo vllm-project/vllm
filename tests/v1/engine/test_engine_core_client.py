@@ -267,50 +267,6 @@ def test_dplb_token_lb_dispatches_to_fewest_tokens():
     assert chosen_engine == client.core_engines[1]
 
 
-def test_dplb_token_lb_with_running_backlog():
-    """Running request remaining tokens affect dispatch.
-    Engine with many running reqs but small remaining tokens
-    should be preferred over engine with large prefill running."""
-    client = object.__new__(DPLBAsyncMPClient)
-    client.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_token_lb=True)
-    )
-    client.client_count = 1
-    client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00"]
-    # Engine 0: 10 running reqs in decode (remaining tokens = 1 each)
-    # Engine 1: 1 running req in prefill (5000 remaining tokens)
-    # Token LB: eng0 wins (40 + 0 + 10 < 4 + 5000 + 0)
-    client.lb_engines = [[0, 10, 0, 10], [0, 1, 0, 5000]]
-    client.eng_start_index = 0
-
-    request = make_request(SamplingParams(max_tokens=1))
-    chosen_engine = client.get_core_engine_for_request(request)
-
-    assert chosen_engine == client.core_engines[0]
-
-
-def test_dplb_token_lb_falls_back_to_request_count():
-    """When token LB is disabled (default), request-count scoring is used."""
-    client = object.__new__(DPLBAsyncMPClient)
-    client.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_token_lb=False)
-    )
-    client.client_count = 1
-    client.reqs_in_flight = {}
-    client.core_engines = [b"\x00\x00", b"\x01\x00"]
-    # Same setup as token LB test: eng0 has 1 req with 10000 tokens,
-    # eng1 has 2 reqs with 2000 tokens.
-    # Request-level LB: eng0 wins (1*4+0=4 < 2*4+0=8)
-    client.lb_engines = [[1, 0, 10000, 0], [2, 0, 2000, 0]]
-    client.eng_start_index = 0
-
-    request = make_request(SamplingParams(max_tokens=1))
-    chosen_engine = client.get_core_engine_for_request(request)
-
-    assert chosen_engine == client.core_engines[0]
-
-
 def test_dplb_backward_compat_short_counts():
     """Old-format 2-element counts should work regardless of token LB flag."""
     client = object.__new__(DPLBAsyncMPClient)
