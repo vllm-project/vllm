@@ -266,17 +266,11 @@ if current_platform.is_rocm():
         tl.store(key_cache_ptr + dst_k_shuffle_offset, k_val)
         tl.store(value_cache_ptr + dst_v_shuffle_offset, v_val)
 
-    def reshape_and_cache_shuffle_triton(
+    def _get_shuffle_kv_cache_views(
         key: torch.Tensor,
-        value: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        k_scales: torch.Tensor,
-        v_scales: torch.Tensor,
-    ):
-        num_tokens = slot_mapping.shape[0]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         _, num_kv_heads, head_size = key.shape
         num_blocks, block_size, _, _ = key_cache.shape
         x = 16 // key_cache.element_size()
@@ -290,8 +284,27 @@ if current_platform.is_rocm():
             dtype=value_cache.dtype,
             device="meta",
         )
-        new_key_cache = key_cache.view_as(k_cache_template)
-        new_value_cache = value_cache.view_as(v_cache_template)
+        return key_cache.view_as(k_cache_template), value_cache.view_as(
+            v_cache_template
+        )
+
+    def reshape_and_cache_shuffle_triton(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
+    ):
+        num_tokens = slot_mapping.shape[0]
+        _, num_kv_heads, head_size = key.shape
+        _, block_size, _, _ = key_cache.shape
+        x = 16 // key_cache.element_size()
+        new_key_cache, new_value_cache = _get_shuffle_kv_cache_views(
+            key, key_cache, value_cache
+        )
         QUANT = False
         if is_quantized_kv_cache(kv_cache_dtype):
             QUANT = True
@@ -1462,12 +1475,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
 
     def fused_rope_kvcache_supported(self):
-        # Only support fusion when shuffle KV cache layout is not used;
-        # shuffle layout uses a different cache update path.
-        return (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        )
+        return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
         self,
@@ -1482,12 +1490,21 @@ class AiterFlashAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         key_cache, value_cache = kv_cache.unbind(0)
-        flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
+
+        flash_layout = not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        # The working non-fused shuffled path stores FP8 KV without applying the
+        # per-layer scales here, and decode consumes the resulting cache with
+        # per-token unit scales. Keep fusion aligned with that representation.
+        apply_fp8_scale = is_fp8_kv_cache and flash_layout
+        if not flash_layout:
+            key_cache, value_cache = _get_shuffle_kv_cache_views(
+                key, key_cache, value_cache
+            )
 
         rocm_aiter_ops.triton_rope_and_cache(
             query,
@@ -1502,5 +1519,5 @@ class AiterFlashAttentionImpl(AttentionImpl):
             layer._k_scale,
             layer._v_scale,
             flash_layout,
-            is_fp8_kv_cache,
+            apply_fp8_scale,
         )
