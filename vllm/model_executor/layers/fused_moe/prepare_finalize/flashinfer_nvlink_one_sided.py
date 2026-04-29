@@ -114,6 +114,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         payloads.append(a1q)
         if a1q_scale is not None:
             payloads.append(a1q_scale)
+        topk_ids_payload_index = len(payloads)
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
@@ -122,6 +123,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            invalid_token_expert_id=num_experts,
+            expert_id_payload_index=topk_ids_payload_index,
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
