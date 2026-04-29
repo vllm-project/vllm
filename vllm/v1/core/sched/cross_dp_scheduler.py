@@ -814,8 +814,8 @@ class CrossDPScheduler(Scheduler):
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
 
-                    if len(preempted_req.cp_ranks) > 1:
-                        raise RuntimeError("Preempted request has multiple CP ranks is not supported now.")
+                    # if len(preempted_req.cp_ranks) > 1:
+                    #     raise RuntimeError("Preempted request has multiple CP ranks is not supported now.")
 
                     for rank in preempted_req.cp_ranks:
                         preempted_reqs[rank].append(preempted_req)
@@ -1164,7 +1164,7 @@ class CrossDPScheduler(Scheduler):
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
 
-        assert sum(len(sub) for sub in scheduled_resumed_reqs) == 0, "Scheduled resumed requests are not supported now."
+        # assert sum(len(sub) for sub in scheduled_resumed_reqs) == 0, "Scheduled resumed requests are not supported now."
 
         self.request_manager.balancer.release_all_tasks()
 
