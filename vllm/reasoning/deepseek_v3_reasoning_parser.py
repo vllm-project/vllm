@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
 
 from .identity_reasoning_parser import IdentityReasoningParser
 
@@ -18,6 +20,16 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
+
+# When thinking is enabled the chat template opens a <think> block before
+# generation begins. Any structured-output constraint applied from token 0
+# would block the closing </think>, so we wrap the constraint in a structural
+# tag that only engages after the reasoning section is closed. The trigger is
+# the bare closing tag (kicks in as soon as </think> appears) and the
+# structure's `begin` forces the canonical \n\n separator before the schema-
+# conforming output starts. See vllm-project/vllm#41132 / #33215.
+_THINKING_END_TRIGGER = "</think>"
+_THINKING_END_BEGIN = "</think>\n\n"
 
 
 class DeepSeekV3ReasoningParser(ReasoningParser):
@@ -47,6 +59,42 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     @property
     def reasoning_end_str(self) -> str | None:
         return self._parser.reasoning_end_str
+
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        if not isinstance(self._parser, DeepSeekR1ReasoningParser):
+            return request
+
+        response_format = getattr(request, "response_format", None)
+        if response_format is None:
+            return request
+
+        if response_format.type == "json_schema":
+            json_schema = response_format.json_schema
+            assert json_schema is not None
+            schema = json_schema.json_schema
+        elif response_format.type == "json_object":
+            schema = {"type": "object"}
+        else:
+            return request
+
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=json.dumps(
+                {
+                    "triggers": [_THINKING_END_TRIGGER],
+                    "structures": [
+                        {
+                            "begin": _THINKING_END_BEGIN,
+                            "schema": schema,
+                            "end": "",
+                        }
+                    ],
+                }
+            )
+        )
+        request.response_format = None
+        return request
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
