@@ -60,6 +60,7 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         self.mtp_block = Qwen2DecoderLayer(
             config=config,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=prefix,
         )

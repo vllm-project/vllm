@@ -156,6 +156,7 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
 
         self.self_attn = GraniteMoeHybridAttention(
             config,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
