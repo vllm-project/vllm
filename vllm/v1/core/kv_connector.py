@@ -37,7 +37,7 @@ class KVConnectorSchedulerContext(SchedulerContext):
         pool = self._block_pool
         pool.free_blocks(pool.blocks[bid] for bid in block_ids)
 
-    def iter_blocks(
+    def iter_free_blocks(
         self, after_block_id: int | None = None
     ) -> Iterator[KVCacheBlockView]:
         pool = self._block_pool

@@ -163,7 +163,7 @@ class SchedulerContext(ABC):
         ...
 
     @abstractmethod
-    def iter_blocks(
+    def iter_free_blocks(
         self, after_block_id: int | None = None
     ) -> Iterator[KVCacheBlockView]:
         """Iterate over free-queue blocks in eviction (LRU) order.
@@ -175,7 +175,8 @@ class SchedulerContext(ABC):
         Args:
             after_block_id: If given, start iteration after this block
                 rather than from the head.  Useful for resuming a
-                previous scan.
+                previous scan.  If the block is no longer in the free
+                queue (ref_cnt > 0), the iterator yields nothing.
         """
         ...
 

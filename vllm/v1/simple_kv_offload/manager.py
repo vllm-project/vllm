@@ -397,7 +397,7 @@ class SimpleCPUOffloadScheduler:
         block_hashes: list[bytes] = []
         last_visited = self._cursor
 
-        for covered, block in enumerate(gpu_state.iter_blocks(self._cursor)):
+        for covered, block in enumerate(gpu_state.iter_free_blocks(self._cursor)):
             if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
                 break
 
