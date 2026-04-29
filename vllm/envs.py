@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
+    VLLM_ENABLE_JIT_PADDING: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -717,6 +718,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else None
+    ),
+    # Enable JIT-compiled C++ padding optimization for make_ndarray_with_pad.
+    # Set to "0" or "false" to disable and use pure Python fallback.
+    "VLLM_ENABLE_JIT_PADDING": lambda: (
+        os.getenv("VLLM_ENABLE_JIT_PADDING", "True").lower() in ("true", "1")
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
