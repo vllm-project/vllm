@@ -431,6 +431,9 @@ class IquestMoeDecoderLayer(nn.Module):
             real_sliding_window = None
         cache_config.sliding_window = real_sliding_window
 
+        if use_hybrid_layers and real_sliding_window:
+            rope_parameters["rope_theta"] = config.swa_rope_theta
+
         self.self_attn = IquestMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
