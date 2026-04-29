@@ -1026,7 +1026,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         # TODO: Remove once all OCP MX schemes use the kernel abstraction
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4", "w_mxfp4_a_fp8")
+        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4")
         self.emulate = (
             not current_platform.supports_mx()
             or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES
