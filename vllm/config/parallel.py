@@ -713,6 +713,14 @@ class ParallelConfig:
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
+            # NUMA binding is per-rank host-side memory locality; it does
+            # not affect collective-communication semantics. When numa_bind
+            # is enabled with auto-detection, each DP rank stores its own
+            # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
+            # `_get_numa_node`), which would otherwise diverge the DP hash.
+            "numa_bind",
+            "numa_bind_nodes",
+            "numa_bind_cpus",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

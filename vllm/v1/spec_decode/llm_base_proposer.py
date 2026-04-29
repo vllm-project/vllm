@@ -1276,15 +1276,29 @@ class SpecDecodeBaseProposer:
         Subclasses may override to apply additional config changes.
         """
         spec_cfg = self.speculative_config
+        base = self.vllm_config
+
         if spec_cfg.moe_backend is not None:
-            return replace(
-                self.vllm_config,
+            base = replace(
+                base,
                 kernel_config=replace(
-                    self.vllm_config.kernel_config,
+                    base.kernel_config,
                     moe_backend=spec_cfg.moe_backend,
                 ),
             )
-        return self.vllm_config
+
+        # Note (matt): Never inherit the attention backend from base, because there are
+        # many opportunities for incompatibility, so we always independently autoselect
+        # unless explicitly specified in the speculative config.
+        base = replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                backend=spec_cfg.attention_backend,
+            ),
+        )
+
+        return base
 
     def _get_model(self) -> nn.Module:
         """
@@ -1344,6 +1358,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
