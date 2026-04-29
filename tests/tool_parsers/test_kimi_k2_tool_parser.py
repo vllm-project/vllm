@@ -684,7 +684,7 @@ def test_adjust_request_auto_structural_tag_is_json_string(
     assert isinstance(loaded, dict)
 
 
-def test_adjust_request_required_uses_json_schema_not_structural_tag(
+def test_adjust_request_required_prefers_structural_tag(
     parser: KimiK2ToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
@@ -695,4 +695,5 @@ def test_adjust_request_required_uses_json_schema_not_structural_tag(
         tool_choice="required",
     )
     out = parser.adjust_request(req)
-    assert out.structured_outputs.structural_tag is None
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None

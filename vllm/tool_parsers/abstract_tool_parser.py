@@ -95,8 +95,27 @@ class ToolParser:
         if not request.tools:
             return request
 
-        # Step 1: set structured output params when tool constraints are derived
-        # from the tool schema.
+        # Step 1 (highest priority for ChatCompletionRequest): apply
+        # xgrammar's built-in structural tag support.
+        if isinstance(request, ChatCompletionRequest):
+            # XGrammar will support tool_choice="none" in the future.
+            # Currently, we only support tool_choice="auto" and
+            # tool_choice="required".
+            need_tool_calling = (
+                request.tool_choice == "auto"
+                or request.tool_choice == "required"
+                or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            )
+            if need_tool_calling:
+                structure_tag = self.get_structural_tag(request)
+                if structure_tag is not None:
+                    request.structured_outputs = StructuredOutputsParams(
+                        structural_tag=json.dumps(structure_tag.model_dump()),
+                    )
+                    return request
+
+        # Step 2: set structured output params when tool constraints are
+        # derived from the tool schema.
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
@@ -124,27 +143,8 @@ class ToolParser:
                         strict=True,
                     )
                 )
-                
+
             return request
-
-        # Only ChatCompletionRequest is supported for Step 2.
-        if not isinstance(request, ChatCompletionRequest):
-            return request
-
-
-        # Step 2: apply xgrammar's built-in tool calling support.
-        # XGrammar will support tool_choice="none" in the future. Currently, we only support tool_choice="auto" and tool_choice="required".
-        need_tool_calling = (
-            request.tool_choice == "auto"
-            or request.tool_choice == "required"
-            or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-        )
-        if need_tool_calling:
-            structure_tag = self.get_structural_tag(request)
-            if structure_tag is not None:
-                request.structured_outputs = StructuredOutputsParams(
-                    structural_tag=json.dumps(structure_tag.model_dump()),
-                )
 
         return request
     
