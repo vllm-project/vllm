@@ -421,6 +421,18 @@ Target image:
 image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test
 ```
 
+Current versioned tag:
+
+```text
+image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-v1
+```
+
+Next image version:
+
+```text
+v2
+```
+
 Final known digest:
 
 ```text
@@ -477,6 +489,138 @@ The validated image keeps the base image deep_ep version:
 1.2.1+73b6ea4
 ```
 
+### Image Versioning Policy
+
+Every new image build must have a monotonically increasing versioned tag:
+
+```text
+image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-v<N>
+```
+
+Rules:
+
+- Do not reuse old version tags.
+- Keep `kimi-llmd-test` as the moving "latest test" tag.
+- Build and push the versioned tag first.
+- After verifying the versioned image, move `kimi-llmd-test` to the same image
+  only if this version should become the current test image.
+- Update this runbook after every build. Record:
+  - versioned tag,
+  - moving tag if updated,
+  - registry digest,
+  - build-server image id,
+  - vLLM commit,
+  - PegaFlow commit,
+  - patch file counts,
+  - build command,
+  - verification command and result,
+  - short change summary.
+
+Future build command pattern:
+
+```bash
+cd /Users/ppio-dn-289/Documents/dynamo-vllm-workspace
+
+VERSION=v2
+
+./build/build-vllm-pegaflow.sh \
+  --image image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-${VERSION} \
+  --vllm-wt /Users/ppio-dn-289/Documents/llmd-vllm-workspace/vllm-kimi-pd-pegaflow \
+  --push
+```
+
+If the version should also become the moving test tag:
+
+```bash
+ssh build-server 'set -e
+VERSION=v2
+docker tag \
+  image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-${VERSION} \
+  image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test
+docker push image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test
+'
+```
+
+### Image Build History
+
+#### v1 - 2026-04-29
+
+Tags:
+
+```text
+image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-v1
+image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test
+```
+
+Digest:
+
+```text
+image.paigpu.com/library/vllm-with-pegaflow@sha256:de0f2541cda799cde8717e7f94abb71f4edf147bd8bab851fcc56094dc51c19c
+```
+
+Build-server image id:
+
+```text
+sha256:91711c883d9a9a6c10dc02f3874e7ae19e2381db6e51f9d442def3d4d33ec6ee
+```
+
+Source commits:
+
+```text
+vLLM:    a1cb3d2ce fix(spec_decode): allow reasoning logits processor
+PegaFlow: ba60953 fix(connector): import NIXL connector from vLLM 0.20 package
+```
+
+Patch counts:
+
+```text
+vllm -> 15 files
+pegaflow -> 5 files
+DeepEP whl: not provided, base image keeps deep_ep 1.2.1+73b6ea4
+```
+
+Build commands:
+
+```bash
+cd /Users/ppio-dn-289/Documents/dynamo-vllm-workspace
+
+./build/build-vllm-pegaflow.sh \
+  --image image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test \
+  --vllm-wt /Users/ppio-dn-289/Documents/llmd-vllm-workspace/vllm-kimi-pd-pegaflow \
+  --push
+
+ssh build-server 'set -e
+docker tag \
+  image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test \
+  image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-v1
+docker push image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-v1
+'
+```
+
+Change summary:
+
+```text
+Includes all prior Kimi params/tool-parser, logit_bias/spec-decode, NIXL PP,
+metrics, and PegaFlow PD connector patches. Adds the spec-decode startup fix
+for explicit ReasoningLogitsProcessor and applies its spec-decode hook in the
+rejection sampler.
+```
+
+Verification:
+
+```text
+Server unit test:
+PYTHONPATH=. /ppio1/venvs/vllm-kimi-pd-v0.20/bin/python -m pytest \
+  tests/v1/sample/test_rejection_sampler.py -v
+Result: 71 passed, 16 warnings
+
+Image source check:
+spec_decode_processors ['MinTokensLogitsProcessor', 'LogitBiasLogitsProcessor', 'ReasoningLogitsProcessor']
+reasoning_has_spec_hook True
+rejection_uses_hook True
+deep_ep_version 1.2.1+73b6ea4
+```
+
 ### Patch Files Included in the Image
 
 vLLM patch list:
@@ -530,8 +674,10 @@ Always dry-run first:
 ```bash
 cd /Users/ppio-dn-289/Documents/dynamo-vllm-workspace
 
+VERSION=v2
+
 ./build/build-vllm-pegaflow.sh \
-  --image image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test \
+  --image image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-${VERSION} \
   --vllm-wt /Users/ppio-dn-289/Documents/llmd-vllm-workspace/vllm-kimi-pd-pegaflow \
   --dry-run
 ```
@@ -552,8 +698,10 @@ worktree.
 ```bash
 cd /Users/ppio-dn-289/Documents/dynamo-vllm-workspace
 
+VERSION=v2
+
 ./build/build-vllm-pegaflow.sh \
-  --image image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test \
+  --image image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-${VERSION} \
   --vllm-wt /Users/ppio-dn-289/Documents/llmd-vllm-workspace/vllm-kimi-pd-pegaflow \
   --push
 ```
@@ -571,12 +719,17 @@ The script will:
 Run:
 
 ```bash
+VERSION=v2
+
 ssh build-server 'docker run --rm -i --entrypoint python3 \
-  image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test - << "PY"
+  image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test-'"${VERSION}"' - << "PY"
 import importlib.metadata
 import inspect
 import vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata as metadata
 import vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker as worker
+import vllm.v1.sample.logits_processor as logits_processor
+import vllm.v1.sample.logits_processor.builtin as builtin
+import vllm.v1.sample.rejection_sampler as rejection_sampler
 from pegaflow.connector.pd_connector import PegaPdConnector
 
 print("vllm_version", importlib.metadata.version("vllm"))
@@ -584,6 +737,9 @@ print("nixl_connector_version", metadata.NIXL_CONNECTOR_VERSION)
 print("worker_file", inspect.getfile(worker))
 print("has_region_mapper", hasattr(worker.NixlConnectorWorker, "_get_local_region_ids_for_remote_stage"))
 print("pegaflow_pd_connector", PegaPdConnector.__name__)
+print("spec_decode_processors", [c.__name__ for c in logits_processor.SPEC_DECODE_LOGITS_PROCESSORS])
+print("reasoning_has_spec_hook", hasattr(builtin.ReasoningLogitsProcessor, "apply_with_spec_decode"))
+print("rejection_uses_hook", "apply_with_spec_decode" in inspect.getsource(rejection_sampler.RejectionSampler.apply_logits_processors))
 try:
     print("deep_ep_version", importlib.metadata.version("deep_ep"))
 except importlib.metadata.PackageNotFoundError:
@@ -599,6 +755,9 @@ nixl_connector_version 3
 worker_file /usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py
 has_region_mapper True
 pegaflow_pd_connector PegaPdConnector
+spec_decode_processors ['MinTokensLogitsProcessor', 'LogitBiasLogitsProcessor', 'ReasoningLogitsProcessor']
+reasoning_has_spec_hook True
+rejection_uses_hook True
 deep_ep_version 1.2.1+73b6ea4
 ```
 
