@@ -490,7 +490,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 
         rope_parameters = {
             "max_trained_positions": max_trained_positions,
-            **config.rope_parameters,
+            **(config.rope_parameters or {}),
         }
 
         config.rotary_kwargs = {
