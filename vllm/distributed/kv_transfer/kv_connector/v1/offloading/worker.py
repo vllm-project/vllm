@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
     ReqId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -45,24 +46,11 @@ class OffloadingConnectorWorker:
         self.spec = spec
         self.worker = OffloadingWorker()
 
-        self._job_counter = 0
-
         self.kv_connector_stats = OffloadingConnectorStats()
-        # req_id -> (job_id, store)
-        self._jobs: dict[int, tuple[ReqId, bool]] = {}
-        # req_id -> active job IDs
-        self._load_job: dict[ReqId, int] = {}
-        # req_id -> set(active job IDs)
-        self._store_jobs = defaultdict[ReqId, set[int]](set)
-        # list of store jobs pending submission (job_id, transfer_spec)
+        # job_id -> req_id for in-flight loads.
+        self._load_jobs: dict[int, ReqId] = {}
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
-
-        self._finished_reqs_waiting_for_store: set[ReqId] = set()
-
-    def _generate_job_id(self) -> int:
-        job_id = self._job_counter
-        self._job_counter = job_id + 1
-        return job_id
+        self._connector_worker_meta = OffloadingWorkerMetadata()
 
     def _register_handlers(self, kv_caches: CanonicalKVCaches):
         for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
@@ -301,10 +289,8 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        for req_id in kv_connector_metadata.reqs_to_flush or ():
-            job_ids = self._store_jobs.get(req_id)
-            if job_ids:
-                self.worker.wait(job_ids)
+        if kv_connector_metadata.jobs_to_flush:
+            self.worker.wait(kv_connector_metadata.jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
@@ -312,41 +298,33 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        for req_id, transfer_spec in metadata.reqs_to_load.items():
-            job_id = self._generate_job_id()
-            self._jobs[job_id] = (req_id, False)
-            assert req_id not in self._load_job
-            self._load_job[req_id] = job_id
-            success = self.worker.transfer_async(job_id, transfer_spec)
+        for job_id, entry in metadata.load_jobs.items():
+            self._load_jobs[job_id] = entry.req_id
+            success = self.worker.transfer_async(job_id, entry.transfer_spec)
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
-        for req_id, transfer_spec in metadata.reqs_to_store.items():
-            job_id = self._generate_job_id()
-            self._jobs[job_id] = (req_id, True)
-            self._store_jobs[req_id].add(job_id)
-            # NOTE(orozery): defer the store to the beginning of the next engine step,
-            # so that offloading starts AFTER transfers related to token sampling,
-            # thereby avoiding delays to token generation due to offloading.
-            self._unsubmitted_store_jobs.append((job_id, transfer_spec))
+        for job_id, entry in metadata.store_jobs.items():
+            # NOTE(orozery): defer the store to the beginning of the next
+            # engine step, so that offloading starts AFTER transfers related
+            # to token sampling, thereby avoiding delays to token generation.
+            self._unsubmitted_store_jobs.append((job_id, entry.transfer_spec))
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
-        Returns a list of request IDs that finished loading or storing.
-
         Returns:
-            ids of requests that have finished asynchronous transfer
-            tuple of (sending/saving ids, recving/loading ids).
+            tuple of (finished_sending, finished_recving). Stores never
+            emit finished_sending — the scheduler tracks store completion
+            via kv_connector_worker_meta.completed_jobs and fences any
+            block reuse via jobs_to_flush. Loads still emit
+            finished_recving so the base scheduler can resume requests
+            blocked on remote KV (and free aborted-during-load reqs).
         """
-        finished_sending = set()
-        finished_recving = set()
+        finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
             assert transfer_result.success
-            req_id, store = self._jobs.pop(job_id)
             if (
                 transfer_result.transfer_time
                 and transfer_result.transfer_size is not None
@@ -357,31 +335,21 @@ class OffloadingConnectorWorker:
                     time=transfer_result.transfer_time,
                     transfer_type=transfer_result.transfer_type,
                 )
-            if store:
-                req_jobs = self._store_jobs[req_id]
-                req_jobs.remove(job_id)
-                if req_jobs:
-                    continue
 
-                if req_id in self._finished_reqs_waiting_for_store:
-                    self._finished_reqs_waiting_for_store.remove(req_id)
-                    finished_sending.add(req_id)
-                    del self._store_jobs[req_id]
-            else:
-                req_job = self._load_job[req_id]
-                assert job_id == req_job
-                del self._load_job[req_id]
+            self._connector_worker_meta.mark_completed(job_id)
+            req_id = self._load_jobs.pop(job_id, None)
+            if req_id is not None:
                 finished_recving.add(req_id)
 
-        for req_id in finished_req_ids:
-            pending_req_jobs = self._store_jobs.get(req_id)
-            if pending_req_jobs:
-                self._finished_reqs_waiting_for_store.add(req_id)
-            elif pending_req_jobs is not None:
-                finished_sending.add(req_id)
-                del self._store_jobs[req_id]
+        return set(), finished_recving
 
-        return finished_sending, finished_recving
+    def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
+        """Return completed transfer job IDs since the last call."""
+        if not self._connector_worker_meta.completed_jobs:
+            return None
+        meta = self._connector_worker_meta
+        self._connector_worker_meta = OffloadingWorkerMetadata()
+        return meta
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -396,11 +364,7 @@ class OffloadingConnectorWorker:
         return kv_connector_stats
 
     def shutdown(self) -> None:
-        # Drop deferred store jobs: there is no point in submitting
-        # them during shutdown.
         self._unsubmitted_store_jobs.clear()
-        self._jobs.clear()
-        self._load_job.clear()
-        self._store_jobs.clear()
-        self._finished_reqs_waiting_for_store.clear()
+        self._load_jobs.clear()
+        self._connector_worker_meta = OffloadingWorkerMetadata()
         self.worker.shutdown()

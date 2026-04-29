@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -110,6 +111,11 @@ class OffloadingConnector(KVConnectorBase_V1):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         return self.connector_worker.get_finished(finished_req_ids)
+
+    def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
+        if self.connector_worker is not None:
+            return self.connector_worker.build_connector_worker_meta()
+        return None
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
