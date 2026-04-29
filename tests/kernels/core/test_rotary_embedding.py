@@ -35,6 +35,9 @@ def rotary_embedding_opcheck(
 @pytest.mark.parametrize("seq_len", [11, 1024])
 @pytest.mark.parametrize("use_key", [True, False])
 @pytest.mark.parametrize("head_stride_is_contiguous", [True, False])
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.bfloat16]
+)
 def test_rotary_embedding_opcheck(
     default_vllm_config,
     dist_init,
@@ -46,19 +49,20 @@ def test_rotary_embedding_opcheck(
     seq_len,
     use_key,
     head_stride_is_contiguous,
+    dtype,
 ):
     batch_size = 1
     base = 10000
     num_heads = 7
     rot = RotaryEmbedding(
-        head_size, rotary_dim, max_position, base, is_neox_style, torch.float32
+        head_size, rotary_dim, max_position, base, is_neox_style, dtype
     )
 
     positions = torch.randint(0, max_position, (batch_size, seq_len), device=device)
     head_stride = head_size + (64 if head_stride_is_contiguous else 0)
 
     query = torch.randn(
-        batch_size, seq_len, num_heads, head_stride, dtype=torch.float32, device=device
+        batch_size, seq_len, num_heads, head_stride, dtype=dtype, device=device
     )
     key = torch.randn_like(query) if use_key else None
     query = query[..., :head_size]
