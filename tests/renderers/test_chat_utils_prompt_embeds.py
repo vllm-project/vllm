@@ -498,7 +498,9 @@ async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
     assert len(tensors) == NUM_TENSORS
 
     # Tokenize: each prompt_embeds part becomes 1 placeholder token.
-    token_ids = tokenizer.apply_chat_template(conv, tokenize=True)
+    # `return_dict=False` to get a flat `list[int]` on transformers v5
+    # (where the default flipped to True and yields a `BatchEncoding` dict).
+    token_ids = tokenizer.apply_chat_template(conv, tokenize=True, return_dict=False)
     assert sum(t == tid for t in token_ids) == NUM_TENSORS
 
     # Expand, locate, and build.
@@ -555,7 +557,9 @@ async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     assert len(tensors) == NUM_TENSORS
 
     # Tokenize, expand, locate, and build.
-    token_ids = tokenizer.apply_chat_template(conv, tokenize=True)
+    # `return_dict=False` to get a flat `list[int]` on transformers v5
+    # (where the default flipped to True and yields a `BatchEncoding` dict).
+    token_ids = tokenizer.apply_chat_template(conv, tokenize=True, return_dict=False)
     mm_updates = _build_prompt_embeds_updates(tensors, tid)
     expanded = _expand_prompt_embeds_placeholders(token_ids, mm_updates)
     positions = _build_prompt_embeds_positions(expanded, len(tensors), mm_updates)
