@@ -62,6 +62,7 @@ tool_calls_template = (
     "<{dsml_token}{tc_block_name}>\n{tool_calls}\n</{dsml_token}{tc_block_name}>"
 )
 tool_calls_block_name: str = "tool_calls"
+ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
 
 tool_output_template: str = (
     "<tool_result>{content}</tool_result>"
@@ -117,6 +118,40 @@ def tools_from_openai_format(tools):
     return [tool["function"] for tool in tools]
 
 
+def _escape_param_name(name: str) -> str:
+    if name == "arguments":
+        return ESCAPED_ARGUMENTS_PARAM_NAME
+    return name
+
+
+def _unescape_param_name(name: str) -> str:
+    if name == ESCAPED_ARGUMENTS_PARAM_NAME:
+        return "arguments"
+    return name
+
+
+def _escape_tool_schema(tool: Dict[str, Any]) -> Dict[str, Any]:
+    escaped_tool = copy.deepcopy(tool)
+    parameters = escaped_tool.get("parameters")
+    if not isinstance(parameters, dict):
+        return escaped_tool
+
+    properties = parameters.get("properties")
+    if isinstance(properties, dict):
+        parameters["properties"] = {
+            _escape_param_name(key): value for key, value in properties.items()
+        }
+
+    required = parameters.get("required")
+    if isinstance(required, list):
+        parameters["required"] = [
+            _escape_param_name(name) if isinstance(name, str) else name
+            for name in required
+        ]
+
+    return escaped_tool
+
+
 def tool_calls_from_openai_format(tool_calls):
     """Convert OpenAI-format tool calls to internal format."""
     return [
@@ -155,21 +190,53 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     p_dsml_template = '<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>'
     P_dsml_strs = []
 
-    if isinstance(tool_call["arguments"], str):
-        arguments = json.loads(tool_call["arguments"])
-    else:
-        arguments = tool_call["arguments"]
+    arguments = _normalize_tool_call_arguments(tool_call["arguments"])
+    if not isinstance(arguments, dict):
+        return ""
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
             dsml_token=dsml_token,
-            key=k,
+            key=_escape_param_name(k),
             is_str="true" if isinstance(v, str) else "false",
             value=v if isinstance(v, str) else to_json(v),
         )
         P_dsml_strs.append(p_dsml_str)
 
     return "\n".join(P_dsml_strs)
+
+
+def _normalize_tool_call_arguments(arguments: Any) -> Dict[str, Any] | None:
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+
+    if not isinstance(arguments, dict):
+        return None
+
+    if set(arguments.keys()) == {"input"}:
+        inner = arguments["input"]
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except json.JSONDecodeError:
+                return arguments
+        if isinstance(inner, dict):
+            arguments = inner
+
+    if set(arguments.keys()) == {"arguments"}:
+        inner = arguments["arguments"]
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except json.JSONDecodeError:
+                return arguments
+            if isinstance(inner, dict):
+                return inner
+
+    return arguments
 
 
 def decode_dsml_to_arguments(tool_name: str, tool_args: Dict[str, Tuple[str, str]]) -> Dict[str, str]:
@@ -188,7 +255,7 @@ def decode_dsml_to_arguments(tool_name: str, tool_args: Dict[str, Tuple[str, str
             value = to_json(value)
         return f"{to_json(key)}: {value}"
 
-    tool_args_json = "{" + ", ".join([_decode_value(k, v, string=is_str) for k, (v, is_str) in tool_args.items()]) + "}"
+    tool_args_json = "{" + ", ".join([_decode_value(_unescape_param_name(k), v, string=is_str) for k, (v, is_str) in tool_args.items()]) + "}"
     return dict(name=tool_name, arguments=tool_args_json)
 
 
@@ -202,7 +269,7 @@ def render_tools(tools: List[Dict[str, Union[str, Dict[str, Any]]]]) -> str:
     Returns:
         Formatted tools section string.
     """
-    tools_json = [to_json(t) for t in tools]
+    tools_json = [to_json(_escape_tool_schema(t)) for t in tools]
 
     return TOOLS_TEMPLATE.format(
         tool_schemas="\n".join(tools_json),

@@ -183,6 +183,59 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
     assert 'parameter name="arguments"' not in prompt
 
 
+def test_deepseek_v4_escapes_arguments_tool_schema_name():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "echo_args",
+                "description": "Echo arguments",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "arguments": {"type": "string"},
+                    },
+                    "required": ["arguments"],
+                },
+            },
+        }
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Echo this"}],
+        tools=tools,
+        tokenize=False,
+    )
+
+    assert "__vllm_param_arguments__" in prompt
+    assert '"required": ["__vllm_param_arguments__"]' in prompt
+    assert '"arguments": {"type": "string"}' not in prompt
+
+
+def test_deepseek_v4_escapes_arguments_history_tool_call_name():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "Echo this"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "echo_args",
+                            "arguments": '{"arguments": "hello"}',
+                        },
+                    }
+                ],
+            },
+        ],
+        tokenize=False,
+    )
+
+    assert 'parameter name="__vllm_param_arguments__" string="true">hello' in prompt
+    assert 'parameter name="arguments"' not in prompt
+
+
 @pytest.mark.parametrize("reasoning_effort", ["minimal", "low", "medium", "high"])
 def test_deepseek_v4_accepts_openai_reasoning_effort_values(reasoning_effort):
     prompt = _tokenizer().apply_chat_template(

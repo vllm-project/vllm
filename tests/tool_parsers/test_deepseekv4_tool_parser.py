@@ -76,6 +76,16 @@ def make_request(tools=None) -> MagicMock:
     return req
 
 
+def make_tool(name: str, properties: dict[str, dict]) -> MagicMock:
+    tool = MagicMock()
+    tool.function.name = name
+    tool.function.parameters = {
+        "type": "object",
+        "properties": properties,
+    }
+    return tool
+
+
 def build_tool_call(func_name: str, params: dict[str, str]) -> str:
     param_strs = "".join(
         f'{PARAM_START}{k}" string="true">{v}{PARAM_END}\n' for k, v in params.items()
@@ -86,6 +96,7 @@ def build_tool_call(func_name: str, params: dict[str, str]) -> str:
 def stream(parser: DeepSeekV4ToolParser, full_text: str, chunk_size: int = 7):
     deltas = []
     previous_text = ""
+    request = make_request()
     for start in range(0, len(full_text), chunk_size):
         delta_text = full_text[start : start + chunk_size]
         current_text = previous_text + delta_text
@@ -96,7 +107,7 @@ def stream(parser: DeepSeekV4ToolParser, full_text: str, chunk_size: int = 7):
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[1],
-            request=make_request(),
+            request=request,
         )
         previous_text = current_text
         if delta is not None:
@@ -203,3 +214,127 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
         )
         tag = parser.get_structural_tag(req)
         assert isinstance(tag, StructuralTag)
+
+
+def test_streaming_split_start_token_does_not_leak_dsml_markers():
+    parser = make_parser()
+    full_text = "I will check." + build_tool_call("search", {"query": "vllm"})
+
+    deltas = stream(parser, full_text, chunk_size=1)
+
+    content = "".join(delta.content or "" for delta in deltas)
+    assert content == "I will check."
+    assert "DSML" not in content
+    assert json.loads(reconstruct_args(deltas)) == {"query": "vllm"}
+
+
+def test_streaming_plain_text_trailing_angle_bracket_is_flushed():
+    parser = make_parser()
+    request = make_request()
+    previous_text = "2 <"
+
+    delta = parser.extract_tool_calls_streaming(
+        previous_text=previous_text,
+        current_text=previous_text,
+        delta_text="",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[1],
+        request=request,
+    )
+
+    assert delta is not None
+    assert delta.content == "2 <"
+    assert not delta.tool_calls
+
+
+def test_extract_tool_calls_non_streaming_preserves_typed_arguments():
+    parser = make_parser()
+    request = make_request(
+        [
+            make_tool(
+                "plan_trip",
+                {
+                    "days": {"type": "integer"},
+                    "flexible": {"type": "boolean"},
+                    "cities": {"type": "array"},
+                    "notes": {"type": "string"},
+                },
+            )
+        ]
+    )
+    model_output = (
+        f"{TC_START}"
+        f'{INV_START}plan_trip">'
+        f'{PARAM_START}days" string="false">3{PARAM_END}'
+        f'{PARAM_START}flexible" string="false">false{PARAM_END}'
+        f'{PARAM_START}cities" string="false">["Beijing", "Shanghai"]{PARAM_END}'
+        f'{PARAM_START}notes" string="true">window seat{PARAM_END}'
+        f"{INV_END}"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "days": 3,
+        "flexible": False,
+        "cities": ["Beijing", "Shanghai"],
+        "notes": "window seat",
+    }
+
+
+def test_extract_tool_calls_repairs_arguments_wrapper_object():
+    parser = make_parser()
+    request = make_request([make_tool("get_weather", {"location": {"type": "string"}})])
+    model_output = (
+        f"{TC_START}"
+        f'{INV_START}get_weather">'
+        f'{PARAM_START}arguments" string="false">{{"location": "Beijing"}}{PARAM_END}'
+        f"{INV_END}"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+
+
+def test_extract_tool_calls_repairs_input_wrapper_string():
+    parser = make_parser()
+    request = make_request([make_tool("get_weather", {"location": {"type": "string"}})])
+    model_output = (
+        f"{TC_START}"
+        f'{INV_START}get_weather">'
+        f'{PARAM_START}input" string="true">{{"location": "Beijing"}}{PARAM_END}'
+        f"{INV_END}"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "location": "Beijing"
+    }
+
+
+def test_extract_tool_calls_unescapes_arguments_field_name():
+    parser = make_parser()
+    request = make_request([make_tool("echo_args", {"arguments": {"type": "string"}})])
+    model_output = (
+        f"{TC_START}"
+        f'{INV_START}echo_args">'
+        f'{PARAM_START}__vllm_param_arguments__" string="true">hello{PARAM_END}'
+        f"{INV_END}"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {"arguments": "hello"}

@@ -166,6 +166,32 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
+def test_deepseek_v4_agentic_flags_pass_validation(monkeypatch):
+    import vllm.platforms as platforms
+    from vllm.platforms.cpu import CpuPlatform
+
+    monkeypatch.setattr(platforms, "_current_platform", CpuPlatform())
+    serve_parser = _build_vllm_parsers()["vllm serve"]
+
+    args = serve_parser.parse_args(
+        args=[
+            "--tokenizer-mode",
+            "deepseek_v4",
+            "--tool-call-parser",
+            "deepseek_v4",
+            "--enable-auto-tool-choice",
+            "--reasoning-parser",
+            "deepseek_v4",
+        ]
+    )
+
+    validate_parsed_serve_args(args)
+    assert args.tokenizer_mode == "deepseek_v4"
+    assert args.tool_call_parser == "deepseek_v4"
+    assert args.enable_auto_tool_choice
+    assert args.reasoning_parser == "deepseek_v4"
+
+
 def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
     """Ensure validation fails if reasoning is enabled with auto tool choice"""
     args = serve_parser.parse_args(
