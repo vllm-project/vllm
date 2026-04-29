@@ -217,7 +217,7 @@ def test_sequence_parallelism_pass(
     run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
 
 
-def test_sequence_parallelism_pass_requires_full_graph_compilation():
+def test_sequence_parallelism_pass_piecewise_compilation_behavior(monkeypatch):
     vllm_config = VllmConfig()
     vllm_config.compilation_config.use_inductor_graph_partition = False
     vllm_config.compilation_config.splitting_ops = [
@@ -228,11 +228,15 @@ def test_sequence_parallelism_pass_requires_full_graph_compilation():
     sequence_parallelism_pass.compilation_config = vllm_config.compilation_config
     sequence_parallelism_pass.min_token_num = 1
 
-    with pytest.raises(
-        AssertionError,
-        match="SequenceParallelismPass requires full-graph compilation",
-    ):
-        sequence_parallelism_pass.is_applicable_for_range(Range(start=8, end=8))
+    monkeypatch.setattr(
+        "vllm.compilation.passes.fusion.sequence_parallelism."
+        "get_tensor_model_parallel_world_size",
+        lambda: 2,
+    )
+
+    assert sequence_parallelism_pass.is_applicable_for_range(Range(start=8, end=8))
+    assert not sequence_parallelism_pass.is_applicable_for_range(Range(start=8, end=9))
+    assert not sequence_parallelism_pass.is_applicable_for_range(Range(start=9, end=9))
 
 
 def sequence_parallelism_pass_on_test_model(
