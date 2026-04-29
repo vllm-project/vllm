@@ -74,6 +74,36 @@ def _iquest_moe_topk_then_softmax_routing(
     return routing_weights, selected_experts
 
 
+def get_layer_sliding_window_size(
+    first_layers_types: list[str],
+    last_layers_types: list[str],
+    hybrid_layers_types_block: list[str],
+    num_hybrid_layers_types_block: int,
+    layer_idx: int,
+    sliding_window_size: int,
+) -> int | None:
+    num_first_layers = len(first_layers_types)
+    num_hybrid_block_layers = (
+        len(hybrid_layers_types_block) * num_hybrid_layers_types_block
+    )
+
+    if layer_idx < num_first_layers:
+        current_layer_type = first_layers_types[layer_idx]
+    elif layer_idx < num_first_layers + num_hybrid_block_layers:
+        effective_layer_idx = layer_idx - num_first_layers
+        current_layer_type = hybrid_layers_types_block[
+            effective_layer_idx % len(hybrid_layers_types_block)
+        ]
+    else:
+        effective_layer_idx = layer_idx - num_first_layers - num_hybrid_block_layers
+        current_layer_type = last_layers_types[effective_layer_idx]
+
+    if current_layer_type == "full_attention":
+        return None
+    else:
+        return sliding_window_size
+
+
 class IquestMoeMLP(nn.Module):
     """MLP for dense layers and optional shared expert (with optional gate)."""
 
@@ -349,7 +379,15 @@ class IquestMoeAttention(nn.Module):
 
 
 class IquestMoeDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        first_layers_types: list[str] | None = None,
+        last_layers_types: list[str] | None = None,
+        hybrid_layers_types_block: list[str] | None = None,
+        num_hybrid_layers_block: int = 0,
+    ) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -374,6 +412,25 @@ class IquestMoeDecoderLayer(nn.Module):
             if getattr(config, "rope_theta", None) is not None:
                 rope_parameters["rope_theta"] = config.rope_theta
 
+        layer_idx = extract_layer_index(prefix)
+        use_hybrid_layers = vllm_config.model_config.get_use_hybrid_layers()
+        if use_hybrid_layers:
+            sliding_window_size = vllm_config.model_config.get_sliding_window()
+            assert sliding_window_size is not None, (
+                "You must provide sliding_window parameter for hybrid setting"
+            )
+            real_sliding_window = get_layer_sliding_window_size(
+                first_layers_types=first_layers_types,
+                last_layers_types=last_layers_types,
+                hybrid_layers_types_block=hybrid_layers_types_block,
+                num_hybrid_layers_types_block=num_hybrid_layers_block,
+                layer_idx=layer_idx,
+                sliding_window_size=sliding_window_size,
+            )
+        else:
+            real_sliding_window = None
+        cache_config.sliding_window = real_sliding_window
+
         self.self_attn = IquestMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -389,7 +446,6 @@ class IquestMoeDecoderLayer(nn.Module):
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
-        layer_idx = extract_layer_index(prefix)
         mlp_only_layers = getattr(config, "mlp_only_layers", []) or []
         if (layer_idx not in mlp_only_layers) and (
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
@@ -462,13 +518,43 @@ class IquestMoeModel(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
+
+        # NOTE(yxing): hybrid layers for iquest moe
+        model_config = vllm_config.model_config
+        use_hybrid_layers = model_config.get_use_hybrid_layers()
+        if use_hybrid_layers:
+            num_hidden_layers = config.num_hidden_layers
+            num_hybrid_layers_types_block = model_config.get_num_hybrid_layers_block()
+            first_layers_types = model_config.get_first_layers_types()
+            last_layers_types = model_config.get_last_layers_types()
+            hybrid_layers_types_block = model_config.get_hybrid_layers_types_block()
+            total_num_hybrid_layers = (
+                len(first_layers_types)
+                + len(last_layers_types)
+                + len(hybrid_layers_types_block) * num_hybrid_layers_types_block
+            )
+            assert total_num_hybrid_layers == num_hidden_layers
+        else:
+            first_layers_types, last_layers_types, hybrid_layers_types_block = (
+                None,
+                None,
+                None,
+            )
+            num_hybrid_layers_types_block = 0
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda *, prefix: decoder_layer_type(
-                vllm_config=vllm_config, prefix=prefix
+                vllm_config=vllm_config,
+                prefix=prefix,
+                first_layers_types=first_layers_types,
+                last_layers_types=last_layers_types,
+                hybrid_layers_types_block=hybrid_layers_types_block,
+                num_hybrid_layers_block=num_hybrid_layers_types_block,
             ),
             prefix=f"{prefix}.layers",
         )
+
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size

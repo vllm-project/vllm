@@ -1328,6 +1328,22 @@ class ModelConfig:
         window_size, _ = getattr(self.hf_config, "plt_window_size", [-2, 0])
         return window_size + 1
 
+    # NOTE(yxing): hybrid-layers configuration
+    def get_use_hybrid_layers(self) -> bool:
+        return getattr(self.hf_config, "use_hybrid_layers", False)
+
+    def get_last_layers_types(self) -> tuple:
+        return getattr(self.hf_config, "last_layers_types", [])
+
+    def get_first_layers_types(self) -> tuple:
+        return getattr(self.hf_config, "first_layers_types", [])
+
+    def get_num_hybrid_layers_block(self) -> int:
+        return getattr(self.hf_config, "num_hybrid_layers_block", 0)
+
+    def get_hybrid_layers_types_block(self) -> tuple:
+        return getattr(self.hf_config, "hybrid_layers_types_block", [])
+
     def get_multimodal_config(self) -> MultiModalConfig:
         """
         Get the multimodal configuration of the model.
