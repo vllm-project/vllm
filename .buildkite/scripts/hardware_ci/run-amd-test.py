@@ -563,9 +563,6 @@ class ContainerRunner:
         cmd.extend(["--network=host", "--shm-size=16gb", "--group-add", render_gid])
         for env_name in self._ENV_PASSTHROUGH:
             cmd.extend(["-e", env_name])
-        container_command = self.request.bash_command()
-        if self.artifact_dir is not None:
-            container_command = f"{self.request.setup_command()} && {container_command}"
         cmd.extend(
             [
                 "-e",
@@ -581,10 +578,17 @@ class ContainerRunner:
                 "-euo",
                 "pipefail",
                 "-c",
-                f"unset PYTORCH_ROCM_ARCH && {container_command}",
+                self._container_shell_command(),
             ]
         )
         return cmd
+
+    def _container_shell_command(self) -> str:
+        commands = ["unset PYTORCH_ROCM_ARCH"]
+        if self.artifact_dir is not None:
+            commands.append(self.request.setup_command().strip())
+        commands.append(self.request.bash_command())
+        return "\n".join(commands)
 
     def _stream_logs(self, log_path: Path) -> threading.Thread:
         def pump() -> None:
