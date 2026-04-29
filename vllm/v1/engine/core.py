@@ -2005,6 +2005,22 @@ class EngineCoreActorMixin:
         """
         pass
 
+    def wait_for_dag_ready(self):
+        """
+        Build the Ray Compiled-DAG eagerly so it is not built lazily on the
+        first user request. Called by the elastic-EP scale-up driver
+        sequentially across newly spawned actors before run(), to avoid a
+        Ray MutableObjectManager race when multiple actors register writer
+        channels concurrently. No-op for non-Ray executors.
+        """
+        warm = getattr(
+            self.model_executor,  # type: ignore[attr-defined]
+            "warm_up_compiled_dag",
+            None,
+        )
+        if warm is not None:
+            warm()
+
     def run(self):
         """
         Run the engine core busy loop.

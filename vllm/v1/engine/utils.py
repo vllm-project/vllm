@@ -847,6 +847,13 @@ class CoreEngineActorManager:
             else []
         ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
 
+        # Serialize first-time Compiled-DAG compile across new actors. Ray's
+        # MutableObjectManager::OpenSemaphores aborts when multiple actors
+        # race through experimental_channel_register_writer concurrently;
+        # warming each actor's DAG one-at-a-time avoids that race entirely.
+        for actor in actors:
+            ray.get(actor.wait_for_dag_ready.remote())
+
         for actor in actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)

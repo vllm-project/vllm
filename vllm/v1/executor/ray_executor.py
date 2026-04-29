@@ -484,6 +484,22 @@ class RayDistributedExecutor(Executor):
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)
 
+    def warm_up_compiled_dag(self) -> None:
+        # The Ray race we are avoiding fires inside experimental_compile()'s
+        # writer-channel registration (MutableObjectManager::OpenSemaphores
+        # asserts `RAY_PREDICT_TRUE(_left_ != _right_)`), so building the DAG
+        # is sufficient — no execute round-trip is needed, which also keeps
+        # this safe for KV/EC connector deployments that expect connector
+        # metadata to be set on any SchedulerOutput passed to execute().
+        # The Elastic-EP scale-up driver serializes calls to this method.
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
+        logger.info(
+            "[Elastic EP] Compiled DAG ready (dp_size=%d, world_size=%d)",
+            self.parallel_config.data_parallel_size,
+            self.parallel_config.world_size,
+        )
+
     def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
