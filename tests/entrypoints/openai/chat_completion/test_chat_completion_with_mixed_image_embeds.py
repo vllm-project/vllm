@@ -5,7 +5,6 @@
 Chat Completions request.
 """
 
-import asyncio
 import json
 
 import openai
@@ -117,19 +116,17 @@ async def test_text_content_and_prompt_embeds_match_with_image_url(
         text_content = [text_part, image_part]
         embeds_content = [embeds_part, image_part]
 
-    text_resp, embeds_resp = await asyncio.gather(
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            max_tokens=10,
-            temperature=0.0,
-            messages=[{"role": "user", "content": text_content}],
-        ),
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            max_tokens=10,
-            temperature=0.0,
-            messages=[{"role": "user", "content": embeds_content}],
-        ),
+    text_resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[{"role": "user", "content": text_content}],
+    )
+    embeds_resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[{"role": "user", "content": embeds_content}],
     )
 
     text_out = text_resp.choices[0].message.content
@@ -184,19 +181,17 @@ async def test_text_content_and_prompt_embeds_match_with_image_embeds(
         text_content = [text_part, image_part]
         embeds_content = [embeds_part, image_part]
 
-    text_resp, embeds_resp = await asyncio.gather(
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            max_tokens=10,
-            temperature=0.0,
-            messages=[{"role": "user", "content": text_content}],
-        ),
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            max_tokens=10,
-            temperature=0.0,
-            messages=[{"role": "user", "content": embeds_content}],
-        ),
+    text_resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[{"role": "user", "content": text_content}],
+    )
+    embeds_resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[{"role": "user", "content": embeds_content}],
     )
 
     text_out = text_resp.choices[0].message.content

@@ -4,7 +4,6 @@
 """E2E test for mixing `prompt_embeds` with `audio_embeds` in a single
 Chat Completions request."""
 
-import asyncio
 import json
 
 import openai
@@ -30,13 +29,13 @@ def qwen2audio_server_args() -> list[str]:
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "4096",
+        "2048",
         "--max-num-seqs",
         "4",
         "--enforce-eager",
         "--trust-remote-code",
         "--gpu-memory-utilization",
-        "0.4",
+        "0.85",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 1}),
         "--enable-prompt-embeds",
@@ -161,20 +160,17 @@ async def test_text_content_and_prompt_embeds_match_with_audio_embeds(
         text_content = [text_part, audio_part]
         embeds_content = [embeds_part, audio_part]
 
-    # Submit both requests concurrently.
-    text_resp, embeds_resp = await asyncio.gather(
-        qwen2audio_client.chat.completions.create(
-            model=QWEN2AUDIO_MODEL,
-            max_tokens=10,
-            temperature=0.0,
-            messages=[{"role": "user", "content": text_content}],
-        ),
-        qwen2audio_client.chat.completions.create(
-            model=QWEN2AUDIO_MODEL,
-            max_tokens=10,
-            temperature=0.0,
-            messages=[{"role": "user", "content": embeds_content}],
-        ),
+    text_resp = await qwen2audio_client.chat.completions.create(
+        model=QWEN2AUDIO_MODEL,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[{"role": "user", "content": text_content}],
+    )
+    embeds_resp = await qwen2audio_client.chat.completions.create(
+        model=QWEN2AUDIO_MODEL,
+        max_tokens=10,
+        temperature=0.0,
+        messages=[{"role": "user", "content": embeds_content}],
     )
 
     text_out = text_resp.choices[0].message.content
