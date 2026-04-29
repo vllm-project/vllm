@@ -11,9 +11,14 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.layers.mamba.mamba_mixer2 import Mixer2RMSNormGated
+from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    Mixer2RMSNormGated,
+    _gather_decode_state_indices,
+)
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 @multi_gpu_test(num_gpus=2)
@@ -136,3 +141,73 @@ def mixer2_gated_norm_tensor_parallel(
         atol=5e-3,
         rtol=1e-3,
     )
+
+
+def test_gather_decode_state_indices_no_spec():
+    n, max_blocks = 3, 5
+    state_indices = torch.arange(n * max_blocks, dtype=torch.int32).reshape(
+        n, max_blocks
+    )
+    last_computed = torch.tensor([0, 1, 2], dtype=torch.int32)
+    last_scheduled = torch.tensor([1, 2, 3], dtype=torch.int32)
+
+    in_slots, out_slots = _gather_decode_state_indices(
+        state_indices, last_computed, last_scheduled, num_spec_tokens=0
+    )
+
+    assert in_slots.shape == (n,)
+    assert out_slots.shape == (n,)
+    torch.testing.assert_close(in_slots, torch.tensor([0, 6, 12], dtype=torch.int32))
+    torch.testing.assert_close(out_slots, torch.tensor([1, 7, 13], dtype=torch.int32))
+
+
+def test_gather_decode_state_indices_with_spec_matches_align_layout():
+    n, max_blocks_full, num_spec_tokens, block_size = 3, 5, 1, 16
+    full_block_table = torch.arange(n * max_blocks_full, dtype=torch.int32).reshape(
+        n, max_blocks_full
+    )
+    last_scheduled = torch.tensor([1, 2, 3], dtype=torch.int32)
+    seq_lens = (last_scheduled.to(torch.int64) + 1) * block_size
+
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_spec_tokens,
+    )
+    align_indices = mamba_get_block_table_tensor(
+        full_block_table, seq_lens, spec, "align"
+    )
+
+    in_slots, _ = _gather_decode_state_indices(
+        full_block_table,
+        block_idx_last_computed_token_d=torch.tensor([0, 1, 2], dtype=torch.int32),
+        block_idx_last_scheduled_token_d=last_scheduled,
+        num_spec_tokens=num_spec_tokens,
+    )
+
+    assert in_slots.shape == align_indices.shape
+    torch.testing.assert_close(in_slots.to(align_indices.dtype), align_indices)
+
+
+def test_gather_decode_state_indices_with_spec():
+    n, max_blocks, num_spec_tokens = 3, 5, 1
+    state_indices = torch.arange(n * max_blocks, dtype=torch.int32).reshape(
+        n, max_blocks
+    )
+    last_computed = torch.tensor([0, 1, 2], dtype=torch.int32)
+    last_scheduled = torch.tensor([1, 2, 3], dtype=torch.int32)
+
+    in_slots, out_slots = _gather_decode_state_indices(
+        state_indices,
+        last_computed,
+        last_scheduled,
+        num_spec_tokens=num_spec_tokens,
+    )
+
+    assert in_slots.shape == (n, 1 + num_spec_tokens)
+    assert out_slots.shape == (n, 1 + num_spec_tokens)
+    expected = torch.tensor([[1, 2], [7, 8], [13, 14]], dtype=torch.int32)
+    torch.testing.assert_close(in_slots, expected)
+    torch.testing.assert_close(out_slots, expected)
