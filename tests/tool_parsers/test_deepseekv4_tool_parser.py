@@ -8,6 +8,13 @@ from unittest.mock import MagicMock
 
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    ChatCompletionNamedFunction,
+)
+from xgrammar import StructuralTag
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
@@ -121,3 +128,40 @@ def test_streaming_extracts_complete_invokes():
     ]
     assert names == ["search"]
     assert json.loads(reconstruct_args(deltas)) == {"query": "deepseek v4"}
+
+def test_support_builtin_structural_tag():
+    assert make_parser().support_structural_tag() is True
+
+
+def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    parser = make_parser()
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+    
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+    
+    if sample_tools:
+        tool = sample_tools[0]
+        req = ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=sample_tools,
+            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
+        )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
