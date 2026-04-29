@@ -261,6 +261,10 @@ else:
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="MLA RoPE+KVCache+Cat fusion is only supported on CUDA and ROCm.",
+)
 def test_mla_rope_kvcache_cat_fusion(
     attn_backend: AttentionBackendEnum,
     use_deepseek_scaling_rope: bool,
