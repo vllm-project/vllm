@@ -82,17 +82,54 @@ void launch_persistent_topk(const torch::Tensor& logits,
     size_t smem_size = P::kFixedSmemLarge + chunk_size * sizeof(uint32_t);
     if (smem_size < P::kSmemMedium) smem_size = P::kSmemMedium;
 
+    // Query occupancy for the instantiation that will actually launch;
+    // overestimating it deadlocks the cooperative barrier.
     int occupancy = 1;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &occupancy, P::persistent_topk_kernel<TopK, 4>, P::kThreadsPerBlock,
-        smem_size);
+    cudaError_t occ_err = cudaSuccess;
+    if (vec_size == 4) {
+      occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &occupancy, P::persistent_topk_kernel<TopK, 4>, P::kThreadsPerBlock,
+          smem_size);
+    } else if (vec_size == 2) {
+      occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &occupancy, P::persistent_topk_kernel<TopK, 2>, P::kThreadsPerBlock,
+          smem_size);
+    } else {
+      occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &occupancy, P::persistent_topk_kernel<TopK, 1>, P::kThreadsPerBlock,
+          smem_size);
+    }
+    TORCH_CHECK(occ_err == cudaSuccess,
+                "persistent_topk occupancy query failed: ",
+                cudaGetErrorString(occ_err));
     if (occupancy < 1) occupancy = 1;
 
-    uint32_t max_resident_ctas = static_cast<uint32_t>(num_sms) * occupancy;
+    // Reserve headroom for co-resident kernels on other streams. Prefer one
+    // CTA per SM when occupancy allows; fall back to a single CTA when
+    // occupancy == 1 (the most deadlock-prone case — any straggler kernel
+    // that takes the only slot on one SM will hang the cooperative barrier).
+    // Never drop below one full group's worth.
+    uint32_t max_resident_ctas =
+        static_cast<uint32_t>(num_sms) * static_cast<uint32_t>(occupancy);
+    uint32_t headroom =
+        (occupancy > 1) ? static_cast<uint32_t>(num_sms) : 1u;
+    if (max_resident_ctas >= headroom + ctas_per_group) {
+      max_resident_ctas -= headroom;
+    }
     uint32_t num_groups = std::min(max_resident_ctas / ctas_per_group,
                                    static_cast<uint32_t>(num_rows));
     if (num_groups == 0) num_groups = 1;
     uint32_t total_ctas = num_groups * ctas_per_group;
+
+    // Fail loudly instead of deadlocking if the launch oversubscribes.
+    uint32_t hw_resident_cap =
+        static_cast<uint32_t>(num_sms) * static_cast<uint32_t>(occupancy);
+    TORCH_CHECK(total_ctas <= hw_resident_cap,
+                "persistent_topk would oversubscribe the device: total_ctas=",
+                total_ctas, " > num_sms*occupancy=", hw_resident_cap,
+                " (TopK=", TopK, ", vec_size=", vec_size,
+                ", ctas_per_group=", ctas_per_group, ", smem=", smem_size,
+                "). Cooperative barriers require all CTAs co-resident.");
 
     size_t state_bytes = num_groups * sizeof(P::RadixRowState);
     TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
