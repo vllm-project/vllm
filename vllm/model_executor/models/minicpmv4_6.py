@@ -375,7 +375,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         return config.hidden_size
 
     def get_model_version(self):
-        return (4, 5)
+        return (4, 6)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
@@ -842,11 +842,18 @@ class MiniCPMV4_6ForConditionalGeneration(
             )
 
         # --- Language model ---
+        # Temporarily swap top-level model_type so that Qwen3_5ForCausalLM
+        # picks up the expected text config when introspecting the hf config.
         with self._mark_language_model(vllm_config):
-            self.language_model = Qwen3_5ForCausalLM(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
-            )
+            saved_model_type = config.model_type
+            config.model_type = "qwen3_5_text"
+            try:
+                self.language_model = Qwen3_5ForCausalLM(
+                    vllm_config=vllm_config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                )
+            finally:
+                config.model_type = saved_model_type
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
