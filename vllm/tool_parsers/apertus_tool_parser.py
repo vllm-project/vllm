@@ -24,12 +24,18 @@ from vllm.entrypoints.openai.engine.protocol import (
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
-    )
+)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import find_common_prefix, partial_json_loads
+from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
+    ToolParser,
+)
+from vllm.tool_parsers.utils import (
+    find_common_prefix,
+    partial_json_loads,
+)
 
 logger = init_logger(__name__)
 
@@ -50,9 +56,10 @@ class ApertusToolParser(ToolParser):
     `<|tools_prefix|>[{"function_name": {"arg1": "value1"}}, ...]<|tools_suffix|>`
 
     Examples:
-        >>> tokenizer = ... # Mock tokenizer
+        >>> tokenizer = ...  # Mock tokenizer
         >>> parser = ApertusToolParser(tokenizer)
-        >>> output = 'I will check. <|tools_prefix|>[{"get_weather": {"city": "Paris"}}]<|tools_suffix|>'
+        >>> output = 'I will check. <|tools_prefix|>[{"get_weather": '\
+            '{"city": "Paris"}}]<|tools_suffix|>'
         >>> request = ChatCompletionRequest(...)
         >>> info = parser.extract_tool_calls(output, request)
         >>> info.content
@@ -68,24 +75,28 @@ class ApertusToolParser(ToolParser):
         Initializes the ApertusToolParser.
 
         Args:
-            tokenizer: The model's tokenizer. Must be provided to interact with special tokens.
+            tokenizer: The model's tokenizer.
+                Must be provided to interact with special tokens.
             tools: Optional list of tools available for the current request.
 
         Raises:
-            ValueError: If the `model_tokenizer` is not successfully passed to the base class.
+            ValueError: If the `model_tokenizer`
+                is not successfully passed to the base class.
         """
         super().__init__(tokenizer, tools)
 
         if not self.model_tokenizer:
             raise ValueError(
-                    "The model tokenizer must be passed to the ToolParser "
-                    "constructor during construction."
-                    )
+                "The model tokenizer must be passed to the ToolParser "
+                "constructor during construction."
+            )
         # Regex to extract tool calls block (suffix is optional for incomplete outputs)
         self.tool_call_regex = re.compile(
-                rf"{re.escape(TOOL_CALLS_PREFIX)}(.*?)(?:{re.escape(TOOL_CALLS_SUFFIX)}|$)",
-                re.DOTALL,
-                )
+            rf"{re.escape(TOOL_CALLS_PREFIX)}"
+            rf"(.*?)"
+            rf"(?:{re.escape(TOOL_CALLS_SUFFIX)}|$)",
+            re.DOTALL,
+        )
 
         self._reset_streaming_state()
 
@@ -103,8 +114,8 @@ class ApertusToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = []
 
     def adjust_request(
-            self, request: ChatCompletionRequest | ResponsesRequest
-            ) -> ChatCompletionRequest | ResponsesRequest:
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Adjusts the generation request to ensure special tool tokens are not skipped.
 
@@ -124,23 +135,25 @@ class ApertusToolParser(ToolParser):
 
     def _buffer_delta_text(self, delta_text: str) -> str:
         """
-        Buffers incoming delta chunks to prevent fragmentation of multi-token special tags.
+        Buffers incoming delta chunks to prevent
+        fragmentation of multi-token special tags.
 
-        If a chunk ends with a partial match of `<|tools_prefix|>` or `<|tools_suffix|>`,
+        If a chunk ends with a partial match of
+        `<|tools_prefix|>` or `<|tools_suffix|>`,
         it holds that part back until the next chunk clarifies if it's the actual tag
         or just normal text.
 
         Args:
-            delta_text: The newly generated text chunk received from the generation stream.
+            delta_text: The newly generated text chunk
 
         Returns:
             The safe, verified text chunk free of partial tag collisions.
 
         Examples:
             >>> parser = ApertusToolParser(...)
-            >>> parser._buffer_delta_text("Let me check <|tool")
+            >>> parser._buffer_delta_text("Let me check <|tool" \
             "Let me check "  # "<|tool" is buffered internally
-            >>> parser._buffer_delta_text("s_prefix|>")
+            >>> parser._buffer_delta_text("s_prefix|>" \
             "<|tools_prefix|>"  # Buffer released on completion
         """
         self.buffered_delta_text += delta_text
@@ -161,23 +174,25 @@ class ApertusToolParser(ToolParser):
         return text
 
     def extract_tool_calls(
-            self,
-            model_output: str,
-            request: ChatCompletionRequest,
-            ) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
         """
         Extracts tool calls from a completely generated model response (Non-Streaming).
 
         Args:
             model_output: The full completion string generated by the model.
-            request: The current chat completion request context containing tool schemas.
+            request: The current chat completion
+                request context containing tool schemas.
 
         Returns:
             An `ExtractedToolCallInformation` object containing normal text content
             and a list of fully formatted `ToolCall` objects.
 
         Examples:
-            >>> output = 'Let me see. <|tools_prefix|>[{"get_weather": {"loc": "Paris"}}]<|tools_suffix|>'
+            >>> output = 'Let me see. <|tools_prefix|>[{"get_weather":' \
+                '{"loc": "Paris"}}]<|tools_suffix|>'
             >>> info = parser.extract_tool_calls(output, request)
             >>> info.tools_called
             True
@@ -189,8 +204,8 @@ class ApertusToolParser(ToolParser):
         match = self.tool_call_regex.search(model_output)
         if not match:
             return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                    )
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
         try:
             # group(1) might contain trailing text if the suffix is missing
@@ -198,7 +213,8 @@ class ApertusToolParser(ToolParser):
             stripped_text = matched_text.lstrip()
 
             try:
-                # Use raw_decode to robustly isolate the valid JSON array from any trailing garbage
+                # Use raw_decode to robustly isolate
+                # the valid JSON array from any trailing garbage
                 parsed_json, idx = json.JSONDecoder().raw_decode(stripped_text)
                 trailing_in_group = stripped_text[idx:]
             except json.JSONDecodeError:
@@ -214,54 +230,58 @@ class ApertusToolParser(ToolParser):
                 if isinstance(obj, dict) and obj:
                     name, args = next(iter(obj.items()))
                     tool_calls.append(
-                            ToolCall(
-                                    type="function",
-                                    id=make_tool_call_id(),
-                                    function=FunctionCall(
-                                            name=name,
-                                            arguments=json.dumps(args, ensure_ascii=False),
-                                            ),
-                                    )
-                            )
+                        ToolCall(
+                            type="function",
+                            id=make_tool_call_id(),
+                            function=FunctionCall(
+                                name=name,
+                                arguments=json.dumps(args, ensure_ascii=False),
+                            ),
+                        )
+                    )
 
-            # Content combines any generated text prior to and safely after the tool block
-            content_str = model_output[:match.start()].strip()
+            # Content combines any generated text
+            # prior to and safely after the tool block
+            content_str = model_output[: match.start()].strip()
 
-            # Surface any hallucinated text inside the regex group (due to missing suffix)
+            # Surface any hallucinated text inside
+            # the regex group (due to missing suffix)
             if trailing_in_group.strip():
                 trailing = trailing_in_group.replace(TOOL_CALLS_SUFFIX, "").strip()
                 if trailing:
                     content_str = (content_str + "\n" + trailing).strip()
 
             # Surface text natively generated after the explicit suffix
-            after_suffix = model_output[match.end():].replace(TOOL_CALLS_SUFFIX, "").strip()
+            after_suffix = (
+                model_output[match.end() :].replace(TOOL_CALLS_SUFFIX, "").strip()
+            )
             if after_suffix:
                 content_str = (content_str + "\n" + after_suffix).strip()
 
             return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=content_str if content_str else None,
-                    )
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=content_str if content_str else None,
+            )
 
         except Exception:
             logger.exception("Error extracting tool calls from Apertus response")
             return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                    )
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
-            request: ChatCompletionRequest,
-            ) -> DeltaMessage | None:
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ) -> DeltaMessage | None:
         """
-        Handles streaming chunks and yields incremental updates for text vs tool JSON calls.
+        Handles streaming chunks
 
         Args:
             previous_text: The complete model text generated prior to this chunk.
@@ -280,7 +300,9 @@ class ApertusToolParser(ToolParser):
             >>> prev = '<|tools_prefix|>[{"get_weather": {"loc'
             >>> cur = '<|tools_prefix|>[{"get_weather": {"location": "Paris"}}'
             >>> delta = 'ation": "Paris"}}'
-            >>> msg = parser.extract_tool_calls_streaming(prev, cur, delta, ..., request)
+            >>> msg = parser.extract_tool_calls_streaming(
+            ...     prev, cur, delta, ..., request
+            ... )
             >>> msg.tool_calls[0].function.arguments
             'ation": "Paris"}'
         """
@@ -298,9 +320,12 @@ class ApertusToolParser(ToolParser):
             logger.exception("Error in Apertus streaming tool call extraction")
             return None
 
-    def _extract_streaming(self, current_text: str, delta_text: str) -> DeltaMessage | None:
+    def _extract_streaming(
+        self, current_text: str, delta_text: str
+    ) -> DeltaMessage | None:
         """
-        Core streaming logic. Separates visible chat text from JSON blocks and computes diffs.
+        Core streaming logic.
+        Separates visible chat text from JSON blocks and computes diffs.
 
         Args:
             current_text: The full generated output string so far.
@@ -322,7 +347,8 @@ class ApertusToolParser(ToolParser):
             json_start = prefix_idx + len(TOOL_CALLS_PREFIX)
             s = current_text[json_start:].lstrip()
             try:
-                # If raw_decode succeeds, the JSON array is fully formed and implicitly closed
+                # If raw_decode succeeds,
+                # the JSON array is fully formed and implicitly closed
                 _, idx = json.JSONDecoder().raw_decode(s)
                 json_end_idx = len(current_text) - len(s) + idx
                 json_completed, is_inside_tools = True, False
@@ -331,24 +357,32 @@ class ApertusToolParser(ToolParser):
 
         just_finished = (TOOL_CALLS_SUFFIX in delta_text) or json_completed
 
-        # 1. Fast path: Output normal text immediately if we are completely outside tool block constraints
+        # 1. Fast path: Output normal text immediately
+        # if we are completely outside tool block constraints
         if not is_inside_tools and not just_finished:
-            text = delta_text.replace(TOOL_CALLS_PREFIX, "").replace(TOOL_CALLS_SUFFIX, "")
+            text = delta_text.replace(TOOL_CALLS_PREFIX, "").replace(
+                TOOL_CALLS_SUFFIX, ""
+            )
             return DeltaMessage(content=text) if text else None
 
         # 2. Extract leading and trailing normal text directly adjacent to tool blocks
         content_str = ""
         if TOOL_CALLS_PREFIX in delta_text:
-            content_str += delta_text.split(TOOL_CALLS_PREFIX)[0].replace(TOOL_CALLS_SUFFIX, "")
+            content_str += delta_text.split(TOOL_CALLS_PREFIX)[0].replace(
+                TOOL_CALLS_SUFFIX, ""
+            )
 
         if just_finished:
             if json_completed:
                 # The tool block finished in this chunk via implicit JSON completion
-                # Ensure we strictly isolate and extract only trailing text that is part of `delta_text`
+                # Ensure we strictly isolate
+                # and extract only trailing text that is part of `delta_text`
                 delta_start_idx = len(current_text) - len(delta_text)
                 content_start = max(json_end_idx, delta_start_idx)
                 if content_start < len(current_text):
-                    content_str += current_text[content_start:].replace(TOOL_CALLS_SUFFIX, "")
+                    content_str += current_text[content_start:].replace(
+                        TOOL_CALLS_SUFFIX, ""
+                    )
             else:
                 content_str += delta_text.split(TOOL_CALLS_SUFFIX)[-1]
 
@@ -361,23 +395,27 @@ class ApertusToolParser(ToolParser):
 
         if tool_calls or content_str:
             return DeltaMessage(
-                    content=content_str if content_str else None,
-                    tool_calls=tool_calls if tool_calls else None
-                    )
+                content=content_str if content_str else None,
+                tool_calls=tool_calls if tool_calls else None,
+            )
 
         return None
 
-    def _parse_and_diff_json(self, json_str: str, is_final: bool) -> list[DeltaToolCall]:
+    def _parse_and_diff_json(
+        self, json_str: str, is_final: bool
+    ) -> list[DeltaToolCall]:
         """
         Parses an isolated, potentially incomplete streaming JSON array and returns
         newly accumulated tool call diffs.
 
         Args:
-            json_str: The extracted JSON array string so far (e.g. `[{"weather": {"city": "Par"}]`).
-            is_final: True if the tool block has received its closing `<|tools_suffix|>`.
+            json_str: The extracted JSON array string so far
+                (e.g. `[{"weather": {"city": "Par"}]`).
+            is_final: True if the tool block has received its closing`<|tools_suffix|>`
 
         Returns:
-            A list of `DeltaToolCall` items representing string diffs in function arguments
+            A list of `DeltaToolCall`
+             items representing string diffs in function arguments
             to stream back to the client.
         """
         try:
@@ -419,7 +457,9 @@ class ApertusToolParser(ToolParser):
 
         return tool_calls
 
-    def _emit_tool_name(self, parsed: list, index: int, tool_calls: list[DeltaToolCall]) -> None:
+    def _emit_tool_name(
+        self, parsed: list, index: int, tool_calls: list[DeltaToolCall]
+    ) -> None:
         """
         Extracts and emits the function name mapped to a new tool call ID.
 
@@ -429,7 +469,8 @@ class ApertusToolParser(ToolParser):
             tool_calls: The running list of delta chunks to mutate.
 
         Examples:
-            Appends `DeltaToolCall(index=0, function=DeltaFunctionCall(name="get_weather", ...))`
+            Appends `DeltaToolCall(index=0,
+                function=DeltaFunctionCall(name="get_weather", ...))`
             to the `tool_calls` list and marks the name as sent.
         """
         obj = parsed[index]
@@ -437,15 +478,19 @@ class ApertusToolParser(ToolParser):
             name = next(iter(obj))
             self.current_tool_name_sent = True
             tool_calls.append(
-                    DeltaToolCall(
-                            index=index,
-                            type="function",
-                            id=make_tool_call_id(),
-                            function=DeltaFunctionCall(name=name, arguments="").model_dump(exclude_none=True),
-                            )
-                    )
+                DeltaToolCall(
+                    index=index,
+                    type="function",
+                    id=make_tool_call_id(),
+                    function=DeltaFunctionCall(name=name, arguments="").model_dump(
+                        exclude_none=True
+                    ),
+                )
+            )
 
-    def _get_tool_diff(self, parsed: list, index: int, is_final: bool) -> DeltaToolCall | None:
+    def _get_tool_diff(
+        self, parsed: list, index: int, is_final: bool
+    ) -> DeltaToolCall | None:
         """
         Calculates the exact string difference to safely append new tool parameters.
 
@@ -455,10 +500,12 @@ class ApertusToolParser(ToolParser):
         Args:
             parsed: The latest list of parsed JSON objects.
             index: The active tool's array index.
-            is_final: Whether to emit trailing structural brackets (True if block is done).
+            is_final: Whether to emit
+                trailing structural brackets (True if block is done).
 
         Returns:
-            A `DeltaToolCall` mapping to the arguments diff, or None if no text was appended.
+            A `DeltaToolCall` mapping to the arguments diff,
+                or None if no text was appended.
 
         Examples:
             >>> # Previous streamed state: '{"city": "Pari'
@@ -477,7 +524,8 @@ class ApertusToolParser(ToolParser):
 
         args_json = json.dumps(args, ensure_ascii=False)
 
-        # Suppress trailing structural characters during stream (looks cleaner in frontends)
+        # Suppress trailing structural characters
+        # during stream (looks cleaner in frontends)
         if not is_final:
             while args_json and args_json[-1] in ("}", '"', "]", " ", ","):
                 args_json = args_json[:-1]
@@ -492,12 +540,14 @@ class ApertusToolParser(ToolParser):
             self.streamed_args_for_tool[index] = prefix
             return None
 
-        diff = args_json[len(prev_sent):]
+        diff = args_json[len(prev_sent) :]
         if diff:
             self.streamed_args_for_tool[index] = args_json
             return DeltaToolCall(
-                    index=index,
-                    function=DeltaFunctionCall(arguments=diff).model_dump(exclude_none=True),
-                    )
+                index=index,
+                function=DeltaFunctionCall(arguments=diff).model_dump(
+                    exclude_none=True
+                ),
+            )
 
         return None

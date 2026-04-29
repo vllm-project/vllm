@@ -12,22 +12,19 @@ from vllm.tool_parsers.apertus_tool_parser import (
     TOOL_CALLS_PREFIX,
     TOOL_CALLS_SUFFIX,
     ApertusToolParser,
-    )
-
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_tokenizer():
     tokenizer = MagicMock()
     tokenizer.encode.return_value = [1, 2, 3]
     # Include the tool call tokens in the vocab for the parser
-    tokenizer.get_vocab.return_value = {
-        TOOL_CALLS_PREFIX: 100,
-        TOOL_CALLS_SUFFIX: 101
-        }
+    tokenizer.get_vocab.return_value = {TOOL_CALLS_PREFIX: 100, TOOL_CALLS_SUFFIX: 101}
     return tokenizer
 
 
@@ -48,8 +45,8 @@ def mock_request():
 # Non-streaming extraction tests
 # ---------------------------------------------------------------------------
 
-class TestExtractToolCalls:
 
+class TestExtractToolCalls:
     def test_no_tool_calls(self, parser, mock_request):
         model_output = "Hello, how can I help you today?"
         result = parser.extract_tool_calls(model_output, mock_request)
@@ -72,7 +69,9 @@ class TestExtractToolCalls:
 
     def test_multiple_arguments(self, parser, mock_request):
         model_output = (
-            '<|tools_prefix|>[{"get_weather": {"location": "San Francisco", "unit": "celsius"}}]<|tools_suffix|>'
+            '<|tools_prefix|>[{"get_weather": '
+            '{"location": "San Francisco", '
+            '"unit": "celsius"}}]<|tools_suffix|>'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -96,7 +95,9 @@ class TestExtractToolCalls:
 
     def test_multiple_tool_calls(self, parser, mock_request):
         model_output = (
-            '<|tools_prefix|>[{"get_weather": {"location": "London"}}, {"get_time": {"location": "London"}}]<|tools_suffix|>'
+            '<|tools_prefix|>[{"get_weather": '
+            '{"location": "London"}}, '
+            '{"get_time": {"location": "London"}}]<|tools_suffix|>'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -107,7 +108,9 @@ class TestExtractToolCalls:
 
     def test_nested_arguments(self, parser, mock_request):
         model_output = (
-            '<|tools_prefix|>[{"complex_function": {"nested": {"inner": "value"}, "list": ["a", "b"]}}]<|tools_suffix|>'
+            '<|tools_prefix|>[{"complex_function": '
+            '{"nested": {"inner": "value"}, '
+            '"list": ["a", "b"]}}]<|tools_suffix|>'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -129,7 +132,8 @@ class TestExtractToolCalls:
 
     def test_missing_tool_suffix(self, parser, mock_request):
         model_output = (
-            '<|tools_prefix|>[{"get_weather": {"location": "San Francisco", "unit": "celsius"}}]'
+            '<|tools_prefix|>[{"get_weather": '
+            '{"location": "San Francisco", "unit": "celsius"}}]'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -144,12 +148,11 @@ class TestExtractToolCalls:
 # Streaming extraction tests
 # ---------------------------------------------------------------------------
 
-class TestStreamingExtraction:
 
+class TestStreamingExtraction:
     def _simulate_streaming(
-            self, parser: ApertusToolParser, mock_request: Any,
-            chunks: list[str]
-            ) -> list[tuple[Any, str]]:
+        self, parser: ApertusToolParser, mock_request: Any, chunks: list[str]
+    ) -> list[tuple[Any, str]]:
         results: list[tuple[Any, str]] = []
         previous_text: str = ""
         previous_token_ids: list[int] = []
@@ -161,14 +164,14 @@ class TestStreamingExtraction:
             current_token_ids = previous_token_ids + delta_token_ids
 
             delta = parser.extract_tool_calls_streaming(
-                    previous_text=previous_text,
-                    current_text=current_text,
-                    delta_text=chunk,
-                    previous_token_ids=tuple(previous_token_ids),
-                    current_token_ids=tuple(current_token_ids),
-                    delta_token_ids=tuple(delta_token_ids),
-                    request=mock_request,
-                    )
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=tuple(previous_token_ids),
+                current_token_ids=tuple(current_token_ids),
+                delta_token_ids=tuple(delta_token_ids),
+                request=mock_request,
+            )
             results.append((delta, current_text))
             previous_text = current_text
             previous_token_ids = list(current_token_ids)
@@ -183,13 +186,29 @@ class TestStreamingExtraction:
                 continue
 
             for tc in delta.tool_calls:
-                idx = tc.get("index", 0) if isinstance(tc, dict) else getattr(tc, "index", 0)
-                func = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
+                idx = (
+                    tc.get("index", 0)
+                    if isinstance(tc, dict)
+                    else getattr(tc, "index", 0)
+                )
+                func = (
+                    tc.get("function", {})
+                    if isinstance(tc, dict)
+                    else getattr(tc, "function", None)
+                )
                 if not func:
                     continue
 
-                name = func.get("name") if isinstance(func, dict) else getattr(func, "name", None)
-                args = func.get("arguments") if isinstance(func, dict) else getattr(func, "arguments", None)
+                name = (
+                    func.get("name")
+                    if isinstance(func, dict)
+                    else getattr(func, "name", None)
+                )
+                args = (
+                    func.get("arguments")
+                    if isinstance(func, dict)
+                    else getattr(func, "arguments", None)
+                )
 
                 if idx not in tool_calls:
                     tool_calls[idx] = {"name": "", "arguments": ""}
@@ -203,7 +222,11 @@ class TestStreamingExtraction:
 
     def _collect_content(self, results) -> str:
         """Collects generated normal text outside of the tool calls."""
-        return "".join(delta.content for delta, _ in results if delta and getattr(delta, "content", None))
+        return "".join(
+            delta.content
+            for delta, _ in results
+            if delta and getattr(delta, "content", None)
+        )
 
     def test_basic_streaming_single_tool(self, parser, mock_request):
         chunks = [
@@ -212,7 +235,7 @@ class TestStreamingExtraction:
             '{"location": "Paris, ',
             'France"}}]',
             "<|tools_suffix|>",
-            ]
+        ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         tcs = self._collect_tool_calls(results)
@@ -227,7 +250,7 @@ class TestStreamingExtraction:
             '[{"get_weather": ',
             '{"location": "Paris, ',
             'France"}}]',
-            ]
+        ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         tcs = self._collect_tool_calls(results)
@@ -236,14 +259,10 @@ class TestStreamingExtraction:
         assert tcs[0]["name"] == "get_weather"
         assert json.loads(tcs[0]["arguments"]) == {"location": "Paris, France"}
 
-    def test_streaming_partial_tag_buffering_missing_tool_suffix(self, parser, mock_request):
-        chunks = [
-            "Content",
-            "<|tools_",
-            "prefix|>",
-            '[{"f": ',
-            '{"a": 1}}]'
-            ]
+    def test_streaming_partial_tag_buffering_missing_tool_suffix(
+        self, parser, mock_request
+    ):
+        chunks = ["Content", "<|tools_", "prefix|>", '[{"f": ', '{"a": 1}}]']
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         content = self._collect_content(results)
@@ -264,7 +283,7 @@ class TestStreamingExtraction:
             '[{"get_weather": {"location": "Tokyo"}}',
             ', {"get_time": {"location": "Tokyo"}}]',
             "<|tools_suffix|>",
-            ]
+        ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         tcs = self._collect_tool_calls(results)
@@ -282,7 +301,7 @@ class TestStreamingExtraction:
             "<|tools_prefix|>",
             '[{"get_weather": {"location": "London"}}]',
             "<|tools_suffix|>",
-            ]
+        ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         content = self._collect_content(results)
@@ -301,8 +320,8 @@ class TestStreamingExtraction:
             "prefix|>",
             '[{"f": {"a": 1}}]',
             "<|tools_suf",
-            "fix|>"
-            ]
+            "fix|>",
+        ]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         content = self._collect_content(results)
@@ -321,11 +340,12 @@ class TestStreamingExtraction:
     # ---------------------------------------------------------------------------
 
     def test_mtp_streaming_massive_chunk(self, parser, mock_request):
-        """Simulates MTP predicting text, tool calls, and trailing text all in a single chunk."""
+        """Simulates MTP predicting text, tool calls,
+        and trailing text all in a single chunk."""
         chunks = [
             "Sure! "
             '<|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|>'
-            ]
+        ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         content = self._collect_content(results)
@@ -339,8 +359,10 @@ class TestStreamingExtraction:
     def test_mtp_streaming_multiple_tools_burst(self, parser, mock_request):
         """Simulates MTP predicting an array of multiple tools in one single chunk."""
         chunks = [
-            '<|tools_prefix|>[{"get_weather": {"location": "London"}}, {"get_time": {"location": "Paris"}}]<|tools_suffix|>'
-            ]
+            '<|tools_prefix|>[{"get_weather": '
+            '{"location": "London"}}, '
+            '{"get_time": {"location": "Paris"}}]<|tools_suffix|>'
+        ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         tc = self._collect_tool_calls(results)
@@ -351,12 +373,13 @@ class TestStreamingExtraction:
         assert json.loads(tc[1]["arguments"]) == {"location": "Paris"}
 
     def test_mtp_streaming_skip_and_catch_up(self, parser, mock_request):
-        """Simulates MTP chunks that jump over entire tools (e.g., from middle of tool 1 to middle of tool 3)."""
+        """Simulates MTP chunks that jump over entire tools
+        (e.g., from middle of tool 1 to middle of tool 3)."""
         chunks = [
             '<|tools_prefix|>[{"t1": {"a": 1}',
             '}, {"t2": {"b": 2}}, {"t3": {"c": 3',
-            '}}]<|tools_suffix|>'
-            ]
+            "}}]<|tools_suffix|>",
+        ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         tc = self._collect_tool_calls(results)
@@ -369,8 +392,12 @@ class TestStreamingExtraction:
         assert json.loads(tc[2]["arguments"]) == {"c": 3}
 
     def test_vllm_streaming_character_by_character(self, parser, mock_request):
-        """Simulates worst-case vLLM fragmentation where chunks arrive character-by-character."""
-        text = 'Hi <|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|> '
+        """Simulates worst-case vLLM fragmentation where
+        chunks arrive character-by-character."""
+        text = (
+            'Hi <|tools_prefix|>[{"get_weather": '
+            '{"location": "London"}}]<|tools_suffix|> '
+        )
         chunks = list(text)
         results = self._simulate_streaming(parser, mock_request, chunks)
 
@@ -383,7 +410,8 @@ class TestStreamingExtraction:
         assert json.loads(tc[0]["arguments"]) == {"location": "London"}
 
     def test_vllm_streaming_empty_deltas(self, parser, mock_request):
-        """Simulates vLLM stream producing empty string chunks (e.g., hidden tokens or artifacts)."""
+        """Simulates vLLM stream producing empty string chunks
+        (e.g., hidden tokens or artifacts)."""
         chunks = [
             "Wait",
             "",
@@ -392,8 +420,8 @@ class TestStreamingExtraction:
             '[{"get_weather": ',
             "",
             '{"location": "London"}}]',
-            "<|tools_suffix|>"
-            ]
+            "<|tools_suffix|>",
+        ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         content = self._collect_content(results)

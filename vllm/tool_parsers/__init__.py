@@ -173,7 +173,7 @@ _TOOL_PARSERS_TO_REGISTER = {
     "apertus": (
         "apertus_tool_parser",
         "ApertusToolParser",
-        ),
+    ),
 }
 
 
