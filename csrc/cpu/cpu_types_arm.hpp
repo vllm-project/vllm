@@ -15,6 +15,9 @@ using namespace at::vec;
 
 namespace vec_op {
 
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)  \
@@ -322,6 +325,9 @@ struct BF16Vec32 : public VectorizedRegWrapper<BF16Vec32, 4, c10::BFloat16> {
     reg.val[2] = vec8_data.reg.val[0];
     reg.val[3] = vec8_data.reg.val[0];
   };
+
+  explicit BF16Vec32(const uint8_t*, fp8_e4m3_tag) : Base() {}
+  explicit BF16Vec32(const uint8_t*, fp8_e5m2_tag) : Base() {}
 };
 
 struct FP32Vec4 : public VectorizedRegWrapper<FP32Vec4, 1, float> {
