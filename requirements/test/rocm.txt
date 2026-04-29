@@ -1597,7 +1597,7 @@ wrapt==2.1.2
     # via smart-open
 xarray==2026.2.0
     # via rioxarray
-xgrammar==0.1.33
+xgrammar==0.1.34
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
