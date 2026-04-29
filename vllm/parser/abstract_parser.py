@@ -614,19 +614,11 @@ class DelegatingParser(Parser):
             if self._tool_parser and self.is_reasoning_end(delta_token_ids):
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
-                # Reconstruct text from token IDs instead of using the
-                # reasoning parser's text-split content, which can contain
-                # partial special-token fragments (e.g. "<|" from
-                # "<|tool_call>") that leak into content. (#40911)
-                if current_token_ids:
-                    current_text = self.model_tokenizer.decode(
-                        current_token_ids,
-                        skip_special_tokens=False,
-                    )
+                if delta_message and delta_message.content:
+                    current_text = delta_message.content
+                    delta_message.content = None
                 else:
                     current_text = ""
-                if delta_message:
-                    delta_message.content = None
 
         # Tool call extraction
         if self._in_tool_call_phase(state):

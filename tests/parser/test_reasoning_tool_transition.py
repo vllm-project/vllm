@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Regression tests for DelegatingParser reasoning-to-tool-call transition.
+Regression tests for Gemma4 reasoning-to-tool-call transition.
 
 Issue #40911: partial tool-call markers (e.g. "<|" from "<|tool_call>")
 can leak into content when the reasoning end token and the tool-call
-start token arrive in the same streaming delta.
+start token arrive in the same streaming delta.  The fix lives in
+Gemma4ReasoningParser.extract_reasoning_streaming(), which reconstructs
+content from token IDs instead of relying on text-based splitting.
 """
 
 import pytest

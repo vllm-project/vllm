@@ -158,6 +158,23 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         if result is None:
             return None
 
+        # When reasoning ends in this delta, the base class splits
+        # delta_text on the end-token string to separate reasoning from
+        # content.  That text split can produce partial special-token
+        # fragments (e.g. "<|" from "<|tool_call>") because the
+        # incremental detokenizer text may not align with token
+        # boundaries.  Reconstruct content from token IDs instead,
+        # which are always exact.  (#40911)
+        if self.end_token_id in delta_token_ids and result.content is not None:
+            content_ids = self.extract_content_ids(list(delta_token_ids))
+            if content_ids:
+                result.content = self.model_tokenizer.decode(
+                    content_ids,
+                    skip_special_tokens=False,
+                )
+            else:
+                result.content = None
+
         if result.reasoning is None:
             return result
 
