@@ -549,67 +549,44 @@ def hc_head_fuse_tilelang(
         T.pdl_trigger()
 
 
-def hc_head(
-    hidden_states: torch.Tensor,
+def _hc_head_fused_kernel(
+    hs_flat: torch.Tensor,
     fn: torch.Tensor,
     hc_scale: torch.Tensor,
     hc_base: torch.Tensor,
+    out: torch.Tensor,
+    hidden_size: int,
     rms_eps: float,
     hc_eps: float,
-) -> torch.Tensor:
-    """Hyperconnection head: fused RMS-norm projection + sigmoid gating + reduce.
-
-    Args:
-        hidden_states: shape (*, hc_mult, hidden_size), dtype bfloat16.
-        fn: shape (hc_mult, hc_mult * hidden_size), dtype float32.
-        hc_scale: shape (1,), dtype float32.
-        hc_base: shape (hc_mult,), dtype float32.
-        rms_eps: RMS normalisation epsilon.
-        hc_eps: post-sigmoid epsilon added to pre_mix.
-
-    Returns:
-        Tensor of shape (*, hidden_size), dtype bfloat16.
-    """
-    assert hidden_states.dtype == torch.bfloat16
-    assert fn.dtype == hc_scale.dtype == hc_base.dtype == torch.float32
-
-    hc_mult = hidden_states.shape[-2]
-    hidden_size = hidden_states.shape[-1]
-    outer_shape = hidden_states.shape[:-2]
-
-    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-    num_tokens = hs_flat.shape[0]
-
-    h_block = math.gcd(512, hidden_size)
-    out = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device)
-
-    hc_head_fuse_tilelang(
-        hs_flat, fn, hc_scale, hc_base, out,
-        hidden_size, rms_eps, hc_eps, h_block, hc_mult,
-    )
-
-    return out.view(*outer_shape, hidden_size)
+    h_block: int,
+    hc_mult: int,
+) -> None:
+    """Fill pre-allocated `out` (T, H) in-place with the hc_head result."""
+    if hs_flat.shape[0] > 0:
+        hc_head_fuse_tilelang(
+            hs_flat, fn, hc_scale, hc_base, out,
+            hidden_size, rms_eps, hc_eps, h_block, hc_mult,
+        )
 
 
-def _hc_head_fake(
-    hidden_states: torch.Tensor,
+def _hc_head_fused_kernel_fake(
+    hs_flat: torch.Tensor,
     fn: torch.Tensor,
     hc_scale: torch.Tensor,
     hc_base: torch.Tensor,
+    out: torch.Tensor,
+    hidden_size: int,
     rms_eps: float,
     hc_eps: float,
-) -> torch.Tensor:
-    return torch.empty(
-        *hidden_states.shape[:-2],
-        hidden_states.shape[-1],
-        dtype=torch.bfloat16,
-        device=hidden_states.device,
-    )
+    h_block: int,
+    hc_mult: int,
+) -> None:
+    pass
 
 
 direct_register_custom_op(
-    op_name="hc_head",
-    op_func=hc_head,
-    mutates_args=[],
-    fake_impl=_hc_head_fake,
+    op_name="hc_head_fused_kernel",
+    op_func=_hc_head_fused_kernel,
+    mutates_args=["out"],
+    fake_impl=_hc_head_fused_kernel_fake,
 )
