@@ -26,7 +26,7 @@ Base:
 vLLM v0.20.0
 
 Latest known HEAD:
-ccd9b95e8 fix(engine): keep idle polling on unfinished requests
+a1cb3d2ce fix(spec_decode): allow reasoning logits processor
 ```
 
 Remotes:
@@ -97,6 +97,8 @@ git push upstream kimi-pd-pegaflow
 Recent vLLM commit stack:
 
 ```text
+a1cb3d2ce fix(spec_decode): allow reasoning logits processor
+3acae96fd docs: add Kimi PD PegaFlow runbook
 ccd9b95e8 fix(engine): keep idle polling on unfinished requests
 a1c8dc5cc fix(metrics): compute TTFT prompt length from prefill stats
 65c7265b4 fix(nixl): align PP stage descriptors by region label
@@ -422,13 +424,13 @@ image.paigpu.com/library/vllm-with-pegaflow:kimi-llmd-test
 Final known digest:
 
 ```text
-image.paigpu.com/library/vllm-with-pegaflow@sha256:f132f4fa904c97d96e8dd942adbf4d9bb031842226d04f04fd2f7274169d95a6
+image.paigpu.com/library/vllm-with-pegaflow@sha256:de0f2541cda799cde8717e7f94abb71f4edf147bd8bab851fcc56094dc51c19c
 ```
 
 Build-server local image id:
 
 ```text
-sha256:e2b4548cc808b3f1ce38013ec49d12d6afa5763626516d71e18e477d800d48ed
+sha256:91711c883d9a9a6c10dc02f3874e7ae19e2381db6e51f9d442def3d4d33ec6ee
 ```
 
 Build script:
