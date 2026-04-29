@@ -74,8 +74,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Map: id(tokenizer) -> prompt embeds placeholder token ID.
-_PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE: Final[dict[int, int]] = {}
+# Cache of `tokenizer -> prompt_embeds placeholder token ID`. Keyed by the
+# tokenizer object (not `id(tokenizer)`) so a fresh tokenizer landing at a
+# recycled memory address can't pick up a stale tid. Entries evict atomically
+# with the tokenizer's garbage-collection.
+_PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE: Final[
+    weakref.WeakKeyDictionary[HfTokenizer, int]
+] = weakref.WeakKeyDictionary()
 _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_ERROR: Final[str] = (
     "Expected {token!r} to tokenize to exactly 1 token, got {num_ids} ({ids!r})."
 )
@@ -97,8 +102,7 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
     """Register `PROMPT_EMBEDS_PLACEHOLDER_TOKEN` as a special token and return
     its token ID."""
-    cache_key = id(tokenizer)
-    cached = _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE.get(cache_key)
+    cached = _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE.get(tokenizer)
     if cached is not None:
         return cached
 
@@ -117,15 +121,7 @@ def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
         )
 
     token_id = ids[0]
-    _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE[cache_key] = token_id
-
-    # Pop the cache entry if the tokenizer is garbage-collected so
-    # id-reuse can't cause a stale cache hit for a different tokenizer instance.
-    def _clear_cache(key: int = cache_key) -> None:
-        _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE.pop(key, None)
-
-    weakref.finalize(tokenizer, _clear_cache)
-
+    _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE[tokenizer] = token_id
     return token_id
 
 
