@@ -197,6 +197,7 @@ if flashinfer_comm is not None:
             layout_code=layout_code,
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
+            trigger_completion_at_end=False,
         )
 
     def call_trtllm_fused_allreduce_norm_fake(

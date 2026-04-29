@@ -83,6 +83,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+
+_ll_a_gemm_enabled = False
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -766,6 +768,11 @@ def _min_latency_fused_qkv_a_proj_impl(
     """
     num_tokens = input_.shape[0]
     if 0 < num_tokens <= 16:
+        if _ll_a_gemm_enabled:
+            from vllm.model_executor.layers.fused_moe.router.ll_a_gemm import (
+                ll_a_gemm,
+            )
+            return ll_a_gemm(input_, weight)
         output = torch.empty(
             num_tokens,
             weight.shape[0],
@@ -823,6 +830,25 @@ class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
                 or current_platform.is_device_capability_family(100)
             )
         )
+        global _ll_a_gemm_enabled
+        if self._use_min_latency_gemm and not _ll_a_gemm_enabled:
+            from vllm.model_executor.layers.fused_moe.router.ll_a_gemm import (
+                is_available,
+                ll_a_gemm,
+            )
+            if is_available():
+                ll_a_gemm(
+                    torch.zeros(1, self.weight.shape[1],
+                                dtype=torch.bfloat16,
+                                device=self.weight.device),
+                    self.weight)
+                ll_a_gemm(
+                    torch.zeros(16, self.weight.shape[1],
+                                dtype=torch.bfloat16,
+                                device=self.weight.device),
+                    self.weight)
+                _ll_a_gemm_enabled = True
+                logger.info("cuteDSL ll_a_gemm enabled for fused_qkv_a_proj")
 
     def forward(
         self,

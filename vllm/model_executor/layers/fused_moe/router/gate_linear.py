@@ -10,11 +10,12 @@ from vllm.platforms import current_platform
 
 @PluggableLayer.register("gate_linear")
 class GateLinear(ReplicatedLinear):
-    """MoE gate linear layer with three-tier GEMM dispatch:
+    """MoE gate linear layer with four-tier GEMM dispatch:
 
-    1. DSV3 specialized kernel (SM90+, batch<=16, supported dims)
-    2. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
-    3. F.linear via ReplicatedLinear (ultimate fallback)
+    1. cuteDSL LL router GEMM (SM90+, batch<=16, any N/K, bf16/fp8)
+    2. DSV3 specialized kernel (SM90+, batch<=16, N∈{256,384}, K=7168)
+    3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
+    4. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
@@ -43,7 +44,7 @@ class GateLinear(ReplicatedLinear):
         )
 
         # If fp32 compute is required and no specialized kernel is available,
-        # store weights in fp32 so Tier 3 computes in fp32 natively.
+        # store weights in fp32 so Tier 4 computes in fp32 natively.
         if force_fp32_compute and not can_use_specialized_kernels:
             params_dtype = torch.float32
 
@@ -56,6 +57,18 @@ class GateLinear(ReplicatedLinear):
             prefix=prefix,
         )
         self.out_dtype = out_dtype
+
+        # cuteDSL LL router GEMM eligibility (SM90+, any N/K)
+        self.allow_ll_router_gemm = False
+        if can_use_specialized_kernels:
+            try:
+                from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (  # noqa: E501
+                    is_available,
+                )
+
+                self.allow_ll_router_gemm = is_available()
+            except ImportError:
+                pass
 
         # DSV3 specialized kernel eligibility (SM90+, exact dims)
         self.allow_specialized_router_gemm = can_use_specialized_kernels
@@ -94,7 +107,25 @@ class GateLinear(ReplicatedLinear):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         import vllm._custom_ops as ops
 
-        # Tier 1: DSV3 specialized kernel
+        # Tier 1: cuteDSL LL router GEMM (any N/K, bf16 or fp8)
+        if (
+            self.allow_ll_router_gemm
+            and x.shape[0] <= 16
+            and x.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+            and self.out_dtype == torch.float32
+        ):
+            from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (  # noqa: E501
+                ll_router_gemm,
+            )
+
+            output = ll_router_gemm(
+                hidden_states=x,
+                router_weight=self.weight,
+                output_dtype=self.out_dtype,
+            )
+            return output, None
+
+        # Tier 2: DSV3 specialized kernel
         if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
@@ -103,12 +134,12 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 2: cuBLAS bf16→fp32
+        # Tier 3: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = ops.router_gemm_bf16_fp32(x, self.weight)
             return output, None
 
-        # Tier 3: F.linear (ReplicatedLinear)
+        # Tier 4: F.linear (ReplicatedLinear)
         if self.out_dtype is not None and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)
