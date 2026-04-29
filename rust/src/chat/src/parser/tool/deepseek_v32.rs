@@ -1,4 +1,3 @@
-use serde_json::{Number, Value};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, terminated};
 use winnow::error::{ErrMode, Needed};
@@ -6,6 +5,7 @@ use winnow::prelude::*;
 use winnow::stream::{Offset, Partial, Stream};
 use winnow::token::{literal, rest, take_until};
 
+use super::parameters::ToolSchemas;
 use super::utils::partial_prefix_len;
 use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
@@ -84,11 +84,12 @@ pub struct DeepSeekV32ToolParser {
     buffer: String,
     mode: DsmlMode,
     emitted_invoke_count: usize,
-    tools: Vec<ChatTool>,
+    tool_parameters: ToolSchemas,
     tokens: DsmlTokens,
 }
 
 impl DeepSeekV32ToolParser {
+    /// Create a parser with DeepSeek V3.2 DSML tokens.
     fn new(tools: &[ChatTool]) -> Self {
         Self::with_tokens(tools, DsmlTokens::V32)
     }
@@ -100,11 +101,12 @@ impl DeepSeekV32ToolParser {
             buffer: String::new(),
             mode: DsmlMode::Text,
             emitted_invoke_count: 0,
-            tools: tools.to_vec(),
+            tool_parameters: ToolSchemas::from_tools(tools),
             tokens,
         }
     }
 
+    /// Apply one parsed DSML event to parser state and output.
     fn apply_event(&mut self, event: DsmlEvent, result: &mut ToolParseResult) -> Result<()> {
         match event {
             DsmlEvent::Text { len: consumed_len } => {
@@ -112,7 +114,9 @@ impl DeepSeekV32ToolParser {
             }
             DsmlEvent::ToolCallsStart => self.mode = DsmlMode::ToolBlock,
             DsmlEvent::Invoke { name, raw_params } => {
-                let arguments = self.convert_params_with_schema(&name, raw_params)?;
+                let arguments = self
+                    .tool_parameters
+                    .convert_params_with_schema(&name, raw_params);
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
@@ -129,65 +133,6 @@ impl DeepSeekV32ToolParser {
         Ok(())
     }
 
-    /// Convert raw string parameter values using the tool schema types.
-    fn convert_params_with_schema(
-        &self,
-        function_name: &str,
-        params: Vec<(String, String)>,
-    ) -> Result<serde_json::Map<String, Value>> {
-        let mut converted = serde_json::Map::new();
-        for (name, value) in params {
-            let types = self.lookup_param_types(function_name, &name);
-            let converted_value = self.convert_param_value(&value, &types);
-            converted.insert(name, converted_value);
-        }
-        Ok(converted)
-    }
-
-    /// Look up one parameter's declared schema types, defaulting to `string`.
-    fn lookup_param_types(&self, function_name: &str, param_name: &str) -> Vec<String> {
-        let Some(tool) = self.tools.iter().find(|tool| tool.name == function_name) else {
-            return vec!["string".to_string()];
-        };
-        let Some(properties) = tool.parameters.get("properties").and_then(Value::as_object) else {
-            return vec!["string".to_string()];
-        };
-        let Some(param_schema) = properties.get(param_name) else {
-            return vec!["string".to_string()];
-        };
-        match param_schema.get("type") {
-            Some(Value::String(kind)) => vec![kind.clone()],
-            Some(Value::Array(kinds)) => {
-                let kinds = kinds
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>();
-                if kinds.is_empty() {
-                    vec!["string".to_string()]
-                } else {
-                    kinds
-                }
-            }
-            _ => vec!["string".to_string()],
-        }
-    }
-
-    /// Convert one parameter value to the first compatible schema type.
-    fn convert_param_value(&self, value: &str, param_types: &[String]) -> Value {
-        if value.eq_ignore_ascii_case("null") {
-            return Value::Null;
-        }
-
-        for param_type in param_types {
-            if let Ok(converted) = convert_param_value_checked(value, param_type) {
-                return converted;
-            }
-        }
-
-        Value::String(value.to_string())
-    }
-
     /// Reset all streaming state.
     fn reset(&mut self) {
         self.buffer.clear();
@@ -197,6 +142,7 @@ impl DeepSeekV32ToolParser {
 }
 
 impl ToolParser for DeepSeekV32ToolParser {
+    /// Create a boxed DeepSeek V3.2 tool parser.
     fn create(tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
@@ -204,6 +150,7 @@ impl ToolParser for DeepSeekV32ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    /// Preserve DSML special tokens when tool parsing is enabled.
     fn adjust_request(&self, request: &mut crate::request::ChatRequest) -> Result<()> {
         if request.tool_parsing_enabled() {
             // Preserve DSML sentinels like `｜DSML｜function_calls` during decode.
@@ -212,6 +159,7 @@ impl ToolParser for DeepSeekV32ToolParser {
         Ok(())
     }
 
+    /// Push one decoded text chunk through the DSML parser.
     fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
         // Extract tool calls from streaming model output.
         //
@@ -242,6 +190,7 @@ impl ToolParser for DeepSeekV32ToolParser {
         Ok(result)
     }
 
+    /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         let mut result = ToolParseResult::default();
         if self.mode == DsmlMode::Text && !self.buffer.is_empty() {
@@ -381,49 +330,16 @@ fn dsml_name_attr<'i>(input: &mut DsmlInput<'i>) -> ModalResult<&'i str> {
     delimited("name=\"", take_until(1.., "\""), "\"").parse_next(input)
 }
 
+/// Parse an incomplete streaming boundary.
 fn incomplete<T>() -> ModalResult<T> {
     Err(ErrMode::Incomplete(Needed::Unknown))
-}
-
-/// Convert a parameter value to the requested type.
-fn convert_param_value_checked(value: &str, param_type: &str) -> std::result::Result<Value, ()> {
-    match param_type.to_ascii_lowercase().as_str() {
-        "string" | "str" | "text" => Ok(Value::String(value.to_string())),
-        "integer" | "int" => value
-            .parse::<i64>()
-            .map(Number::from)
-            .map(Value::Number)
-            .map_err(|_| ()),
-        "number" | "float" => {
-            let parsed = value.parse::<f64>().map_err(|_| ())?;
-            if parsed.is_finite()
-                && parsed.fract() == 0.0
-                && parsed >= i64::MIN as f64
-                && parsed <= i64::MAX as f64
-            {
-                Ok(Value::Number(Number::from(parsed as i64)))
-            } else {
-                Number::from_f64(parsed).map(Value::Number).ok_or(())
-            }
-        }
-        "boolean" | "bool" => {
-            let trimmed = value.trim();
-            match trimmed.to_ascii_lowercase().as_str() {
-                "true" | "1" => Ok(Value::Bool(true)),
-                "false" | "0" => Ok(Value::Bool(false)),
-                _ => Err(()),
-            }
-        }
-        "object" | "array" => serde_json::from_str(value).map_err(|_| ()),
-        _ => serde_json::from_str(value).map_err(|_| ()),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{DeepSeekV32ToolParser, ToolParser, convert_param_value_checked};
+    use super::{DeepSeekV32ToolParser, ToolParser};
     use crate::request::ChatTool;
 
     fn test_tools() -> Vec<ChatTool> {
@@ -517,30 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v32_convert_param_value_handles_supported_types() {
-        assert_eq!(
-            convert_param_value_checked("42", "integer").unwrap(),
-            json!(42)
-        );
-        assert_eq!(
-            convert_param_value_checked("5.0", "number").unwrap(),
-            json!(5)
-        );
-        assert_eq!(
-            convert_param_value_checked("true", "boolean").unwrap(),
-            json!(true)
-        );
-        assert_eq!(
-            convert_param_value_checked(r#"{"k":1}"#, "object").unwrap(),
-            json!({ "k": 1 })
-        );
-        assert_eq!(
-            convert_param_value_checked("[1,2]", "array").unwrap(),
-            json!([1, 2])
-        );
-    }
-
-    #[test]
     fn deepseek_v32_adjust_request_keeps_special_tokens() {
         let parser = DeepSeekV32ToolParser::new(&test_tools());
         let mut request = crate::request::ChatRequest::for_test();
@@ -616,7 +508,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
             json!({
-                "whole": 5,
+                "whole": 5.0,
                 "flag": true,
                 "payload": { "nested": true },
                 "items": [1, 2],

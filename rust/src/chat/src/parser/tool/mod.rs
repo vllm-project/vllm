@@ -11,6 +11,7 @@ mod deepseek_v32;
 mod deepseek_v4;
 mod external;
 mod gemma4;
+mod parameters;
 pub(super) mod streaming;
 mod utils;
 
