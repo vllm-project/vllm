@@ -843,6 +843,13 @@ class TestGetSystemMessage:
                     f"{channel} missing when with_custom_tools={with_tools}"
                 )
 
+    def test_unsupported_reasoning_effort_raises_clear_error(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="reasoning_effort='max' is not supported by Harmony",
+        ):
+            get_system_message(reasoning_effort="max")
+
 
 class TestResponseInputToHarmonyReasoningItem:
     """Tests for response_input_to_harmony handling of reasoning input items.
