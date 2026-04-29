@@ -345,6 +345,7 @@ def fp8_fp4_mqa_logits(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
     clean_logits: bool,
+    logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
@@ -380,6 +381,7 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ks,
         cu_seqlen_ke,
         clean_logits=clean_logits,
+        logits_dtype=logits_dtype,
     )
 
 
@@ -413,6 +415,7 @@ def fp8_fp4_paged_mqa_logits(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
     clean_logits: bool,
+    logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -454,6 +457,7 @@ def fp8_fp4_paged_mqa_logits(
         schedule_metadata,
         max_model_len,
         clean_logits=clean_logits,
+        logits_dtype=logits_dtype,
     )
 
 

@@ -98,6 +98,7 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    use_bf16_scores: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -227,6 +228,7 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
                 clean_logits=False,
+                logits_dtype=torch.float32,
             )
             num_rows = logits.shape[0]
 
@@ -316,6 +318,7 @@ def sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
             clean_logits=False,
+            logits_dtype=torch.bfloat16 if use_bf16_scores else torch.float32,
         )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
@@ -426,8 +429,10 @@ class SparseAttnIndexer(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
+        use_bf16_scores: bool = False,
     ):
         super().__init__()
+        self.use_bf16_scores = use_bf16_scores
         self.k_cache = k_cache
         self.quant_block_size = quant_block_size
         self.scale_fmt = scale_fmt
@@ -490,6 +495,7 @@ class SparseAttnIndexer(CustomOp):
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
             self.use_fp4_cache,
+            self.use_bf16_scores,
         )
 
     def forward_hip(

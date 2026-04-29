@@ -6,10 +6,12 @@
 #define PERSISTENT_TOPK_CUH_
 
 #include <cuda.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <cstdint>
+#include <type_traits>
 
 namespace vllm {
 namespace persistent {
@@ -57,6 +59,76 @@ __device__ __forceinline__ auto convert_to_uint8(float x) -> uint8_t {
                                  : static_cast<uint16_t>(bits | 0x8000);
   return static_cast<uint8_t>(key >> 8);
 }
+
+__device__ __forceinline__ auto convert_to_uint16_bf16(__nv_bfloat16 x)
+    -> uint16_t {
+  uint16_t bits;
+  memcpy(&bits, &x, sizeof(uint16_t));
+  return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                         : static_cast<uint16_t>(bits | 0x8000);
+}
+
+__device__ __forceinline__ auto convert_to_uint8_bf16(__nv_bfloat16 x)
+    -> uint8_t {
+  return static_cast<uint8_t>(convert_to_uint16_bf16(x) >> 8);
+}
+
+// ============================================================================
+// Type traits for dtype-generic persistent topk paths
+// ============================================================================
+
+template <typename scalar_t>
+struct TopKDTypeTraits;
+
+template <>
+struct TopKDTypeTraits<float> {
+  using OrderedType = uint32_t;
+  static constexpr int kOrderedBits = 32;
+  static constexpr int kNumRefinePassesDecode = 4;  // 32-bit key after 11-bit coarse
+  static constexpr int kNumRefinePassesMedium = 4;  // 32-bit key after 8-bit coarse
+  static constexpr int kFirstBitOffset = 24;        // start refinement at bit 24
+  static constexpr int kNumRadixRounds = 4;         // large path: 4 x 8-bit rounds
+
+  __device__ __forceinline__ static OrderedType to_ordered(float x) {
+    return convert_to_uint32_v2(x);
+  }
+  __device__ __forceinline__ static uint8_t to_coarse_key(float x) {
+    return convert_to_uint8(x);
+  }
+  __device__ __forceinline__ static uint8_t coarse_from_ordered(OrderedType) {
+    return 0;
+  }
+  __device__ __forceinline__ static uint32_t to_decode_bin(float x) {
+    __half hx = __float2half(x);
+    uint16_t bits = __half_as_ushort(hx);
+    uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                                   : static_cast<uint16_t>(bits | 0x8000);
+    return key >> 5;
+  }
+};
+
+template <>
+struct TopKDTypeTraits<__nv_bfloat16> {
+  using OrderedType = uint16_t;
+  static constexpr int kOrderedBits = 16;
+  static constexpr int kNumRefinePassesDecode = 1;
+  static constexpr int kNumRefinePassesMedium = 1;
+  static constexpr int kFirstBitOffset = 0;
+  static constexpr int kNumRadixRounds = 2;
+
+  __device__ __forceinline__ static OrderedType to_ordered(__nv_bfloat16 x) {
+    return convert_to_uint16_bf16(x);
+  }
+  __device__ __forceinline__ static uint8_t to_coarse_key(__nv_bfloat16 x) {
+    return convert_to_uint8_bf16(x);
+  }
+  __device__ __forceinline__ static uint8_t coarse_from_ordered(OrderedType ord) {
+    return static_cast<uint8_t>(ord >> 8);
+  }
+  __device__ __forceinline__ static uint32_t to_decode_bin(__nv_bfloat16 x) {
+    return convert_to_uint16_bf16(x) >> 5;
+  }
+};
 
 // ============================================================================
 // Vectorized load helpers
@@ -109,6 +181,72 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
   v3 = __uint_as_float(r3);
 }
 
+__device__ __forceinline__ void load_bf16x8(const __nv_bfloat16* ptr,
+                                             __nv_bfloat16& v0,
+                                             __nv_bfloat16& v1,
+                                             __nv_bfloat16& v2,
+                                             __nv_bfloat16& v3,
+                                             __nv_bfloat16& v4,
+                                             __nv_bfloat16& v5,
+                                             __nv_bfloat16& v6,
+                                             __nv_bfloat16& v7) {
+  uint32_t r0, r1, r2, r3;
+  asm volatile("ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+               : "l"(ptr));
+  memcpy(&v0, &r0, 2); { uint16_t hi = static_cast<uint16_t>(r0 >> 16); memcpy(&v1, &hi, 2); }
+  memcpy(&v2, &r1, 2); { uint16_t hi = static_cast<uint16_t>(r1 >> 16); memcpy(&v3, &hi, 2); }
+  memcpy(&v4, &r2, 2); { uint16_t hi = static_cast<uint16_t>(r2 >> 16); memcpy(&v5, &hi, 2); }
+  memcpy(&v6, &r3, 2); { uint16_t hi = static_cast<uint16_t>(r3 >> 16); memcpy(&v7, &hi, 2); }
+}
+
+__device__ __forceinline__ void load_bf16x4(const __nv_bfloat16* ptr,
+                                             __nv_bfloat16& v0,
+                                             __nv_bfloat16& v1,
+                                             __nv_bfloat16& v2,
+                                             __nv_bfloat16& v3) {
+  uint16_t r0, r1, r2, r3;
+  asm volatile("ld.global.cg.v4.u16 {%0,%1,%2,%3}, [%4];\n"
+               : "=h"(r0), "=h"(r1), "=h"(r2), "=h"(r3)
+               : "l"(ptr));
+  memcpy(&v0, &r0, sizeof(uint16_t));
+  memcpy(&v1, &r1, sizeof(uint16_t));
+  memcpy(&v2, &r2, sizeof(uint16_t));
+  memcpy(&v3, &r3, sizeof(uint16_t));
+}
+
+__device__ __forceinline__ void load_bf16x4_predicated(
+    const __nv_bfloat16* ptr, int base, int seq_len, __nv_bfloat16& v0,
+    __nv_bfloat16& v1, __nv_bfloat16& v2, __nv_bfloat16& v3) {
+  uint16_t r0, r1, r2, r3;
+  int p0 = (base < seq_len);
+  int p1 = (base + 1 < seq_len);
+  int p2 = (base + 2 < seq_len);
+  int p3 = (base + 3 < seq_len);
+  asm volatile(
+      "{\n"
+      "  .reg .pred pr0, pr1, pr2, pr3;\n"
+      "  setp.ne.u32 pr0, %4, 0;\n"
+      "  setp.ne.u32 pr1, %5, 0;\n"
+      "  setp.ne.u32 pr2, %6, 0;\n"
+      "  setp.ne.u32 pr3, %7, 0;\n"
+      "  mov.u16 %0, 0xFF80;\n"
+      "  mov.u16 %1, 0xFF80;\n"
+      "  mov.u16 %2, 0xFF80;\n"
+      "  mov.u16 %3, 0xFF80;\n"
+      "  @pr0 ld.global.cg.u16 %0, [%8];\n"
+      "  @pr1 ld.global.cg.u16 %1, [%8+2];\n"
+      "  @pr2 ld.global.cg.u16 %2, [%8+4];\n"
+      "  @pr3 ld.global.cg.u16 %3, [%8+6];\n"
+      "}\n"
+      : "=h"(r0), "=h"(r1), "=h"(r2), "=h"(r3)
+      : "r"(p0), "r"(p1), "r"(p2), "r"(p3), "l"(ptr));
+  memcpy(&v0, &r0, 2);
+  memcpy(&v1, &r1, 2);
+  memcpy(&v2, &r2, 2);
+  memcpy(&v3, &r3, 2);
+}
+
 // ============================================================================
 // Large path: inter-CTA coordination state (one per group)
 // ============================================================================
@@ -125,11 +263,12 @@ struct RadixRowState {
 // Kernel parameters
 // ============================================================================
 
+template <typename scalar_t = float>
 struct PersistentTopKParams {
-  const float* __restrict__ input;  // [num_rows, stride]
-  int32_t* __restrict__ output;     // [num_rows, top_k]
-  int32_t* __restrict__ lengths;    // [num_rows]
-  RadixRowState* row_states;        // large path: per-group state
+  const scalar_t* __restrict__ input;  // [num_rows, stride]
+  int32_t* __restrict__ output;        // [num_rows, top_k]
+  int32_t* __restrict__ lengths;       // [num_rows]
+  RadixRowState* row_states;           // large path: per-group state
   uint32_t num_rows;
   uint32_t stride;
   uint32_t top_k;           // actual k value for output stride
@@ -154,10 +293,34 @@ __device__ __forceinline__ uint32_t decode_bin(float x) {
   return key >> 5;
 }
 
-template <int TopK>
+__device__ __forceinline__ void load_vec4(const float* ptr, int base,
+                                           int seq_len, bool aligned,
+                                           float& v0, float& v1, float& v2,
+                                           float& v3) {
+  if (aligned && base + 3 < seq_len)
+    load_float4(ptr + base, v0, v1, v2, v3);
+  else
+    load_float4_predicated(ptr + base, base, seq_len, v0, v1, v2, v3);
+}
+
+__device__ __forceinline__ void load_vec4(const __nv_bfloat16* ptr, int base,
+                                           int seq_len, bool aligned,
+                                           __nv_bfloat16& v0,
+                                           __nv_bfloat16& v1,
+                                           __nv_bfloat16& v2,
+                                           __nv_bfloat16& v3) {
+  if (aligned && base + 3 < seq_len)
+    load_bf16x4(ptr + base, v0, v1, v2, v3);
+  else
+    load_bf16x4_predicated(ptr + base, base, seq_len, v0, v1, v2, v3);
+}
+
+template <typename scalar_t, int TopK, uint32_t THRESHOLD = HIST2048_THRESHOLD>
 __device__ __noinline__ void histogram_2048_topk(
-    const float* __restrict__ logits, int32_t* __restrict__ output_indices,
+    const scalar_t* __restrict__ logits, int32_t* __restrict__ output_indices,
     int32_t seq_len) {
+  using Traits = TopKDTypeTraits<scalar_t>;
+  using OrderedT = typename Traits::OrderedType;
   extern __shared__ int decode_smem[];
   const int tx = threadIdx.x;
   const int lane = tx & 31;
@@ -168,7 +331,7 @@ __device__ __noinline__ void histogram_2048_topk(
   constexpr int BOFF = 2 * RHIST;           // 768
   constexpr int DBUF = (SBASE - BOFF) / 2;  // 3708
   constexpr int MAX_ITEMS_PER_THREAD =
-      (HIST2048_THRESHOLD + kThreadsPerBlock - 1) / kThreadsPerBlock;
+      (THRESHOLD + kThreadsPerBlock - 1) / kThreadsPerBlock;
 
   enum : int { sTHR = 0, sOUT = 1, sREF = 2, sFIN = 3, sBUF0 = 4, sBUF1 = 5 };
 
@@ -177,9 +340,10 @@ __device__ __noinline__ void histogram_2048_topk(
     decode_smem[SBASE + tx] = 0;
   }
 
-  // ---- Phase 1: Build 2048-bin histogram with float4 vectorized loads ----
+  // ---- Phase 1: Build 2048-bin histogram with vectorized loads ----
   int* histo = decode_smem;
-  uint16_t reg_bins[MAX_ITEMS_PER_THREAD];
+  constexpr int kVecWidth = std::is_same_v<scalar_t, float> ? 4 : 8;
+  uint16_t reg_bins[MAX_ITEMS_PER_THREAD * (kVecWidth / 4)];
   int nitems = 0;
 
   for (int i = tx; i < kDecodeBins; i += kThreadsPerBlock) {
@@ -187,31 +351,54 @@ __device__ __noinline__ void histogram_2048_topk(
   }
   __syncthreads();
 
-  const int n_vec = (seq_len + 3) >> 2;
+  const int n_vec = (seq_len + kVecWidth - 1) / kVecWidth;
   const bool row_aligned = ((reinterpret_cast<uintptr_t>(logits) & 15) == 0);
 
   for (int i = tx; i < n_vec; i += kThreadsPerBlock) {
-    const int base = i << 2;
-    float v0, v1, v2, v3;
+    const int base = i * kVecWidth;
 
-    if (row_aligned && base + 3 < seq_len) {
-      load_float4(logits + base, v0, v1, v2, v3);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      float v0, v1, v2, v3;
+      load_vec4(logits, base, seq_len, row_aligned, v0, v1, v2, v3);
+      const uint16_t b0 = static_cast<uint16_t>(Traits::to_decode_bin(v0));
+      const uint16_t b1 = static_cast<uint16_t>(Traits::to_decode_bin(v1));
+      const uint16_t b2 = static_cast<uint16_t>(Traits::to_decode_bin(v2));
+      const uint16_t b3 = static_cast<uint16_t>(Traits::to_decode_bin(v3));
+      reg_bins[nitems++] = b0; reg_bins[nitems++] = b1;
+      reg_bins[nitems++] = b2; reg_bins[nitems++] = b3;
+      atomicAdd(&histo[b0], 1);
+      atomicAdd(&histo[b1], 1);
+      atomicAdd(&histo[b2], 1);
+      atomicAdd(&histo[b3], 1);
     } else {
-      load_float4_predicated(logits + base, base, seq_len, v0, v1, v2, v3);
+      __nv_bfloat16 v0, v1, v2, v3, v4, v5, v6, v7;
+      if (row_aligned && base + 7 < seq_len) {
+        load_bf16x8(logits + base, v0, v1, v2, v3, v4, v5, v6, v7);
+      } else {
+        load_bf16x4_predicated(logits + base, base, seq_len, v0, v1, v2, v3);
+        load_bf16x4_predicated(logits + base + 4, base + 4, seq_len, v4, v5, v6, v7);
+      }
+      const uint16_t b0 = static_cast<uint16_t>(Traits::to_decode_bin(v0));
+      const uint16_t b1 = static_cast<uint16_t>(Traits::to_decode_bin(v1));
+      const uint16_t b2 = static_cast<uint16_t>(Traits::to_decode_bin(v2));
+      const uint16_t b3 = static_cast<uint16_t>(Traits::to_decode_bin(v3));
+      const uint16_t b4 = static_cast<uint16_t>(Traits::to_decode_bin(v4));
+      const uint16_t b5 = static_cast<uint16_t>(Traits::to_decode_bin(v5));
+      const uint16_t b6 = static_cast<uint16_t>(Traits::to_decode_bin(v6));
+      const uint16_t b7 = static_cast<uint16_t>(Traits::to_decode_bin(v7));
+      reg_bins[nitems++] = b0; reg_bins[nitems++] = b1;
+      reg_bins[nitems++] = b2; reg_bins[nitems++] = b3;
+      reg_bins[nitems++] = b4; reg_bins[nitems++] = b5;
+      reg_bins[nitems++] = b6; reg_bins[nitems++] = b7;
+      atomicAdd(&histo[b0], 1);
+      atomicAdd(&histo[b1], 1);
+      atomicAdd(&histo[b2], 1);
+      atomicAdd(&histo[b3], 1);
+      atomicAdd(&histo[b4], 1);
+      atomicAdd(&histo[b5], 1);
+      atomicAdd(&histo[b6], 1);
+      atomicAdd(&histo[b7], 1);
     }
-
-    const uint16_t b0 = static_cast<uint16_t>(decode_bin(v0));
-    const uint16_t b1 = static_cast<uint16_t>(decode_bin(v1));
-    const uint16_t b2 = static_cast<uint16_t>(decode_bin(v2));
-    const uint16_t b3 = static_cast<uint16_t>(decode_bin(v3));
-    reg_bins[nitems++] = b0;
-    reg_bins[nitems++] = b1;
-    reg_bins[nitems++] = b2;
-    reg_bins[nitems++] = b3;
-    atomicAdd(&histo[b0], 1);
-    atomicAdd(&histo[b1], 1);
-    atomicAdd(&histo[b2], 1);
-    atomicAdd(&histo[b3], 1);
   }
   __syncthreads();
 
@@ -256,10 +443,9 @@ __device__ __noinline__ void histogram_2048_topk(
     for (int iter = 0; iter < n_vec_iters; iter++) {
       const int i = tx + iter * kThreadsPerBlock;
       const bool vec_valid = (i < n_vec);
-      const int base_idx = i << 2;
+      const int base_idx = i * kVecWidth;
 
-#pragma unroll 4
-      for (int sub = 0; sub < 4; sub++) {
+      for (int sub = 0; sub < kVecWidth; sub++) {
         const int elem_idx = base_idx + sub;
         uint32_t bin = 0;
         if (vec_valid) bin = reg_bins[item++];
@@ -323,8 +509,8 @@ __device__ __noinline__ void histogram_2048_topk(
   __syncthreads();
 
   for (int i = tx; i < num_buf0; i += kThreadsPerBlock) {
-    const uint32_t fp32 = convert_to_uint32_v2(logits[bufs[0][i]]);
-    atomicAdd(&refine[0][(fp32 >> 24) & 0xFF], 1);
+    const OrderedT ord = Traits::to_ordered(logits[bufs[0][i]]);
+    atomicAdd(&refine[0][(static_cast<uint32_t>(ord) >> Traits::kFirstBitOffset) & 0xFF], 1);
   }
   __syncthreads();
 
@@ -343,8 +529,8 @@ __device__ __noinline__ void histogram_2048_topk(
     }
   };
 
-#pragma unroll 4
-  for (int pass = 0; pass < 4; ++pass) {
+  constexpr int kNumRefinePasses = Traits::kNumRefinePassesDecode;
+  for (int pass = 0; pass < kNumRefinePasses; ++pass) {
     const int src = pass & 1;
     const int dst = src ^ 1;
 
@@ -363,13 +549,13 @@ __device__ __noinline__ void histogram_2048_topk(
 
     const int ref_thr = decode_smem[SBASE + sREF];
     remaining_k -= refine[0][ref_thr + 1];
-    const int bit_offset = 24 - pass * 8;
+    const int bit_offset = Traits::kFirstBitOffset - pass * 8;
 
     if (remaining_k == 0) {
       for (int i = tx; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = bufs[src][i];
-        const uint32_t fp32 = convert_to_uint32_v2(logits[idx]);
-        if (((fp32 >> bit_offset) & 0xFF) > static_cast<uint32_t>(ref_thr)) {
+        const OrderedT ord = Traits::to_ordered(logits[idx]);
+        if (((ord >> bit_offset) & 0xFF) > static_cast<uint32_t>(ref_thr)) {
           const int pos = atomicAdd(&decode_smem[SBASE + sOUT], 1);
           output_indices[pos] = idx;
         }
@@ -384,15 +570,15 @@ __device__ __noinline__ void histogram_2048_topk(
 
     for (int i = tx; i < num_buffered; i += kThreadsPerBlock) {
       const int idx = bufs[src][i];
-      const float logit_val = logits[idx];
-      const uint32_t fp32 = convert_to_uint32_v2(logit_val);
-      const int bin = (fp32 >> bit_offset) & 0xFF;
+      const scalar_t logit_val = logits[idx];
+      const OrderedT ord = Traits::to_ordered(logit_val);
+      const int bin = (ord >> bit_offset) & 0xFF;
 
       if (bin > ref_thr) {
         const int pos = atomicAdd(&decode_smem[SBASE + sOUT], 1);
         output_indices[pos] = idx;
       } else if (bin == ref_thr) {
-        if (pass == 3) {
+        if (pass == kNumRefinePasses - 1) {
           const int slot = atomicAdd(&decode_smem[SBASE + sFIN], -1);
           if (slot > 0) output_indices[TopK - slot] = idx;
         } else {
@@ -400,7 +586,7 @@ __device__ __noinline__ void histogram_2048_topk(
           if (__builtin_expect(bp < DBUF, 1)) {
             bufs[dst][bp] = idx;
             const int nbo = bit_offset - 8;
-            atomicAdd(&refine[0][(fp32 >> nbo) & 0xFF], 1);
+            atomicAdd(&refine[0][(static_cast<uint32_t>(ord) >> nbo) & 0xFF], 1);
           }
         }
       }
@@ -419,10 +605,12 @@ __device__ __noinline__ void histogram_2048_topk(
 // by: DarkSharpness
 // which at the same time is an optimized topk kernel copied from tilelang
 // kernel
-template <int TopK>
+template <typename scalar_t, int TopK>
 __device__ __noinline__ void histogram_256_topk(
-    const float* __restrict__ logits, int* __restrict__ output_indices,
+    const scalar_t* __restrict__ logits, int* __restrict__ output_indices,
     int logits_offset, int seq_len) {
+  using Traits = TopKDTypeTraits<scalar_t>;
+  using OrderedT = typename Traits::OrderedType;
   // All shared state lives in dynamic shared memory to avoid static
   extern __shared__ char medium_smem[];
 
@@ -433,6 +621,7 @@ __device__ __noinline__ void histogram_256_topk(
   int& shared_threshold_bin = medium_scalars[1];
   int* shared_buffered_count = &medium_scalars[2];
   int& shared_final_k = medium_scalars[4];
+  int& shared_overflow = medium_scalars[5];
   int (*buffered_indices)[MAX_BUFFERED_ITEMS] =
       reinterpret_cast<int (*)[MAX_BUFFERED_ITEMS]>(medium_smem +
                                                     kMediumHeaderSize);
@@ -440,13 +629,16 @@ __device__ __noinline__ void histogram_256_topk(
   const int thread_id = threadIdx.x;
   int remaining_k = TopK;
 
+  if constexpr (Traits::kNumRefinePassesMedium == 1) {
+    if (thread_id == 0) shared_overflow = 0;
+  }
   if (thread_id < RADIX + 1) {
     shared_histogram[0][thread_id] = 0;
   }
   __syncthreads();
 
   for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-    const auto bin = convert_to_uint8(logits[idx + logits_offset]);
+    const auto bin = Traits::to_coarse_key(logits[idx + logits_offset]);
     atomicAdd(&shared_histogram[0][bin], 1);
   }
   __syncthreads();
@@ -483,7 +675,7 @@ __device__ __noinline__ void histogram_256_topk(
 
   if (remaining_k == 0) {
     for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-      const int bin = convert_to_uint8(logits[idx + logits_offset]);
+      const int bin = Traits::to_coarse_key(logits[idx + logits_offset]);
       if (bin > threshold_bin) {
         const int output_pos = atomicAdd(&shared_output_count, 1);
         output_indices[output_pos] = idx;
@@ -500,8 +692,8 @@ __device__ __noinline__ void histogram_256_topk(
   __syncthreads();
 
   for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-    const float logit_value = logits[idx + logits_offset];
-    const int bin = convert_to_uint8(logit_value);
+    const scalar_t logit_value = logits[idx + logits_offset];
+    const int bin = Traits::to_coarse_key(logit_value);
     if (bin > threshold_bin) {
       const int output_pos = atomicAdd(&shared_output_count, 1);
       output_indices[output_pos] = idx;
@@ -509,16 +701,60 @@ __device__ __noinline__ void histogram_256_topk(
       const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
       if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
         buffered_indices[0][buffer_pos] = idx;
-        const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
-        const int next_bin = (fp32_bits >> 24) & 0xFF;
+        const OrderedT ord_bits = Traits::to_ordered(logit_value);
+        const int next_bin = (ord_bits >> Traits::kFirstBitOffset) & 0xFF;
         atomicAdd(&shared_histogram[0][next_bin], 1);
+      } else if constexpr (Traits::kNumRefinePassesMedium == 1) {
+        atomicOr(&shared_overflow, 1);
       }
     }
   }
   __syncthreads();
 
-#pragma unroll 4
-  for (int pass = 0; pass < 4; ++pass) {
+  // Overflow fallback: re-scan full input when threshold bin exceeds buffer.
+  constexpr int kNumRefine = Traits::kNumRefinePassesMedium;
+  if (kNumRefine == 1 && shared_overflow) {
+    if (thread_id < RADIX + 1) shared_histogram[0][thread_id] = 0;
+    __syncthreads();
+
+    for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
+      const OrderedT ord = Traits::to_ordered(logits[idx + logits_offset]);
+      if (static_cast<int>(Traits::coarse_from_ordered(ord)) == threshold_bin) {
+        atomicAdd(&shared_histogram[0][(ord >> Traits::kFirstBitOffset) & 0xFF], 1);
+      }
+    }
+    __syncthreads();
+
+    compute_cumulative_sum();
+
+    if (thread_id < RADIX && shared_histogram[0][thread_id] > remaining_k &&
+        shared_histogram[0][thread_id + 1] <= remaining_k) {
+      shared_threshold_bin = thread_id;
+      shared_final_k = remaining_k - shared_histogram[0][thread_id + 1];
+    }
+    __syncthreads();
+
+    const int fine_threshold = shared_threshold_bin;
+
+    for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
+      const OrderedT ord = Traits::to_ordered(logits[idx + logits_offset]);
+      if (static_cast<int>(Traits::coarse_from_ordered(ord)) != threshold_bin)
+        continue;
+      const int sub_bin =
+          static_cast<int>((ord >> Traits::kFirstBitOffset) & 0xFF);
+      if (sub_bin > fine_threshold) {
+        const int pos = atomicAdd(&shared_output_count, 1);
+        output_indices[pos] = idx;
+      } else if (sub_bin == fine_threshold) {
+        const int slot = atomicAdd(&shared_final_k, -1);
+        if (slot > 0) output_indices[TopK - slot] = idx;
+      }
+    }
+    __syncthreads();
+    return;
+  }
+
+  for (int pass = 0; pass < kNumRefine; ++pass) {
     const int src_buffer = pass % 2;
     const int dst_buffer = src_buffer ^ 1;
     const int raw_buffered = shared_buffered_count[src_buffer];
@@ -537,14 +773,14 @@ __device__ __noinline__ void histogram_256_topk(
 
     const int threshold_bin = shared_threshold_bin;
     remaining_k -= shared_histogram[0][threshold_bin + 1];
-    const int bit_offset = 24 - pass * 8;
+    const int bit_offset = Traits::kFirstBitOffset - pass * 8;
 
     if (remaining_k == 0) {
       for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = buffered_indices[src_buffer][i];
-        const uint32_t fp32_bits =
-            convert_to_uint32_v2(logits[idx + logits_offset]);
-        const int bin = (fp32_bits >> bit_offset) & 0xFF;
+        const OrderedT ord_bits =
+            Traits::to_ordered(logits[idx + logits_offset]);
+        const int bin = (ord_bits >> bit_offset) & 0xFF;
         if (bin > threshold_bin) {
           const int output_pos = atomicAdd(&shared_output_count, 1);
           output_indices[output_pos] = idx;
@@ -562,14 +798,14 @@ __device__ __noinline__ void histogram_256_topk(
 
     for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
       const int idx = buffered_indices[src_buffer][i];
-      const float logit_value = logits[idx + logits_offset];
-      const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
-      const int bin = (fp32_bits >> bit_offset) & 0xFF;
+      const scalar_t logit_value = logits[idx + logits_offset];
+      const OrderedT ord_bits = Traits::to_ordered(logit_value);
+      const int bin = (ord_bits >> bit_offset) & 0xFF;
       if (bin > threshold_bin) {
         const int output_pos = atomicAdd(&shared_output_count, 1);
         output_indices[output_pos] = idx;
       } else if (bin == threshold_bin) {
-        if (pass == 3) {
+        if (pass == kNumRefine - 1) {
           const int slot = atomicAdd(&shared_final_k, -1);
           if (slot > 0) {
             output_indices[TopK - slot] = idx;
@@ -580,7 +816,7 @@ __device__ __noinline__ void histogram_256_topk(
           if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
             buffered_indices[dst_buffer][buffer_pos] = idx;
             const int next_bit_offset = bit_offset - 8;
-            const int next_bin = (fp32_bits >> next_bit_offset) & 0xFF;
+            const int next_bin = (ord_bits >> next_bit_offset) & 0xFF;
             atomicAdd(&shared_histogram[0][next_bin], 1);
           }
         }
@@ -651,8 +887,8 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val,
 // Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 
-template <int TopK, uint32_t VEC_SIZE>
-__device__ void radix_topk(const float* __restrict__ row_input,
+template <typename scalar_t, int TopK, uint32_t VEC_SIZE>
+__device__ void radix_topk(const scalar_t* __restrict__ row_input,
                            int32_t* __restrict__ row_output, uint32_t seq_len,
                            uint32_t my_chunk_start, uint32_t chunk_size,
                            uint32_t* local_histogram, uint32_t* suffix_sum,
@@ -660,36 +896,80 @@ __device__ void radix_topk(const float* __restrict__ row_input,
                            RadixRowState* state, uint32_t cta_in_group,
                            uint32_t ctas_per_group, int& barrier_phase,
                            uint32_t iter, uint32_t tx) {
+  using Traits = TopKDTypeTraits<scalar_t>;
+  using OrderedT = typename Traits::OrderedType;
   const uint32_t my_chunk_end = (my_chunk_start + chunk_size < seq_len)
                                     ? my_chunk_start + chunk_size
                                     : seq_len;
   const uint32_t actual_chunk_size =
       (my_chunk_start < seq_len) ? (my_chunk_end - my_chunk_start) : 0;
 
-  // -- Stage 1: Load chunk to shared memory as ordered uint32 --
+  // -- Stage 1: Load chunk to shared memory as ordered keys --
   {
     const uint32_t aligned_size = (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
 
-    for (uint32_t i = tx * VEC_SIZE; i < aligned_size;
-         i += kThreadsPerBlock * VEC_SIZE) {
-      const float* src = row_input + my_chunk_start + i;
-      if constexpr (VEC_SIZE == 4) {
-        float4 v = *reinterpret_cast<const float4*>(src);
-        shared_ordered[i] = convert_to_uint32_v2(v.x);
-        shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
-        shared_ordered[i + 2] = convert_to_uint32_v2(v.z);
-        shared_ordered[i + 3] = convert_to_uint32_v2(v.w);
-      } else if constexpr (VEC_SIZE == 2) {
-        float2 v = *reinterpret_cast<const float2*>(src);
-        shared_ordered[i] = convert_to_uint32_v2(v.x);
-        shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
-      } else {
-        shared_ordered[i] = convert_to_uint32_v2(*src);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      for (uint32_t i = tx * VEC_SIZE; i < aligned_size;
+           i += kThreadsPerBlock * VEC_SIZE) {
+        const float* src = row_input + my_chunk_start + i;
+        if constexpr (VEC_SIZE == 4) {
+          float4 v = *reinterpret_cast<const float4*>(src);
+          shared_ordered[i] = Traits::to_ordered(v.x);
+          shared_ordered[i + 1] = Traits::to_ordered(v.y);
+          shared_ordered[i + 2] = Traits::to_ordered(v.z);
+          shared_ordered[i + 3] = Traits::to_ordered(v.w);
+        } else if constexpr (VEC_SIZE == 2) {
+          float2 v = *reinterpret_cast<const float2*>(src);
+          shared_ordered[i] = Traits::to_ordered(v.x);
+          shared_ordered[i + 1] = Traits::to_ordered(v.y);
+        } else {
+          shared_ordered[i] = Traits::to_ordered(*src);
+        }
       }
-    }
-    for (uint32_t i = aligned_size + tx; i < actual_chunk_size;
-         i += kThreadsPerBlock) {
-      shared_ordered[i] = convert_to_uint32_v2(row_input[my_chunk_start + i]);
+      for (uint32_t i = aligned_size + tx; i < actual_chunk_size;
+           i += kThreadsPerBlock) {
+        shared_ordered[i] = Traits::to_ordered(row_input[my_chunk_start + i]);
+      }
+    } else {
+      uint16_t* shared_u16 = reinterpret_cast<uint16_t*>(shared_ordered);
+      for (uint32_t i = tx * VEC_SIZE; i < aligned_size;
+           i += kThreadsPerBlock * VEC_SIZE) {
+        const __nv_bfloat16* src = row_input + my_chunk_start + i;
+        if constexpr (VEC_SIZE == 8) {
+          __nv_bfloat16 v0, v1, v2, v3, v4, v5, v6, v7;
+          load_bf16x8(src, v0, v1, v2, v3, v4, v5, v6, v7);
+          shared_u16[i] = Traits::to_ordered(v0);
+          shared_u16[i + 1] = Traits::to_ordered(v1);
+          shared_u16[i + 2] = Traits::to_ordered(v2);
+          shared_u16[i + 3] = Traits::to_ordered(v3);
+          shared_u16[i + 4] = Traits::to_ordered(v4);
+          shared_u16[i + 5] = Traits::to_ordered(v5);
+          shared_u16[i + 6] = Traits::to_ordered(v6);
+          shared_u16[i + 7] = Traits::to_ordered(v7);
+        } else if constexpr (VEC_SIZE == 4) {
+          __nv_bfloat16 v0, v1, v2, v3;
+          load_bf16x4(src, v0, v1, v2, v3);
+          shared_u16[i] = Traits::to_ordered(v0);
+          shared_u16[i + 1] = Traits::to_ordered(v1);
+          shared_u16[i + 2] = Traits::to_ordered(v2);
+          shared_u16[i + 3] = Traits::to_ordered(v3);
+        } else if constexpr (VEC_SIZE == 2) {
+          uint32_t packed;
+          memcpy(&packed, src, sizeof(uint32_t));
+          __nv_bfloat16 v0, v1;
+          memcpy(&v0, &packed, 2);
+          uint16_t hi = static_cast<uint16_t>(packed >> 16);
+          memcpy(&v1, &hi, 2);
+          shared_u16[i] = Traits::to_ordered(v0);
+          shared_u16[i + 1] = Traits::to_ordered(v1);
+        } else {
+          shared_u16[i] = Traits::to_ordered(*src);
+        }
+      }
+      for (uint32_t i = aligned_size + tx; i < actual_chunk_size;
+           i += kThreadsPerBlock) {
+        shared_u16[i] = Traits::to_ordered(row_input[my_chunk_start + i]);
+      }
     }
   }
   __syncthreads();
@@ -714,10 +994,12 @@ __device__ void radix_topk(const float* __restrict__ row_input,
     st_release(&state->output_counter, 0);
   }
 
-  // -- Stage 2: 4 rounds of radix select --
-  for (uint32_t round = 0; round < 4; round++) {
-    const uint32_t global_round = iter * 4 + round;
-    const uint32_t shift = 24 - round * 8;
+  // -- Stage 2: radix select --
+  constexpr uint32_t kRounds = Traits::kNumRadixRounds;
+  constexpr uint32_t kTotalOrderedBits = Traits::kOrderedBits;
+  for (uint32_t round = 0; round < kRounds; round++) {
+    const uint32_t global_round = iter * kRounds + round;
+    const uint32_t shift = (kTotalOrderedBits - 8) - round * 8;
     const uint32_t prefix = shared_scalars[0];
     const uint32_t remaining_k = shared_scalars[1];
 
@@ -730,8 +1012,14 @@ __device__ void radix_topk(const float* __restrict__ row_input,
     __syncthreads();
 
     for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
-      uint32_t ordered = shared_ordered[i];
-      uint32_t mask = (round == 0) ? 0u : (~0u << (32 - round * 8));
+      uint32_t ordered;
+      if constexpr (std::is_same_v<scalar_t, float>) {
+        ordered = shared_ordered[i];
+      } else {
+        ordered = reinterpret_cast<const uint16_t*>(shared_ordered)[i];
+      }
+      uint32_t mask = (round == 0) ? 0u
+                                   : (~0u << (kTotalOrderedBits - round * 8));
       if ((ordered & mask) == prefix) {
         uint32_t bucket = (ordered >> shift) & 0xFF;
         atomicAdd(&local_histogram[bucket], 1);
@@ -796,7 +1084,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
       shared_scalars[1] = shared_scalars[3];
     }
     __syncthreads();
-  }  // end 4 radix rounds
+  }  // end radix rounds
 
   // -- Count local > pivot elements --
   const uint32_t ordered_pivot = shared_scalars[0];
@@ -806,7 +1094,13 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 
   uint32_t my_gt_count = 0;
   for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
-    if (shared_ordered[i] > ordered_pivot) my_gt_count++;
+    uint32_t val;
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      val = shared_ordered[i];
+    } else {
+      val = reinterpret_cast<const uint16_t*>(shared_ordered)[i];
+    }
+    if (val > ordered_pivot) my_gt_count++;
   }
   for (int offset = 16; offset > 0; offset /= 2) {
     my_gt_count += __shfl_down_sync(0xffffffff, my_gt_count, offset);
@@ -828,7 +1122,13 @@ __device__ void radix_topk(const float* __restrict__ row_input,
   __syncthreads();
 
   for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
-    if (shared_ordered[i] > ordered_pivot) {
+    uint32_t val;
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      val = shared_ordered[i];
+    } else {
+      val = reinterpret_cast<const uint16_t*>(shared_ordered)[i];
+    }
+    if (val > ordered_pivot) {
       uint32_t local_pos = atomicAdd(&local_histogram[0], 1);
       int pos = static_cast<int>(local_histogram[1]) + local_pos;
       row_output[pos] = static_cast<int32_t>(my_chunk_start + i);
@@ -844,7 +1144,13 @@ __device__ void radix_topk(const float* __restrict__ row_input,
   __syncthreads();
 
   for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
-    if (shared_ordered[i] == ordered_pivot) {
+    uint32_t val;
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      val = shared_ordered[i];
+    } else {
+      val = reinterpret_cast<const uint16_t*>(shared_ordered)[i];
+    }
+    if (val == ordered_pivot) {
       int pos = atomicAdd(&state->output_counter, 1);
       if (pos < TopK) {
         row_output[pos] = static_cast<int32_t>(my_chunk_start + i);
@@ -859,9 +1165,9 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 // see filtered_topk.cuh)
 // ============================================================================
 
-template <int TopK = 2048, uint32_t VEC_SIZE = 1>
+template <typename scalar_t = float, int TopK = 2048, uint32_t VEC_SIZE = 1>
 __global__ void __launch_bounds__(kThreadsPerBlock, 2)
-    persistent_topk_kernel(PersistentTopKParams params) {
+    persistent_topk_kernel(PersistentTopKParams<scalar_t> params) {
   const uint32_t tx = threadIdx.x;
   extern __shared__ uint8_t smem_raw[];
 
@@ -878,8 +1184,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
 
   if (blockIdx.x >= num_groups * ctas_per_group) return;
 
-  // Early exit: non-CTA-0 threads are never needed if no large rows exist
-  if (cta_in_group != 0 && params.max_seq_len <= RADIX_THRESHOLD) return;
+  constexpr uint32_t kLargeThreshold = RADIX_THRESHOLD;
+  if (cta_in_group != 0 && params.max_seq_len <= kLargeThreshold) return;
 
   uint32_t* local_histogram = reinterpret_cast<uint32_t*>(smem_raw);
   uint32_t* suffix_sum = local_histogram + RADIX;
@@ -918,27 +1224,37 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
 
     const uint32_t seq_len = params.lengths[row_idx];
     int32_t* row_output = params.output + row_idx * params.top_k;
-    const float* row_input = params.input + row_idx * params.stride;
+    const scalar_t* row_input = params.input + row_idx * params.stride;
 
-    if (seq_len <= RADIX_THRESHOLD) {
+    constexpr uint32_t kBf16DecodeLimit = RADIX_THRESHOLD;
+    constexpr uint32_t kSmallThreshold =
+        std::is_same_v<scalar_t, __nv_bfloat16>
+            ? kBf16DecodeLimit
+            : HIST2048_THRESHOLD;
+    constexpr uint32_t kLargeStart =
+        std::is_same_v<scalar_t, __nv_bfloat16>
+            ? kBf16DecodeLimit
+            : RADIX_THRESHOLD;
+
+    if (seq_len <= kLargeStart) {
       if (cta_in_group == 0) {
         if (seq_len <= static_cast<uint32_t>(TopK)) {
-          // Trivial case: seq_len <= TopK
           for (uint32_t i = tx; i < static_cast<uint32_t>(TopK);
                i += kThreadsPerBlock) {
             row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
           }
-        } else if (seq_len <= static_cast<uint32_t>(HIST2048_THRESHOLD)) {
-          histogram_2048_topk<TopK>(row_input, row_output, seq_len);
+        } else if (seq_len <= kSmallThreshold) {
+          histogram_2048_topk<scalar_t, TopK, kSmallThreshold>(
+              row_input, row_output, seq_len);
         } else {
-          histogram_256_topk<TopK>(row_input, row_output, 0, seq_len);
+          histogram_256_topk<scalar_t, TopK>(row_input, row_output, 0, seq_len);
         }
       }
       continue;
     }
 
     const uint32_t my_chunk_start = cta_in_group * chunk_size;
-    radix_topk<TopK, VEC_SIZE>(
+    radix_topk<scalar_t, TopK, VEC_SIZE>(
         row_input, row_output, seq_len, my_chunk_start, chunk_size,
         local_histogram, suffix_sum, shared_scalars, shared_ordered, state,
         cta_in_group, ctas_per_group, barrier_phase, iter, tx);
@@ -997,8 +1313,9 @@ struct FilteredTopKTraits<float> {
   using OrderedType = uint32_t;
   static constexpr int NUM_REFINE_ROUNDS = 4;
   static constexpr int FIRST_REFINE_SHIFT = 24;
+  static constexpr int COARSE_BINS = 256;
 
-  __device__ __forceinline__ static uint8_t ToCoarseKey(float x) {
+  __device__ __forceinline__ static uint16_t ToCoarseKey(float x) {
     // Convert to FP16 representation and extract high 8 bits
     __half h = __float2half_rn(x);
     uint16_t bits = __half_as_ushort(h);
@@ -1013,6 +1330,23 @@ struct FilteredTopKTraits<float> {
   }
 };
 
+template <>
+struct FilteredTopKTraits<__nv_bfloat16> {
+  using OrderedType = uint16_t;
+  static constexpr int NUM_REFINE_ROUNDS = 1;
+  static constexpr int FIRST_REFINE_SHIFT = 0;
+  static constexpr int COARSE_BINS = 1024;
+
+  __device__ __forceinline__ static uint16_t ToCoarseKey(__nv_bfloat16 x) {
+    return persistent::convert_to_uint16_bf16(x) >> 6;
+  }
+
+  __device__ __forceinline__ static OrderedType ToOrdered(__nv_bfloat16 x) {
+    return persistent::convert_to_uint16_bf16(x);
+  }
+};
+
+constexpr uint32_t FILTERED_TOPK_MAX_K = 2048;
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
@@ -1033,8 +1367,10 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                               const IdType* __restrict__ lengths,
                               uint32_t num_rows, uint32_t top_k,
                               uint32_t max_len) {
+  using Traits = FilteredTopKTraits<DType>;
+  using OrderedType = typename Traits::OrderedType;
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
-  constexpr int RADIX = 256;
+  constexpr int COARSE_BINS = Traits::COARSE_BINS;
   constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
 
   const uint32_t bid = blockIdx.x;
@@ -1056,10 +1392,12 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   }
 
   // Static shared memory
-  alignas(128) __shared__ int s_histogram_buf[2][RADIX + 128];
-  alignas(128) __shared__ int s_counter;
-  alignas(128) __shared__ int s_threshold_bin_id;
-  alignas(128) __shared__ int s_num_input[2];
+  alignas(128) __shared__ int s_histogram_buf[2][COARSE_BINS + 128];
+  __shared__ int s_counter;
+  __shared__ int s_threshold_bin_id;
+  __shared__ int s_num_input[2];
+  __shared__ int s_last_remain;
+  __shared__ int s_refine_overflow;
   alignas(128) __shared__ int s_indices[MAX_K];
 
   auto& s_histogram = s_histogram_buf[0];
@@ -1067,42 +1405,59 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   // Dynamic shared memory for input double buffer
   extern __shared__ int s_input_idx[][SMEM_INPUT_SIZE];
 
-  using Traits = FilteredTopKTraits<DType>;
   int topk = top_k;
 
-  // Stage 1: 8-bit coarse histogram with vectorized loads
-  if (tx < RADIX + 1) s_histogram[tx] = 0;
-  __syncthreads();
+  if (tx == 0) s_refine_overflow = 0;
 
   vec_t<DType, VEC_SIZE> score_vec;
-
   const int aligned_length = (length / VEC_SIZE) * VEC_SIZE;
+  auto for_each_score = [&](auto&& fn) {
 #pragma unroll 2
-  for (int base = tx * VEC_SIZE; base < aligned_length;
-       base += BLOCK_SIZE * VEC_SIZE) {
-    score_vec.cast_load(&score[base]);
+    for (int base = tx * VEC_SIZE; base < aligned_length;
+         base += BLOCK_SIZE * VEC_SIZE) {
+      score_vec.cast_load(&score[base]);
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      const auto bin = Traits::ToCoarseKey(score_vec[j]);
-      atomicAdd(&s_histogram[bin], 1);
+      for (int j = 0; j < VEC_SIZE; ++j) fn(score_vec[j], base + j);
     }
-  }
-  // Handle tail
-  for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-    const auto bin = Traits::ToCoarseKey(score[i]);
-    atomicAdd(&s_histogram[bin], 1);
+    for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
+      fn(score[i], i);
+    }
+  };
+
+  // Use sub-histograms to reduce atomicAdd contention in the coarse pass.
+  // 4 groups of 256 threads each write to their own histogram, then merge.
+  constexpr int kHistGroups = 4;
+  constexpr int kThreadsPerHistGroup = BLOCK_SIZE / kHistGroups;
+  int* sub_histograms = reinterpret_cast<int*>(s_input_idx);
+  const int hist_group = tx / kThreadsPerHistGroup;
+  int* my_hist = sub_histograms + hist_group * (COARSE_BINS + 1);
+
+  for (int _j = tx; _j < kHistGroups * (COARSE_BINS + 1); _j += BLOCK_SIZE)
+    sub_histograms[_j] = 0;
+  __syncthreads();
+
+  for_each_score([&](auto raw_input, int) {
+    atomicAdd(&my_hist[Traits::ToCoarseKey(raw_input)], 1);
+  });
+  __syncthreads();
+
+  // Merge sub-histograms into s_histogram
+  for (int _j = tx; _j < COARSE_BINS + 1; _j += BLOCK_SIZE) {
+    int sum = 0;
+    for (int g = 0; g < kHistGroups; g++)
+      sum += sub_histograms[g * (COARSE_BINS + 1) + _j];
+    s_histogram[_j] = sum;
   }
   __syncthreads();
 
   // Suffix sum
   const auto run_cumsum = [&]() {
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-      if (tx < RADIX) {
+    for (int i = 0; i < (COARSE_BINS <= 256 ? 8 : 10); ++i) {
+      if (tx < COARSE_BINS) {
         const auto j = 1 << i;
         const auto k = i & 1;
         auto value = s_histogram_buf[k][tx];
-        if (tx < RADIX - j) {
+        if (tx < COARSE_BINS - j) {
           value += s_histogram_buf[k][tx + j];
         }
         s_histogram_buf[k ^ 1][tx] = value;
@@ -1112,7 +1467,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   };
 
   run_cumsum();
-  if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
+  if (tx < COARSE_BINS && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
     s_threshold_bin_id = tx;
     s_num_input[0] = 0;
     s_counter = 0;
@@ -1126,129 +1481,165 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   constexpr int FIRST_SHIFT = Traits::FIRST_REFINE_SHIFT;
 
   if (topk == 0) {
-    // Collect indices where bin > threshold
-#pragma unroll 2
-    for (int base = tx * VEC_SIZE; base < aligned_length;
-         base += BLOCK_SIZE * VEC_SIZE) {
-      score_vec.cast_load(&score[base]);
-#pragma unroll
-      for (int j = 0; j < VEC_SIZE; ++j) {
-        const auto bin = static_cast<int>(Traits::ToCoarseKey(score_vec[j]));
-        if (bin > threshold_bin) {
-          const auto pos = atomicAdd(&s_counter, 1);
-          s_indices[pos] = base + j;
-        }
+    for_each_score([&](auto raw_input, int index) {
+      if (static_cast<int>(Traits::ToCoarseKey(raw_input)) > threshold_bin) {
+        s_indices[atomicAdd(&s_counter, 1)] = index;
       }
-    }
-    // Handle tail
-    for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-      const auto bin = static_cast<int>(Traits::ToCoarseKey(score[i]));
-      if (bin > threshold_bin) {
-        const auto pos = atomicAdd(&s_counter, 1);
-        s_indices[pos] = i;
-      }
-    }
+    });
     __syncthreads();
   } else {
     __syncthreads();
-    if (tx < RADIX + 1) s_histogram[tx] = 0;
+    for (int _j = tx; _j < COARSE_BINS + 1; _j += BLOCK_SIZE) s_histogram[_j] = 0;
     __syncthreads();
 
-    // Filter + histogram for refinement
-    auto filter_and_add_to_histogram = [&](auto raw_input, int index) {
+    for_each_score([&](auto raw_input, int index) {
       const auto bin = static_cast<int>(Traits::ToCoarseKey(raw_input));
       if (bin > threshold_bin) {
-        const auto pos = atomicAdd(&s_counter, 1);
-        s_indices[pos] = index;
+        s_indices[atomicAdd(&s_counter, 1)] = index;
       } else if (bin == threshold_bin) {
         const auto pos = atomicAdd(&s_num_input[0], 1);
         if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
           s_input_idx[0][pos] = index;
-          const auto ordered = Traits::ToOrdered(raw_input);
-          const auto sub_bin = (ordered >> FIRST_SHIFT) & 0xFF;
-          atomicAdd(&s_histogram[sub_bin], 1);
+          atomicAdd(&s_histogram[(Traits::ToOrdered(raw_input) >> FIRST_SHIFT) & 0xFF], 1);
+        } else {
+          atomicOr(&s_refine_overflow, 1);
         }
       }
-    };
-#pragma unroll 2
-    for (int base = tx * VEC_SIZE; base < aligned_length;
-         base += BLOCK_SIZE * VEC_SIZE) {
-      score_vec.cast_load(&score[base]);
-#pragma unroll
-      for (int j = 0; j < VEC_SIZE; ++j) {
-        filter_and_add_to_histogram(score_vec[j], base + j);
-      }
-    }
-    // Handle tail
-    for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-      filter_and_add_to_histogram(score[i], i);
-    }
+    });
     __syncthreads();
 
-    // Stage 2: refine with 8bit radix passes
-#pragma unroll
-    for (int round = 0; round < NUM_ROUNDS; ++round) {
-      __shared__ int s_last_remain;
-      const auto r_idx = round % 2;
+    if constexpr (NUM_ROUNDS == 1) {
+      if (s_refine_overflow) {
+        for (int _j = tx; _j < COARSE_BINS + 1; _j += BLOCK_SIZE) s_histogram[_j] = 0;
+        __syncthreads();
 
-      const auto _raw_num_input = s_num_input[r_idx];
-      const auto num_input =
-          (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
-
-      run_cumsum();
-      if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
-        s_threshold_bin_id = tx;
-        s_num_input[r_idx ^ 1] = 0;
-        s_last_remain = topk - s_histogram[tx + 1];
-      }
-      __syncthreads();
-
-      const auto threshold = s_threshold_bin_id;
-      topk -= s_histogram[threshold + 1];
-
-      const int offset = FIRST_SHIFT - round * 8;
-      const bool is_last_round = (round == NUM_ROUNDS - 1);
-
-      if (topk == 0) {
-        for (int i = tx; i < num_input; i += BLOCK_SIZE) {
-          const auto idx = s_input_idx[r_idx][i];
-          const auto bin = (Traits::ToOrdered(score[idx]) >> offset) & 0xFF;
-          if (static_cast<int>(bin) > threshold) {
-            const auto pos = atomicAdd(&s_counter, 1);
-            s_indices[pos] = idx;
+        for_each_score([&](auto raw_input, int) {
+          if (static_cast<int>(Traits::ToCoarseKey(raw_input)) == threshold_bin) {
+            const auto ordered = Traits::ToOrdered(raw_input);
+            atomicAdd(&s_histogram[ordered & 0xFF], 1);
           }
+        });
+        __syncthreads();
+
+        if (tx == 0) { s_threshold_bin_id = 0; s_last_remain = 0; }
+        __syncthreads();
+        run_cumsum();
+        if (tx < COARSE_BINS && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
+          s_threshold_bin_id = tx;
+          s_last_remain = topk - s_histogram[tx + 1];
         }
         __syncthreads();
-        break;
+
+        const auto fine_threshold = s_threshold_bin_id;
+
+        for_each_score([&](auto raw_input, int index) {
+          if (static_cast<int>(Traits::ToCoarseKey(raw_input)) != threshold_bin) return;
+          const auto sub_bin = static_cast<int>(Traits::ToOrdered(raw_input) & 0xFF);
+          if (sub_bin > fine_threshold) {
+            s_indices[atomicAdd(&s_counter, 1)] = index;
+          } else if (sub_bin == fine_threshold) {
+            const auto pos = atomicAdd(&s_last_remain, -1);
+            if (pos > 0) s_indices[static_cast<int>(top_k) - pos] = index;
+          }
+        });
+        __syncthreads();
       } else {
+        const auto raw_num = s_num_input[0];
+        const auto num_input = (raw_num < SMEM_INPUT_SIZE) ? raw_num : SMEM_INPUT_SIZE;
+
+        run_cumsum();
+        if (tx < COARSE_BINS && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
+          s_threshold_bin_id = tx;
+          s_last_remain = topk - s_histogram[tx + 1];
+        }
         __syncthreads();
-        if (tx < RADIX + 1) s_histogram[tx] = 0;
-        __syncthreads();
-        for (int i = tx; i < num_input; i += BLOCK_SIZE) {
-          const auto idx = s_input_idx[r_idx][i];
-          const auto raw_input = score[idx];
-          const auto bin = (Traits::ToOrdered(raw_input) >> offset) & 0xFF;
-          if (static_cast<int>(bin) > threshold) {
-            const auto pos = atomicAdd(&s_counter, 1);
-            s_indices[pos] = idx;
-          } else if (static_cast<int>(bin) == threshold) {
-            if (is_last_round) {
+
+        const auto threshold = s_threshold_bin_id;
+        topk -= s_histogram[threshold + 1];
+
+        if (topk == 0) {
+          for (int i = tx; i < num_input; i += BLOCK_SIZE) {
+            const auto idx = s_input_idx[0][i];
+            const auto bin = (Traits::ToOrdered(score[idx]) >> FIRST_SHIFT) & 0xFF;
+            if (static_cast<int>(bin) > threshold) {
+              s_indices[atomicAdd(&s_counter, 1)] = idx;
+            }
+          }
+          __syncthreads();
+        } else {
+          for (int i = tx; i < num_input; i += BLOCK_SIZE) {
+            const auto idx = s_input_idx[0][i];
+            const auto raw_input = score[idx];
+            const auto bin = static_cast<int>((Traits::ToOrdered(raw_input) >> FIRST_SHIFT) & 0xFF);
+            if (bin > threshold) {
+              s_indices[atomicAdd(&s_counter, 1)] = idx;
+            } else if (bin == threshold) {
               const auto pos = atomicAdd(&s_last_remain, -1);
-              if (pos > 0) {
-                s_indices[top_k - pos] = idx;
-              }
-            } else {
-              const auto pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
-              if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
-                s_input_idx[r_idx ^ 1][pos] = idx;
-                const auto bin32 = Traits::ToOrdered(raw_input);
-                const auto sub_bin = (bin32 >> (offset - 8)) & 0xFF;
-                atomicAdd(&s_histogram[sub_bin], 1);
+              if (pos > 0) s_indices[static_cast<int>(top_k) - pos] = idx;
+            }
+          }
+          __syncthreads();
+        }
+      }
+    } else {
+#pragma unroll
+      for (int round = 0; round < NUM_ROUNDS; ++round) {
+        const auto r_idx = round % 2;
+
+        const auto _raw_num_input = s_num_input[r_idx];
+        const auto num_input =
+            (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
+
+        run_cumsum();
+        if (tx < COARSE_BINS && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
+          s_threshold_bin_id = tx;
+          s_num_input[r_idx ^ 1] = 0;
+          s_last_remain = topk - s_histogram[tx + 1];
+        }
+        __syncthreads();
+
+        const auto threshold = s_threshold_bin_id;
+        topk -= s_histogram[threshold + 1];
+
+        const int offset = FIRST_SHIFT - round * 8;
+        const bool is_last_round = (round == NUM_ROUNDS - 1);
+
+        if (topk == 0) {
+          for (int i = tx; i < num_input; i += BLOCK_SIZE) {
+            const auto idx = s_input_idx[r_idx][i];
+            const auto bin = (Traits::ToOrdered(score[idx]) >> offset) & 0xFF;
+            if (static_cast<int>(bin) > threshold) {
+              s_indices[atomicAdd(&s_counter, 1)] = idx;
+            }
+          }
+          __syncthreads();
+          break;
+        } else {
+          __syncthreads();
+          for (int _j = tx; _j < COARSE_BINS + 1; _j += BLOCK_SIZE) s_histogram[_j] = 0;
+          __syncthreads();
+          for (int i = tx; i < num_input; i += BLOCK_SIZE) {
+            const auto idx = s_input_idx[r_idx][i];
+            const auto raw_input = score[idx];
+            const auto bin = (Traits::ToOrdered(raw_input) >> offset) & 0xFF;
+            if (static_cast<int>(bin) > threshold) {
+              s_indices[atomicAdd(&s_counter, 1)] = idx;
+            } else if (static_cast<int>(bin) == threshold) {
+              if (is_last_round) {
+                const auto pos = atomicAdd(&s_last_remain, -1);
+                if (pos > 0) s_indices[static_cast<int>(top_k) - pos] = idx;
+              } else {
+                const auto pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
+                if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
+                  s_input_idx[r_idx ^ 1][pos] = idx;
+                  const auto sub_bin = (Traits::ToOrdered(raw_input) >> (offset - 8)) & 0xFF;
+                  atomicAdd(&s_histogram[sub_bin], 1);
+                }
               }
             }
           }
+          __syncthreads();
         }
-        __syncthreads();
       }
     }
   }
@@ -1275,7 +1666,7 @@ constexpr uint32_t gcd(uint32_t a, uint32_t b) {
 // Returns 1, 2, 4, or 8
 template <typename DType>
 constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
-  constexpr int MAX_VEC = 16 / sizeof(DType);  // 4 for float32, 8 for fp16/bf16
+  constexpr int MAX_VEC = 4;  // Cap at 4 for all dtypes
   // Use GCD to find largest power-of-2 divisor
   const uint32_t g = gcd(max_len, static_cast<uint32_t>(MAX_VEC));
   return static_cast<int>(g);
@@ -1287,7 +1678,7 @@ cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
                                         uint32_t top_k_val, uint32_t max_len,
                                         cudaStream_t stream = 0) {
   constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
-  constexpr int MAX_VEC = 16 / sizeof(DType);
+  constexpr int MAX_VEC = 4;
 
   dim3 grid(num_rows);
   dim3 block(FILTERED_TOPK_BLOCK_THREADS);
@@ -1298,7 +1689,7 @@ cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
 
 #define DISPATCH_VEC_SIZE(VS)                                               \
   if (vec_size == VS) {                                                     \
-    auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VS, MAX_K>;      \
+    auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VS, MAX_K>;             \
     FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                              \
         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));   \
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, grid, block, args, \
