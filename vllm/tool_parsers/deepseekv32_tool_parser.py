@@ -21,12 +21,20 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import partial_tag_overlap
+
+# Marker the model emits to close its thinking section. The
+# structured-output FSM must allow arbitrary content up to and
+# including this marker before the schema constraint engages,
+# otherwise the model — which always starts inside <think> when
+# enable_thinking=true — can never close the reasoning section.
+_THINKING_END_MARKER = "</think>\n\n"
 
 logger = init_logger(__name__)
 
@@ -95,7 +103,49 @@ class DeepSeekV32ToolParser(ToolParser):
             # setting skip_special_tokens=False ensures proper handling in
             # transformers 5.x where decoding behavior may have changed.
             request.skip_special_tokens = False
+
+        # When thinking mode is enabled, the chat template opens a <think>
+        # block before the first generated token. The base adjust_request
+        # installs a whole-sequence JSON schema constraint for
+        # `tool_choice: "required"` and named-function tool_choice, which
+        # makes </think> unreachable in the constrained vocabulary. Wrap
+        # the schema in a structural tag so the FSM only engages after
+        # the model emits </think>\n\n. See vllm-project/vllm#33215.
+        if (
+            isinstance(request, ChatCompletionRequest)
+            and self._thinking_enabled(request)
+            and request.structured_outputs is not None
+            and request.structured_outputs.json is not None
+        ):
+            schema = request.structured_outputs.json
+            if isinstance(schema, str):
+                schema = json.loads(schema)
+            request.structured_outputs = StructuredOutputsParams(
+                structural_tag=json.dumps(
+                    {
+                        "triggers": [_THINKING_END_MARKER],
+                        "structures": [
+                            {
+                                "begin": _THINKING_END_MARKER,
+                                "schema": schema,
+                                "end": "",
+                            }
+                        ],
+                    }
+                )
+            )
         return request
+
+    @staticmethod
+    def _thinking_enabled(
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> bool:
+        """Mirror DeepSeekV3ReasoningParser's thinking-enable detection."""
+        chat_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+        return bool(
+            chat_kwargs.get("thinking", False)
+            or chat_kwargs.get("enable_thinking", False)
+        )
 
     def _generate_tool_call_id(self) -> str:
         """Generate a unique tool call ID."""
