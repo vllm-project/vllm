@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Distributed Comm Ops
+  key: distributed-comm-ops
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
@@ -16,6 +17,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
 
 - label: Distributed DP Tests (2 GPUs)
+  key: distributed-dp-tests-2-gpus
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
@@ -37,6 +39,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
 - label: Distributed Compile + RPC Tests (2 GPUs)
+  key: distributed-compile-rpc-tests-2-gpus
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
@@ -59,6 +62,7 @@ steps:
   - pytest -v -s ./compile/test_wrapper.py
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
+  key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
@@ -81,6 +85,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: Distributed Torchrun + Examples (4 GPUs)
+  key: distributed-torchrun-examples-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace"
   num_devices: 4
@@ -112,6 +117,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_ipc.py
 
 - label: Distributed DP Tests (4 GPUs)
+  key: distributed-dp-tests-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
@@ -132,6 +138,7 @@ steps:
   - pytest -v -s distributed/test_utils.py
 
 - label: Distributed Compile + Comm (4 GPUs)
+  key: distributed-compile-comm-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
@@ -153,6 +160,7 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
 - label: Distributed Tests (8 GPUs)(H100)
+  key: distributed-tests-8-gpus-h100
   timeout_in_minutes: 10
   device: h100
   num_devices: 8
@@ -173,6 +181,7 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: Distributed Tests (4 GPUs)(A100)
+  key: distributed-tests-4-gpus-a100
   device: a100
   optional: true
   num_devices: 4
@@ -187,6 +196,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: Distributed Tests (2 GPUs)(H100)
+  key: distributed-tests-2-gpus-h100
   timeout_in_minutes: 15
   device: h100
   optional: true
@@ -201,6 +211,7 @@ steps:
     - pytest -v -s tests/distributed/test_packed_tensor.py
 
 - label: Distributed Tests (2 GPUs)(B200)
+  key: distributed-tests-2-gpus-b200
   device: b200
   optional: true
   working_dir: "/vllm-workspace/"
@@ -214,6 +225,7 @@ steps:
     
 
 - label: 2 Node Test (4 GPUs)
+  key: 2-node-test-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
@@ -231,6 +243,7 @@ steps:
     - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
 
 - label: Pipeline + Context Parallelism (4 GPUs)
+  key: pipeline-context-parallelism-4-gpus
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
@@ -245,6 +258,7 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: RayExecutorV2 (4 GPUs)
+  key: rayexecutorv2-4-gpus
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
