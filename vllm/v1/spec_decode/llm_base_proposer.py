@@ -1542,7 +1542,10 @@ class SpecDecodeBaseProposer:
                         )
 
         if hasattr(target_language_model.model, "topk_indices_buffer"):
-            if hasattr(self.model.model, "topk_indices_buffer"):
+            if (
+                hasattr(self.model.model, "topk_indices_buffer")
+                and self.model.model.topk_indices_buffer is not None
+            ):
                 self.model.model.topk_indices_buffer.set_(
                     target_language_model.model.topk_indices_buffer
                 )
