@@ -11,27 +11,28 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.base.serving import PoolingServingBase
-from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
-from vllm.entrypoints.pooling.pooling.protocol import (
+from vllm.logger import init_logger
+from vllm.outputs import PoolingRequestOutput
+from vllm.tasks import SupportedTask
+from vllm.utils.serial_utils import EmbedDType, Endianness
+
+from ..base.io_processor import PoolingIOProcessor
+from ..base.serving import PoolingServingBase
+from ..factories import init_pooling_io_processors
+from ..typing import AnyPoolingRequest, PoolingServeContext
+from ..utils import (
+    encode_pooling_bytes,
+    encode_pooling_output_base64,
+    encode_pooling_output_float,
+    get_json_response_cls,
+)
+from .protocol import (
     IOProcessorRequest,
     PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
-from vllm.entrypoints.pooling.utils import (
-    encode_pooling_bytes,
-    encode_pooling_output_base64,
-    encode_pooling_output_float,
-    get_json_response_cls,
-)
-from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import SupportedTask
-from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
 
@@ -77,17 +78,15 @@ class ServingPooling(PoolingServingBase):
 
         # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
-            if pooling_task not in self.io_processors:
+            if pooling_task not in self.supported_tasks:
                 raise ValueError(
                     f"Unsupported task: {pooling_task!r} "
                     f"Supported tasks: {self.supported_tasks}"
                 )
             else:
-                logger.warning_once(
-                    "Pooling multitask support is deprecated and will be removed "
-                    "in v0.20. When the default pooling task is not what you want, you "
-                    "need to manually specify it via --pooler-config.task %s. ",
-                    pooling_task,
+                raise ValueError(
+                    "Try switching the model's pooling_task "
+                    f"via --pooler-config.task {request.task}."
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.io_processors:

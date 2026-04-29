@@ -47,6 +47,9 @@ class ModelArchConfigConvertorBase:
 
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
+            # special case for deepseek_v4
+            if hasattr(self.hf_text_config, "compress_ratios"):
+                return self.hf_text_config.head_dim
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
             if not envs.VLLM_MLA_DISABLE:
                 return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
@@ -77,6 +80,8 @@ class ModelArchConfigConvertorBase:
             "num_key_value_heads",
             # For ChatGLM:
             "multi_query_group_num",
+            # For Step3p5:
+            "num_attention_groups",
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
@@ -220,6 +225,7 @@ class ModelArchConfigConvertorBase:
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
+            "deepseek_v4",
             "deepseek_mtp",
             "glm_moe_dsa",
             "glm4_moe_lite",
@@ -231,7 +237,11 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+            # check is deepseek_v4 model
+            if hasattr(self.hf_text_config, "compress_ratios"):
+                return getattr(self.hf_text_config, "head_dim", None) is not None
+            else:
+                return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -247,6 +257,22 @@ class ModelArchConfigConvertorBase:
                 and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
+
+    def is_mm_prefix_lm(self) -> bool:
+        """Whether to use bidirectional attention for mm positions."""
+        if hasattr(self.hf_config, "is_mm_prefix_lm"):
+            return bool(self.hf_config.is_mm_prefix_lm)
+        # fallback to list of known models
+        MM_PREFIX_LM_MODELS = (
+            "bagel",
+            "gemma3",
+            "molmo2",
+            "paligemma",
+            "umm",
+        )
+        if not hasattr(self.hf_config, "model_type"):
+            return False
+        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
     def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
         derived_max_model_len = float("inf")
@@ -297,6 +323,7 @@ class ModelArchConfigConvertorBase:
             num_experts=self.get_num_experts(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
+            is_mm_prefix_lm=self.is_mm_prefix_lm(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
 
@@ -418,6 +445,39 @@ class MimoMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+def _strip_mimo_v2_attention_chunk_size(
+    hf_config: PretrainedConfig, hf_text_config: PretrainedConfig
+) -> None:
+    # MiMo-V2-Flash's config.json sets `attention_chunk_size=128` but the
+    # architecture does not actually use chunked local attention. Leaving it
+    # set makes vLLM disable the hybrid KV cache manager
+    for cfg in (hf_text_config, hf_config):
+        if cfg is not None and hasattr(cfg, "attention_chunk_size"):
+            delattr(cfg, "attention_chunk_size")
+
+
+class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        if getattr(hf_config, "vision_config", None):
+            hf_config.architectures = ["MiMoV2OmniForCausalLM"]
+        super().__init__(hf_config, hf_text_config)
+        _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
+
+
+class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        super().__init__(hf_config, hf_text_config)
+        _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
+
+    def get_num_hidden_layers(self) -> int:
+        n = getattr(self.hf_text_config, "num_nextn_predict_layers", None)
+        if n is not None:
+            return n
+        # Fall back to n_predict set by hf_config_override
+        n = getattr(self.hf_text_config, "n_predict", None)
+        return n if n is not None else 0
+
+
 class GLM4MoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -449,6 +509,12 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def is_mm_prefix_lm(self) -> bool:
+        return (
+            getattr(self.hf_text_config, "use_bidirectional_attention", None)
+            == "vision"
+        )
+
     def get_head_size(self) -> int:
         # Gemma4 uses dual head dimensions: head_dim (sliding attention)
         # and global_head_dim (full attention).  Return the largest so
@@ -478,6 +544,10 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
+    "mimo_v2": MimoV2ModelArchConfigConvertor,
+    "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
+    "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
+    "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,

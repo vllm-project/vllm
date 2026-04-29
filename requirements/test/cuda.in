@@ -18,10 +18,9 @@ httpx
 librosa # required for audio tests
 vector_quantize_pytorch # required for minicpmo_26 test
 vocos # required for minicpmo_26 test
-peft>=0.15.0 # required for phi-4-mm test
+peft>=0.18.1 # required for phi-4-mm test
 pqdm
 ray[cgraph,default]>=2.48.0 # Ray Compiled Graph, required by pipeline parallelism tests
-resampy # required for audio tests
 sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
@@ -39,8 +38,8 @@ opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.11 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==4.57.5
-tokenizers==0.22.0
+transformers==5.5.3
+tokenizers==0.22.2
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
 bitsandbytes==0.49.2
@@ -55,7 +54,7 @@ grpcio==1.78.0
 grpcio-reflection==1.78.0
 
 arctic-inference == 0.1.1 # Required for suffix decoding test
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.65.0 # Required for N-gram speculative decoding
 numpy
 runai-model-streamer[s3,gcs,azure]==0.15.7
 fastsafetensors>=0.2.2 # 0.2.2 contains important fixes for multi-GPU mem usage

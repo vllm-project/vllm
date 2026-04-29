@@ -164,6 +164,34 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         assert add_perp < mul_perp
 
 
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+    if not current_platform.supports_fp8():
+        pytest.skip(reason="Requires FP8 support")
+
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
+    with vllm_runner(
+        model_name=model,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
+
+    assert reloaded_perp < 10
+
+
 @pytest.mark.parametrize(
     "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
 )
