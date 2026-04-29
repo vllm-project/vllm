@@ -91,8 +91,10 @@ def test_basic_interface():
     assert request_id in kv_connector_metadata.reqs_to_recv["my-engine-id"]
     req_meta = kv_connector_metadata.reqs_to_recv["my-engine-id"][request_id]
 
+    # local_block_ids is list[list[int]] (per-group); flatten for comparison.
+    all_block_ids = [bid for group in req_meta.local_block_ids for bid in group]
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        all_block_ids,
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -228,15 +230,15 @@ def test_scheduler_request_finished():
 
     # Case: Capped length (Successful prefill, need to send to decoder)
     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-    delay_free, _ = scheduler_connector.request_finished(request, block_ids=[10, 11])
+    delay_free, _ = scheduler_connector.request_finished(request, block_ids=([10, 11],))
     assert delay_free is True
     assert "id-1" in scheduler_connector._reqs_need_send
-    assert scheduler_connector._reqs_need_send["id-1"][1] == [10, 11]
+    assert scheduler_connector._reqs_need_send["id-1"][1] == [[10, 11]]
 
     # Case: Aborted (No need to transfer, free blocks immediately)
     scheduler_connector._reqs_need_send.clear()
     request.status = RequestStatus.FINISHED_ABORTED
-    delay_free, _ = scheduler_connector.request_finished(request, block_ids=[12])
+    delay_free, _ = scheduler_connector.request_finished(request, block_ids=([12],))
     assert delay_free is False
     assert len(scheduler_connector._reqs_need_send) == 0
     assert "id-1" in scheduler_connector._reqs_not_processed
@@ -334,7 +336,7 @@ async def test_kv_producer(monkeypatch):
         send_meta = SendBlockMeta(
             p_req_id="p-req-1",
             transfer_id=transfer_id,
-            local_block_ids=[10, 11],
+            local_block_ids=[[10, 11]],
             ready=asyncio.Event(),
         )
         prefill_worker.reqs_need_send[transfer_id] = send_meta
@@ -346,7 +348,7 @@ async def test_kv_producer(monkeypatch):
             remote_port=54321,
             remote_tp_size=1,
             remote_tp_rank=0,
-            req_blocks={"d-req-1": (transfer_id, [20, 21])},
+            req_blocks={"d-req-1": (transfer_id, [[20, 21]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
         )
@@ -389,7 +391,7 @@ async def test_kv_producer(monkeypatch):
             prefill_worker.reqs_need_send[transfer_id] = send_meta
             send_meta.sent = 0
             send_meta.ready.set()
-            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [20])
+            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct: 11 to 20
@@ -407,7 +409,7 @@ async def test_kv_producer(monkeypatch):
             prefill_worker.reqs_need_send[transfer_id] = send_meta
             send_meta.sent = 0
             send_meta.ready.set()
-            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [20, 21, 22])
+            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21, 22]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # This should not be called because error.
@@ -424,7 +426,7 @@ async def test_kv_producer(monkeypatch):
             prefill_worker.reqs_need_send[transfer_id] = send_meta
             send_meta.sent = 0
             send_meta.ready.clear()
-            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [20, 21])
+            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # This should not be called because timeout.
@@ -443,7 +445,7 @@ async def test_kv_producer(monkeypatch):
             prefill_worker.reqs_need_send[transfer_id] = send_meta
             send_meta.sent = 0
             send_meta.ready.set()
-            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [20, 21])
+            xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             mock_send_blocks.assert_called_once()
@@ -481,7 +483,7 @@ async def test_kv_consumuer(monkeypatch):
             "d-req-1": PullReqMeta(
                 d_req_id="d-req-1",
                 transfer_id="xfer-req-1",
-                local_block_ids=[100, 101],
+                local_block_ids=[[100, 101]],
                 remote_engine_id="p-engine",
                 remote_bootstrap_addr="http://bootstrap:33333",
                 pull_tasks_count=1,
@@ -514,7 +516,7 @@ async def test_kv_consumuer(monkeypatch):
 
         assert sent_meta.remote_hostname == "127.0.0.1"
         assert sent_meta.remote_port == 54321
-        assert sent_meta.req_blocks["d-req-1"] == ("xfer-req-1", [100, 101])
+        assert sent_meta.req_blocks["d-req-1"] == ("xfer-req-1", [[100, 101]])
 
         # Verify internal state is updated correctly.
         assert "d-req-1" in decode_worker.finished_recving_reqs
@@ -538,7 +540,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
         prefill_worker.reqs_need_send["tx-expired"] = SendBlockMeta(
             p_req_id="p-req-expired",
             transfer_id="tx-expired",
-            local_block_ids=[1, 2],
+            local_block_ids=[[1, 2]],
             ready=MagicMock(),
             expire_time=time.perf_counter() - 100,
         )
@@ -547,7 +549,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
         prefill_worker.reqs_need_send["tx-active"] = SendBlockMeta(
             p_req_id="p-req-active",
             transfer_id="tx-active",
-            local_block_ids=[3, 4],
+            local_block_ids=[[3, 4]],
             ready=MagicMock(),
             expire_time=time.perf_counter() + 100,
         )
@@ -703,7 +705,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         prefill_worker.sender_loop = asyncio.get_event_loop()
 
         transfer_id = "xfer-hetero-1"
-        local_block_ids = [10, 11]
+        local_block_ids = [[10, 11]]
         send_meta = SendBlockMeta(
             p_req_id="p-req-h1",
             transfer_id=transfer_id,
@@ -720,9 +722,9 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         mock_socket.send_multipart = AsyncMock()
         identity = b"consumer-hetero"
 
-        # Assign different remote block IDs per D rank
+        # Assign different remote block IDs per D rank (nested per-group)
         d_rank_remote_blocks = {
-            rank: [20 + i * 10, 21 + i * 10] for i, rank in enumerate(target_d_ranks)
+            rank: [[20 + i * 10, 21 + i * 10]] for i, rank in enumerate(target_d_ranks)
         }
 
         with patch.object(
@@ -757,11 +759,15 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                 dst_ptrs = call_args[2]
                 lengths = call_args[3]
 
+                # Flatten nested per-group block IDs for assertions
+                flat_local = [b for g in local_block_ids for b in g]
+                flat_remote = [b for g in remote_block_ids for b in g]
+
                 # Heterogeneous TP: blocks cannot be coalesced because
                 # local and remote block_lens differ
-                assert len(src_ptrs) == len(local_block_ids)
-                assert len(dst_ptrs) == len(local_block_ids)
-                assert len(lengths) == len(local_block_ids)
+                assert len(src_ptrs) == len(flat_local)
+                assert len(dst_ptrs) == len(flat_local)
+                assert len(lengths) == len(flat_local)
 
                 # Compute expected offsets based on TP ratio
                 if d_tp_size <= P_TP_SIZE:
@@ -775,9 +781,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     expected_dst_off = 0
                     expected_xfer_len = remote_block_len
 
-                for idx, (lblk, rblk) in enumerate(
-                    zip(local_block_ids, remote_block_ids)
-                ):
+                for idx, (lblk, rblk) in enumerate(zip(flat_local, flat_remote)):
                     assert src_ptrs[idx] == (
                         0x1000 + lblk * local_block_len + expected_src_off
                     )
