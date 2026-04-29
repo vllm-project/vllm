@@ -1367,14 +1367,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 counts = current_counts[idx]
                 waiting = counts[0]
                 running = counts[1]
-                if use_token_lb and len(counts) >= 4:
-                    # Token-aware: each waiting request incurs fixed overhead,
-                    # plus its token backlog. Running requests contribute
-                    # their remaining tokens. This favors engines with fewer
-                    # total tokens, balancing prefill-heavy workloads.
+                if use_token_lb:
                     waiting_tokens = counts[2]
                     running_tokens = counts[3]
-                    score = waiting * 4 + waiting_tokens + running_tokens
+                    score = waiting_tokens + running_tokens
                 else:
                     score = waiting * 4 + running
                 if score < min_score:

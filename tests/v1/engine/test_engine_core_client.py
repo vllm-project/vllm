@@ -257,7 +257,7 @@ def test_dplb_token_lb_dispatches_to_fewest_tokens():
     # Engine 0: 1 waiting req, 10000 waiting tokens (big prefill)
     # Engine 1: 2 waiting reqs, 2000 waiting tokens (small prefills)
     # Request-level LB: eng0 wins (4 < 8)
-    # Token-level LB: eng1 wins (2008 < 10004)
+    # Token-level LB: eng1 wins (2000 < 10000)
     client.lb_engines = [[1, 0, 10000, 0], [2, 0, 2000, 0]]
     client.eng_start_index = 0
 
