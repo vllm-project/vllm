@@ -5,6 +5,7 @@
 
 import json
 from unittest.mock import MagicMock
+import pytest
 
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
