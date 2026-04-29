@@ -540,7 +540,13 @@ class KVCacheManager:
             if event.group_idx < 0 or event.group_idx >= len(
                 self.kv_cache_event_metadata
             ):
+                logger.warning(
+                    "Group index `%s` not in KV cache metadata",
+                    event.group_idx,
+                )
                 continue
+            # Annotate here so BlockPool can keep emitting structural cache
+            # events without owning semantic KV cache spec metadata.
             kind, sliding_window = self.kv_cache_event_metadata[event.group_idx]
             event.kv_cache_spec_kind = kind
             event.kv_cache_spec_sliding_window = sliding_window

@@ -743,6 +743,8 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
         if len(inner_kinds) == 1:
             return next(iter(inner_kinds))
         return KVCacheSpecKind.UNKNOWN
+    # Keep subclass checks before base classes so specialized specs keep their
+    # more precise kind.
     if isinstance(kv_cache_spec, SlidingWindowMLASpec):
         return KVCacheSpecKind.SLIDING_WINDOW_MLA
     if isinstance(kv_cache_spec, MLAAttentionSpec):
@@ -773,7 +775,9 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
         if len(inner_windows) == 1:
             return next(iter(inner_windows))
         return None
-    return getattr(kv_cache_spec, "sliding_window", None)
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return kv_cache_spec.sliding_window
+    return None
 
 
 @dataclass

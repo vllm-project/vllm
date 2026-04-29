@@ -379,12 +379,11 @@ class BlockPool:
         block.reset_hash()
 
         if self.enable_kv_cache_events:
-            group_id = get_group_id(block_hash)
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
                     medium=MEDIUM_GPU,
-                    group_idx=group_id,
+                    group_idx=get_group_id(block_hash),
                 )
             )
         return True

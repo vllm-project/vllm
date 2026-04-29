@@ -8,6 +8,7 @@ from collections.abc import Callable
 import pytest
 import torch
 
+import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
 from vllm.lora.request import LoRARequest
@@ -2138,11 +2139,14 @@ def test_block_stored_event_group_idx(group_id: int):
             KVCacheSpecKind.MAMBA.value,
         ][group_id]
     )
-    assert events[0].kv_cache_spec_sliding_window == [
-        None,
-        2 * block_size,
-        None,
-    ][group_id]
+    assert (
+        events[0].kv_cache_spec_sliding_window
+        == [
+            None,
+            2 * block_size,
+            None,
+        ][group_id]
+    )
 
 
 def test_block_stored_event_group_idx_multiple_groups():
@@ -2229,6 +2233,42 @@ def test_block_stored_event_group_idx_multiple_groups():
     assert events[1].group_idx == 1
     assert events[1].kv_cache_spec_kind == KVCacheSpecKind.SLIDING_WINDOW.value
     assert events[1].kv_cache_spec_sliding_window == 128
+
+
+def test_block_stored_event_group_idx_out_of_bounds(monkeypatch):
+    """Out-of-range group_idx events are returned without metadata annotation."""
+    block_size = 4
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    event = BlockStored(
+        block_hashes=[1],
+        parent_block_hash=None,
+        token_ids=list(range(block_size)),
+        block_size=block_size,
+        lora_id=None,
+        medium=None,
+        lora_name=None,
+        group_idx=1,
+    )
+    manager.block_pool.kv_event_queue.append(event)
+    warnings = []
+
+    def collect_warning(message, *args, **kwargs):
+        del kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(kv_cache_manager.logger, "warning", collect_warning)
+    events = manager.take_events()
+
+    assert events == [event]
+    assert event.kv_cache_spec_kind is None
+    assert event.kv_cache_spec_sliding_window is None
+    assert warnings == ["Group index `1` not in KV cache metadata"]
 
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
