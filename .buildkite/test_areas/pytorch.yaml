@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: PyTorch Compilation Unit Tests
+  key: pytorch-compilation-unit-tests
   timeout_in_minutes: 10
   source_file_dependencies:
     - vllm/
@@ -18,6 +19,7 @@ steps:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Compilation Unit Tests (H100)
+  key: pytorch-compilation-unit-tests-h100
   timeout_in_minutes: 30
   device: h100
   num_devices: 1
@@ -28,6 +30,7 @@ steps:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Compilation Passes Unit Tests
+  key: pytorch-compilation-passes-unit-tests
   timeout_in_minutes: 20
   source_file_dependencies:
     - vllm/
@@ -36,6 +39,7 @@ steps:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: PyTorch Fullgraph Smoke Test
+  key: pytorch-fullgraph-smoke-test
   timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/
@@ -48,6 +52,7 @@ steps:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph
+  key: pytorch-fullgraph
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -58,6 +63,7 @@ steps:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
 
 - label: Pytorch Nightly Dependency Override Check # 2min
+  key: pytorch-nightly-dependency-override-check
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py

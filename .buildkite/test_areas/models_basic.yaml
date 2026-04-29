@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Basic Models Tests (Initialization)
+  key: basic-models-tests-initialization
   timeout_in_minutes: 45
   torch_nightly: true
   source_file_dependencies:
@@ -16,6 +17,7 @@ steps:
     torch_nightly: {}
 
 - label: Basic Models Tests (Extra Initialization) %N
+  key: basic-models-tests-extra-initialization
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -31,6 +33,7 @@ steps:
     torch_nightly: {}
 
 - label: Basic Models Tests (Other)
+  key: basic-models-tests-other
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
@@ -47,6 +50,7 @@ steps:
 
 
 - label: Basic Models Test (Other CPU) # 5min
+  key: basic-models-test-other-cpu
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 10
@@ -59,6 +63,7 @@ steps:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
 - label: Transformers Nightly Models
+  key: transformers-nightly-models
   working_dir: "/vllm-workspace/"
   optional: true
   soft_fail: true
@@ -74,6 +79,7 @@ steps:
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
 
 - label: Transformers Backward Compatibility Models Test
+  key: transformers-backward-compatibility-models-test
   working_dir: "/vllm-workspace/"
   optional: true
   soft_fail: true

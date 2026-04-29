@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: V1 Spec Decode
+  key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
     - vllm/
@@ -18,6 +19,7 @@ steps:
       - image-build-amd
 
 - label: V1 Sample + Logits
+  key: v1-sample-logits
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -41,6 +43,7 @@ steps:
       - image-build-amd
 
 - label: V1 Core + KV + Metrics
+  key: v1-core-kv-metrics
   timeout_in_minutes: 30
   source_file_dependencies:
     - vllm/
@@ -71,6 +74,7 @@ steps:
       - image-build-amd
 
 - label: V1 Others (CPU)
+  key: v1-others-cpu
   depends_on:
     - image-build-cpu
   source_file_dependencies:
@@ -86,6 +90,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/metrics
 
 - label: Regression
+  key: regression
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
@@ -97,6 +102,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Examples
+  key: examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
@@ -128,6 +134,7 @@ steps:
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 - label: Metrics, Tracing (2 GPUs)
+  key: metrics-tracing-2-gpus
   timeout_in_minutes: 20
   num_devices: 2
   source_file_dependencies:
@@ -142,6 +149,7 @@ steps:
   - pytest -v -s v1/tracing
 
 - label: Python-only Installation
+  key: python-only-installation
   depends_on: ~
   timeout_in_minutes: 20
   source_file_dependencies:
@@ -151,6 +159,7 @@ steps:
   - bash standalone_tests/python_only_compile.sh
 
 - label: Async Engine, Inputs, Utils, Worker
+  key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
   - vllm/
@@ -163,7 +172,8 @@ steps:
   - pytest -v -s utils_
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
-  depends_on: 
+  key: async-engine-inputs-utils-worker-config-cpu
+  depends_on:
   - image-build-cpu
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -196,6 +206,7 @@ steps:
   - pytest -v -s config
 
 - label: Batch Invariance (H100)
+  key: batch-invariance-h100
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
@@ -211,6 +222,7 @@ steps:
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
 
 - label: Batch Invariance (B200)
+  key: batch-invariance-b200
   timeout_in_minutes: 30
   device: b200
   source_file_dependencies:
@@ -227,6 +239,7 @@ steps:
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
   
 - label: Acceptance Length Test (Large Models) # optional
+  key: acceptance-length-test-large-models
   timeout_in_minutes: 25
   gpu: h100
   optional: true

@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Samplers Test
+  key: samplers-test
   timeout_in_minutes: 75
   source_file_dependencies:
   - vllm/model_executor/layers

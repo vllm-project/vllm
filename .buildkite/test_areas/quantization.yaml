@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Quantization
+  key: quantization
   timeout_in_minutes: 90
   source_file_dependencies:
   - csrc/
@@ -21,6 +22,7 @@ steps:
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: Quantized MoE Test (B200)
+  key: quantized-moe-test-b200
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   device: b200
@@ -38,6 +40,7 @@ steps:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 - label: Quantized Models Test
+  key: quantized-models-test
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
