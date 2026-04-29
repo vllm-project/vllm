@@ -1062,6 +1062,25 @@ class GPUModelRunner(
         )
         return model_kwargs
 
+    def _uses_request_ids_for_generation(self) -> bool:
+        return bool(getattr(self.get_model(), "uses_request_ids_for_generation", False))
+
+    def _get_encoder_request_ids(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> list[str]:
+        encoder_request_ids: list[str] = []
+        for (
+            req_id,
+            encoder_input_ids,
+        ) in scheduler_output.scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            for mm_input_id in encoder_input_ids:
+                mm_feature = req_state.mm_features[mm_input_id]
+                if mm_feature.data is not None:
+                    encoder_request_ids.append(req_id)
+        return encoder_request_ids
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -3554,6 +3573,22 @@ class GPUModelRunner(
             encoder_outputs = self._execute_mm_encoder(scheduler_output)
             model_kwargs.update({"encoder_outputs": encoder_outputs})
 
+        if self._uses_request_ids_for_generation():
+            finished_request_ids = scheduler_output.finished_req_ids | getattr(
+                scheduler_output, "preempted_req_ids", set()
+            )
+            model_kwargs.update(
+                {
+                    "finished_request_ids": tuple(finished_request_ids),
+                    "request_ids": self.input_batch.req_ids.copy(),
+                    "request_indices": self.req_indices.gpu[:num_scheduled_tokens],
+                }
+            )
+            if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+                model_kwargs["encoder_request_ids"] = self._get_encoder_request_ids(
+                    scheduler_output
+                )
+
         return (
             input_ids,
             inputs_embeds,
@@ -4149,6 +4184,7 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                force_eager=self._uses_request_ids_for_generation(),
             )
 
             logger.debug(

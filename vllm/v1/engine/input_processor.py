@@ -79,6 +79,16 @@ class InputProcessor:
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
 
+    def _get_eos_token_id(self) -> int | None:
+        eos_token_id = self.renderer.get_eos_token_id()
+        if eos_token_id is not None:
+            return eos_token_id
+
+        config_eos_token_id = getattr(self.model_config.hf_config, "eos_token_id", None)
+        if isinstance(config_eos_token_id, int):
+            return config_eos_token_id
+        return None
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -322,7 +332,7 @@ class InputProcessor:
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
-                self.renderer.get_eos_token_id(),
+                self._get_eos_token_id(),
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
