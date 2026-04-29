@@ -41,12 +41,40 @@ def run_command(
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
+def _short_output(output: str | None, limit: int = 500) -> str:
+    text = (output or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
+
+
+def _load_json_stdout(
+    result: subprocess.CompletedProcess[str], description: str
+) -> Any:
+    stdout = result.stdout.strip()
+    if not stdout:
+        stderr = _short_output(result.stderr)
+        message = f"{description} returned empty stdout"
+        if stderr:
+            message += f"; stderr: {stderr}"
+        raise RuntimeError(message)
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        message = f"{description} returned non-JSON stdout: {_short_output(stdout)!r}"
+        stderr = _short_output(result.stderr)
+        if stderr:
+            message += f"; stderr: {stderr!r}"
+        raise RuntimeError(message) from exc
+
+
 def gpu_snapshot() -> list[dict[str, Any]]:
     result = run_command(["amd-smi", "metric", "--mem-usage", "--json"], timeout=30)
     if result.returncode != 0:
-        raise RuntimeError(f"amd-smi failed: {result.stderr.strip()}")
+        output = _short_output(result.stderr or result.stdout)
+        raise RuntimeError(f"amd-smi metric failed: {output}")
 
-    payload = json.loads(result.stdout or "{}")
+    payload = _load_json_stdout(result, "amd-smi metric --mem-usage --json")
     if isinstance(payload, dict):
         entries = payload.get("gpu_data", [])
     elif isinstance(payload, list):
@@ -71,6 +99,44 @@ def gpu_snapshot() -> list[dict[str, Any]]:
             }
         )
     return snapshot
+
+
+def _count_gpu_entries(payload: Any) -> int:
+    if isinstance(payload, list):
+        return len(payload)
+    if not isinstance(payload, dict):
+        return 0
+
+    for key in ("gpu_data", "gpus", "GPUs", "devices"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, dict):
+            return len(value)
+
+    return sum(1 for value in payload.values() if isinstance(value, dict))
+
+
+def amd_smi_list_gpu_count() -> int:
+    result = run_command(["amd-smi", "list", "--json"], timeout=30)
+    if result.returncode == 0:
+        try:
+            count = _count_gpu_entries(_load_json_stdout(result, "amd-smi list --json"))
+            if count:
+                return count
+        except RuntimeError as exc:
+            log.warning("amd-smi list --json was not usable: %s", exc)
+
+    result = run_command(["amd-smi", "list"], timeout=30)
+    if result.returncode != 0:
+        output = _short_output(result.stderr or result.stdout)
+        raise RuntimeError(f"amd-smi list failed: {output}")
+
+    return sum(
+        1
+        for line in result.stdout.splitlines()
+        if line.strip().lower().startswith("gpu")
+    )
 
 
 @dataclass(frozen=True)
@@ -99,12 +165,18 @@ class RunRequest:
 
         artifact_mode = env_flag("VLLM_CI_USE_ARTIFACTS")
         execution_mode = os.environ.get("VLLM_CI_EXECUTION_MODE", "single-node")
-        image = os.environ.get("DOCKER_IMAGE_NAME")
-        if not image:
-            if artifact_mode:
-                image = os.environ.get("VLLM_CI_BASE_IMAGE", "rocm/vllm-dev:ci_base")
-            else:
-                image = f"rocm/vllm-ci:{commit}"
+        configured_image = os.environ.get("DOCKER_IMAGE_NAME")
+        if artifact_mode:
+            image = os.environ.get("VLLM_CI_BASE_IMAGE", "rocm/vllm-dev:ci_base")
+            if configured_image and configured_image != image:
+                log.warning(
+                    "Ignoring DOCKER_IMAGE_NAME=%s because "
+                    "VLLM_CI_USE_ARTIFACTS=1; using VLLM_CI_BASE_IMAGE=%s",
+                    configured_image,
+                    image,
+                )
+        else:
+            image = configured_image or f"rocm/vllm-ci:{commit}"
 
         node_commands = cls._resolve_node_commands()
         hf_cache = Path(
@@ -1067,10 +1139,37 @@ class AmdTestRunner:
         raise RuntimeError(f"Failed to pull test image: {self.request.image}")
 
     def _check_gpus(self) -> None:
-        snapshot = gpu_snapshot()
-        if not snapshot:
+        try:
+            snapshot = gpu_snapshot()
+        except RuntimeError as exc:
+            fallback_count = len(self.request.render_devices)
+            fallback_source = "Buildkite render-device metadata"
+            if fallback_count == 0:
+                fallback_count = amd_smi_list_gpu_count()
+                fallback_source = "amd-smi list"
+
+            if fallback_count == 0:
+                raise RuntimeError("No GPUs detected by amd-smi") from exc
+
+            log.warning(
+                "amd-smi memory snapshot failed (%s); detected %d GPU(s) via %s",
+                exc,
+                fallback_count,
+                fallback_source,
+            )
+            return
+
+        if snapshot:
+            log.info("Detected %d GPU(s)", len(snapshot))
+            return
+
+        fallback_count = len(self.request.render_devices) or amd_smi_list_gpu_count()
+        if fallback_count == 0:
             raise RuntimeError("No GPUs detected by amd-smi")
-        log.info("Detected %d GPU(s)", len(snapshot))
+        log.warning(
+            "amd-smi memory snapshot was empty; detected %d GPU(s) via fallback",
+            fallback_count,
+        )
 
     @staticmethod
     def _image_exists_locally(image: str) -> bool:
