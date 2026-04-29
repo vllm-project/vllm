@@ -161,18 +161,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_weight=w13,
             w2_weight=w2,
         )
+        # Use prefer_copy=True so that on subsequent calls (e.g. RL weight
+        # updates that re-trigger process_weights_after_loading) the shuffled
+        # data is copied into the existing parameter storage. This preserves
+        # the tensor addresses captured by CUDA graphs.
+        replace_parameter(layer, "w13_weight", w13_new, prefer_copy=True)
+        replace_parameter(layer, "w2_weight", w2_new, prefer_copy=True)
 
-        if self.moe_kernel is not None:
-            # Subsequent call (weight update): copy shuffled data into existing
-            # tensors to preserve addresses used by captured CUDA graphs.
-            layer.w13_weight.copy_(w13_new)
-            layer.w2_weight.copy_(w2_new)
-        else:
-            # First call (initial load): replace parameters as usual.
-            replace_parameter(layer, "w13_weight", w13_new)
-            replace_parameter(layer, "w2_weight", w2_new)
-
-            # Setup moe kernel.
+        if self.moe_kernel is None:
+            # Setup moe kernel (only on the first call).
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
             assert self.experts_cls is not None
