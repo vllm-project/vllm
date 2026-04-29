@@ -16,7 +16,10 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    can_use_page_table_fusion,
+)
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -200,7 +203,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Pick fp8_einsum recipe based on GPU arch:
         # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
         # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        from vllm.platforms import current_platform
 
         cap = current_platform.get_device_capability()
         assert cap is not None, "DeepseekV4 attention requires a CUDA device"
@@ -799,15 +801,15 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                can_use_fused_page_table_transform = (
-                    self.topk_lens_buffer is not None
-                    and current_platform.is_cuda()
-                    and num_decode_tokens == num_decodes
-                    and num_decode_tokens <= 4
-                    and self.topk_indices_buffer.shape[-1] in (512, 1024, 2048)
-                    and attn_metadata.block_table.shape[0] >= num_decode_tokens
+                use_page_table_fusion = can_use_page_table_fusion(
+                    topk_lens_buffer=self.topk_lens_buffer,
+                    topk_tokens=self.topk_indices_buffer.shape[-1],
+                    num_tokens=num_decode_tokens,
+                    num_seqs=num_decodes,
+                    page_table_block_size=block_size,
+                    page_table=attn_metadata.block_table,
                 )
-                if can_use_fused_page_table_transform:
+                if use_page_table_fusion:
                     assert self.topk_lens_buffer is not None
                     topk_indices = self.topk_indices_buffer[:num_decode_tokens].view(
                         num_decode_tokens, 1, -1
@@ -1144,7 +1146,7 @@ class DeepseekV4Indexer(nn.Module):
             self.topk_indices_buffer,
             topk_lens_buffer=topk_lens_buffer,
             page_table_block_size=cache_config.block_size // self.compress_ratio,
-            fuse_decode_page_table_transform=self.compress_ratio == 4,
+            enable_page_table_fusion=self.compress_ratio == 4,
             skip_k_cache_insert=True,
             use_fp4_cache=self.use_fp4_kv,
         )
