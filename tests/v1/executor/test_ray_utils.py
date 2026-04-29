@@ -3,7 +3,10 @@
 
 import numpy as np
 
-from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
+from vllm.v1.executor.ray_utils import (
+    RayWorkerWrapper,
+    detach_zero_copy_from_model_runner_output,
+)
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, ModelRunnerOutput
 
 
@@ -52,3 +55,21 @@ def test_detach_zero_copy_from_model_runner_output_copies_only_numpy_views():
     assert detached_logprobs.sampled_token_ranks.flags.writeable
     assert detached_logprobs.cu_num_generated_tokens is cu_num_generated_tokens
     assert output.prompt_logprobs_dict["req-0"] is prompt_logprobs
+
+
+def test_adjust_rank_keeps_global_rank_in_sync():
+    wrapper = RayWorkerWrapper(rpc_rank=0)
+    assert wrapper.rpc_rank == 0
+    assert wrapper.global_rank == 0
+
+    # Re-rank from 0 -> 2
+    # (emulating RayDistributedExecutor reordering workers by node placement).
+    wrapper.adjust_rank({0: 2})
+    assert wrapper.rpc_rank == 2
+    assert wrapper.global_rank == 2
+
+    # When the worker's current `rpc_rank` (of 2) is not a key in the `rank_mapping`
+    # argument below ({5: 9}), `adjust_rank` must leave both ranks untouched
+    wrapper.adjust_rank({5: 9})
+    assert wrapper.rpc_rank == 2
+    assert wrapper.global_rank == 2
