@@ -8,9 +8,14 @@ import torch
 import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
+from vllm.config import VllmConfig
+from vllm.config.speculative import SpeculativeConfig
 from vllm.platforms import current_platform
-from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.logits_processor.builtin import LogitBiasLogitsProcessor
+from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
+from vllm.v1.sample.logits_processor.builtin import (
+    LogitBiasLogitsProcessor,
+    ReasoningLogitsProcessor,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
@@ -47,6 +52,14 @@ def create_spec_decode_metadata(
     # be empty.
     metadata.bonus_logits_indices = torch.empty(0, dtype=torch.int32)
     return metadata
+
+
+def create_spec_decode_vllm_config() -> VllmConfig:
+    vllm_config = VllmConfig()
+    vllm_config.speculative_config = SpeculativeConfig(
+        model="ngram", num_speculative_tokens=1
+    )
+    return vllm_config
 
 
 def create_logits_tensor(
@@ -1007,6 +1020,56 @@ def create_logit_bias_processor(
     return LogitsProcessors([processor])
 
 
+def create_reasoning_processor(
+    reasoning_indices: list[int],
+    banned_token_ids: list[int],
+) -> LogitsProcessors:
+    processor = ReasoningLogitsProcessor.__new__(ReasoningLogitsProcessor)
+    processor.device = torch.device(DEVICE_TYPE)
+    processor.pin_memory = False
+    processor.req_states = {
+        index: ([], True, 0) for index in reasoning_indices
+    }
+    processor.has_reasoning = bool(reasoning_indices)
+    processor.banned_token_ids_tensor = torch.tensor(
+        banned_token_ids, device=DEVICE_TYPE, dtype=torch.int64
+    )
+    return LogitsProcessors([processor])
+
+
+def test_spec_decode_builds_reasoning_logits_processor():
+    logitsprocs = build_logitsprocs(
+        vllm_config=create_spec_decode_vllm_config(),
+        device=torch.device(DEVICE_TYPE),
+        is_pin_memory=False,
+        is_pooling_model=False,
+    )
+
+    assert any(
+        isinstance(processor, ReasoningLogitsProcessor)
+        for processor in logitsprocs.all
+    )
+
+
+def test_spec_decode_allows_explicit_builtin_reasoning_logitproc():
+    logitsprocs = build_logitsprocs(
+        vllm_config=create_spec_decode_vllm_config(),
+        device=torch.device(DEVICE_TYPE),
+        is_pin_memory=False,
+        is_pooling_model=False,
+        custom_logitsprocs=[
+            "vllm.v1.sample.logits_processor.builtin:ReasoningLogitsProcessor"
+        ],
+    )
+
+    reasoning_processors = [
+        processor
+        for processor in logitsprocs.all
+        if isinstance(processor, ReasoningLogitsProcessor)
+    ]
+    assert len(reasoning_processors) == 1
+
+
 def test_logit_bias_greedy(rejection_sampler):
     """测试 logit bias 在 greedy 模式下改变 draft token 的 accept/reject 行为。
 
@@ -1050,6 +1113,46 @@ def test_logit_bias_greedy(rejection_sampler):
     # req 2: token 2 biased -> rejected -> [1, 15, -1, -1]
     expected = torch.tensor(
         [[1, 15, -1, -1], [1, 15, 3, 4], [1, 15, -1, -1]],
+        dtype=torch.int,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_reasoning_processor_greedy(rejection_sampler):
+    """Verify reasoning special-token bans are applied to speculative drafts."""
+    spec_tokens = [[1, 2, 3], [1, 2, 3], [1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]]
+
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+
+    logitsprocs = create_reasoning_processor(
+        reasoning_indices=[0, 2],
+        banned_token_ids=[2],
+    )
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[2], [3], [4]],
+        spec_token_ids=spec_tokens,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[i][-1] for i in range(len(output_tokens))],
+        device=logits.device,
+    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # req 0/2: token 2 banned while reasoning -> rejected at token 2.
+    # req 1: no reasoning state -> all draft tokens are accepted.
+    expected = torch.tensor(
+        [[1, 15, -1, -1], [1, 2, 3, 4], [1, 15, -1, -1]],
         dtype=torch.int,
         device=logits.device,
     )

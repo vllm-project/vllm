@@ -56,6 +56,12 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     ThinkingTokenBudgetLogitsProcessor,
 ]
 
+SPEC_DECODE_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
+    MinTokensLogitsProcessor,
+    LogitBiasLogitsProcessor,
+    ReasoningLogitsProcessor,
+]
+
 
 def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     """Load all installed logit processor plugins"""
@@ -204,15 +210,22 @@ def build_logitsprocs(
     # Check if speculative decoding is enabled.
     if vllm_config.speculative_config:
         if custom_logitsprocs:
-            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+            custom_logitsprocs_classes = _load_logitsprocs_by_fqcns(
+                custom_logitsprocs
+            )
+            unsupported_logitsprocs = [
+                logitproc
+                for logitproc in custom_logitsprocs_classes
+                if logitproc not in SPEC_DECODE_LOGITS_PROCESSORS
+            ]
+            if unsupported_logitsprocs:
+                raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
         logger.warning(
             "min_p parameter won't work with speculative decoding."
         )
         return LogitsProcessors(
-            [
-                MinTokensLogitsProcessor(vllm_config, device, is_pin_memory),
-                LogitBiasLogitsProcessor(vllm_config, device, is_pin_memory),
-            ]
+            ctor(vllm_config, device, is_pin_memory)
+            for ctor in SPEC_DECODE_LOGITS_PROCESSORS
         )
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
