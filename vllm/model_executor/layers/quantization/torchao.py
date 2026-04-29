@@ -24,8 +24,18 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+try:
+    from torchao.quantization.quantize_.workflows import Int8Tensor
+except Exception:  # torchao not installed or version mismatch
+    Int8Tensor = None
+
+
+def _is_int8_weight(t: torch.Tensor) -> bool:
+    return Int8Tensor is not None and isinstance(t, Int8Tensor)
 
 
 def _bond_method_to_cls(func, obj):
@@ -331,6 +341,18 @@ class TorchAOLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Zen CPU override:
+        # - Int8Tensor with activation quant -> zentorch_dynamic_qlinear (dynamic)
+        if current_platform.is_zen_cpu() and hasattr(torch.ops, "zentorch"):
+            # Dynamic quantization: Int8Tensor with activation quant args
+            if hasattr(layer, "_zentorch_dynamic_qlinear_weight"):
+                return torch.ops.zentorch.zentorch_dynamic_qlinear(
+                    x,
+                    layer._zentorch_dynamic_qlinear_weight,
+                    layer._zentorch_dynamic_qlinear_scales,
+                    bias,
+                    zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
+                )
         return F.linear(x, layer.weight, bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -348,19 +370,34 @@ class TorchAOLinearMethod(LinearMethodBase):
             )
 
             _restore_weight_attrs(layer.weight, recorded_weight_attr)
-            return
+        else:
+            # online quantize the weight if the checkpoint is not already
+            # quantized by torchao
+            recorded_weight_attr = _get_weight_attrs(layer.weight)
 
-        # online quantize the weight if the checkpoint is not already
-        # quantized by torchao
-        recorded_weight_attr = _get_weight_attrs(layer.weight)
+            weight = torchao_quantize_param_data(
+                layer.weight, self.quant_config.torchao_config
+            )
+            weight = torch.nn.Parameter(
+                convert_to_packed_tensor_based_on_current_hardware(weight),
+                weight.requires_grad,
+            )
 
-        weight = torchao_quantize_param_data(
-            layer.weight, self.quant_config.torchao_config
-        )
-        weight = torch.nn.Parameter(
-            convert_to_packed_tensor_based_on_current_hardware(weight),
-            weight.requires_grad,
-        )
+            _restore_weight_attrs(weight, recorded_weight_attr)
+            layer.register_parameter("weight", weight)
 
-        _restore_weight_attrs(weight, recorded_weight_attr)
-        layer.register_parameter("weight", weight)
+        if current_platform.is_zen_cpu() and hasattr(torch.ops, "zentorch"):
+            w = layer.weight
+
+            if (
+                _is_int8_weight(w)
+                and w.act_quant_kwargs is not None
+                and hasattr(torch.ops.zentorch, "zentorch_dynamic_qlinear")
+            ):
+                layer._zentorch_dynamic_qlinear_weight = w.qdata
+                scales = w.scale
+                if scales.dim() == 2 and scales.shape[-1] == 1:
+                    scales = scales.squeeze(-1)
+                layer._zentorch_dynamic_qlinear_scales = scales
+                # Drop the original torchao-packed weight wrapper
+                layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
