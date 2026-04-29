@@ -120,6 +120,13 @@ class TopKWeightAndReduce(ABC):
     An abstract base class for weight application and reduction implementations.
     """
 
+    def is_noop(self) -> bool:
+        """
+        Whether this implementation leaves an already weighted/reduced fused
+        expert output unchanged when no output buffer is provided.
+        """
+        return False
+
     @abstractmethod
     def apply(
         self,
@@ -410,6 +417,16 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         obj.finalize(output, ...)
         """
         raise NotImplementedError
+
+    def can_skip_finalize_copy(
+        self,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> bool:
+        """
+        Return true when finalize would only copy an already-final fused expert
+        output into the provided output buffer.
+        """
+        return False
 
 
 class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
@@ -896,7 +913,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ) -> torch.Tensor | None:
         """
         This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
@@ -931,6 +948,12 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         - apply_router_weight_on_input: True if router weights are already
           applied on the input. This is relevant if the implementation
           chooses to do weight application.
+
+        Returns:
+        - None if the result was written into output.
+        - A direct output tensor when the implementation already produced the
+          final fused expert output and the caller should use it instead of
+          output.
         """
         raise NotImplementedError
 
@@ -1204,7 +1227,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, bool]:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
@@ -1216,7 +1239,7 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            return torch.empty_like(a1q, dtype=in_dtype)
+            return torch.empty_like(a1q, dtype=in_dtype), False
 
         workspace13, workspace2, fused_out = self._allocate_buffers(
             in_dtype,
@@ -1232,7 +1255,7 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        self.fused_experts.apply(
+        direct_fused_out = self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
             w1=w1,
@@ -1249,8 +1272,31 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+        if direct_fused_out is not None:
+            return direct_fused_out, not self._shares_storage(
+                direct_fused_out, fused_out
+            )
 
-        return fused_out
+        return fused_out, False
+
+    @staticmethod
+    def _shares_storage(lhs: torch.Tensor, rhs: torch.Tensor) -> bool:
+        return lhs.untyped_storage().data_ptr() == rhs.untyped_storage().data_ptr()
+
+    def _can_skip_finalize_copy(
+        self,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+        shared_experts_input: torch.Tensor | None,
+        fused_out_is_direct: bool,
+    ) -> bool:
+        return (
+            fused_out_is_direct
+            and not self.inplace
+            and not self.prepare_finalize.supports_async()
+            and self.shared_experts is None
+            and shared_experts_input is None
+            and self.prepare_finalize.can_skip_finalize_copy(weight_and_reduce_impl)
+        )
 
     def _finalize(
         self,
@@ -1261,6 +1307,7 @@ class FusedMoEKernelModularImpl:
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         shared_experts_input: torch.Tensor | None,
+        weight_and_reduce_impl: TopKWeightAndReduce,
     ) -> torch.Tensor:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
@@ -1282,7 +1329,7 @@ class FusedMoEKernelModularImpl:
                 topk_weights,
                 topk_ids,
                 apply_router_weight_on_input,
-                self.fused_experts.finalize_weight_and_reduce_impl(),
+                weight_and_reduce_impl,
             )
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
@@ -1291,7 +1338,7 @@ class FusedMoEKernelModularImpl:
                 topk_weights,
                 topk_ids,
                 apply_router_weight_on_input,
-                self.fused_experts.finalize_weight_and_reduce_impl(),
+                weight_and_reduce_impl,
             )
             self._maybe_apply_shared_experts(shared_experts_input)
 
@@ -1361,9 +1408,6 @@ class FusedMoEKernelModularImpl:
         if self.inplace:
             assert self.shared_experts is None
             assert not disable_inplace()
-            output = hidden_states
-        else:
-            output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1378,7 +1422,7 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input,
         )
 
-        fused_out = self._fused_experts(
+        fused_out, fused_out_is_direct = self._fused_experts(
             in_dtype=hidden_states.dtype,
             a1q=a1q,
             a1q_scale=a1q_scale,
@@ -1394,6 +1438,23 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
         )
 
+        weight_and_reduce_impl = self.fused_experts.finalize_weight_and_reduce_impl()
+        if self._can_skip_finalize_copy(
+            weight_and_reduce_impl,
+            shared_experts_input,
+            fused_out_is_direct,
+        ):
+            assert not dbo_enabled()
+            return weight_and_reduce_impl.apply(
+                output=None,
+                fused_expert_output=fused_out,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
+        output = hidden_states if self.inplace else torch.empty_like(hidden_states)
+
         return self._finalize(
             output,
             fused_out,
@@ -1402,6 +1463,7 @@ class FusedMoEKernelModularImpl:
             topk_ids,
             apply_router_weight_on_input,
             shared_experts_input=shared_experts_input,
+            weight_and_reduce_impl=weight_and_reduce_impl,
         )
 
 

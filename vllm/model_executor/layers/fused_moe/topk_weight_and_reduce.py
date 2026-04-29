@@ -50,6 +50,9 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
     def __eq__(self, other):
         return isinstance(other, TopKWeightAndReduceNoOP)
 
+    def is_noop(self) -> bool:
+        return True
+
     def apply(
         self,
         output: torch.Tensor | None,

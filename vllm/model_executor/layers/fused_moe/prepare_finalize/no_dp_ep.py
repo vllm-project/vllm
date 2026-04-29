@@ -53,6 +53,12 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     def output_is_reduced(self) -> bool:
         return False
 
+    def can_skip_finalize_copy(
+        self,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> bool:
+        return weight_and_reduce_impl.is_noop()
+
     def prepare(
         self,
         a1: torch.Tensor,
