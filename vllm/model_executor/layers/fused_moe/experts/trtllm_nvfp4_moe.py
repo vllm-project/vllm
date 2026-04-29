@@ -113,7 +113,11 @@ class TrtLlmNvFp4ExpertsBase:
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         """Supports only SiLU, RELU^2 non-gated and GELU activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL, MoEActivation.GELU]
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.RELU2_NO_MUL,
+            MoEActivation.GELU,
+        ]
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:

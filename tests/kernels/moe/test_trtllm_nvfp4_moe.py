@@ -8,6 +8,7 @@ Covers the activations the wrapper claims to support — SiLU, RELU^2 (non-gated
 and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
 intermediate_size 704) that exercises the non-256-aligned padding path.
 """
+
 import pytest
 import torch
 
@@ -39,9 +40,10 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
-if pytest and (not has_flashinfer_trtllm_fused_moe() or not current_platform.has_device_capability(
-    100
-)):
+if pytest and (
+    not has_flashinfer_trtllm_fused_moe()
+    or not current_platform.has_device_capability(100)
+):
     pytest.skip(
         "Requires flashinfer TRTLLM fused MoE and NvFP4 (SM100)",
         allow_module_level=True,
@@ -138,9 +140,7 @@ def test_trtllm_fp4_moe_no_graph(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            TrtLlmNvFp4ExpertsModular(
-                moe_config=moe_config, quant_config=quant_config
-            ),
+            TrtLlmNvFp4ExpertsModular(moe_config=moe_config, quant_config=quant_config),
             inplace=False,
         )
 
@@ -159,9 +159,9 @@ def test_trtllm_fp4_moe_no_graph(
         # Reference: round-trip activations and weights through FP4
         # quant/dequant so the comparison isolates kernel/activation behavior
         # from quantization error.
-        a_global_scale = (
-            (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / a.abs().max()
-        ).to(torch.float32)
+        a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / a.abs().max()).to(
+            torch.float32
+        )
         a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
         a_in_dtype = dequantize_nvfp4_to_dtype(
             a_fp4,
@@ -198,11 +198,10 @@ def test_trtllm_fp4_moe_no_graph(
             a_in_dtype, w1_d, w2_d, score, topk, activation=activation
         )
 
-        torch.testing.assert_close(
-            torch_output, trtllm_output, atol=2e-1, rtol=2e-1
-        )
+        torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
 
 
 if __name__ == "__main__":
-    test_trtllm_fp4_moe_no_graph(64, 704, 4096, 128, 8, torch.bfloat16,
-                                 MoEActivation.GELU, None)
+    test_trtllm_fp4_moe_no_graph(
+        64, 704, 4096, 128, 8, torch.bfloat16, MoEActivation.GELU, None
+    )
