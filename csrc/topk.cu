@@ -111,8 +111,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
     // Never drop below one full group's worth.
     uint32_t max_resident_ctas =
         static_cast<uint32_t>(num_sms) * static_cast<uint32_t>(occupancy);
-    uint32_t headroom =
-        (occupancy > 1) ? static_cast<uint32_t>(num_sms) : 1u;
+    uint32_t headroom = (occupancy > 1) ? static_cast<uint32_t>(num_sms) : 1u;
     if (max_resident_ctas >= headroom + ctas_per_group) {
       max_resident_ctas -= headroom;
     }
