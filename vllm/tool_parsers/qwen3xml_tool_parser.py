@@ -201,11 +201,14 @@ class StreamingXMLToolCallParser:
         result = self._merge_deltas(self.deltas)
         if result.tool_calls:
             valid = [tc for tc in result.tool_calls if tc.function and tc.function.name]
-            result = DeltaMessage(
-                content=result.content,
-                tool_calls=valid,
-                reasoning=result.reasoning,
-            )
+            if valid:
+                result = DeltaMessage(
+                    content=result.content,
+                    tool_calls=valid,
+                    reasoning=result.reasoning,
+                )
+            else:
+                result = DeltaMessage(content=result.content, reasoning=result.reasoning)
         return result
 
     # ------------------------------------------------------------------
@@ -816,10 +819,12 @@ class StreamingXMLToolCallParser:
             for cid in call_order
         ]
 
-        return DeltaMessage(
-            content=merged_content or None,
-            tool_calls=merged_calls,
-        )
+        if merged_calls:
+            return DeltaMessage(
+                content=merged_content or None,
+                tool_calls=merged_calls,
+            )
+        return DeltaMessage(content=merged_content or None)
 
 
 class Qwen3XMLToolParser(ToolParser):
