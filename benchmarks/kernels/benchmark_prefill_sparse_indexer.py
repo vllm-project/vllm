@@ -483,15 +483,17 @@ def parse_args():
         description="Run all DeepGEMM prefill sparse-indexer paths."
     )
     parser.add_argument("--dtype", choices=["fp4", "fp8"], required=True)
-    parser.add_argument("--num-requests", type=int, default=8)
-    parser.add_argument("--min-query-len", type=int, default=16)
-    parser.add_argument("--max-query-len", type=int, default=128)
-    parser.add_argument("--min-context-len", type=int, default=0)
-    parser.add_argument("--max-context-len", type=int, default=1024)
-    parser.add_argument("--block-size", type=int, default=64)
-    parser.add_argument("--compress-ratio", type=int, default=4)
+    parser.add_argument("--num_requests", type=int, default=8)
+    parser.add_argument("--min_query_len", type=int, default=16)
+    parser.add_argument("--max_query_len", type=int, default=128)
+    parser.add_argument("--min_context_len", type=int, default=0)
+    parser.add_argument("--max_context_len", type=int, nargs="+", default=[1024])
+    parser.add_argument("--block_size", type=int, default=64)
+    parser.add_argument("--compress_ratio", type=int, default=4)
     parser.add_argument("--topk", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--log_axis", action="store_true")
+    parser.add_argument("--graph_path")
     return parser.parse_args()
 
 
@@ -527,57 +529,104 @@ def check_topk_result(
     return wrong_entries, compared_entries
 
 
-def main() -> None:
-    args = parse_args()
-    print(args)
-    print("implementations:", ", ".join(name for name, _ in IMPLEMENTATIONS))
+def make_context_lens(
+    min_context_len: int, max_context_len: int, num_requests: int
+) -> list[int]:
+    if num_requests == 1:
+        return [max_context_len]
 
-    torch.set_default_device("cuda")
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
+    span = max_context_len - min_context_len
+    return [
+        min_context_len + span * req_idx // (num_requests - 1)
+        for req_idx in range(num_requests)
+    ]
 
-    # Prepare request lengths.
-    use_fp4 = args.dtype == "fp4"
 
-    query_lens: list[int] = []
+def export_sweep_graph(
+    results_df: pd.DataFrame, output_path: str, log_axis: bool
+) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import LogFormatterSciNotation, LogLocator
+
+    def label_log_y_subticks(ax) -> None:
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(5,)))
+        ax.yaxis.set_minor_formatter(
+            LogFormatterSciNotation(
+                base=10,
+                labelOnlyBase=False,
+                minor_thresholds=(float("inf"), float("inf")),
+            )
+        )
+
+    fig, (latency_ax, memory_ax) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+
+    for impl_name, impl_results in results_df.groupby("implementation", sort=False):
+        impl_results = impl_results.sort_values("max_context_len")
+        x_values = impl_results["max_context_len"].to_numpy()
+        latency_us = impl_results["latency_us"].to_numpy()
+        p20_us = impl_results["p20_us"].to_numpy()
+        p80_us = impl_results["p80_us"].to_numpy()
+        peak_memory_mib = impl_results["peak_memory_mib"].to_numpy()
+
+        latency_ax.plot(x_values, latency_us, marker="o", label=impl_name)
+        latency_ax.fill_between(x_values, p20_us, p80_us, alpha=0.15)
+        memory_ax.plot(x_values, peak_memory_mib, marker="o", label=impl_name)
+
+    latency_ax.set_title("Latency")
+    latency_ax.set_ylabel("us")
+    latency_ax.tick_params(axis="x", labelbottom=True)
+    if log_axis:
+        latency_ax.set_xscale("log", base=10)
+        latency_ax.set_yscale("log")
+        label_log_y_subticks(latency_ax)
+    latency_ax.grid(True, axis="y", alpha=0.25)
+    latency_ax.legend()
+
+    memory_ax.set_xlabel("max_context_len")
+    memory_ax.set_title("Peak memory")
+    memory_ax.set_ylabel("MiB")
+    if log_axis:
+        memory_ax.set_xscale("log", base=10)
+        memory_ax.set_yscale("log")
+        label_log_y_subticks(memory_ax)
+    memory_ax.grid(True, axis="y", alpha=0.25)
+    memory_ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def run_benchmark_batch(
+    args: argparse.Namespace,
+    max_context_len: int,
+    query_lens: list[int],
+    q_quant: Tensor,
+    q_scale: Tensor | None,
+    weights: Tensor,
+    use_fp4: bool,
+) -> list[dict[str, object]]:
+    context_lens = make_context_lens(
+        args.min_context_len, max_context_len, args.num_requests
+    )
     seq_lens: list[int] = []
     compressed_seq_lens: list[int] = []
     query_start_locs = [0]
 
-    for _ in range(args.num_requests):
-        query_len = random.randint(args.min_query_len, args.max_query_len)
-        context_len = random.randint(args.min_context_len, args.max_context_len)
+    for query_len, context_len in zip(query_lens, context_lens):
         seq_len = query_len + context_len
 
-        query_lens.append(query_len)
         seq_lens.append(seq_len)
         # Production uses floor division: the compressed cache only has entries
         # for positions where (pos + 1) % compress_ratio == 0.
         compressed_seq_lens.append(seq_len // args.compress_ratio)
         query_start_locs.append(query_start_locs[-1] + query_len)
 
-    total_query_len = query_start_locs[-1]
     cpu_i32 = dict(dtype=torch.int32, device="cpu")
     query_lens_cpu = torch.tensor(query_lens, **cpu_i32)
     seq_lens_cpu = torch.tensor(seq_lens, **cpu_i32)
     compressed_seq_lens_cpu = torch.tensor(compressed_seq_lens, **cpu_i32)
     query_start_loc_cpu = torch.tensor(query_start_locs, **cpu_i32)
-
-    # Prepare Q and per-token weights.
-    weights = torch.randn(total_query_len, NUM_HEADS)
-    if use_fp4:
-        q_quant, q_scale = make_random_fp4(total_query_len, NUM_HEADS)
-        q_scale = q_scale.view(torch.int32).squeeze(-1)
-    else:
-        q_bf16 = torch.randn(
-            total_query_len * NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16
-        )
-        q_quant, q_fp8_scale = ops.scaled_fp8_quant(
-            q_bf16, use_per_token_if_dynamic=True
-        )
-        weights *= q_fp8_scale.view(total_query_len, NUM_HEADS)
-        q_quant = q_quant.view(total_query_len, NUM_HEADS, HEAD_DIM)
-        q_scale = None
 
     # Prepare paged KV cache.
     block_size = args.block_size
@@ -667,13 +716,14 @@ def main() -> None:
             args.topk,
         )
         latency_ms, p20_ms, p80_ms = triton.testing.do_bench(
-            lambda: impl.run(q_quant, q_scale, kv_cache, weights),
+            lambda impl=impl: impl.run(q_quant, q_scale, kv_cache, weights),
             warmup=25,
             rep=100,
             quantiles=[0.5, 0.2, 0.8],
         )
         results.append(
             {
+                "max_context_len": max_context_len,
                 "implementation": impl_name,
                 "wrong_entries": f"{wrong_entries}/{compared_entries}",
                 "peak_memory_mib": peak_memory_mib,
@@ -682,6 +732,55 @@ def main() -> None:
                 "p80_us": p80_ms * 1000,
             }
         )
+
+    return results
+
+
+def main() -> None:
+    args = parse_args()
+    print(args)
+    print("implementations:", ", ".join(name for name, _ in IMPLEMENTATIONS))
+
+    torch.set_default_device("cuda")
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+
+    use_fp4 = args.dtype == "fp4"
+    query_lens = [
+        random.randint(args.min_query_len, args.max_query_len)
+        for _ in range(args.num_requests)
+    ]
+    total_query_len = sum(query_lens)
+
+    # Prepare Q and per-token weights once so each sweep point uses the same
+    # query-side inputs.
+    weights = torch.randn(total_query_len, NUM_HEADS)
+    if use_fp4:
+        q_quant, q_scale = make_random_fp4(total_query_len, NUM_HEADS)
+        q_scale = q_scale.view(torch.int32).squeeze(-1)
+    else:
+        q_bf16 = torch.randn(
+            total_query_len * NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16
+        )
+        q_quant, q_fp8_scale = ops.scaled_fp8_quant(
+            q_bf16, use_per_token_if_dynamic=True
+        )
+        weights *= q_fp8_scale.view(total_query_len, NUM_HEADS)
+        q_quant = q_quant.view(total_query_len, NUM_HEADS, HEAD_DIM)
+        q_scale = None
+
+    results: list[dict[str, object]] = []
+    for max_context_len in args.max_context_len:
+        batch_results = run_benchmark_batch(
+            args,
+            max_context_len,
+            query_lens,
+            q_quant,
+            q_scale,
+            weights,
+            use_fp4,
+        )
+        results.extend(batch_results)
 
     results_df = pd.DataFrame(results)
     print(
@@ -695,6 +794,9 @@ def main() -> None:
             },
         )
     )
+    if args.graph_path:
+        export_sweep_graph(results_df, args.graph_path, args.log_axis)
+        print(f"wrote {args.graph_path}")
 
 
 if __name__ == "__main__":
