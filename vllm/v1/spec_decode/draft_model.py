@@ -154,3 +154,87 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             cad=cad,
             num_rejected_tokens_gpu=num_rejected_tokens_gpu,
         )
+
+    @override
+    def _prepare_draft_input_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
+        if self.vocab_mapping is not None:
+            return self.vocab_mapping.map_target_to_draft_ids(token_ids)
+        return token_ids
+
+    @override
+    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.model.compute_logits(hidden_states)
+        if self.vocab_mapping is not None:
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+        draft_token_ids = logits.argmax(dim=-1)
+        if self.vocab_mapping is not None:
+            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
+        return draft_token_ids
+
+    @override
+    def set_inputs_first_pass(
+        self,
+        target_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor | None,
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        if self.vocab_mapping is not None:
+            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                target_token_ids)
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                next_token_ids)
+        return super().set_inputs_first_pass(
+            target_token_ids=target_token_ids,
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=token_indices_to_sample,
+            cad=cad,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+        )
+
+    @override
+    def _prepare_draft_input_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
+        if self.vocab_mapping is not None:
+            return self.vocab_mapping.map_target_to_draft_ids(token_ids)
+        return token_ids
+
+    @override
+    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.model.compute_logits(hidden_states)
+        if self.vocab_mapping is not None:
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+        draft_token_ids = logits.argmax(dim=-1)
+        if self.vocab_mapping is not None:
+            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
+        return draft_token_ids
+
+    @override
+    def set_inputs_first_pass(
+        self,
+        target_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor | None,
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        if self.vocab_mapping is not None:
+            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                target_token_ids)
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                next_token_ids)
+        return super().set_inputs_first_pass(
+            target_token_ids=target_token_ids,
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=token_indices_to_sample,
+            cad=cad,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+        )
