@@ -106,10 +106,18 @@ class BaseRenderer(ABC, Generic[_T]):
             self._process_multimodal, executor=self._mm_executor
         )
 
+        no_allowed_mm_limits = config.model_config.is_multimodal_model and (
+            all(
+                limit == 0
+                for limit in mm_registry._create_processing_info(
+                    config.model_config
+                ).allowed_mm_limits.values()
+            )
+        )
         enable_multimodal = (
             config.model_config.is_multimodal_model
             and (multimodal_config := config.model_config.multimodal_config)
-            and not multimodal_config.language_model_only
+            and not (multimodal_config.language_model_only or no_allowed_mm_limits)
         )
         if enable_multimodal:
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
