@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.tokenizers import get_tokenizer
-from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
+from vllm.tool_parsers.parser import KimiK2ToolParser
 
 MODEL = "moonshotai/Kimi-K2-Instruct"
 
@@ -629,12 +629,12 @@ class TestStreamingIntervals:
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
 
-def test_support_builtin_structural_tag(kimi_k2_tool_parser: KimiK2ToolParser):
-    assert kimi_k2_tool_parser.support_structural_tag() is True
+def test_support_builtin_structural_tag(parser: KimiK2ToolParser):
+    assert parser.support_structural_tag() is True
 
 
 def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
-    kimi_k2_tool_parser: KimiK2ToolParser,
+    parser: KimiK2ToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     req = ChatCompletionRequest(
@@ -643,7 +643,7 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
         tools=sample_tools,
         tool_choice="auto",
     )
-    tag = kimi_k2_tool_parser.get_structural_tag(req)
+    tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
     
     req = ChatCompletionRequest(
@@ -652,7 +652,7 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
         tools=sample_tools,
         tool_choice="required",
     )
-    tag = kimi_k2_tool_parser.get_structural_tag(req)
+    tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
     
     if sample_tools:
@@ -664,12 +664,12 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
             tools=sample_tools,
             tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
         )
-    tag = kimi_k2_tool_parser.get_structural_tag(req)
+    tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
 def test_adjust_request_auto_structural_tag_is_json_string(
-    kimi_k2_tool_parser: KimiK2ToolParser,
+    parser: KimiK2ToolParser,
     sample_tools: list[ChatCompletionToolsParam],
     include_reasoning: bool,
 ) -> None:
@@ -680,7 +680,7 @@ def test_adjust_request_auto_structural_tag_is_json_string(
         tool_choice="auto",
         include_reasoning=include_reasoning,
     )
-    out = kimi_k2_tool_parser.adjust_request(req)
+    out = parser.adjust_request(req)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
     assert isinstance(out.structured_outputs.structural_tag, str)
@@ -689,7 +689,7 @@ def test_adjust_request_auto_structural_tag_is_json_string(
 
 
 def test_adjust_request_required_uses_json_schema_not_structural_tag(
-    kimi_k2_tool_parser: KimiK2ToolParser,
+    parser: KimiK2ToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     req = ChatCompletionRequest(
@@ -698,5 +698,5 @@ def test_adjust_request_required_uses_json_schema_not_structural_tag(
         tools=sample_tools,
         tool_choice="required",
     )
-    out = kimi_k2_tool_parser.adjust_request(req)
+    out = parser.adjust_request(req)
     assert out.structured_outputs.structural_tag is None
