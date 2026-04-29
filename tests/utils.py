@@ -14,9 +14,10 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
@@ -62,8 +63,6 @@ from vllm.utils.torch_utils import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
-    import threading
-
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -247,6 +246,16 @@ class RemoteVLLMServer:
         (when the server fails to start). Must be safe to call even if
         the process is already dead.
         """
+        self._terminate_process_tree()
+        self._wait_for_gpu_memory_release()
+
+    def _terminate_process_tree(self) -> None:
+        """Kill the server process tree without waiting for GPU memory release.
+
+        Split out from ``_shutdown`` so that ``shutdown_many`` can run this
+        phase in parallel for sibling servers and then wait for GPU memory
+        release once at the end.
+        """
         pid = self.proc.pid
 
         # Get the process group ID. Because we used
@@ -288,9 +297,49 @@ class RemoteVLLMServer:
         # prevent VRAM from being reclaimed by the driver.
         self._kill_process_group_survivors(pgid)
 
-        # Wait for GPU memory to actually be freed, not just
-        # "stabilized at whatever level it's at".
-        self._wait_for_gpu_memory_release()
+    @classmethod
+    def shutdown_many(cls, servers: Sequence["RemoteVLLMServer"]) -> None:
+        """Shut down multiple sibling servers and wait for GPU memory once.
+
+        Test fixtures that hold several ``RemoteVLLMServer`` instances at
+        once must NOT shut them down by calling each server's ``__exit__``
+        sequentially: every server measures total GPU memory across all
+        visible devices in ``_wait_for_gpu_memory_release``, so the first
+        server's wait blocks the full timeout because later sibling
+        servers are still holding GPU memory.
+
+        Instead, this method terminates every server's process tree in
+        parallel, then runs the GPU-memory-release wait once against the
+        earliest recorded baseline (memory before any server started).
+        """
+        if not servers:
+            return
+
+        threads = [
+            threading.Thread(
+                target=s._terminate_process_tree,
+                name=f"shutdown-{s.proc.pid}",
+                daemon=True,
+            )
+            for s in servers
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Use the smallest pre-server baseline so the wait targets memory
+        # usage before *any* of these sibling servers started, not after
+        # earlier siblings had already allocated.
+        earliest = min(
+            servers,
+            key=lambda s: (
+                float("inf")
+                if s._pre_server_gpu_memory is None
+                else s._pre_server_gpu_memory
+            ),
+        )
+        earliest._wait_for_gpu_memory_release()
 
     def _kill_process_group_survivors(
         self, pgid: int | None, timeout: float = 15.0
