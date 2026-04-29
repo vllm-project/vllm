@@ -31,9 +31,9 @@ def _is_weak_contiguous(inp: torch.Tensor) -> bool:
 def _bench_time(func, test_niter: int = 10, warmup_niter: int = 2) -> float:
     for _ in range(warmup_niter):
         func()
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
+    start_event = torch.accelerator.Event(enable_timing=True)
+    end_event = torch.accelerator.Event(enable_timing=True)
+    torch.accelerator.synchronize()
     dist.barrier()
     start_event.record()
     for _ in range(test_niter):
@@ -46,13 +46,13 @@ def _bench_time(func, test_niter: int = 10, warmup_niter: int = 2) -> float:
 def _load_mscclpp_ops():
     try:
         import vllm_mscclpp_ops  # noqa: F401
+
         return torch.ops.vllm_mscclpp
     except ImportError:
         return None
 
 
 class MscclppAllReduce:
-
     _SUPPORTED_WORLD_SIZES = [8, 16]
     _SUPPORTED_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
     _DEFAULT_MAX_BYTES = int(os.getenv("VLLM_MSCCLPP_MAX_BYTES", "1048576"))
@@ -83,8 +83,7 @@ class MscclppAllReduce:
 
         if world_size not in self._SUPPORTED_WORLD_SIZES:
             logger.warning(
-                "MSCCL++ allreduce disabled: unsupported world size %d. "
-                "Supported: %s",
+                "MSCCL++ allreduce disabled: unsupported world size %d. Supported: %s",
                 world_size,
                 self._SUPPORTED_WORLD_SIZES,
             )
@@ -108,12 +107,9 @@ class MscclppAllReduce:
         self.max_bytes = max_bytes or self._DEFAULT_MAX_BYTES
         self.rank = rank
         self.world_size = world_size
-        self.nranks_per_node = torch.cuda.device_count()
+        self.nranks_per_node = torch.accelerator.device_count()
 
-        if rank == 0:
-            unique_id = [self._ops.mscclpp_generate_unique_id()]
-        else:
-            unique_id = [None]
+        unique_id = [self._ops.mscclpp_generate_unique_id()] if rank == 0 else [None]
         dist.broadcast_object_list(unique_id, src=ranks[0], group=self.group)
         self.unique_id = unique_id[0]
 
@@ -147,16 +143,12 @@ class MscclppAllReduce:
         )
 
         self.msg_size_for_finetune = [
-            2**i
-            for i in range(10, math.floor(math.log2(self.max_bytes)) + 1)
+            2**i for i in range(10, math.floor(math.log2(self.max_bytes)) + 1)
         ]
         self.msg_size2best_config: dict[int, tuple[int, int]] = {}
         self._pre_tune_config()
 
-        if rank == 0:
-            config_list = [self.msg_size2best_config]
-        else:
-            config_list = [None]
+        config_list = [self.msg_size2best_config] if rank == 0 else [None]
         dist.broadcast_object_list(config_list, src=ranks[0], group=self.group)
         self.msg_size2best_config = config_list[0]
 
@@ -185,10 +177,14 @@ class MscclppAllReduce:
             best_config = None
             best_time = None
             for nthreads in nthreads_to_try:
-                for nblocks in nblocks_to_try:
+                for nblocks in nblocks_to_try:  # noqa: B023
                     cur_cost = _bench_time(
                         lambda nt=nthreads, nb=nblocks: self._ops.mscclpp_allreduce(
-                            self._context, mock_inp, mock_outp, nt, nb
+                            self._context,
+                            mock_inp,
+                            mock_outp,
+                            nt,
+                            nb,
                         )
                     )
                     if best_time is None or cur_cost < best_time:
@@ -204,15 +200,13 @@ class MscclppAllReduce:
                 )
 
     def should_mscclpp_allreduce(self, inp: torch.Tensor) -> bool:
-        if self.disabled or self._context is None:
-            return False
-        if inp.dtype not in self._SUPPORTED_DTYPES:
-            return False
-        if not _is_weak_contiguous(inp):
-            return False
-        if inp.numel() * inp.element_size() > self.max_bytes:
-            return False
-        return True
+        return (
+            not self.disabled
+            and self._context is not None
+            and inp.dtype in self._SUPPORTED_DTYPES
+            and _is_weak_contiguous(inp)
+            and inp.numel() * inp.element_size() <= self.max_bytes
+        )
 
     def all_reduce(self, inp: torch.Tensor) -> torch.Tensor:
         msg_size = inp.numel() * inp.element_size()
@@ -222,9 +216,7 @@ class MscclppAllReduce:
         msg_size_finetune = self.msg_size_for_finetune[index]
         nthreads, nblocks = self.msg_size2best_config[msg_size_finetune]
         result = torch.empty_like(inp)
-        self._ops.mscclpp_allreduce(
-            self._context, inp, result, nthreads, nblocks
-        )
+        self._ops.mscclpp_allreduce(self._context, inp, result, nthreads, nblocks)
         return result
 
     @contextmanager
