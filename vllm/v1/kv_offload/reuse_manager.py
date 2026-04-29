@@ -8,7 +8,7 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
 """
 
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
@@ -79,7 +79,7 @@ class FilterReusedOffloadingManager(OffloadingManager):
         return self._backing.lookup(key, req_context)
 
     def prepare_store(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         """Filter out blocks below threshold, then delegate to backing.
 
@@ -87,7 +87,6 @@ class FilterReusedOffloadingManager(OffloadingManager):
         ``prepare_store`` so that blocks that would be skipped do not
         consume any CPU offload capacity.
         """
-        keys = list(keys)
         eligible = [
             key for key in keys if self.counts.get(key, 0) >= self.store_threshold
         ]
@@ -102,11 +101,11 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # ------------------------------------------------------------------
 
     def prepare_load(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         return self._backing.prepare_load(keys, req_context)
 
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Sequence[OffloadKey]) -> None:
         return self._backing.touch(keys)
 
     def complete_load(self, keys: Iterable[OffloadKey]) -> None:
