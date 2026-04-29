@@ -1355,6 +1355,13 @@ class rocm_aiter_ops:
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
 
+    @classmethod
+    @if_aiter_supported
+    def is_tgemm_enabled(cls) -> bool:
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls.is_linear_enabled() and on_gfx950()
+
     @staticmethod
     @if_aiter_supported
     def register_ops_once() -> None:
