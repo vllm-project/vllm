@@ -5,6 +5,7 @@ import argparse
 import gc
 import random
 
+import pandas as pd
 import torch
 from torch import Tensor
 
@@ -15,6 +16,7 @@ from vllm.third_party.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
     get_paged_mqa_logits_metadata,
 )
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
     build_prefill_chunk_metadata,
@@ -372,21 +374,17 @@ def parse_args():
     return parser.parse_args()
 
 
-def print_topk_result(
-    impl_name: str,
+def check_topk_result(
     actual: Tensor,
     expected: Tensor,
     query_lens: list[int],
     seq_lens: list[int],
     compress_ratio: int,
     topk: int,
-    peak_memory_mib: float,
-) -> None:
+) -> tuple[int, int]:
     actual_cpu = actual.cpu()
     expected_cpu = expected.cpu()
     row_idx = 0
-    compared_rows = 0
-    wrong_rows = 0
     compared_entries = 0
     wrong_entries = 0
 
@@ -401,20 +399,11 @@ def print_topk_result(
                 row_mismatches = int(
                     (~torch.isin(actual_row, expected_row)).sum().item()
                 )
-                compared_rows += 1
                 compared_entries += k
-                if row_mismatches > 0:
-                    wrong_rows += 1
-                    wrong_entries += row_mismatches
+                wrong_entries += row_mismatches
             row_idx += 1
 
-    correctness = "passed" if wrong_entries == 0 else "failed"
-    print(
-        f"{impl_name}: correctness={correctness}, "
-        f"wrong_entries={wrong_entries}/{compared_entries}, "
-        f"wrong_rows={wrong_rows}/{compared_rows}, "
-        f"peak_memory={peak_memory_mib:.2f} MiB"
-    )
+    return wrong_entries, compared_entries
 
 
 def main() -> None:
@@ -525,6 +514,7 @@ def main() -> None:
     )
     expected_topk = reference.run(q_quant, q_scale, kv_cache, weights)
 
+    results: list[dict[str, object]] = []
     for impl_name, impl_cls in IMPLEMENTATIONS:
         impl = None
         topk_indices = None
@@ -547,16 +537,43 @@ def main() -> None:
         topk_indices = impl.run(q_quant, q_scale, kv_cache, weights)
         torch.cuda.synchronize()
         peak_memory_mib = torch.cuda.max_memory_allocated() / 1024 / 1024
-        print_topk_result(
-            impl_name,
+        wrong_entries, compared_entries = check_topk_result(
             topk_indices,
             expected_topk,
             query_lens,
             seq_lens,
             args.compress_ratio,
             args.topk,
-            peak_memory_mib,
         )
+        latency_ms, p20_ms, p80_ms = triton.testing.do_bench(
+            lambda: impl.run(q_quant, q_scale, kv_cache, weights),
+            warmup=25,
+            rep=100,
+            quantiles=[0.5, 0.2, 0.8],
+        )
+        results.append(
+            {
+                "implementation": impl_name,
+                "wrong_entries": f"{wrong_entries}/{compared_entries}",
+                "peak_memory_mib": peak_memory_mib,
+                "latency_us": latency_ms * 1000,
+                "p20_us": p20_ms * 1000,
+                "p80_us": p80_ms * 1000,
+            }
+        )
+
+    results_df = pd.DataFrame(results)
+    print(
+        results_df.to_string(
+            index=False,
+            formatters={
+                "peak_memory_mib": "{:.2f}".format,
+                "latency_us": "{:.2f}".format,
+                "p20_us": "{:.2f}".format,
+                "p80_us": "{:.2f}".format,
+            },
+        )
+    )
 
 
 if __name__ == "__main__":
