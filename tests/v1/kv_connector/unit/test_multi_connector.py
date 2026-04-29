@@ -221,9 +221,10 @@ def test_multi_example_connector_consistency():
         )
 
     events = get_connector_events()
-    # First event is set_xfer_handshake_metadata from initialization, then
-    # get_num_new_matched_tokens and update_state_after_alloc from generate().
-    assert events["storage1-SCHEDULER"][:4] == [
+    # First events are bind_scheduler_context and set_xfer_handshake_metadata
+    # from initialization, then scheduler methods from generate().
+    assert events["storage1-SCHEDULER"][:5] == [
+        "bind_scheduler_context",
         "set_xfer_handshake_metadata",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
@@ -241,7 +242,8 @@ def test_multi_example_connector_consistency():
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:4] == [
+    assert events["storage2-SCHEDULER"][:5] == [
+        "bind_scheduler_context",
         "set_xfer_handshake_metadata",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
@@ -790,6 +792,14 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+def test_multi_connector_bind_scheduler_context(mc):
+    """Verify bind_scheduler_context is delegated to all sub-connectors."""
+    mock_ctx = MagicMock()
+    mc.bind_scheduler_context(mock_ctx)
+    for c in mc._connectors:
+        c.bind_scheduler_context.assert_called_once_with(mock_ctx)
 
 
 def test_multi_connector_prefer_cross_layer_blocks(mc):

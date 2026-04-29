@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    SchedulerContext,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -347,6 +348,10 @@ class MultiConnector(KVConnectorBase_V1):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    def bind_scheduler_context(self, scheduler_context: SchedulerContext) -> None:
+        for c in self._connectors:
+            c.bind_scheduler_context(scheduler_context)
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
