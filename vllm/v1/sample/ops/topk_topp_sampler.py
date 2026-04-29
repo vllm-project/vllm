@@ -289,6 +289,9 @@ class TopKTopPSampler(nn.Module):
         torch.ops.vllm.xpu_topk_topp_sampler(
             random_sampled, logits_to_return, logits, k, p, self.logprobs_mode, seeds
         )
+        offset += logits.numel()
+        state.view(torch.int64)[1] = offset
+        generator.set_state(state)
         return random_sampled, logits_to_return
 
 
