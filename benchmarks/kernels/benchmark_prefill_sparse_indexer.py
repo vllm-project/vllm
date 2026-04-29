@@ -5,6 +5,7 @@ import argparse
 import gc
 import random
 from dataclasses import dataclass
+from functools import partial
 
 import pandas as pd
 import torch
@@ -160,7 +161,7 @@ class Reference:
         return topk_indices_buffer
 
 
-class DeepGemmFlatChunk:
+class DeepGemmFlat:
     def __init__(
         self,
         block_table_cpu: Tensor,
@@ -172,6 +173,7 @@ class DeepGemmFlatChunk:
         block_size: int,
         use_fp4: bool,
         topk: int,
+        do_chunk: bool = False,
     ) -> None:
         total_query_len = int(query_start_loc_cpu[-1].item())
         block_table = block_table_cpu.cuda()
@@ -182,12 +184,18 @@ class DeepGemmFlatChunk:
             (total_query_len, topk), dtype=torch.int32, device="cuda"
         )
 
-        chunk_specs = split_indexer_prefill_chunks(
-            compressed_seq_lens_cpu,
-            query_lens_cpu,
-            DEEPGEMM_WORKSPACE_SIZE,
-            DEEPGEMM_MAX_LOGITS_BYTES,
-        )
+        if do_chunk:
+            chunk_specs = split_indexer_prefill_chunks(
+                compressed_seq_lens_cpu,
+                query_lens_cpu,
+                DEEPGEMM_WORKSPACE_SIZE,
+                DEEPGEMM_MAX_LOGITS_BYTES,
+            )
+        else:
+            chunk_specs = [
+                (slice(0, query_lens_cpu.numel()), slice(0, total_query_len))
+            ]
+
         self.chunks = []
         for req_slice, query_slice in chunk_specs:
             metadata = build_prefill_chunk_metadata(
@@ -282,80 +290,6 @@ class DeepGemmFlatChunk:
 
 
 class DeepGemmPaged:
-    def __init__(
-        self,
-        block_table_cpu: Tensor,
-        query_lens_cpu: Tensor,
-        seq_lens_cpu: Tensor,
-        compressed_seq_lens_cpu: Tensor,
-        query_start_loc_cpu: Tensor,
-        compress_ratio: int,
-        block_size: int,
-        use_fp4: bool,
-        topk: int,
-    ) -> None:
-        total_query_len = int(query_start_loc_cpu[-1].item())
-        if total_query_len == 0 or int(compressed_seq_lens_cpu.max().item()) == 0:
-            raise RuntimeError("generated requests produced no prefill KV tokens")
-        self.topk_indices_buffer = torch.empty(
-            (total_query_len, topk), dtype=torch.int32, device="cuda"
-        )
-
-        req_ids = torch.arange(query_lens_cpu.numel(), device="cpu")
-        req_idx = torch.repeat_interleave(
-            req_ids, query_lens_cpu, output_size=total_query_len
-        )
-        token_idx = torch.arange(total_query_len, dtype=torch.int32, device="cpu")
-        query_offsets = token_idx - query_start_loc_cpu[req_idx]
-        context_lens = (
-            seq_lens_cpu[req_idx] - query_lens_cpu[req_idx] + query_offsets + 1
-        ) // compress_ratio
-
-        req_idx = req_idx.cuda()
-        self.indices = req_idx.to(torch.int32)
-        self.context_lens = context_lens.cuda().view(-1, 1)
-        self.block_table = block_table_cpu.cuda()[req_idx]
-        self.max_context_len = int(compressed_seq_lens_cpu.max().item())
-
-        self.schedule_metadata = get_paged_mqa_logits_metadata(
-            self.context_lens, block_size, NUM_SMS, indices=self.indices
-        )
-        self.num_chunks = 1
-
-    def run(
-        self, q_quant: Tensor, q_scale: Tensor | None, kv_cache: Tensor, weights: Tensor
-    ) -> Tensor:
-        num_tokens = self.context_lens.shape[0]
-        q_values = q_quant.view(num_tokens, 1, *q_quant.shape[1:])
-        if q_scale is not None:
-            q_values = q_values.view(torch.int8)
-            q_scale = q_scale.view(num_tokens, 1, *q_scale.shape[1:])
-
-        logits = fp8_fp4_paged_mqa_logits(
-            (q_values, q_scale),
-            kv_cache_as_quant_view(kv_cache, HEAD_DIM, q_scale is not None),
-            weights,
-            self.context_lens,
-            self.block_table,
-            self.schedule_metadata,
-            self.max_context_len,
-            False,
-            indices=self.indices,
-        )
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            1,
-            self.context_lens,
-            self.topk_indices_buffer,
-            logits.shape[0],
-            logits.stride(0),
-            logits.stride(1),
-            self.topk_indices_buffer.shape[1],
-        )
-        return self.topk_indices_buffer
-
-
-class DeepGemmPagedChunk:
     @dataclass
     class Metadata:
         token_start: int
@@ -377,6 +311,7 @@ class DeepGemmPagedChunk:
         block_size: int,
         use_fp4: bool,
         topk: int,
+        do_chunk: bool = False,
     ) -> None:
         total_query_len = int(query_start_loc_cpu[-1].item())
         self.topk_indices_buffer = torch.empty(
@@ -394,17 +329,22 @@ class DeepGemmPagedChunk:
         ) // compress_ratio
 
         block_table = block_table_cpu.cuda()
-        # The paged path reads K directly from the KV cache, so it does not
-        # need the flat path's gathered-K workspace bound.
-        paged_chunk_workspace_size = int(compressed_seq_lens_cpu.sum().item())
-        chunk_specs = split_indexer_prefill_chunks(
-            compressed_seq_lens_cpu,
-            query_lens_cpu,
-            paged_chunk_workspace_size,
-            DEEPGEMM_MAX_LOGITS_BYTES,
-        )
+        if do_chunk:
+            # The paged path reads K directly from the KV cache, so it does not
+            # need the flat path's gathered-K workspace bound.
+            paged_chunk_workspace_size = int(compressed_seq_lens_cpu.sum().item())
+            chunk_specs = split_indexer_prefill_chunks(
+                compressed_seq_lens_cpu,
+                query_lens_cpu,
+                paged_chunk_workspace_size,
+                DEEPGEMM_MAX_LOGITS_BYTES,
+            )
+        else:
+            chunk_specs = [
+                (slice(0, query_lens_cpu.numel()), slice(0, total_query_len))
+            ]
 
-        self.chunks: list[DeepGemmPagedChunk.Metadata] = []
+        self.chunks: list[DeepGemmPaged.Metadata] = []
         for req_slice, query_slice in chunk_specs:
             if int(compressed_seq_lens_cpu[req_slice].sum().item()) == 0:
                 continue
@@ -420,7 +360,7 @@ class DeepGemmPagedChunk:
             schedule_metadata = get_paged_mqa_logits_metadata(
                 context_lens, block_size, NUM_SMS, indices=indices
             )
-            chunk = DeepGemmPagedChunk.Metadata(
+            chunk = DeepGemmPaged.Metadata(
                 token_start,
                 token_end,
                 indices,
@@ -479,9 +419,10 @@ class DeepGemmPagedChunk:
 
 
 IMPLEMENTATIONS = (
-    ("deepgemm_flat_chunk", DeepGemmFlatChunk),
+    ("deepgemm_flat", DeepGemmFlat),
+    ("deepgemm_flat_chunk", partial(DeepGemmFlat, do_chunk=True)),
     ("deepgemm_paged", DeepGemmPaged),
-    ("deepgemm_paged_chunk", DeepGemmPagedChunk),
+    ("deepgemm_paged_chunk", partial(DeepGemmPaged, do_chunk=True)),
 )
 
 
