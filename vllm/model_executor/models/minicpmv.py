@@ -555,8 +555,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
         image_processor = hf_processor.image_processor  # type: ignore
-        for attr in ("mean", "std"):
-            val = getattr(image_processor, attr)
+        # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
+        for attr in ("mean", "std", "image_mean", "image_std"):
+            val = getattr(image_processor, attr, None)
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
 
@@ -1048,10 +1049,19 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if version == (2, 0) or version == (2, 5):
                 im_start = image_processor.im_start_token
                 im_end = image_processor.im_end_token
-            else:
+            elif hasattr(image_processor, "im_id_start"):
                 im_start = image_processor.im_id_start
                 im_end = image_processor.im_id_end
+            else:
+                # transformers v5.7+ keeps im_id tokens on the tokenizer.
+                im_start = getattr(
+                    tokenizer, "image_id_start_token", "<image_id>"
+                )
+                im_end = getattr(
+                    tokenizer, "image_id_end_token", "</image_id>"
+                )
 
+            embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
                 PromptUpdateDetails.select_text(
                     text.replace(
@@ -1059,7 +1069,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                         f"{im_start}{new_item_idx}{im_end}",
                         1,
                     ),
-                    "<unk>",
+                    embed_text,
                 )
             )
 

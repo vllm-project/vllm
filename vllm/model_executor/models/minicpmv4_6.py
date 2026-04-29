@@ -96,17 +96,39 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         image_size,
         num_frames: int,
         downsample_mode: str | None = None,
+        video_idx: int = 0,
     ) -> str:
-        return (
-            self.info.get_slice_image_placeholder(
-                image_size=image_size,
-                image_idx=0,
-                max_slice_nums=self.info.get_video_max_slice_num(),
-                use_image_id=False,
-                downsample_mode=downsample_mode,
-            )
-            * num_frames
+        # Match transformers v5.7+ MiniCPMV4_6Processor video formatting:
+        #   <image_id>{video_idx}</image_id>(<image>VIDEO*src</image>
+        #     <slice>VIDEO*patch</slice>...)*num_frames
+        # Crucially the visual token inside each frame is ``<|video_pad|>``
+        # (tokenizer.video_token), NOT ``<|image_pad|>`` — they share the same
+        # embedding-injection role but the language model is conditioned on
+        # which one is used. Using image_token for video silently produces
+        # garbage descriptions.
+        info = self.info
+        grids, source_tokens, patch_tokens = info._compute_visual_tokens(
+            image_size,
+            max_slice_nums=info.get_video_max_slice_num(),
+            downsample_mode=downsample_mode,
         )
+        tokenizer = info.get_tokenizer()
+        video_token = getattr(tokenizer, "video_token", "<|video_pad|>")
+        image_start = getattr(tokenizer, "image_start_token", "<image>")
+        image_end = getattr(tokenizer, "image_end_token", "</image>")
+        slice_start = getattr(tokenizer, "slice_start_token", "<slice>")
+        slice_end = getattr(tokenizer, "slice_end_token", "</slice>")
+        id_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+        id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
+
+        per_frame = image_start + video_token * source_tokens + image_end
+        if grids[0] > 0 and grids[1] > 0 and patch_tokens > 0:
+            slice_ph = slice_start + video_token * patch_tokens + slice_end
+            rows = [slice_ph * grids[0] for _ in range(grids[1])]
+            per_frame += "\n".join(rows)
+
+        body = per_frame * num_frames
+        return f"{id_start}{video_idx}{id_end}" + body
 
     def process_images(
         self,
@@ -127,26 +149,129 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
             return {}
 
-        out_keys = {"pixel_values", "tgt_sizes"}
-        image_inputs = self._base_call_hf_processor(
-            prompts=[self.info.image_pattern] * len(parsed_images),
-            mm_data={"images": [[image] for image in parsed_images]},
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-            out_keys=out_keys,
-        )
+        # transformers v5.7+ MiniCPMV4_6ImageProcessor returns
+        # `pixel_values` (1, C, P, sum_W) where all slices are fused along W
+        # (NaViT-style), and `target_sizes` (n_slices, 2). vLLM expects each
+        # image entry to be a 4D tensor (n_slices, C, P, L_max_padded).
+        n_images = len(parsed_images)
+        image_processor = self.info.get_image_processor()
+        patch_size = image_processor.patch_size
+        per_image_pixel_values: list[torch.Tensor] = []
+        per_image_tgt_sizes: list[torch.Tensor] = []
+        for image in parsed_images:
+            ip_out = image_processor([image], **mm_kwargs)
+            pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
+            ts = ip_out["target_sizes"]  # (n_slices, 2)
+            if pv.ndim == 4 and pv.shape[0] == 1:
+                pv = pv.squeeze(0)  # (C, P, sum_W)
+            ts_long = ts.to(torch.long)
+            split_widths = (
+                ts_long[:, 0] * ts_long[:, 1] * patch_size
+            ).tolist()
+            slices = torch.split(pv, split_widths, dim=-1)
+            n_slices = len(slices)
+            l_max = max(s.shape[-1] for s in slices)
+            out = torch.zeros(
+                n_slices,
+                pv.shape[0],
+                pv.shape[1],
+                l_max,
+                dtype=pv.dtype,
+                device=pv.device,
+            )
+            for i, s in enumerate(slices):
+                out[i, :, :, : s.shape[-1]] = s
+            per_image_pixel_values.append(out)
+            per_image_tgt_sizes.append(ts_long)
+
+        image_inputs: dict = {
+            "pixel_values": per_image_pixel_values,
+            "tgt_sizes": per_image_tgt_sizes,
+        }
 
         ds_mode = self._resolve_downsample_mode(mm_kwargs)
         insert_layer_id = getattr(
             self.info.get_hf_config(), "insert_layer_id", -1,
         )
         merger_flag = ds_mode != "4x" and insert_layer_id >= 0
-        n_images = len(parsed_images)
         image_inputs["use_vit_merger"] = [
             torch.tensor([merger_flag], dtype=torch.bool)
             for _ in range(n_images)
         ]
         return image_inputs
+
+    def process_videos(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        from vllm.multimodal.parse import VideoProcessorItems
+        if (videos := mm_data.get("videos")) is None:
+            return {}
+
+        mm_items = self.info.parse_mm_data({"video": videos}, validate=False)
+        from .minicpmv import MiniCPMVVideoEmbeddingItems
+        parsed_videos = mm_items.get_items(
+            "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
+        )
+
+        if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
+            return {}
+
+        # Treat each video as a sequence of frames. The transformers v5.7+
+        # `MiniCPMV4_6ImageProcessor` returns NaViT-style fused `pixel_values`;
+        # we run it per-frame, split the slices, then re-pack each video into
+        # a single 4D tensor (sum_slices, C, P, L_max_video).
+        image_processor = self.info.get_image_processor()
+        patch_size = image_processor.patch_size
+        video_max_slice = self.info.get_video_max_slice_num()
+        video_mm_kwargs = {**mm_kwargs, "max_slice_nums": video_max_slice}
+
+        per_video_pixel_values: list[torch.Tensor] = []
+        per_video_tgt_sizes: list[torch.Tensor] = []
+
+        for video in parsed_videos:
+            # video is iterable of frames (PIL Image or numpy array).
+            all_slices: list[torch.Tensor] = []
+            ts_list: list[torch.Tensor] = []
+            for frame in video:
+                ip_out = image_processor([frame], **video_mm_kwargs)
+                pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
+                ts = ip_out["target_sizes"]  # (n_slices, 2)
+                if pv.ndim == 4 and pv.shape[0] == 1:
+                    pv = pv.squeeze(0)  # (C, P, sum_W)
+                ts_long = ts.to(torch.long)
+                split_widths = (
+                    ts_long[:, 0] * ts_long[:, 1] * patch_size
+                ).tolist()
+                slices = torch.split(pv, split_widths, dim=-1)
+                all_slices.extend(slices)
+                ts_list.append(ts_long)
+
+            if not all_slices:
+                continue
+
+            l_max = max(s.shape[-1] for s in all_slices)
+            n_total = len(all_slices)
+            C, P = all_slices[0].shape[0], all_slices[0].shape[1]
+            out = torch.zeros(
+                n_total, C, P, l_max,
+                dtype=all_slices[0].dtype, device=all_slices[0].device,
+            )
+            for i, s in enumerate(all_slices):
+                out[i, :, :, : s.shape[-1]] = s
+
+            per_video_pixel_values.append(out)
+            per_video_tgt_sizes.append(torch.cat(ts_list, dim=0))
+
+        if not per_video_pixel_values:
+            return {}
+
+        return {
+            "video_pixel_values": per_video_pixel_values,
+            "video_tgt_sizes": per_video_tgt_sizes,
+        }
 
     def _get_prompt_updates(
         self,
@@ -179,6 +304,11 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                 additional_placeholders.append((modality, sub_pattern))
         placeholders += additional_placeholders
 
+        # The 4.6 chat_template emits `<|image_pad|>` / `<|video_pad|>` rather
+        # than `<unk>`, so use those tokens as the embedding selector.
+        image_embed_text = getattr(tokenizer, "image_token", "<|image_pad|>")
+        video_embed_text = getattr(tokenizer, "video_token", "<|video_pad|>")
+
         def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
                 "image",
@@ -189,7 +319,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                 self.get_image_prompt_texts(
                     image_size, item_idx, downsample_mode=ds_mode,
                 ),
-                "<unk>",
+                image_embed_text,
             )
 
         def get_video_replacement(item_idx: int):
@@ -201,9 +331,11 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             num_frames = videos.get_num_frames(item_idx)
             return PromptUpdateDetails.select_text(
                 self.get_video_prompt_texts(
-                    frame_size, num_frames, downsample_mode=ds_mode,
+                    frame_size, num_frames,
+                    downsample_mode=ds_mode,
+                    video_idx=item_idx,
                 ),
-                "<unk>",
+                video_embed_text,
             )
 
         get_replacement = {
@@ -229,6 +361,10 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
 
 class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
+    # transformers v5.7+ chat_template emits these as image/video placeholders.
+    image_pattern = "<|image_pad|>"
+    video_pattern = "<|video_pad|>"
+
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
@@ -242,13 +378,26 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         return (4, 5)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
+        return {"image": None, "video": None}
 
     def get_image_max_slice_num(self) -> int:
         config = self.get_hf_config()
         if hasattr(config, "slice_config") and config.slice_config is not None:
             return getattr(config.slice_config, "max_slice_nums", 9)
         return getattr(config, "max_slice_nums", 9)
+
+    def get_video_max_slice_num(self) -> int:
+        # Override the base class default of 1: transformers v5.7+
+        # `MiniCPMV4_6VideoProcessor` keeps the same max_slice_nums (default 9)
+        # as the image processor so that high-res frames get sliced.
+        try:
+            hf_processor = self.get_hf_processor()
+            video_processor = getattr(hf_processor, "video_processor", None)
+            if video_processor is not None:
+                return int(getattr(video_processor, "max_slice_nums", 9))
+        except Exception:
+            pass
+        return self.get_image_max_slice_num()
 
     def _get_downsample_mode(
         self,
@@ -284,9 +433,15 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         downsample_mode = self._get_downsample_mode(downsample_mode)
         token_divisor = 4 if downsample_mode == "4x" else 16
 
-        grids = image_processor.get_sliced_grid(
-            image_size, max_slice_nums,
-        )
+        # transformers v5.7+ requires `scale_resolution` arg
+        try:
+            grids = image_processor.get_sliced_grid(
+                image_size, max_slice_nums, scale_res,
+            )
+        except TypeError:
+            grids = image_processor.get_sliced_grid(
+                image_size, max_slice_nums,
+            )
 
         if grids is None:
             best_size = image_processor.find_best_resize(
@@ -329,14 +484,37 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             image_size, max_slice_nums, downsample_mode=downsample_mode,
         )
         image_processor = self.get_image_processor()
-        return image_processor.get_slice_image_placeholder(
-            grids,
-            image_idx=image_idx,
-            max_slice_nums=max_slice_nums,
-            use_image_id=use_image_id,
-            source_image_visual_tokens=source_tokens,
-            patch_visual_tokens=patch_tokens,
-        )
+        # transformers v5.7+ removed `get_slice_image_placeholder` from the
+        # image_processor and moved the logic into MiniCPMV4_6Processor.
+        # Replicate it here using tokenizer special tokens.
+        if hasattr(image_processor, "get_slice_image_placeholder"):
+            return image_processor.get_slice_image_placeholder(
+                grids,
+                image_idx=image_idx,
+                max_slice_nums=max_slice_nums,
+                use_image_id=use_image_id,
+                source_image_visual_tokens=source_tokens,
+                patch_visual_tokens=patch_tokens,
+            )
+        tokenizer = self.get_tokenizer()
+        image_token = getattr(tokenizer, "image_token", "<|image_pad|>")
+        image_start = getattr(tokenizer, "image_start_token", "<image>")
+        image_end = getattr(tokenizer, "image_end_token", "</image>")
+        slice_start = getattr(tokenizer, "slice_start_token", "<slice>")
+        slice_end = getattr(tokenizer, "slice_end_token", "</slice>")
+        id_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+        id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
+
+        placeholder = image_start + image_token * source_tokens + image_end
+        if use_image_id:
+            placeholder = f"{id_start}{image_idx}{id_end}" + placeholder
+
+        num_cols, num_rows = grids[0], grids[1]
+        if num_cols > 0 and num_rows > 0 and patch_tokens > 0:
+            slice_ph = slice_start + image_token * patch_tokens + slice_end
+            slices = [slice_ph * num_cols for _ in range(num_rows)]
+            placeholder += "\n".join(slices)
+        return placeholder
 
     def get_num_image_tokens(
         self,
@@ -486,6 +664,9 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
 
 
 class MiniCPMV4_6DownsampleMLP(nn.Module):
+    """Match HF (transformers v5.7+) parameter naming: pre_norm/linear_1/
+    act/linear_2 (instead of pre_norm + Sequential(mlp.0/mlp.2))."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -498,14 +679,16 @@ class MiniCPMV4_6DownsampleMLP(nn.Module):
             hidden_size * merge_kernel_size[0] * merge_kernel_size[1]
         )
         self.pre_norm = nn.LayerNorm(self.hidden_size, eps=1e-6)
-        self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_size, self.hidden_size, bias=True),
-            nn.GELU(),
-            nn.Linear(self.hidden_size, llm_embed_dim, bias=True),
-        )
+        self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        self.act = nn.GELU()
+        self.linear_2 = nn.Linear(self.hidden_size, llm_embed_dim, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(self.pre_norm(x))
+        x = self.pre_norm(x)
+        x = self.linear_1(x)
+        x = self.act(x)
+        x = self.linear_2(x)
+        return x
 
 
 class MiniCPMV4_6Merger(nn.Module):
@@ -584,6 +767,10 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # transformers v5.7+ uses `vision_tower` and nests `vit_merger`
+            # inside it. Order matters: more specific prefix must come first.
+            "model.vision_tower.vit_merger.": "vit_merger.",
+            "model.vision_tower.": "vpm.",
             "model.vpm.": "vpm.",
             "model.vit_merger.": "vit_merger.",
             "model.merger.": "merger.",
@@ -601,10 +788,11 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        # transformers v5.7+ chat_template uses these tokens.
         if modality.startswith("image"):
-            return "(<image>./</image>)"
+            return "<|image_pad|>"
         if modality.startswith("video"):
-            return "(<video>./</video>)"
+            return "<|video_pad|>"
         raise ValueError("Only image or video modality is supported")
 
     def get_mrope_input_positions(
@@ -708,11 +896,13 @@ class MiniCPMV4_6ForConditionalGeneration(
         P = pixel_values[0].shape[-2]
         L = max(item.shape[-1] for item in pixel_values)
         device = pixel_values[0].device
-        dtype = pixel_values[0].dtype
+        target_dtype = self.vpm.embeddings.patch_embedding.weight.dtype
 
-        all_pixel_values = torch.zeros(B, 3, P, L, dtype=dtype, device=device)
+        all_pixel_values = torch.zeros(
+            B, 3, P, L, dtype=target_dtype, device=device,
+        )
         for i, pv in enumerate(pixel_values):
-            all_pixel_values[i, ..., : pv.shape[-1]] = pv
+            all_pixel_values[i, ..., : pv.shape[-1]] = pv.to(target_dtype)
 
         num_patches = tgt_sizes.prod(-1)
         max_patches = int(num_patches.max().item())
@@ -729,8 +919,9 @@ class MiniCPMV4_6ForConditionalGeneration(
         )
 
         if torch.any(~patch_attn_mask):
-            min_val = torch.finfo(dtype).min
-            attention_mask = (~patch_attn_mask).to(dtype=dtype) * min_val
+            mask_dtype = hidden_states.dtype
+            min_val = torch.finfo(mask_dtype).min
+            attention_mask = (~patch_attn_mask).to(dtype=mask_dtype) * min_val
             attention_mask = attention_mask[:, None, None, :]
         else:
             attention_mask = None
@@ -791,12 +982,40 @@ class MiniCPMV4_6ForConditionalGeneration(
                     else bool(t)
                     for t in use_vit_merger_tensors
                 )
-        image_input = self._parse_and_validate_vision_input(**kwargs)
-        if image_input is None:
+
+        # Split kwargs into image / video buckets (videos are processed via
+        # the same vision pipeline; their fields just carry a ``video_`` prefix).
+        image_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k in ("pixel_values", "image_embeds", "tgt_sizes")
+        }
+        video_kwargs = {
+            k.removeprefix("video_"): v
+            for k, v in kwargs.items()
+            if k.startswith("video_")
+        }
+
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        if (image_kwargs.get("pixel_values") is not None
+                or image_kwargs.get("image_embeds") is not None):
+            image_input = self._parse_and_validate_vision_input(**image_kwargs)
+            if image_input is not None:
+                multimodal_embeddings += tuple(self._process_vision_input(
+                    image_input, use_vit_merger=use_vit_merger,
+                ))
+
+        if (video_kwargs.get("pixel_values") is not None
+                or video_kwargs.get("image_embeds") is not None):
+            video_input = self._parse_and_validate_vision_input(**video_kwargs)
+            if video_input is not None:
+                multimodal_embeddings += tuple(self._process_vision_input(
+                    video_input, use_vit_merger=use_vit_merger,
+                ))
+
+        if not multimodal_embeddings:
             return []
-        return tuple(self._process_vision_input(
-            image_input, use_vit_merger=use_vit_merger,
-        ))
+        return multimodal_embeddings
 
     def embed_input_ids(
         self,
