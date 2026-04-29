@@ -55,6 +55,7 @@ def create_fused_moe_router(
     # zero expert parameters
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
+    hash_indices_table: torch.Tensor | None = None,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -98,6 +99,9 @@ def create_fused_moe_router(
             creates a ZeroExpertRouter.
         num_logical_experts: Number of real (non-zero) experts. Required when
             zero_expert_type is not None.
+
+    Hash Indices Table:
+        Used to map input_ids to experts, need for Deepseek V4
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
@@ -179,17 +183,20 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
         )
 
-    if e_score_correction_bias is not None:
+    assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
+
+    if e_score_correction_bias is not None or hash_indices_table is not None:
         return FusedTopKBiasRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
             e_score_correction_bias=e_score_correction_bias,
-            scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            scoring_func=scoring_func,
+            hash_indices_table=hash_indices_table,
         )
 
     return FusedTopKRouter(

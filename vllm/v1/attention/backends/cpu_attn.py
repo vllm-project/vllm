@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
 
 import torch
 
@@ -34,6 +37,12 @@ class CPUAttentionBackend(AttentionBackend):
         torch.float16,
         torch.bfloat16,
         torch.float32,
+    ]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
     ]
 
     @classmethod
@@ -133,7 +142,13 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
+        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.isa = _get_attn_isa(
+            self.dtype,
+            self.block_size,
+            self.head_dim,
+            kv_cache_dtype_str,
+        )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
 
     def build(
@@ -247,8 +262,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if is_quantized_kv_cache(kv_cache_dtype):
-            raise NotImplementedError("FP8 KV cache is unsupported in CPU_ATTN")
+        self.is_fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
         self.attn_type = attn_type
 
         self.sinks = sinks
@@ -325,6 +339,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 attn_metadata.isa,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -356,6 +373,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=attn_metadata.scheduler_metadata,
                 s_aux=self.sinks,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         return output
@@ -477,13 +497,26 @@ def _make_sliding_window_bias(
 
 
 def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
+    dtype: torch.dtype,
+    block_size: int,
+    head_size: int | None = None,
+    kv_cache_dtype: str | None = None,
 ) -> str:
+    fp8_kv = is_quantized_kv_cache(kv_cache_dtype) if kv_cache_dtype else False
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
+        if fp8_kv:
+            raise NotImplementedError(
+                "FP8 KV cache requires head_size divisible by 32 on CPU."
+            )
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
+    supports_avx512 = torch.cpu._is_avx512_supported()
+    if fp8_kv and not supports_amx and not supports_avx512:
+        raise NotImplementedError(
+            "FP8 KV cache on CPU requires x86 with AVX-512 or AMX."
+        )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
