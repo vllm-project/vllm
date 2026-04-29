@@ -350,7 +350,12 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in ("max_num_batched_tokens", "kv_cache_memory_bytes"):
+            elif name in (
+                "max_num_batched_tokens",
+                "kv_cache_memory_bytes",
+                "max_num_encoder_input_tokens",
+                "encoder_cache_size",
+            ):
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -611,6 +616,10 @@ class EngineArgs:
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
+    max_num_encoder_input_tokens: int | None = (
+        SchedulerConfig.max_num_encoder_input_tokens
+    )
+    encoder_cache_size: int | None = SchedulerConfig.encoder_cache_size
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
@@ -1361,6 +1370,14 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
+        scheduler_group.add_argument(
+            "--max-num-encoder-input-tokens",
+            **scheduler_kwargs["max_num_encoder_input_tokens"],
+        )
+        scheduler_group.add_argument(
+            "--encoder-cache-size",
+            **scheduler_kwargs["encoder_cache_size"],
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1971,6 +1988,8 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            max_num_encoder_input_tokens=self.max_num_encoder_input_tokens,
+            encoder_cache_size=self.encoder_cache_size,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
