@@ -472,6 +472,7 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_mscclpp_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -481,6 +482,9 @@ class GroupCoordinator:
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
+            mscclpp_comm = self.device_communicator.mscclpp_comm
+            if mscclpp_comm is not None and mscclpp_comm._context is not None:
+                maybe_mscclpp_context = mscclpp_comm.capture()
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -488,7 +492,7 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context:
+        with torch.cuda.stream(stream), maybe_ca_context, maybe_mscclpp_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
