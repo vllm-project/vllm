@@ -134,7 +134,6 @@ class IrOp:
     registry: ClassVar[dict[str, "IrOp"]] = {}
 
     name: str
-    has_reduction: bool
     impls: dict[str, "IrOpImpl"]
     maybe_inplace: "IrOpInplaceOverload | None"
 
@@ -239,7 +238,6 @@ class IrOp:
         :param provider: The name of the provider, must be unique.
         :param supported: Static support check, use this to check platform support.
         :param supports_args: Dynamic arg support check, used for types and shapes.
-        :param batch_invariant: is this implementation is batch-invariant.
         :return: A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
@@ -260,21 +258,10 @@ class IrOp:
         def my_provider_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor: ...
         ```
 
-        Default behavior of batch_invariant depends on op.has_reduction:
-        - op.has_reduction == True: batch_invariant = False
-        - op.has_reduction == False: batch_invariant = True
-
-        This is because ops without reductions are always batch-invariant
-        (unless explicitly opting out).
-        Ops with reductions have to opt in, as they are not batch-invariant by default.
-
         """
         assert provider not in RESERVED_PROVIDERS, (
             f"Provider name {provider} is reserved."
         )
-
-        if batch_invariant is None:
-            batch_invariant = not self.has_reduction
 
         def _register_impl(f: Callable):
             impl = IrOpImpl(
@@ -378,8 +365,7 @@ class IrOp:
                        when called inside opaque custom ops.
         """
         assert all(p in self.impls for p in priority), (
-            f"All providers in priority must be registered implementations, missing "
-            f"{','.join(p for p in priority if p not in self.impls)}"
+            "All providers in priority must be registered implementations."
         )
 
         # If compile=True and impl allows compilation, use compiled wrapper
@@ -501,55 +487,7 @@ class IrOpInplaceOverload:
         return impl.impl_fn(*args, **kwargs)
 
 
-class IrOpInplaceOverload:
-    def __init__(self, op: IrOp):
-        params, returns = op._schema_str.split(" -> ")
-        n_outputs = returns.count("Tensor")
-
-        assert returns.count("Tensor") == len(op.activations), (
-            "Inplace overload requires the same number of outputs as activations."
-        )
-
-        assert returns.count(",") == n_outputs - 1, (
-            "Inplace overload only supports Tensor outputs for now."
-        )
-
-        self.op = op
-        self.name = f"{op.name}.maybe_inplace"
-        self._schema_str = infer_schema(
-            op.impls["native"].impl_fn, mutates_args=op.activations
-        )
-
-        # torch registration
-        vllm_ir_lib.define(self.name + self._schema_str)
-        vllm_ir_lib.impl(
-            self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
-        )
-        # fake goes to default overload for now
-        vllm_ir_lib._register_fake(self.name, self.op._fake_call)
-
-        assert hasattr(getattr(torch.ops.vllm_ir, self.op.name), "maybe_inplace")
-        self.torch_op = getattr(torch.ops.vllm_ir, self.op.name).maybe_inplace
-
-    def __call__(self, *args, **kwargs) -> Any:
-        if not _ENABLE_TORCH_WRAP:
-            return self._inner_call(*args, **kwargs)
-
-        return self.torch_op(*args, **kwargs)
-
-    def _inner_call(self, *args, **kwargs) -> Any:
-        # Calling the maybe_inplace overload means we can use inplace impls directly.
-        impl = self.op.dispatch(*args, **kwargs)
-        return impl.impl_fn(*args, **kwargs)
-
-
 class IrOpImpl:
-    op: IrOp
-    provider: str
-    impl_fn: Callable
-    supported: bool
-    batch_invariant: bool
-
     def __init__(
         self,
         op: IrOp,

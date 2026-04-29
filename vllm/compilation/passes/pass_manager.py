@@ -117,8 +117,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         VllmInductorPass.dump_prefix += 1
 
         # clean up after lowering again
-        # self.post_cleanup(graph)
-        # VllmInductorPass.dump_prefix += 1
+        self.post_cleanup(graph)
+        VllmInductorPass.dump_prefix += 1
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)

@@ -51,7 +51,7 @@ def test_registration_overloads():
     def _custom_div(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return x / y
 
-    custom_div = IrOp("_custom_div", _custom_div, False)
+    custom_div = IrOp("_custom_div", _custom_div)
     assert custom_div.name == "_custom_div"
     assert "_custom_div" not in IrOp.registry
 
@@ -336,7 +336,7 @@ class TestIrOpImplDispatch:
         assert "priority not set" in message
 
 
-@vllm.ir.register_op(has_reduction=True)
+@vllm.ir.register_op
 def _custom_mm(
     x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -344,16 +344,15 @@ def _custom_mm(
     return tmp if bias is None else tmp + bias
 
 
-@_custom_mm.register_impl("impl_mm", supports_args=lambda x, y, bias=None: True)
-def impl_mm(
-    x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
-) -> torch.Tensor:
-    tmp = x @ y
-    return tmp + 50 if bias is None else tmp + bias + 100
-
-
 def test_default_args():
     # Test that default args are properly applied when dispatching and calling
+    @_custom_mm.register_impl("impl_mm", supports_args=lambda x, y, bias=None: True)
+    def impl_mm(
+        x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        tmp = x @ y
+        return tmp + 50 if bias is None else tmp + bias + 100
+
     x1 = torch.tensor([1, 2], dtype=torch.int32)
     x2 = torch.tensor([3, 4], dtype=torch.int32)
 
@@ -361,70 +360,6 @@ def test_default_args():
     assert impl_mm.supports_args(x1, x2)
     with _custom_mm.set_priority(["impl_mm", "native"]):
         assert _custom_mm.dispatch(x1, x2) is impl_mm
-
-
-@_custom_add.register_impl(
-    "bv_impl_add", batch_invariant=False, supports_args=lambda x, y: True
-)
-def bv_impl_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return x + y + 70
-
-
-@_custom_mm.register_impl(
-    "bi_impl_mm", batch_invariant=True, supports_args=lambda x, y, bias=None: True
-)
-def bi_impl_mm(
-    x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
-) -> torch.Tensor:
-    return x @ y + 20 + bias
-
-
-@_custom_mm.register_impl(
-    "bv_impl_mm", batch_invariant=False, supports_args=lambda x, y, bias=None: True
-)
-def bv_impl_mm(
-    x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
-) -> torch.Tensor:
-    return x @ y + 20 + bias
-
-
-def test_batch_invariant_defaults():
-    # _custom_add is batch invariant by default
-    assert _custom_add.impls["native"].batch_invariant
-    assert _custom_add.impls["impl_even"].batch_invariant
-    assert not _custom_add.impls["bv_impl_add"].batch_invariant
-
-    # _custom_mm is not batch invariant by default
-    assert _custom_mm.impls["native"].batch_invariant
-    assert _custom_mm.impls["bi_impl_mm"].batch_invariant
-    assert not _custom_mm.impls["impl_mm"].batch_invariant
-    assert not _custom_mm.impls["bv_impl_mm"].batch_invariant
-
-
-def test_batch_invariant_dispatching():
-    # batch invariance off, all ops remain
-    with _custom_add.set_priority(
-        ["bv_impl_add", "impl_even", "native"], batch_invariant_only=False
-    ):
-        assert _custom_add.get_priority() == ["bv_impl_add", "impl_even", "native"]
-
-    # batch invariance required, filter ops
-    with _custom_add.set_priority(
-        ["impl_even", "bv_impl_add", "native"], batch_invariant_only=True
-    ):
-        assert _custom_add.get_priority() == ["impl_even", "native"]
-
-    # batch invariance off, all ops remain
-    with _custom_mm.set_priority(
-        ["bv_impl_mm", "bi_impl_mm", "native"], batch_invariant_only=False
-    ):
-        assert _custom_mm.get_priority() == ["bv_impl_mm", "bi_impl_mm", "native"]
-
-    # batch invariance required, filter ops
-    with _custom_mm.set_priority(
-        ["bv_impl_mm", "bi_impl_mm", "native"], batch_invariant_only=True
-    ):
-        assert _custom_mm.get_priority() == ["bi_impl_mm", "native"]
 
 
 def test_bad_impl_registrations():
@@ -500,12 +435,7 @@ def test_bad_impl_registrations():
         ) -> torch.Tensor:
             return x @ y + 40
 
-    assert set(_custom_mm.impls.keys()) == {
-        "bi_impl_mm",
-        "bv_impl_mm",
-        "impl_mm",
-        "native",
-    }
+    assert set(_custom_mm.impls.keys()) == {"impl_mm", "native"}
 
 
 IMPL_OOT_SRC = """

@@ -10,7 +10,6 @@ from torch._inductor.pattern_matcher import (
     PatternMatcherPass,
     register_graph_pattern,
 )
-from torch._library.triton import set_wrap_triton_enabled
 
 from vllm.config import VllmConfig
 from vllm.ir.op import IrOp
@@ -74,9 +73,7 @@ class VllmIRLoweringPass(VllmInductorPass):
         # clear at the beginning instead of end, so that tests can inspect
         self.selected_impls.clear()
 
-        # Triton wrap is disabled in the forward context, enable it during lowering.
-        with set_wrap_triton_enabled(True):
-            count = self.patterns.apply(graph)
+        count = self.patterns.apply(graph)
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
 
         # TODO write self.selected_impls to depyf/tlparse dir
