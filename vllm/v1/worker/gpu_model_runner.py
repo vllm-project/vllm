@@ -3083,18 +3083,16 @@ class GPUModelRunner(
                     local_len = num_tokens // tp
                     tp_rank = get_tp_group().rank_in_group
                     offset = tp_rank * local_len
-                    self.intermediate_tensors[k][offset:offset + local_len]\
-                        .copy_(v[:local_len], non_blocking=True)
+                    self.intermediate_tensors[k][offset : offset + local_len].copy_(
+                        v[:local_len], non_blocking=True
+                    )
                 else:
                     self.intermediate_tensors[k][:num_tokens].copy_(
                         v[:num_tokens], non_blocking=True
                     )
 
         return IntermediateTensors(
-            {
-                k: v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            }
+            {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
         )
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:

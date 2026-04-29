@@ -82,8 +82,7 @@ class InputMutationSlicingPass(VllmInductorPass):
 
             if dst_shape == src_shape:
                 logger.debug(
-                    "Skipping copy_ fix for %s <- %s "
-                    "because metadata shapes match: %s",
+                    "Skipping copy_ fix for %s <- %s because metadata shapes match: %s",
                     dst.name,
                     src.name,
                     dst_shape,
@@ -106,7 +105,7 @@ class InputMutationSlicingPass(VllmInductorPass):
                     torch.ops.aten.slice.Tensor,
                     args=(dst, 0, 0, src_shape[0]),
                 )
-                sliced_dst.meta["val"] = dst_val[:src_shape[0]]
+                sliced_dst.meta["val"] = dst_val[: src_shape[0]]
 
             node.args = (sliced_dst, src)
             count += 1
