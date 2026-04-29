@@ -96,14 +96,30 @@ struct enable_sm90_or_later : Kernel {
 };
 
 template <typename Kernel>
-struct enable_sm100_to_sm120 : Kernel {
+struct enable_sm100_family : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__
-  #if (__CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1200)
+  #if (__CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100)
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    printf("This kernel only supports sm[100, 120).\n");
+    printf("This kernel only supports sm100f.\n");
+    asm("trap;");
+  #endif
+#endif
+  }
+};
+
+// SM11x family: SM101/SM110 (AGX Thor)
+template <typename Kernel>
+struct enable_sm110_family : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__
+  #if (__CUDA_ARCH__ == 1010 || __CUDA_ARCH__ == 1100)
+    Kernel::operator()(std::forward<Args>(args)...);
+  #else
+    printf("This kernel only supports sm110f.\n");
     asm("trap;");
   #endif
 #endif

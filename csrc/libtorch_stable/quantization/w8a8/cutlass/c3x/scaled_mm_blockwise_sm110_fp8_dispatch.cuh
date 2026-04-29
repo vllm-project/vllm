@@ -91,8 +91,8 @@ struct cutlass_3x_gemm_fp8_blockwise {
       EpilogueScheduler,
       DefaultOperation
   >::CollectiveOp;
- 
-  using StageCountType = cutlass::gemm::collective::StageCountAuto; 
+
+  using StageCountType = cutlass::gemm::collective::StageCountAuto;
   using CollectiveMainloop = conditional_t<swap_ab,
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag,
@@ -125,7 +125,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
           MainloopScheduler
       >::CollectiveOp>;
 
-  using KernelType = enable_sm100_family<cutlass::gemm::kernel::GemmUniversal<
+  using KernelType = enable_sm110_family<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
 
   struct GemmKernel : public KernelType {};
@@ -192,6 +192,7 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
     mainloop_args.ptr_SFA = a_scales_ptr;
     mainloop_args.ptr_SFB = b_scales_ptr;
   }
+
   auto prob_shape = swap_ab ? cute::make_shape(n, m, k, 1) : cute::make_shape(m, n, k, 1);
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
@@ -202,27 +203,27 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
 }
 
 template <typename OutType>
-void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
+void cutlass_gemm_blockwise_sm110_fp8_dispatch(torch::stable::Tensor& out,
                                                torch::stable::Tensor const& a,
                                                torch::stable::Tensor const& b,
                                                torch::stable::Tensor const& a_scales,
                                                torch::stable::Tensor const& b_scales) {
-  int32_t m = a.size(0), n = b.size(1), k = a.size(1), sms;
+  int32_t m = a.size(0), n = b.size(1), sms;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
 
   constexpr int TILE_K = 128;
   // TODO: better heuristics
   bool swap_ab = (m < 16) || (m % 4 != 0);
   bool use_tma_epilogue = (m * n) % 4 == 0;
+
   if (!swap_ab) {
     constexpr int TILE_N = 128;
-    int tile_m = 256;
+    // Thor is single-die: keep to 1SM schedules and cap tile_m at 128.
+    int tile_m = 128;
     if (cuda_utils::ceil_div(n, TILE_N) * cuda_utils::ceil_div(m, 64) <= sms) {
       tile_m = 64;
     }
-    else if (cuda_utils::ceil_div(n, TILE_N) * cuda_utils::ceil_div(m, 128) <= sms) {
-      tile_m = 128;
-    }
+
     if (tile_m == 64) {
       if (use_tma_epilogue) {
         cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
@@ -237,7 +238,7 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
             cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100>>(
             out, a, b, a_scales, b_scales);
       }
-    } else if (tile_m == 128) {
+    } else {
       if (use_tma_epilogue) {
         cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
             OutType, 1, TILE_N, TILE_K, Shape<_128, Int<TILE_N>, Int<TILE_K>>,
@@ -249,20 +250,6 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
             OutType, 1, TILE_N, TILE_K, Shape<_128, Int<TILE_N>, Int<TILE_K>>,
             Shape<_1, _1, _1>, cutlass::epilogue::BlockwiseNoSmemWarpSpecialized1Sm,
             cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100>>(
-            out, a, b, a_scales, b_scales);
-      }
-    } else { // tile_m == 256
-      if (use_tma_epilogue) {
-          cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-              OutType, 1, TILE_N, TILE_K, Shape<_256, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_2, _1, _1>, cutlass::epilogue::TmaWarpSpecialized2Sm,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwise2SmSm100>>(
-            out, a, b, a_scales, b_scales);
-      } else {
-          cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-              OutType, 1, TILE_N, TILE_K, Shape<_256, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_2, _1, _1>, cutlass::epilogue::BlockwiseNoSmemWarpSpecialized2Sm,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwise2SmSm100>>(
             out, a, b, a_scales, b_scales);
       }
     }
