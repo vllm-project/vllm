@@ -22,71 +22,95 @@ ISA_TYPES = {
     "VXE": 4,
 }
 
+# KV cache index: 0 = auto (same as scalar_t), 1 = fp8_e4m3, 2 = fp8_e5m2
+KV_CACHE_IDX = {
+    "auto": 0,
+    "fp8_e4m3": 1,
+    "fp8_e5m2": 2,
+}
+
+# C++ type for each kv_cache index
+KV_CACHE_CPP_TYPES = {
+    "auto": "scalar_t",
+    "fp8_e4m3": "c10::Float8_e4m3fn",
+    "fp8_e5m2": "c10::Float8_e5m2",
+}
+
 # ISAs supported for head_dims divisible by 32
 ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
 
+# ISAs that support FP8 KV cache (x86 AVX2/AVX-512 required)
+ISA_FOR_FP8 = ["AMX", "VEC"]
 
-def encode_params(head_dim: int, isa_type: str) -> int:
-    """Encode head_dim and ISA type into a single int64_t."""
+
+def encode_params(head_dim: int, isa_type: str, kv_cache: str = "auto") -> int:
+    """Encode head_dim, ISA type, and KV cache type into a single int64_t."""
     isa_val = ISA_TYPES[isa_type]
-    # Encoding: (head_dim << 8) | isa_type
-    # This allows head_dim up to 2^56 - 1 and 256 ISA types
-    return (head_dim << 8) | isa_val
+    kv_val = KV_CACHE_IDX[kv_cache]
+    # Encoding: (head_dim << 16) | (kv_cache_idx << 8) | isa_type
+    # This allows head_dim up to 2^48 - 1, 256 KV cache types, and 256 ISA types
+    return (head_dim << 16) | (kv_val << 8) | isa_val
 
 
-def generate_cases_for_isa_group(isa_list: list[str]) -> str:
+def _make_case(
+    head_dim: int, isa: str, kv_cache: str = "auto", isa_override: str | None = None
+) -> str:
+    """Generate a single switch case line."""
+    encoded = encode_params(head_dim, isa, kv_cache)
+    actual_isa = isa_override if isa_override else isa
+    cpp_type = KV_CACHE_CPP_TYPES[kv_cache]
+    attn_impl = (
+        f"cpu_attention::AttentionImpl<"
+        f"cpu_attention::ISA::{actual_isa}, \\\n"
+        f"                                                       "
+        f"scalar_t, head_dim, {cpp_type}>"
+    )
+    comment = (
+        f"head_dim={head_dim}, isa={isa}"
+        if kv_cache == "auto"
+        else f"head_dim={head_dim}, isa={isa}, kv_cache={kv_cache}"
+    )
+    return (
+        f"""      case {encoded}LL: {{ """
+        f"""/* {comment} */ \\"""
+        f"""
+        constexpr size_t head_dim = {head_dim}; \\"""
+        f"""
+        using attn_impl = {attn_impl}; \\"""
+        f"""
+        return __VA_ARGS__(); \\"""
+        f"""
+      }} \\"""
+    )
+
+
+def generate_cases_for_isa_group(isa_list: list[str], include_fp8: bool = False) -> str:
     """Generate switch cases for a specific ISA group."""
     cases = []
 
-    # Generate cases for head_dims divisible by 32
+    # Non-FP8 cases for head_dims divisible by 32
     for head_dim in HEAD_DIMS_32:
         for isa in isa_list:
             if isa not in ISA_FOR_32:
                 continue
-            encoded = encode_params(head_dim, isa)
-            case_str = (
-                f"""      case {encoded}LL: {{ """
-                f"""/* head_dim={head_dim}, isa={isa} */ \\"""
-                f"""
-        constexpr size_t head_dim = {head_dim}; \\"""
-                f"""
-        using attn_impl = cpu_attention::AttentionImpl<"""
-                f"""cpu_attention::ISA::{isa}, \\"""
-                f"""
-                                                       """
-                f"""scalar_t, head_dim>; \\"""
-                f"""
-        return __VA_ARGS__(); \\"""
-                f"""
-      }} \\"""
-            )
-            cases.append(case_str)
+            cases.append(_make_case(head_dim, isa, "auto"))
 
-    # Generate cases for head_dims divisible by 16 only
+    # Non-FP8 cases for head_dims divisible by 16 only
     for head_dim in HEAD_DIMS_16:
         for isa in isa_list:
-            encoded = encode_params(head_dim, isa)
-            case_str = (
-                f"""      case {encoded}LL: {{ """
-                f"""/* head_dim={head_dim}, isa={isa} """
-                f"""(using VEC16) */ \\"""
-                f"""
-        constexpr size_t head_dim = {head_dim}; \\"""
-                f"""
-        using attn_impl = cpu_attention::AttentionImpl<"""
-                f"""cpu_attention::ISA::VEC16, \\"""
-                f"""
-                                                       """
-                f"""scalar_t, head_dim>; \\"""
-                f"""
-        return __VA_ARGS__(); \\"""
-                f"""
-      }} \\"""
-            )
-            cases.append(case_str)
+            cases.append(_make_case(head_dim, isa, "auto", isa_override="VEC16"))
+
+    # FP8 cases: only AMX and VEC, only head_dims divisible by 32
+    if include_fp8:
+        for fp8_type in ("fp8_e4m3", "fp8_e5m2"):
+            for head_dim in HEAD_DIMS_32:
+                for isa in isa_list:
+                    if isa not in ISA_FOR_FP8:
+                        continue
+                    cases.append(_make_case(head_dim, isa, fp8_type))
 
     return "\n".join(cases)
 
@@ -94,8 +118,9 @@ def generate_cases_for_isa_group(isa_list: list[str]) -> str:
 def generate_helper_function() -> str:
     """Generate helper function to encode parameters."""
     return """
-inline int64_t encode_cpu_attn_params(int64_t head_dim, cpu_attention::ISA isa) {
-  return (head_dim << 8) | static_cast<int64_t>(isa);
+inline int64_t encode_cpu_attn_params(int64_t head_dim, cpu_attention::ISA isa,
+                                      int64_t kv_cache_idx = 0) {
+  return (head_dim << 16) | (kv_cache_idx << 8) | static_cast<int64_t>(isa);
 }
 """
 
@@ -129,87 +154,78 @@ def generate_header_file() -> str:
 
     # Generate dispatch macro with conditional compilation for different ISA sets
     header += """
-// Dispatch macro using encoded parameters
+// Dispatch macro using encoded parameters.
+// KV_CACHE_IDX: Fp8KVCacheDataType enum value (kAuto=0, kFp8E4M3=1, kFp8E5M2=2).
+// FP8 cases (kv_cache_idx != 0) are generated on x86 platforms with AVX2 or
+// AVX-512: BF16Vec32 FP8 constructors have both AVX-512 and AVX2 implementations
+// in cpu_types_x86.hpp. Non-x86 platforms (#else fallback) have fp8=False.
 """
 
-    # x86_64 with AMX
-    header += """#if defined(CPU_CAPABILITY_AMXBF16)
-#define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, ...) \\
-  [&] { \\
-    int64_t encoded_params = encode_cpu_attn_params(HEAD_DIM, ISA_TYPE); \\
-    switch (encoded_params) { \\
-"""
-    header += generate_cases_for_isa_group(["AMX", "VEC", "VEC16"])
-    header += """
-      default: { \\
-        TORCH_CHECK(false, "Unsupported CPU attention configuration: head_dim=" + \\
-                    std::to_string(HEAD_DIM) + " isa=" + \\
-                    std::to_string(static_cast<int>(ISA_TYPE))); \\
-      } \\
-    } \\
-  }()
+    def _macro_block(guard: str, isa_list: list[str], fp8: bool) -> str:
+        """Return one CPU_ATTN_DISPATCH macro block for a given guard."""
+        enc = (
+            "    int64_t encoded_params = encode_cpu_attn_params("
+            "HEAD_DIM, ISA_TYPE, KV_CACHE_IDX); \\"
+        )
+        cases = generate_cases_for_isa_group(isa_list, include_fp8=fp8)
+        tail = (
+            "\n"
+            "      default: { \\\n"
+            "        TORCH_CHECK(false, "
+            '"Unsupported CPU attention configuration: head_dim=" + \\\n'
+            '                    std::to_string(HEAD_DIM) + " isa=" + \\\n'
+            "                    std::to_string(static_cast<int>(ISA_TYPE))"
+            " + \\\n"
+            '                    " kv_cache_idx=" + '
+            "std::to_string(KV_CACHE_IDX)); \\\n"
+            "      } \\\n"
+            "    } \\\n"
+            "  }()\n\n"
+        )
+        return (
+            f"{guard}\n"
+            "#define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, KV_CACHE_IDX, ...) \\\n"
+            "  [&] { \\\n"
+            f"{enc}\n"
+            "    switch (encoded_params) { \\\n"
+            f"{cases}"
+            f"{tail}"
+        )
 
-"""
-
-    # ARM64 with NEON
-    header += """#elif defined(__aarch64__)
-#define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, ...) \\
-  [&] { \\
-    int64_t encoded_params = encode_cpu_attn_params(HEAD_DIM, ISA_TYPE); \\
-    switch (encoded_params) { \\
-"""
-    header += generate_cases_for_isa_group(["NEON", "VEC", "VEC16"])
-    header += """
-      default: { \\
-        TORCH_CHECK(false, "Unsupported CPU attention configuration: head_dim=" + \\
-                    std::to_string(HEAD_DIM) + " isa=" + \\
-                    std::to_string(static_cast<int>(ISA_TYPE))); \\
-      } \\
-    } \\
-  }()
-
-"""
-
-    # s390x with VXE
-    header += """#elif defined(__s390x__)
-#define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, ...) \\
-  [&] { \\
-    int64_t encoded_params = encode_cpu_attn_params(HEAD_DIM, ISA_TYPE); \\
-    switch (encoded_params) { \\
-"""
-    header += generate_cases_for_isa_group(["VXE", "VEC", "VEC16"])
-    header += """
-      default: { \\
-        TORCH_CHECK(false, "Unsupported CPU attention configuration: head_dim=" + \\
-                    std::to_string(HEAD_DIM) + " isa=" + \\
-                    std::to_string(static_cast<int>(ISA_TYPE))); \\
-      } \\
-    } \\
-  }()
-
-"""
-
-    # Fallback: VEC and VEC16 only
-    header += """#else
-#define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, ...) \\
-  [&] { \\
-    int64_t encoded_params = encode_cpu_attn_params(HEAD_DIM, ISA_TYPE); \\
-    switch (encoded_params) { \\
-"""
-    header += generate_cases_for_isa_group(["VEC", "VEC16"])
-    header += """
-      default: { \\
-        TORCH_CHECK(false, "Unsupported CPU attention configuration: head_dim=" + \\
-                    std::to_string(HEAD_DIM) + " isa=" + \\
-                    std::to_string(static_cast<int>(ISA_TYPE))); \\
-      } \\
-    } \\
-  }()
-
-#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ */
-
-#endif  // CPU_ATTN_DISPATCH_GENERATED_H
-"""
+    header += _macro_block(
+        "#if defined(CPU_CAPABILITY_AMXBF16)",
+        ["AMX", "VEC", "VEC16"],
+        fp8=True,
+    )
+    header += _macro_block(
+        "#elif defined(__aarch64__)",
+        ["NEON", "VEC", "VEC16"],
+        fp8=False,
+    )
+    header += _macro_block(
+        "#elif defined(__s390x__)",
+        ["VXE", "VEC", "VEC16"],
+        fp8=False,
+    )
+    header += _macro_block(
+        "#elif defined(__AVX512F__)",
+        ["VEC", "VEC16"],
+        fp8=True,
+    )
+    header += _macro_block(
+        "#elif defined(__AVX2__)",
+        ["VEC", "VEC16"],
+        fp8=False,
+    )
+    header += _macro_block(
+        "#else",
+        ["VEC", "VEC16"],
+        fp8=False,
+    )
+    header += (
+        "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ */\n\n"
+        "#endif  // CPU_ATTN_DISPATCH_GENERATED_H\n"
+    )
 
     return header
 
