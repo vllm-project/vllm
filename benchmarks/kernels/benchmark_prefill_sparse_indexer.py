@@ -31,9 +31,7 @@ MXFP4_BLOCK_SIZE = 32
 DEEPGEMM_WORKSPACE_SIZE = 4096
 DEEPGEMM_MAX_LOGITS_MB = 16
 DEEPGEMM_MAX_LOGITS_BYTES = DEEPGEMM_MAX_LOGITS_MB * 1024 * 1024
-NUM_SMS = torch.cuda.get_device_properties(
-    torch.cuda.current_device()
-).multi_processor_count
+NUM_SMS = torch.cuda.get_device_properties().multi_processor_count
 
 
 def make_random_fp4(*prefix_shape: int) -> tuple[Tensor, Tensor]:
@@ -636,9 +634,9 @@ def run_benchmark_batch(
         impl = None
         topk_indices = None
         gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
+        torch.accelerator.empty_cache()
+        torch.accelerator.synchronize()
+        torch.accelerator.reset_peak_memory_stats()
 
         impl = impl_cls(
             block_table_cpu,
@@ -652,8 +650,8 @@ def run_benchmark_batch(
             args.topk,
         )
         topk_indices = impl.run(q_quant, q_scale, kv_cache, weights)
-        torch.cuda.synchronize()
-        peak_memory_mib = torch.cuda.max_memory_allocated() / 1024 / 1024
+        torch.accelerator.synchronize()
+        peak_memory_mib = torch.accelerator.max_memory_allocated() / 1024 / 1024
         wrong_entries, compared_entries = check_topk_result(
             topk_indices,
             expected_topk,

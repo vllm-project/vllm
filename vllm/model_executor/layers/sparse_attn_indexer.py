@@ -107,14 +107,24 @@ def sparse_attn_indexer(
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
-        values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+        use_paged_prefill = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and has_deep_gemm()
         )
-        current_workspace_manager().get_simultaneous(
-            values_spec,
-            scales_spec,
-            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-        )
+        if use_paged_prefill:
+            current_workspace_manager().get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+        else:
+            values_spec, scales_spec = _gather_workspace_shapes(
+                total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            )
+            current_workspace_manager().get_simultaneous(
+                values_spec,
+                scales_spec,
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # FP8 elements so elements == bytes
@@ -179,83 +189,126 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # Get the full shared workspace buffers once (will allocate on first use).
-        # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
-        # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
-        # scales) based on use_fp4_cache.
-        workspace_manager = current_workspace_manager()
-        values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
-        )
-        k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
-            values_spec,
-            scales_spec,
-        )
-        for chunk in prefill_metadata.chunks:
-            k_quant = k_quant_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
-
-            if not chunk.skip_kv_gather:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_quant,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                )
-
-            q_slice = q_quant[chunk.token_start : chunk.token_end]
-            q_scale_slice = (
-                q_scale[chunk.token_start : chunk.token_end]
-                if q_scale is not None
-                else None
-            )
-            # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
-            # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
+        paged_metadata = prefill_metadata.paged_metadata
+        if paged_metadata is not None:
+            # Paged prefill has already expanded each query token into its own
+            # varlen row, so it uses the decode-shaped DeepGEMM/top-k kernels.
+            paged_kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
+            num_tokens = paged_metadata.context_lens.shape[0]
+            token_slice = slice(paged_metadata.token_start, paged_metadata.token_end)
+            q_slice = q_quant[token_slice].view(num_tokens, 1, *q_quant.shape[1:])
             if use_fp4_cache:
-                q_slice_cast = q_slice.view(torch.int8)
-                k_quant_cast = k_quant.view(torch.int8)
-                k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
+                q_slice = q_slice.view(torch.int8)
+                assert q_scale is not None
+                q_scale_slice = q_scale[token_slice].view(
+                    num_tokens, 1, *q_scale.shape[1:]
+                )
             else:
-                q_slice_cast = q_slice
-                k_quant_cast = k_quant
-                k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            logits = fp8_fp4_mqa_logits(
-                (q_slice_cast, q_scale_slice),
-                (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
+                q_scale_slice = None
+
+            logits = fp8_fp4_paged_mqa_logits(
+                (q_slice, q_scale_slice),
+                paged_kv_cache,
+                weights[token_slice],
+                paged_metadata.context_lens,
+                paged_metadata.block_table,
+                paged_metadata.schedule_metadata,
+                max_model_len=paged_metadata.max_context_len,
                 clean_logits=False,
+                indices=paged_metadata.indices,
             )
-            num_rows = logits.shape[0]
-
             topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
+                paged_metadata.token_start : paged_metadata.token_end, :topk_tokens
             ]
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                1,
+                paged_metadata.context_lens,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
-            if current_platform.is_xpu():
-                xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
-                    logits,
+        if prefill_metadata.chunks:
+            # Get the full shared workspace buffers once (will allocate on first use).
+            # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
+            # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
+            # scales) based on use_fp4_cache.
+            workspace_manager = current_workspace_manager()
+            values_spec, scales_spec = _gather_workspace_shapes(
+                total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            )
+            k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
+                values_spec,
+                scales_spec,
+            )
+            for chunk in prefill_metadata.chunks:
+                k_quant = k_quant_full[: chunk.total_seq_lens]
+                k_scale = k_scale_full[: chunk.total_seq_lens]
+
+                if not chunk.skip_kv_gather:
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                    )
+
+                q_slice = q_quant[chunk.token_start : chunk.token_end]
+                q_scale_slice = (
+                    q_scale[chunk.token_start : chunk.token_end]
+                    if q_scale is not None
+                    else None
+                )
+                # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
+                # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
+                if use_fp4_cache:
+                    q_slice_cast = q_slice.view(torch.int8)
+                    k_quant_cast = k_quant.view(torch.int8)
+                    k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
+                else:
+                    q_slice_cast = q_slice
+                    k_quant_cast = k_quant
+                    k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
+                    clean_logits=False,
                 )
-            else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                num_rows = logits.shape[0]
+
+                topk_indices = topk_indices_buffer[
+                    chunk.token_start : chunk.token_end, :topk_tokens
+                ]
+
+                if current_platform.is_xpu():
+                    xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
+                else:
+                    torch.ops._C.top_k_per_row_prefill(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
