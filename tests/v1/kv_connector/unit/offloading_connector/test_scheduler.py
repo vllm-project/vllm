@@ -232,6 +232,9 @@ def test_request_preemption(request_runner, async_scheduling: bool):
         expected_stored_gpu_block_indexes=(9, 10, 11),
     )
 
+    # All stores completed before request_finished -> fence index empty.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
@@ -291,6 +294,9 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # second request will use the GPU prefix cache
     assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+    # Fence index drained: stores completed before request_finished ran.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -534,3 +540,131 @@ def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bo
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored_gpu_block_indexes=(0, 1, 2, 3, 4, 5),
     )
+    # All stores completed before request_finished -> fence index empty.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests for the per-job-store-completion design and fence invariants.
+# ---------------------------------------------------------------------------
+
+
+def test_loads_do_not_populate_fence_index(request_runner):
+    """Loads don't populate _block_id_to_pending_jobs (protected by
+    delay_free_blocks while in flight)."""
+    runner = request_runner(
+        offloaded_block_size=12,
+        gpu_block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[0] * 12)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.run(decoded_tokens=[], complete_transfers=False)
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+def test_fence_at_update_state_after_alloc(request_runner):
+    """A load reusing a finished request's pending-store block triggers
+    a flush via update_state_after_alloc's fence.
+
+    num_gpu_blocks=2 forces the BlockPool to give req2 the same block
+    req1 just freed.
+    """
+    runner = request_runner(
+        offloaded_block_size=4,
+        gpu_block_size=4,
+        num_gpu_blocks=2,
+        async_scheduling=False,
+    )
+
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+    assert runner.connector_scheduler._block_id_to_pending_jobs
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * 4)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output([])
+    )
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+        expected_stored_gpu_block_indexes=(0,),
+        expected_flushed_gpu_block_indexes=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+def test_fence_at_build_store_jobs(request_runner):
+    """A new prefill (no load -> update_state_after_alloc returns early)
+    reusing a finished request's pending-store block is flushed by
+    _build_store_jobs's fence."""
+    runner = request_runner(
+        offloaded_block_size=4,
+        gpu_block_size=4,
+        num_gpu_blocks=2,
+        async_scheduling=False,
+    )
+
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+    assert runner.connector_scheduler._block_id_to_pending_jobs
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[1] * 4)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 0
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output([])
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0,),
+        expected_flushed_gpu_block_indexes=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
+    """complete_store fires per-job, not deferred to request finish.
+    Each call carries only that store's keys."""
+    offloaded_block_size = 12
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    # First store: fires when block 0 is fully populated.
+    runner.run(decoded_tokens=[0, 0], expected_stored_gpu_block_indexes=(0, 1, 2))
+    assert runner.manager.complete_store.call_count == 1
+    first_call_keys = set(runner.manager.complete_store.call_args.args[0])
+    assert len(first_call_keys) == 1
+    runner.manager.complete_store.reset_mock()
+
+    # Second store: fires when block 1 is fully populated, with different keys.
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size + 1),
+        expected_stored_gpu_block_indexes=(3, 4, 5),
+    )
+    assert runner.manager.complete_store.call_count == 1
+    second_call_keys = set(runner.manager.complete_store.call_args.args[0])
+    assert first_call_keys != second_call_keys
+    runner.manager.complete_store.reset_mock()
+
+    # Finish: no store pending -> no further call.
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    assert runner.manager.complete_store.call_count == 0
