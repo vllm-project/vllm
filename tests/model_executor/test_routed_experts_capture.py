@@ -41,7 +41,9 @@ class DummyRouter(BaseRouter):
     def routing_method_type(self) -> RoutingMethodType:
         return RoutingMethodType.FUSED_TOPK
 
-    def _compute_routing(self, hidden_states, router_logits, indices_type):
+    def _compute_routing(
+        self, hidden_states, router_logits, indices_type, *, input_ids=None
+    ):
         topk_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
         topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
         return topk_weights, topk_ids

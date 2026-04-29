@@ -1782,6 +1782,8 @@ class rocm_aiter_ops:
         need_renorm: bool,
         routed_scaling_factor: float = 1.0,
     ) -> None:
+        if correction_bias.dtype != gating_output.dtype:
+            correction_bias = correction_bias.to(gating_output.dtype)
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
             correction_bias,
