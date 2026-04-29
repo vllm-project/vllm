@@ -60,7 +60,20 @@ Key points from the PyTorch security guide:
 - Implement proper authentication and authorization for management interfaces
 - Follow the principle of least privilege for all system components
 
-### 4. **Restrict Domains Access for Media URLs:**
+### 4. **Outlines Disk Cache:**
+
+The V1 outlines structured output backend uses an in-memory cache by default.
+The optional on-disk cache is enabled only with
+`VLLM_V1_USE_OUTLINES_CACHE=1` and requires installing optional `diskcache`
+through the vLLM `outlines-cache` extra.
+
+Only enable this cache when the outlines cache directory is writable by trusted
+users. If `OUTLINES_CACHE_DIR` is not set, vLLM falls back to the user's cache
+directory, or to the system temp directory in container-like environments
+without a usable home directory. Avoid shared, world-writable, or untrusted
+cache volumes for this feature.
+
+### 5. **Restrict Domains Access for Media URLs:**
 
 Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
