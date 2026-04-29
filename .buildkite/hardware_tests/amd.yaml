@@ -29,7 +29,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 1
 
-  - label: "AMD: :package: build test artifacts"
+  - label: "AMD: :docker: build test image and artifacts"
     key: image-build-amd
     depends_on:
       - ensure-ci-base-amd
@@ -37,12 +37,13 @@ steps:
     no_plugin: true
     commands:
       - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base pull failed, continuing with ci-bake-rocm.sh"
-      - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
+      - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
     env:
       DOCKER_BUILDKIT: "1"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       CI_HCL_URL: "https://raw.githubusercontent.com/vllm-project/ci-infra/${VLLM_CI_BRANCH:-main}/docker/ci-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       CI_BASE_IMAGE: "rocm/vllm-dev:ci_base"
+      IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
       REMOTE_VLLM: "1"
       VLLM_BRANCH: "$BUILDKITE_COMMIT"

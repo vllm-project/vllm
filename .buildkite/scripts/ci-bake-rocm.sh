@@ -434,6 +434,12 @@ maybe_skip_existing_image() {
             return 0
         fi
 
+        if should_upload_wheel_artifacts; then
+            echo "Commit image already exists: ${IMAGE_TAG}"
+            echo "Continuing build because this target uploads per-build ROCm artifacts"
+            return 0
+        fi
+
         echo "Commit image already exists: ${IMAGE_TAG}"
         echo "Skipping build"
         exit 0
