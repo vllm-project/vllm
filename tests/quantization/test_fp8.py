@@ -24,6 +24,8 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 MODELS = [
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
     # The checkpoint below was removed from the HF.
@@ -314,7 +316,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Note that we use a shape % 4 != 0 to cover edge cases,
     # because scaled_fp8_quant is vectorized by 4.
-    x = (torch.randn(size=(11, 11), device="cuda") * 13).to(dtype)
+    x = (torch.randn(size=(11, 11), device=DEVICE_TYPE) * 13).to(dtype)
 
     # Dynamic quantization
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
@@ -338,7 +340,9 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # non-contiguous input with padding
     m, n, padded_stride = 975, 512, 576
-    padded_tensor = (torch.randn(size=(m, padded_stride), device="cuda") * 13).to(dtype)
+    padded_tensor = (torch.randn(size=(m, padded_stride), device=DEVICE_TYPE) * 13).to(
+        dtype
+    )
     x_nc = padded_tensor[:, :n]  # shape (m, n) with stride (padded_stride, 1)
 
     assert not x_nc.is_contiguous()
@@ -409,7 +413,7 @@ def test_fp8_reloading(
 
     # Set model config as model_config.dtype is required in Fp8LinearMethod.
     default_vllm_config.model_config = ModelConfig()
-    with torch.device("cuda:0"):
+    with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             weight_block_size=weight_block_size,

@@ -41,9 +41,9 @@ if current_platform.is_cuda_alike():
             DeepEPLLPrepareAndFinalize,
         )
     if has_mori():
-        from .mori_prepare_finalize import MoriPrepareAndFinalize
+        from .prepare_finalize.mori import MoriPrepareAndFinalize
     if has_nixl_ep():
-        from .nixl_ep_prepare_finalize import (
+        from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
@@ -117,17 +117,20 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
+            device_communicator = get_ep_group().device_communicator
+            assert device_communicator is not None
+            assert device_communicator.all2all_manager is not None
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
-                num_dispatchers=(
-                    get_ep_group().device_communicator.all2all_manager.world_size
-                ),
+                num_dispatchers=(device_communicator.all2all_manager.world_size),
                 use_monolithic=use_monolithic,
             )
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    all2all_manager = get_ep_group().device_communicator.all2all_manager
+    device_communicator = get_ep_group().device_communicator
+    assert device_communicator is not None
+    all2all_manager = device_communicator.all2all_manager
     assert all2all_manager is not None
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
@@ -225,6 +228,14 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_fi_nvl_one_sided_kernels:
         assert quant_config is not None
+        if quant_config.quant_dtype != "nvfp4":
+            raise ValueError(
+                "The 'flashinfer_nvlink_one_sided' all2all backend only "
+                "supports nvfp4 activation quantization, but got "
+                f"quant_dtype={quant_config.quant_dtype!r}. Use a different "
+                "all2all backend (e.g. 'flashinfer_nvlink_two_sided' or "
+                "'allgather_reducescatter') for non-nvfp4 models."
+            )
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
