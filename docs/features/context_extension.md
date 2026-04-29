@@ -6,12 +6,12 @@ This directory contains examples for extending the context length of models usin
 
 ## Offline Inference Example
 
-The [`context_extension.py`](../../examples/offline_inference/context_extension) script demonstrates how to extend the context length of a Qwen model using the YARN method (rope_parameters) and run a simple chat example.
+The [`context_extension.py`](../../examples/features/context_extension/context_extension_offline.py) script demonstrates how to extend the context length of a Qwen model using the YARN method (rope_parameters) and run a simple chat example.
 
 ### Usage
 
 ```bash
-python examples/offline_inference/context_extension.py
+python examples/features/context_extension/context_extension_offline.py
 ```
 
 ## OpenAI Online Method
