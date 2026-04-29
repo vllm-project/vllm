@@ -134,7 +134,7 @@ struct enable_sm120_family : Kernel {
   #if (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300)
     Kernel::operator()(std::forward<Args>(args)...);
   #else
-    printf("This kernel only supports sm110f or sm120f.\n");
+    printf("This kernel only supports sm120f.\n");
     asm("trap;");
   #endif
 #endif
