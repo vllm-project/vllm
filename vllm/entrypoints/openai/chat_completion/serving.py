@@ -1212,20 +1212,13 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 return (
                     ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content="",
-                        tool_calls=items,
+                        role=role, reasoning=reasoning, content="", tool_calls=items
                     ),
                     False,
                     history_tool_call_cnt,
                 )
             return (
-                ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content or "",
-                ),
+                ChatMessage(role=role, reasoning=reasoning, content=content),
                 False,
                 history_tool_call_cnt,
             )
@@ -1237,20 +1230,13 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 return (
                     ChatMessage(
-                        role=role,
-                        content="",
-                        tool_calls=items,
-                        reasoning=reasoning,
+                        role=role, content="", tool_calls=items, reasoning=reasoning
                     ),
                     False,
                     history_tool_call_cnt,
                 )
             return (
-                ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content or "",
-                ),
+                ChatMessage(role=role, reasoning=reasoning, content=content),
                 False,
                 history_tool_call_cnt,
             )
@@ -1307,7 +1293,13 @@ class OpenAIServingChat(OpenAIServing):
         """Determine the finish_reason for a non-streaming choice."""
         if auto_tools_called:
             return "tool_calls"
-        if request.tool_choice == "required" and output.finish_reason == "stop":
+        if (
+            request.tool_choice not in ["none", "auto"]
+            and output.finish_reason == "stop"
+        ):
+            # openai spec: For named/required tool choices,
+            # if the model stopped because it made a tool call,
+            # we override the finish reason to "tool_calls".
             return "tool_calls"
         return output.finish_reason if output.finish_reason else "stop"
 
