@@ -268,7 +268,7 @@ class TieringOffloadingManager(OffloadingManager):
         job_metadata = JobMetadata(
             job_id=job_id,
             keys=primary_store_result.keys_to_store,
-            spec=primary_store_result.store_spec,
+            block_ids=primary_store_result.store_spec.block_ids,
             req_context=req_context,
         )
         self._load_jobs[job_id] = job_metadata
@@ -408,7 +408,9 @@ class TieringOffloadingManager(OffloadingManager):
 
             # Track this store job
             job_metadata = JobMetadata(
-                job_id=job_id, keys=keys_list, spec=primary_blocks_spec
+                job_id=job_id,
+                keys=keys_list,
+                block_ids=primary_blocks_spec.block_ids,
             )
             self._store_jobs[job_id] = job_metadata
 

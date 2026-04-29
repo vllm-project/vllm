@@ -14,6 +14,7 @@ These tests verify:
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -22,7 +23,6 @@ from vllm.v1.kv_offload.abstract import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.example import ExampleSecondaryTier
 from vllm.v1.kv_offload.tiering.manager import (
@@ -113,7 +113,7 @@ class TestExampleSecondaryTier:
             JobMetadata(
                 job_id=1,
                 keys=[new_block],
-                spec=CPULoadStoreSpec([0]),
+                block_ids=np.array([0], dtype=np.int64),
             )
         )
 
@@ -141,7 +141,7 @@ class TestExampleSecondaryTier:
             JobMetadata(
                 job_id=1,
                 keys=blocks,
-                spec=CPULoadStoreSpec([0, 1]),
+                block_ids=np.array([0, 1], dtype=np.int64),
             )
         )
 

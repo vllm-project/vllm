@@ -8,7 +8,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
-from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadKey, ReqContext
+import numpy as np
+
+from vllm.v1.kv_offload.abstract import OffloadKey, ReqContext
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -20,7 +22,7 @@ class JobMetadata:
 
     job_id: JobId
     keys: Sequence[OffloadKey]
-    spec: LoadStoreSpec
+    block_ids: np.ndarray
     req_context: ReqContext = field(default_factory=ReqContext)
 
 
@@ -73,7 +75,7 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         The caller (TieringOffloadingManager) must have already called
-        primary.prepare_read(keys) to obtain job_metadata.spec and
+        primary.prepare_read(keys) to obtain job_metadata.block_ids and
         to increment ref_cnt on those blocks. ref_cnt will be decremented
         when get_finished() reports this job_id as complete and
         primary.unprepare_read() is called.
@@ -87,9 +89,8 @@ class SecondaryTierManager(ABC):
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
-                          spec for reading blocks from the primary tier
+                          block_ids for reading blocks from the primary tier
                           (obtained via primary.prepare_read()).
-                          spec is a CPULoadStoreSpec with block_ids.
         """
         pass
 
@@ -104,16 +105,15 @@ class SecondaryTierManager(ABC):
         the calling thread.
 
         The caller (TieringOffloadingManager) must have already called
-        primary.prepare_write(keys) to obtain job_metadata.spec and
+        primary.prepare_write(keys) to obtain job_metadata.block_ids and
         to allocate space in the primary tier. When get_finished() reports
         this job_id as complete, primary.complete_write() is called to make
         the blocks available for GPU loads.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
-                          spec for writing blocks into the primary tier
+                          block_ids for writing blocks into the primary tier
                           (obtained via primary.prepare_write()).
-                          spec is a CPULoadStoreSpec with block_ids.
         """
         pass
 

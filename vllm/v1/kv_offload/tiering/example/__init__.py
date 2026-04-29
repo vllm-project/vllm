@@ -14,7 +14,6 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from vllm.v1.kv_offload.abstract import OffloadKey, ReqContext
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
@@ -102,15 +101,10 @@ class ExampleSecondaryTier(SecondaryTierManager):
         """
         job_id = job_metadata.job_id
         keys = job_metadata.keys
-        primary_read_spec = job_metadata.spec
+        block_ids = job_metadata.block_ids
 
-        # Validate spec type and consistency
-        assert isinstance(primary_read_spec, CPULoadStoreSpec), (
-            f"Expected CPULoadStoreSpec, got {type(primary_read_spec)}"
-        )
-        assert len(keys) == len(primary_read_spec.block_ids), (
-            f"Length mismatch: {len(keys)} keys but "
-            f"{len(primary_read_spec.block_ids)} block_ids in spec"
+        assert len(keys) == len(block_ids), (
+            f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
 
         # Filter out blocks already present
@@ -166,15 +160,10 @@ class ExampleSecondaryTier(SecondaryTierManager):
         """
         job_id = job_metadata.job_id
         keys = job_metadata.keys
-        primary_write_spec = job_metadata.spec
+        block_ids = job_metadata.block_ids
 
-        # Validate spec type and consistency
-        assert isinstance(primary_write_spec, CPULoadStoreSpec), (
-            f"Expected CPULoadStoreSpec, got {type(primary_write_spec)}"
-        )
-        assert len(keys) == len(primary_write_spec.block_ids), (
-            f"Length mismatch: {len(keys)} keys but "
-            f"{len(primary_write_spec.block_ids)} block_ids in spec"
+        assert len(keys) == len(block_ids), (
+            f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
 
         # Verify all blocks exist
