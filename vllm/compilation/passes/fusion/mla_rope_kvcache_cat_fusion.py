@@ -100,6 +100,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 head_size=self.qk_rope_head_dim,
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
+                use_flashinfer=self.use_flashinfer,
             )
         else:
             self.rope_matcher = MatcherRotaryEmbedding(  # type: ignore

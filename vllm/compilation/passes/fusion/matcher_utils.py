@@ -183,6 +183,7 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
+        self.use_flashinfer = use_flashinfer
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
@@ -197,6 +198,16 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_flashinfer:
+            torch.ops.vllm.flashinfer_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox,
+            )
+            return query, key
         result: tuple[torch.Tensor, torch.Tensor | None] = (
             DeepseekScalingRotaryEmbedding.forward_static(
                 positions,
