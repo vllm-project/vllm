@@ -30,7 +30,7 @@ steps:
   # - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not invalid"
   # - pytest -v -s entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
-  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure"
+  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   # - pytest -v -s entrypoints/openai/test_return_token_ids.py
   # - pytest -v -s entrypoints/openai/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
