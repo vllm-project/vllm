@@ -172,10 +172,13 @@ class LlamaModel(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
+            num_aux_layers = len(
+                getattr(self.config, "eagle_aux_hidden_state_layer_ids", [])
+            ) or 3
             if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = self.config.target_hidden_size * 3
+                fc_input_size = self.config.target_hidden_size * num_aux_layers
             else:
-                fc_input_size = self.config.hidden_size * 3
+                fc_input_size = self.config.hidden_size * num_aux_layers
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
                     fc_input_size,
