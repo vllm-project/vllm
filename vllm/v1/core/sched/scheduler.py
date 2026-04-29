@@ -463,25 +463,55 @@ class Scheduler(SchedulerInterface):
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
-                while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
-                    )
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request,
+                    num_new_tokens,
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                )
 
-                    if new_blocks is not None:
-                        # The request can be scheduled.
-                        break
-
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
+                if new_blocks is None:
                     if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
+                        req_candidates = []
+                        for candidate in sorted(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
-                        )
-                        self.running.remove(preempted_req)
+                            reverse=True,
+                        ):
+                            if candidate == request:
+                                break
+                            req_candidates.append(candidate)
+                    else:
+                        req_candidates = list(reversed(self.running[req_index + 1 :]))
+
+                    num_reqs_to_preempt = self._get_num_reqs_to_preempt_for_decode_step(
+                        request,
+                        req_candidates,
+                        num_new_tokens,
+                    )
+                    assert num_reqs_to_preempt != 0, (
+                        "allocate_slots failed even though the request appears "
+                        "to fit without preemption"
+                    )
+
+                    if num_reqs_to_preempt is None:
+                        self.running.remove(request)
+                        self._preempt_request(request, scheduled_timestamp)
+                        preempted_reqs.append(request)
+                        # Like the earlier zero-token path, we allow later requests
+                        # to continue running to prevent unnecessary preemption even
+                        # though it breaks strict FCFS scheduling.
+                        continue
+                    else:
+                        requests_to_preempt = req_candidates[:num_reqs_to_preempt]
+
+                    for preempted_req in requests_to_preempt:
+                        if self.policy == SchedulingPolicy.PRIORITY:
+                            preempted_idx = self.running.index(preempted_req)
+                            self.running.pop(preempted_idx)
+                            if preempted_idx < req_index:
+                                req_index -= 1
+                        else:
+                            self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
@@ -499,19 +529,18 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
-                            req_index -= 1
-                    else:
-                        preempted_req = self.running.pop()
+                        self._preempt_request(preempted_req, scheduled_timestamp)
+                        preempted_reqs.append(preempted_req)
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
-                    preempted_reqs.append(preempted_req)
-                    if preempted_req == request:
-                        # No more request to preempt. Cannot schedule this request.
-                        break
-
-            if new_blocks is None:
-                # Cannot schedule this request.
-                break
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens,
+                    )
+                    assert new_blocks is not None, (
+                        "allocate_slots failed after preempting the request "
+                        "prefix selected by the scheduler"
+                    )
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -983,6 +1012,46 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
+
+    def _get_num_reqs_to_preempt_for_decode_step(
+        self,
+        request: Request,
+        reqs_in_order: list[Request],
+        num_new_tokens: int,
+    ) -> int | None:
+        """Return the minimal number of requests to preempt to fit the current request.
+
+        Returns None if even preempting all requests would still be insufficient.
+        """
+        num_blocks_to_allocate = (
+            self.kv_cache_manager.get_num_blocks_to_allocate_for_decode_step(
+                request,
+                num_new_tokens,
+                self.num_lookahead_tokens,
+            )
+        )
+        free_blocks = self.kv_cache_manager.get_num_free_blocks()
+        if num_blocks_to_allocate <= free_blocks:
+            return 0
+
+        simulated_ref_cnts: dict[int, int] = {}
+        reclaimable_blocks = 0
+        for req_index, req in enumerate(reqs_in_order, start=1):
+            for group in self.kv_cache_manager.get_blocks(req.request_id).blocks:
+                for block in group:
+                    if block.is_null:
+                        continue
+                    new_ref_cnt = (
+                        simulated_ref_cnts.get(block.block_id, block.ref_cnt) - 1
+                    )
+                    simulated_ref_cnts[block.block_id] = new_ref_cnt
+                    if new_ref_cnt == 0:
+                        reclaimable_blocks += 1
+
+            if free_blocks + reclaimable_blocks >= num_blocks_to_allocate:
+                return req_index
+
+        return None
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER

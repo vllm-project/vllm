@@ -2189,6 +2189,87 @@ def test_priority_scheduling_preemption():
     )
 
 
+def test_priority_scheduling_avoids_futile_lower_priority_preemption():
+    """If the current request cannot fit even after preempting every
+    lower-priority running request, only the current request should be
+    preempted.
+
+    This test seeds the running queue directly with three requests sharing the
+    same two KV blocks, simulating a prefix-cached/shared-block scenario:
+      - hi1 (priority 0) is the current request and needs a 3rd block.
+      - lo1/lo2 are lower-priority requests that only need their existing 2
+        blocks.
+      - There are no free blocks.
+
+    Because all live blocks are shared with hi1, preempting lo1 and lo2 frees
+    nothing. The only correct behavior is to preempt hi1 directly, leave the
+    lower-priority requests resident, and continue scheduling them.
+    """
+    block_size = 16
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=200,
+        num_blocks=3,  # 1 null block + 2 usable blocks
+        block_size=block_size,
+    )
+
+    hi1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=33,
+        req_ids=["hi1"],
+    )[0]
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=32,
+        req_ids=["lo1"],
+    )[0]
+    lo2 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[6],
+        arrival_times=[2.0],
+        num_tokens=32,
+        req_ids=["lo2"],
+    )[0]
+
+    for req, num_computed_tokens in ((hi1, 32), (lo1, 31), (lo2, 31)):
+        req.status = RequestStatus.RUNNING
+        req.num_computed_tokens = num_computed_tokens
+        scheduler.requests[req.request_id] = req
+
+    scheduler.running = [hi1, lo1, lo2]
+
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    block_pool = scheduler.kv_cache_manager.block_pool
+    shared_blocks = block_pool.get_new_blocks(2)
+
+    manager.req_to_blocks[hi1.request_id].extend(shared_blocks)
+    manager.num_cached_block[hi1.request_id] = len(shared_blocks)
+
+    for req in (lo1, lo2):
+        block_pool.touch(shared_blocks)
+        manager.req_to_blocks[req.request_id].extend(shared_blocks)
+        manager.num_cached_block[req.request_id] = len(shared_blocks)
+
+    assert block_pool.get_num_free_blocks() == 0
+    assert [block.ref_cnt for block in shared_blocks] == [3, 3]
+
+    scheduler_output = scheduler.schedule()
+
+    assert hi1.status == RequestStatus.PREEMPTED
+    assert lo1.status == RequestStatus.RUNNING
+    assert lo2.status == RequestStatus.RUNNING
+    assert [req.request_id for req in scheduler.running] == ["lo1", "lo2"]
+    assert scheduler_output.num_scheduled_tokens == {"lo1": 1, "lo2": 1}
+    assert lo1.num_computed_tokens == 32
+    assert lo2.num_computed_tokens == 32
+    assert block_pool.get_num_free_blocks() == 0
+    assert [block.ref_cnt for block in shared_blocks] == [2, 2]
+
+
 def test_priority_scheduling_no_preemption_when_space_available():
     """Test that preemption doesn't happen
     when there's space for new requests."""

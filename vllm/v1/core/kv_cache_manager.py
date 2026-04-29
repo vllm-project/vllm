@@ -261,6 +261,35 @@ class KVCacheManager:
 
         return num_blocks_to_allocate <= self.block_pool.get_num_free_blocks()
 
+    def get_num_blocks_to_allocate_for_decode_step(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_lookahead_tokens: int = 0,
+    ) -> int:
+        """Return the block delta for the current decode-step frontier.
+        This is a thin sizing utility for scheduler-side decode logic.
+        """
+        total_computed_tokens = request.num_computed_tokens
+        num_tokens_main_model = total_computed_tokens + num_new_tokens
+        num_tokens_need_slot = min(
+            num_tokens_main_model + num_lookahead_tokens,
+            self.max_model_len,
+        )
+
+        return self.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=num_tokens_need_slot,
+            new_computed_blocks=self.empty_kv_cache_blocks.blocks,
+            num_encoder_tokens=0,
+            total_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=num_tokens_main_model,
+        )
+
+    def get_num_free_blocks(self) -> int:
+        """Return the number of free KV-cache blocks."""
+        return self.block_pool.get_num_free_blocks()
+
     def allocate_slots(
         self,
         request: Request,
