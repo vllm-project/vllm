@@ -3403,6 +3403,9 @@ def cpu_attn_reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     isa: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
@@ -3411,6 +3414,9 @@ def cpu_attn_reshape_and_cache(
         value_cache,
         slot_mapping,
         isa,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 
@@ -3429,6 +3435,9 @@ def cpu_attention_with_kv_cache(
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache(
         query,
@@ -3446,6 +3455,9 @@ def cpu_attention_with_kv_cache(
         softcap,
         scheduler_metadata,
         s_aux,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 
