@@ -173,7 +173,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirements/test/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/dev.txt && \
+    uv pip install -r requirements/lint.txt && \
+    uv pip install -r requirements/test/cpu.txt && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 ENTRYPOINT ["bash"]

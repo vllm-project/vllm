@@ -5,12 +5,13 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
-from vllm.entrypoints.pooling.classify.serving import ServingClassification
 from vllm.entrypoints.utils import (
     load_aware_call,
     with_cancellation,
 )
+
+from .protocol import ClassificationRequest
+from .serving import ServingClassification
 
 router = APIRouter()
 

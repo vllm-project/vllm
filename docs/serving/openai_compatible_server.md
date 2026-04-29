@@ -60,7 +60,7 @@ We currently support the following OpenAI APIs:
 - [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Realtime API](#realtime-api) (`/v1/realtime`)
-    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#realtime-transcription).
 
 In addition, we have the following custom APIs:
 
@@ -251,7 +251,7 @@ The following extra parameters are supported:
 Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/online_serving/openai_responses_client_with_tools.py)
+Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/tool_calling/openai_responses_client_with_tools.py)
 
 #### Extra parameters
 
@@ -279,7 +279,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 !!! note
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
-Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
+Code example: [examples/speech_to_text/openai/openai_transcription_client.py](../../examples/speech_to_text/openai/openai_transcription_client.py)
 
 NOTE: beam search is currently supported in the transcriptions endpoint for encoder-decoder multimodal models, e.g., whisper, but highly inefficient as work for handling the encoder/decoder cache is actively ongoing. This is an active point of ongoing optimization and will be handled properly in the very near future.
 
@@ -397,7 +397,7 @@ Please mind that the popular `openai/whisper-large-v3-turbo` model does not supp
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
-Code example: [examples/online_serving/openai_translation_client.py](../../examples/online_serving/openai_translation_client.py)
+Code example: [examples/speech_to_text/openai/openai_translation_client.py](../../examples/speech_to_text/openai/openai_translation_client.py)
 
 #### Extra Parameters
 
@@ -467,28 +467,11 @@ It consists of two endpoints:
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
-### Score API
-
-#### Score Template
-
-Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](#chat-template)).
-
-Score templates are supported for **cross-encoder** models only. If you are using an **embedding** model for scoring, vLLM does not apply a score template.
-
-Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
-
-- **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
-- **Document**: `{{ (messages | selectattr("role", "eq", "document") | first).content }}`
-
-This approach is more robust than index-based access (`messages[0]`, `messages[1]`) because it selects messages by their semantic role. It also avoids assumptions about message ordering if additional message types are added to `messages` in the future.
-
-Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja)
-
 ### Generative Scoring API
 
 The `/generative_scoring` endpoint uses a CausalLM model (e.g., Llama, Qwen, Mistral) to compute the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
 
-This endpoint is automatically available when the server is started with a generative model (task `"generate"`). It is separate from the pooling-based [Score API](#score-api), which uses cross-encoder, bi-encoder, or late-interaction models.
+This endpoint is automatically available when the server is started with a generative model (task `"generate"`). It is separate from the pooling-based [Score API](../models/pooling_models/scoring.md#score-api), which uses cross-encoder, bi-encoder, or late-interaction models.
 
 **Requirements:**
 

@@ -4,11 +4,11 @@ import logging
 import math
 import random
 
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchaudio.functional import melscale_fbanks
 from transformers import AutoFeatureExtractor, AutoProcessor, BatchFeature
 from transformers.feature_extraction_sequence_utils import (
     SequenceFeatureExtractor,
@@ -129,17 +129,15 @@ class FilterbankFeatures(nn.Module):
         self.pad_min_duration = 0.0
         self.pad_direction = "both"
 
-        filterbanks = torch.tensor(
-            librosa.filters.mel(
-                sr=sample_rate,
-                n_fft=self.n_fft,
-                n_mels=nfilt,
-                fmin=lowfreq,
-                fmax=highfreq,
-                norm=mel_norm,
-            ),
-            dtype=torch.float,
-        ).unsqueeze(0)
+        filterbanks = melscale_fbanks(
+            n_freqs=self.n_fft // 2 + 1,
+            f_min=lowfreq,
+            f_max=highfreq,
+            n_mels=nfilt,
+            sample_rate=sample_rate,
+            norm=mel_norm,
+            mel_scale="slaney",
+        ).T.unsqueeze(0)
         self.register_buffer("fb", filterbanks)
 
         # Calculate maximum sequence length
