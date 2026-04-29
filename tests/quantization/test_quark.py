@@ -385,3 +385,78 @@ def test_mxfp4_dequant_kernel_match_quark(
     out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
 
     assert torch.equal(out_hip, out_torch)
+
+
+def test_moe_emulation_w_mxfp4_a_mxfp4():
+    """w_mxfp4_a_mxfp4 on gfx950 (supports_mx + aiter) must not fall back
+    to emulation — it should use the native AITER CK path."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig, MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+
+    weight_config = {"dtype": "fp4", "qscheme": "per_group", "is_dynamic": False}
+    input_config = {"dtype": "fp4", "qscheme": "per_group", "is_dynamic": True}
+
+    parallel_config = FusedMoEParallelConfig(
+        tp_size=1,
+        pcp_size=1,
+        dp_size=1,
+        ep_size=1,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=False,
+        all2all_backend="",
+        enable_eplb=False,
+    )
+    moe = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size_per_partition=512,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device="gpu",
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=parallel_config,
+        in_dtype=torch.bfloat16,
+    )
+
+    mock_vllm_config = MagicMock()
+
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.quark.quark_moe.current_platform"
+        ) as mock_platform,
+        patch(
+            "vllm.model_executor.layers.quantization.quark.quark_moe.rocm_aiter_ops"
+        ) as mock_aiter,
+        patch(
+            "vllm.model_executor.layers.quantization.quark.quark_moe"
+            ".get_current_vllm_config",
+            return_value=mock_vllm_config,
+        ),
+    ):
+        mock_platform.supports_mx.return_value = True
+        mock_aiter.is_fused_moe_enabled.return_value = True
+
+        method = QuarkOCP_MX_MoEMethod(
+            weight_config=weight_config,
+            input_config=input_config,
+            moe=moe,
+        )
+
+    assert method.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+    assert method.emulate is False, (
+        "w_mxfp4_a_mxfp4 on gfx950 (supports_mx + aiter) must not emulate"
+    )
