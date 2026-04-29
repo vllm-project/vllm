@@ -32,6 +32,18 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningParser",
     ),
+    "poolside_v1": (
+        "poolside_v1_reasoning_parser",
+        "PoolsideV1ReasoningParser",
+    ),
+    "cohere_command3": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand3ReasoningParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand4ReasoningParser",
+    ),
     "ernie45": (
         "ernie45_reasoning_parser",
         "Ernie45ReasoningParser",
