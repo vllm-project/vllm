@@ -82,6 +82,15 @@ INDUCTOR_GRAPH_PARTITION = [
     pytest.param(False, id="dynamo_partition"),
 ]
 
+# Maps match_name -> pass_name keys in VllmPatternMatcherPass.match_table.
+# Passes listed here are verified via match_table totals instead of log regex.
+MATCH_TABLE_KEYS: dict[str, list[str]] = {
+    "act_quant_fusion": ["activation_quant_fusion_pass"],
+    "attn_quant_fusion": ["attn_quant_fusion", "mla_attn_quant_fusion"],
+    "norm_rope_fusion": ["qk_norm_rope_fusion_pass"],
+    "async_tp": ["async_tp_pass"],
+}
+
 FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     "aiter_rms_quant_fusion": re.compile(
         r"RocmAiterRMSNormQuantFusionPass Replaced (\d+) patterns"

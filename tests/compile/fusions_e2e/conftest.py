@@ -9,7 +9,7 @@ import regex as re
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
-from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
+from .common import FUSION_LOG_PATTERNS, MATCH_TABLE_KEYS, AttentionBackendCase, Matches
 
 
 def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
@@ -191,10 +191,8 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             else:
                 num_ranges_activated = num_compile_ranges
 
-            # TODO: Remove log counting in unit tests
-            # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
+            if match_name not in MATCH_TABLE_KEYS:
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
@@ -217,24 +215,24 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Expecting at least {expected_matches - matches.ar_rms_fusion} "
                     f"where ar+rms+quant was activated"
                 )
-            elif (
-                match_name == "async_tp"
-                and "sequence_parallel" in matches_check
-                and num_compile_ranges >= 2
-            ):
-                # AsyncTP only finds patterns on ranges where SP ran.
-                n_sp_ranges = num_compile_ranges - 1
-                assert (
-                    sum(m == expected_matches for m in log_matches)
-                    == tp_size * n_sp_ranges
-                ), (
-                    f"Expecting {expected_matches} async_tp on "
-                    f"{tp_size * n_sp_ranges} SP-range entries, "
-                    f"found: {log_matches}"
+            elif match_name in MATCH_TABLE_KEYS:
+                actual_match = sum(
+                    match_table.get(k, 0) for k in MATCH_TABLE_KEYS[match_name]
                 )
-                assert sum(m == 0 for m in log_matches) == tp_size, (
-                    f"Expecting 0 async_tp on {tp_size} small-range entries "
-                    f"(no SP), found: {log_matches}"
+                if (
+                    match_name == "async_tp"
+                    and "sequence_parallel" in matches_check
+                    and num_compile_ranges >= 2
+                ):
+                    # AsyncTP only finds patterns on ranges where SP ran.
+                    expected_total = (
+                        expected_matches * tp_size * (num_compile_ranges - 1)
+                    )
+                else:
+                    expected_total = expected_matches * n_expected
+                assert actual_match == expected_total, (
+                    f"Could not find {expected_total} "
+                    f"{match_name} (found {actual_match})."
                 )
             elif (
                 match_name == "ar_rms_fusion"
@@ -255,20 +253,6 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"entries (SP took precedence), found: {log_matches}"
                 )
 
-            elif match_name == "act_quant_fusion":
-                actual_match = match_table.get("activation_quant_fusion_pass", 0)
-                assert actual_match == expected_matches * n_expected, (
-                    f"Could not find {expected_matches * n_expected} "
-                    f"{match_name} (found {actual_match})."
-                )
-            elif match_name == "attn_quant_fusion":
-                actual_match = match_table.get(
-                    "attn_quant_fusion", 0
-                ) + match_table.get("mla_attn_quant_fusion", 0)
-                assert actual_match == expected_matches * n_expected, (
-                    f"Could not find {expected_matches * n_expected} "
-                    f"{match_name} (found {actual_match})."
-                )
             else:
                 expected_matches_list = [expected_matches] * n_expected
                 assert sorted(log_matches) == expected_matches_list, (
