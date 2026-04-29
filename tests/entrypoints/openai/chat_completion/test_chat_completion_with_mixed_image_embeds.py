@@ -10,8 +10,11 @@ import json
 import openai
 import pytest
 import pytest_asyncio
+import safetensors
 import torch
-from transformers import Qwen2VLForConditionalGeneration
+import torch.nn as nn
+from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer
 
 from tests.utils import RemoteOpenAIServer
 from vllm.assets.image import ImageAsset
@@ -70,20 +73,28 @@ def image_url() -> str:
 
 
 @pytest.fixture(scope="module")
-def aligned_content_and_embeds_b64(hf_runner) -> tuple[str, str]:
+def aligned_content_and_embeds_b64() -> tuple[str, str]:
     """`(content, base64_embeds)` where the embeddings are the model's
-    embedding of `content` tokenized WITHOUT special tokens."""
+    embedding of `content` tokenized WITHOUT special tokens.
+
+    Loads only the `embed_tokens` shard from disk on CPU instead of the full
+    model on GPU, so the fixture has zero VRAM footprint and won't contend
+    with the running vLLM server.
+    """
     content = "Describe this image."
-    with hf_runner(
-        MODEL_NAME,
-        auto_cls=Qwen2VLForConditionalGeneration,
-    ) as hf_model:
-        ids = hf_model.tokenizer(
-            content, add_special_tokens=False, return_tensors="pt"
-        ).input_ids
-        ids = hf_model.wrap_device({"input_ids": ids})["input_ids"]
-        embed_layer = hf_model.model.get_input_embeddings()
-        embeds = embed_layer(ids).squeeze(0).to(MODEL_DTYPE).cpu()
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+
+    index_path = hf_hub_download(MODEL_NAME, "model.safetensors.index.json")
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
+    embed_key = next(k for k in weight_map if k.endswith("embed_tokens.weight"))
+    shard_path = hf_hub_download(MODEL_NAME, weight_map[embed_key])
+    with safetensors.safe_open(shard_path, framework="pt", device="cpu") as f:
+        embed_weight = f.get_tensor(embed_key)
+    embed_layer = nn.Embedding.from_pretrained(embed_weight.to(MODEL_DTYPE))
+
+    ids = tokenizer(content, add_special_tokens=False, return_tensors="pt").input_ids
+    embeds = embed_layer(ids).squeeze(0)
     return content, tensor2base64(embeds)
 
 
