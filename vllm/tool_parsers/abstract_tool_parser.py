@@ -159,21 +159,32 @@ class ToolParser:
     def get_structural_tag(
         self, request: ChatCompletionRequest
     ) -> StructuralTag:
-        
+
+        def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
+            if isinstance(tool, dict):
+                return tool
+            if hasattr(tool, "model_dump"):
+                return tool.model_dump()
+            if hasattr(tool, "dict"):
+                return tool.dict()
+            raise TypeError(f"Unsupported tool type: {type(tool)}")
+
         model_id = self.get_model_structural_tag_id()
         thinking_mode = request.include_reasoning
         tool_choice_type = (
             request.tool_choice.model_dump() if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam) else request.tool_choice
         )
         tool_dicts = []
-        
+
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             for tool in request.tools:
-                if tool.function.name == request.tool_choice.function.name:
-                    tool_dicts.append(tool.model_dump())
+                tool_dict = _tool_to_dict(tool)
+                tool_name = tool_dict.get("function", {}).get("name")
+                if tool_name == request.tool_choice.function.name:
+                    tool_dicts.append(tool_dict)
         else:
-            tool_dicts = [tool.model_dump() for tool in request.tools]
-        
+            tool_dicts = [_tool_to_dict(tool) for tool in request.tools]
+
         if thinking_mode:
             return get_model_structural_tag(
                 model=model_id,
