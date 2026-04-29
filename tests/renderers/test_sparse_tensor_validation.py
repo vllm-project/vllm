@@ -54,8 +54,14 @@ def _create_malicious_sparse_tensor() -> torch.Tensor:
     values = torch.tensor([1.0])
     shape = (3, 3)
 
-    # Create sparse tensor (this will be invalid)
-    sparse_tensor = torch.sparse_coo_tensor(indices, values, shape, dtype=torch.float32)
+    # Create sparse tensor (this will be invalid). Pass `check_invariants=False`
+    # explicitly so this fixture is robust to process-wide invariant-check state
+    # left enabled by other tests (the global flag isn't thread-local, and
+    # concurrent users of the `check_sparse_tensor_invariants` context manager
+    # can leak the "enabled" state across tests).
+    sparse_tensor = torch.sparse_coo_tensor(
+        indices, values, shape, dtype=torch.float32, check_invariants=False
+    )
     return sparse_tensor
 
 
@@ -118,7 +124,7 @@ class TestPromptEmbedsValidation:
         shape = (10, 10)
 
         malicious_tensor = torch.sparse_coo_tensor(
-            indices, values, shape, dtype=torch.float32
+            indices, values, shape, dtype=torch.float32, check_invariants=False
         )
         encoded = _encode_tensor(malicious_tensor)
 
@@ -133,7 +139,7 @@ class TestPromptEmbedsValidation:
         shape = (10, 10)
 
         malicious_tensor = torch.sparse_coo_tensor(
-            indices, values, shape, dtype=torch.float32
+            indices, values, shape, dtype=torch.float32, check_invariants=False
         )
         encoded = _encode_tensor(malicious_tensor)
 
