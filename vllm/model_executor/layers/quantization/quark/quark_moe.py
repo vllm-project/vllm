@@ -1025,12 +1025,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        # TODO(aiter): extend once rocm_aiter_fused_experts gains dispatch
-        # for the other OCP MX schemes. Today its CK MoE kernel only has an
-        # entry for `w_mxfp4` (w4a16); mixed schemes like `w_mxfp4_a_mxfp6_*`
-        # fall through to QuantMethod.NO and raise "Unsupported kernel config
-        # for moe heuristic dispatch".
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4",)
+        # TODO: Remove once all OCP MX schemes use the kernel abstraction
+        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4")
         self.emulate = (
             not current_platform.supports_mx()
             or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES
