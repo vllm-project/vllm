@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -363,26 +362,14 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
             self.silu_and_mul_matcher.inputs()[0],
         ]
 
-    @property
-    def pattern(self):
-        def _pattern(
-            input: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            at1 = self.silu_and_mul_matcher(input)
-            at2 = self.quant_matcher(at1)
-            return at2[0], at2[1]
+    def pattern(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        at1 = self.silu_and_mul_matcher(input)
+        at2 = self.quant_matcher(at1)
+        return at2[0], at2[1]
 
-        return _pattern
-
-    @property
-    def replacement(self):
-        def _replacement(
-            input: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
-            return at[0], at[1]
-
-        return _replacement
+    def replacement(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
+        return at[0], at[1]
 
 
 class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
@@ -537,57 +524,43 @@ class MLADualRMSNormPattern(
             self.empty_bf16(kv_c_dim),
         ]
 
-    @property
     def pattern(
         self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        eps = self._epsilon
+        projected: torch.Tensor,
+        q_weight: torch.Tensor,
+        kv_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_dim = q_weight.shape[0]
+        kv_dim = projected.shape[-1] - q_dim
+        kv_c_dim = kv_weight.shape[0]
+        k_pe_dim = kv_dim - kv_c_dim
+        q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
+        kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
+        q_normed = vllm.ir.ops.rms_norm(q_c, q_weight, self._epsilon)
+        kv_normed = vllm.ir.ops.rms_norm(kv_c, kv_weight, self._epsilon)
+        return q_normed, kv_normed, k_pe
 
-        def _pattern(
-            projected: torch.Tensor,
-            q_weight: torch.Tensor,
-            kv_weight: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            q_dim = q_weight.shape[0]
-            kv_dim = projected.shape[-1] - q_dim
-            kv_c_dim = kv_weight.shape[0]
-            k_pe_dim = kv_dim - kv_c_dim
-            q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
-            kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
-            q_normed = vllm.ir.ops.rms_norm(q_c, q_weight, eps)
-            kv_normed = vllm.ir.ops.rms_norm(kv_c, kv_weight, eps)
-            return q_normed, kv_normed, k_pe
-
-        return _pattern
-
-    @property
     def replacement(
         self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        eps = self._epsilon
-
-        def _replacement(
-            projected: torch.Tensor,
-            q_weight: torch.Tensor,
-            kv_weight: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            q_dim = q_weight.shape[0]
-            kv_dim = projected.shape[-1] - q_dim
-            kv_c_dim = kv_weight.shape[0]
-            k_pe_dim = kv_dim - kv_c_dim
-            q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
-            kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
-            q_normed, kv_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
-                q_c,
-                q_weight,
-                kv_c,
-                kv_weight,
-                eps,
-                eps,
-            )
-            return q_normed, kv_normed, k_pe
-
-        return _replacement
+        projected: torch.Tensor,
+        q_weight: torch.Tensor,
+        kv_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_dim = q_weight.shape[0]
+        kv_dim = projected.shape[-1] - q_dim
+        kv_c_dim = kv_weight.shape[0]
+        k_pe_dim = kv_dim - kv_c_dim
+        q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
+        kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
+        q_normed, kv_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
+            q_c,
+            q_weight,
+            kv_c,
+            kv_weight,
+            self._epsilon,
+            self._epsilon,
+        )
+        return q_normed, kv_normed, k_pe
 
 
 class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):

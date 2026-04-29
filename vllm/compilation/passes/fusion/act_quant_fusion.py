@@ -90,35 +90,17 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             scale,
         ]
 
-    @property
-    def pattern(self):
-        def _pattern(
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> torch.Tensor:
-            result_silu_mul = self.silu_and_mul_matcher(input)
-            result_quant = self.quant_matcher(result_silu_mul, scale)
-            return result_quant[0]
+    def pattern(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        result_silu_mul = self.silu_and_mul_matcher(input)
+        result_quant = self.quant_matcher(result_silu_mul, scale)
+        return result_quant[0]
 
-        return _pattern
-
-    @property
-    def replacement(self):
-        def _replacement(
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> torch.Tensor:
-            d = input.shape[-1] // 2
-            output_shape = input.shape[:-1] + (d,)
-            result = torch.empty(
-                output_shape, device=input.device, dtype=self.quant_dtype
-            )
-            at = auto_functionalized(
-                self.FUSED_OP, result=result, input=input, scale=scale
-            )
-            return at[1]
-
-        return _replacement
+    def replacement(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        d = input.shape[-1] // 2
+        output_shape = input.shape[:-1] + (d,)
+        result = torch.empty(output_shape, device=input.device, dtype=self.quant_dtype)
+        at = auto_functionalized(self.FUSED_OP, result=result, input=input, scale=scale)
+        return at[1]
 
 
 class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
@@ -136,45 +118,39 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         scale = empty_fp32(1, 1)
         return [result, output_scale, input_, scale]
 
-    @property
-    def pattern(self):
-        def _pattern(
-            result: torch.Tensor,
-            output_scale: torch.Tensor,
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            result_silu_mul = self.silu_and_mul_matcher(input)
-            at = auto_functionalized(
-                self.QUANT_OP,
-                input=result_silu_mul,
-                input_scale=scale,
-                is_sf_swizzled_layout=True,
-                output=result,
-                output_scale=output_scale,
-            )
-            return at[1], at[2]
+    def pattern(
+        self,
+        result: torch.Tensor,
+        output_scale: torch.Tensor,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        result_silu_mul = self.silu_and_mul_matcher(input)
+        at = auto_functionalized(
+            self.QUANT_OP,
+            input=result_silu_mul,
+            input_scale=scale,
+            is_sf_swizzled_layout=True,
+            output=result,
+            output_scale=output_scale,
+        )
+        return at[1], at[2]
 
-        return _pattern
-
-    @property
-    def replacement(self):
-        def _replacement(
-            result: torch.Tensor,
-            output_scale: torch.Tensor,
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            at = auto_functionalized(
-                self.FUSED_OP,
-                result=result,
-                result_block_scale=output_scale,
-                input=input,
-                input_global_scale=scale,
-            )
-            return at[1], at[2]
-
-        return _replacement
+    def replacement(
+        self,
+        result: torch.Tensor,
+        output_scale: torch.Tensor,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        at = auto_functionalized(
+            self.FUSED_OP,
+            result=result,
+            result_block_scale=output_scale,
+            input=input,
+            input_global_scale=scale,
+        )
+        return at[1], at[2]
 
 
 class SiluMulBlockQuantPattern(ActivationQuantPattern):
@@ -207,72 +183,60 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         scale = self.quant_matcher.empty_f32(1, 1)
         return self.silu_and_mul_matcher.inputs() + [scale]
 
-    @property
-    def pattern(self):
-        def _pattern(
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            silu_out = self.silu_and_mul_matcher(input)
-            result = torch.empty(
-                silu_out.shape,
-                device=silu_out.device,
-                dtype=self.quant_dtype,
-            )
-            assert scale is not None
-            finfo = torch.finfo(self.quant_dtype)
-            _, result, scale = auto_functionalized(
-                self.quant_matcher.QUANT_OP,
-                input=silu_out,
-                output_q=result,
-                output_s=scale,
-                group_size=self.group_size,
-                eps=1e-10,
-                fp8_min=finfo.min,
-                fp8_max=finfo.max,
-                scale_ue8m0=self.is_e8m0,
-                dummy_is_scale_transposed=self.is_scale_transposed,
-                dummy_is_tma_aligned=self.is_tma_aligned,
-            )
-            return result, scale
+    def pattern(
+        self, input: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        silu_out = self.silu_and_mul_matcher(input)
+        result = torch.empty(
+            silu_out.shape,
+            device=silu_out.device,
+            dtype=self.quant_dtype,
+        )
+        assert scale is not None
+        finfo = torch.finfo(self.quant_dtype)
+        _, result, scale = auto_functionalized(
+            self.quant_matcher.QUANT_OP,
+            input=silu_out,
+            output_q=result,
+            output_s=scale,
+            group_size=self.group_size,
+            eps=1e-10,
+            fp8_min=finfo.min,
+            fp8_max=finfo.max,
+            scale_ue8m0=self.is_e8m0,
+            dummy_is_scale_transposed=self.is_scale_transposed,
+            dummy_is_tma_aligned=self.is_tma_aligned,
+        )
+        return result, scale
 
-        return _pattern
-
-    @property
-    def replacement(self):
-        def _replacement(
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            d = input.shape[-1] // 2
-            output_shape = input.shape[:-1] + (d,)
-            result = torch.empty(
-                output_shape, device=input.device, dtype=self.quant_dtype
+    def replacement(
+        self, input: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        d = input.shape[-1] // 2
+        output_shape = input.shape[:-1] + (d,)
+        result = torch.empty(output_shape, device=input.device, dtype=self.quant_dtype)
+        if self.is_scale_transposed:
+            scale = torch.empty(
+                (d // self.group_size, input.shape[0]),
+                device=input.device,
+                dtype=torch.float32,
+            ).permute(-1, -2)
+        else:
+            scale = torch.empty(
+                (input.shape[0], d // self.group_size),
+                device=input.device,
+                dtype=torch.float32,
             )
-            if self.is_scale_transposed:
-                scale = torch.empty(
-                    (d // self.group_size, input.shape[0]),
-                    device=input.device,
-                    dtype=torch.float32,
-                ).permute(-1, -2)
-            else:
-                scale = torch.empty(
-                    (input.shape[0], d // self.group_size),
-                    device=input.device,
-                    dtype=torch.float32,
-                )
-            at = auto_functionalized(
-                self.FUSED_OP,
-                out=result,
-                input=input,
-                scales=scale,
-                group_size=self.group_size,
-                scale_ub=None,
-                is_scale_transposed=self.is_scale_transposed,
-            )
-            return at[1], at[2]
-
-        return _replacement
+        at = auto_functionalized(
+            self.FUSED_OP,
+            out=result,
+            input=input,
+            scales=scale,
+            group_size=self.group_size,
+            scale_ub=None,
+            is_scale_transposed=self.is_scale_transposed,
+        )
+        return at[1], at[2]
 
 
 class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
