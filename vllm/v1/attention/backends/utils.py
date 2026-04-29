@@ -356,7 +356,7 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
     ), make_block_table

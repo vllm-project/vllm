@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -162,7 +163,7 @@ def _reshape_kv_cache(
             attn_backend = attn_backends[layer_name]
             kv_cache_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
-                kv_cache_spec.block_size,
+                kv_cache_spec.storage_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
                 cache_dtype,
@@ -183,8 +184,28 @@ def _reshape_kv_cache(
 
             dtype = kv_cache_spec.dtype
             raw_tensor = raw_tensor.view(dtype)
-            raw_tensor = raw_tensor.view(kv_cache_shape)
-            kv_caches[layer_name] = raw_tensor.permute(*inv_order)
+            if kv_cache_spec.page_size_padded is not None:
+                # Use strided view to handle page_size_bytes that
+                # include padding. This follows the same pattern as
+                # MambaSpec handling in gpu_model_runner.py.
+                # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                # (i.e. the first physical dimension is the block
+                # index), which holds for MLA backends but NOT for
+                # standard attention backends whose shape starts with
+                # a K/V dimension of size 2.
+                dtype_size = get_dtype_size(dtype)
+                page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                strides = list(torch.empty(kv_cache_shape).stride())
+                strides[inv_order[0]] = page_stride
+                kv_cache = torch.as_strided(
+                    raw_tensor,
+                    size=kv_cache_shape,
+                    stride=tuple(strides),
+                )
+            else:
+                # No padding — safe to use a contiguous view.
+                kv_cache = raw_tensor.view(kv_cache_shape)
+            kv_caches[layer_name] = kv_cache.permute(*inv_order)
     return kv_caches
 
 
@@ -230,6 +251,7 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+    positions: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -256,6 +278,7 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            positions=positions,
         )
         if encoder_seq_lens and i in encoder_seq_lens:
             encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
