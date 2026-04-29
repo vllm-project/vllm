@@ -20,7 +20,7 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
 If you want to run this script standalone with `uv`, you can use the following:
 
 ```bash
-uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_outputs \
+uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/features/structured_outputs \
     structured-outputs
 ```
 
@@ -34,19 +34,19 @@ See [feature docs](https://docs.vllm.ai/en/latest/features/structured_outputs.ht
 Run all constraints, non-streaming:
 
 ```bash
-uv run structured_outputs.py
+uv run structured_outputs_offline.py
 ```
 
 Run all constraints, streaming:
 
 ```bash
-uv run structured_outputs.py --stream
+uv run structured_outputs_offline.py --stream
 ```
 
 Run certain constraints, for example `structural_tag` and `regex`, streaming:
 
 ```bash
-uv run structured_outputs.py \
+uv run structured_outputs_offline.py \
     --constraint structural_tag regex \
     --stream
 ```
@@ -54,5 +54,5 @@ uv run structured_outputs.py \
 Run all constraints, with reasoning models and streaming:
 
 ```bash
-uv run structured_outputs.py --reasoning --stream
+uv run structured_outputs_offline.py --reasoning --stream
 ```
