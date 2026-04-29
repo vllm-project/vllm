@@ -1221,7 +1221,8 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
 
         if self.compilation_config.backend == "eager" or (
-            self.compilation_config.mode is not None
+            not isinstance(self.compilation_config.mode, _RuntimeDefaultValue)
+            and self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.warning(
@@ -1249,14 +1250,18 @@ class VllmConfig:
 
         current_platform.apply_config_platform_defaults(self)
 
-        if self.compilation_config.mode is None:
+        if self.compilation_config.mode is None or isinstance(
+            self.compilation_config.mode, _RuntimeDefaultValue
+        ):
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
         # By default, enable torch wrapping only when using custom Inductor lowering
-        if self.compilation_config.ir_enable_torch_wrap is None:
+        if self.compilation_config.ir_enable_torch_wrap is None or isinstance(
+            self.compilation_config.ir_enable_torch_wrap, _RuntimeDefaultValue
+        ):
             self.compilation_config.ir_enable_torch_wrap = (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
                 and self.compilation_config.backend == "inductor"
@@ -1424,6 +1429,8 @@ class VllmConfig:
 
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.compilation_config.max_cudagraph_capture_size = 0
+            self.compilation_config.cudagraph_capture_sizes = []
 
         if self.cache_config.kv_sharing_fast_prefill:
             if (
@@ -1821,7 +1828,9 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
-            if max_cudagraph_capture_size is None:
+            if max_cudagraph_capture_size is None or isinstance(
+                max_cudagraph_capture_size, _RuntimeDefaultValue
+            ):
                 decode_query_len = 1 + self.num_speculative_tokens
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
@@ -1835,7 +1844,7 @@ class VllmConfig:
             )
 
             # determine the cudagraph_capture_sizes
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if isinstance(self.compilation_config.cudagraph_capture_sizes, list):
                 assert len(self.compilation_config.cudagraph_capture_sizes) > 0, (
                     "cudagraph_capture_sizes should contain at least one element "
                     "when using cuda graph."
@@ -1890,12 +1899,12 @@ class VllmConfig:
                 cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
             )
             if (
-                self.compilation_config.max_cudagraph_capture_size is not None
+                isinstance(self.compilation_config.max_cudagraph_capture_size, int)
                 and self.compilation_config.max_cudagraph_capture_size != valid_max_size
             ):
                 # raise error only when both two flags are user-specified
                 # and they are inconsistent with each other
-                if self.compilation_config.cudagraph_capture_sizes is not None:
+                if isinstance(self.compilation_config.cudagraph_capture_sizes, list):
                     raise ValueError(
                         "customized max_cudagraph_capture_size"
                         f"(={self.compilation_config.max_cudagraph_capture_size}) "
@@ -1910,9 +1919,11 @@ class VllmConfig:
             # always set the final max_cudagraph_capture_size
             self.compilation_config.max_cudagraph_capture_size = valid_max_size
 
-            if self.compilation_config.cudagraph_capture_sizes is not None and len(
-                cudagraph_capture_sizes
-            ) < len(self.compilation_config.cudagraph_capture_sizes):
+            if isinstance(
+                self.compilation_config.cudagraph_capture_sizes, list
+            ) and len(cudagraph_capture_sizes) < len(
+                self.compilation_config.cudagraph_capture_sizes
+            ):
                 # If users have specified capture sizes, we only need to
                 # compare the lens before and after modification since the modified
                 # list is only the subset of the original list.
