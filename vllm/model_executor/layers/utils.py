@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import contextlib
+import itertools
 from collections.abc import Callable
 
 import torch
@@ -87,6 +89,292 @@ def apply_penalties(
     logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
     logits -= presence_penalties.unsqueeze(dim=1) * output_mask
     return logits
+
+
+_DYNAMO_CACHE_SIZE_LIMIT = 65536
+_DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT = 1048576
+
+_inductor_max_autotune_gemm_forced = False
+_dynamo_compile_caches_forced = False
+_unquant_bf16_linear_cache: dict[tuple, Callable] = {}
+_unquant_bf16_linear_id_gen = itertools.count()
+_unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
+_unquant_bf16_linear_torch_compile_configured = False
+_unquant_bf16_linear_torch_compile_disabled = False
+
+
+def force_large_dynamo_compile_caches() -> None:
+    """Raise Dynamo cache limits for many per-shape compiled linear kernels."""
+    global _dynamo_compile_caches_forced
+    if _dynamo_compile_caches_forced:
+        return
+    _dynamo_compile_caches_forced = True
+
+    try:
+        import torch._dynamo.config as dynamo_config
+    except Exception:
+        logger.warning(
+            "torch._dynamo.config could not be imported; "
+            "leaving Dynamo cache limits untouched.",
+            exc_info=True,
+        )
+        return
+
+    if hasattr(dynamo_config, "cache_size_limit"):
+        dynamo_config.cache_size_limit = max(
+            dynamo_config.cache_size_limit,
+            _DYNAMO_CACHE_SIZE_LIMIT,
+        )
+    dynamo_config.accumulated_cache_size_limit = max(
+        getattr(dynamo_config, "accumulated_cache_size_limit", 0),
+        _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
+    )
+    if hasattr(dynamo_config, "recompile_limit"):
+        dynamo_config.recompile_limit = max(
+            dynamo_config.recompile_limit,
+            _DYNAMO_CACHE_SIZE_LIMIT,
+        )
+    if hasattr(dynamo_config, "accumulated_recompile_limit"):
+        dynamo_config.accumulated_recompile_limit = max(
+            dynamo_config.accumulated_recompile_limit,
+            _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
+        )
+    if hasattr(dynamo_config, "fail_on_recompile_limit_hit"):
+        dynamo_config.fail_on_recompile_limit_hit = False
+    if hasattr(dynamo_config, "fail_on_cache_limit_hit"):
+        dynamo_config.fail_on_cache_limit_hit = False
+
+
+def force_inductor_max_autotune_gemm_on_small_gpus() -> None:
+    """Enable inductor GEMM autotuning for the BF16 linear compile path."""
+    global _inductor_max_autotune_gemm_forced
+    if _inductor_max_autotune_gemm_forced:
+        return
+    _inductor_max_autotune_gemm_forced = True
+
+    force_large_dynamo_compile_caches()
+
+    try:
+        import torch._inductor.config as inductor_config
+        import torch._inductor.utils as inductor_utils
+    except Exception:
+        logger.warning(
+            "torch._inductor could not be imported; leaving inductor config untouched.",
+            exc_info=True,
+        )
+        return
+
+    original_big_gpu = getattr(inductor_utils, "is_big_gpu", None)
+    if original_big_gpu is not None and not getattr(
+        original_big_gpu, "__vllm_big_gpu_override__", False
+    ):
+
+        def _forced_big_gpu(*args, **kwargs) -> bool:
+            return True
+
+        _forced_big_gpu.__vllm_big_gpu_override__ = True
+        inductor_utils.is_big_gpu = _forced_big_gpu
+        cache_clear = getattr(original_big_gpu, "cache_clear", None)
+        if callable(cache_clear):
+            with contextlib.suppress(Exception):
+                cache_clear()
+
+    try:
+        from torch._inductor.codegen.cuda import cuda_env
+
+        original_blackwell = getattr(cuda_env, "is_datacenter_blackwell_arch", None)
+        if original_blackwell is not None and not getattr(
+            original_blackwell, "__vllm_blackwell_family_override__", False
+        ):
+
+            def _forced_blackwell_family_arch() -> bool:
+                if original_blackwell():
+                    return True
+                if torch.cuda.is_available():
+                    major, _ = torch.cuda.get_device_capability()
+                    return major >= 10
+                return False
+
+            _forced_blackwell_family_arch.__vllm_blackwell_family_override__ = True
+            cuda_env.is_datacenter_blackwell_arch = _forced_blackwell_family_arch
+            cache_clear = getattr(original_blackwell, "cache_clear", None)
+            if callable(cache_clear):
+                with contextlib.suppress(Exception):
+                    cache_clear()
+    except Exception:
+        logger.debug("Could not patch inductor Blackwell architecture helper.")
+
+    inductor_config.max_autotune = True
+    inductor_config.max_autotune_gemm = True
+    inductor_config.max_autotune_gemm_backends = "ATEN,TRITON"
+    inductor_config.coordinate_descent_tuning = True
+    if hasattr(inductor_config, "triton"):
+        inductor_config.triton.unique_kernel_names = True
+        if hasattr(inductor_config.triton, "enable_persistent_tma_matmul"):
+            inductor_config.triton.enable_persistent_tma_matmul = True
+    if hasattr(inductor_config, "fx_graph_cache"):
+        inductor_config.fx_graph_cache = True
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
+
+def _configure_unquant_bf16_linear_torch_compile_once() -> None:
+    global _unquant_bf16_linear_torch_compile_configured
+    if _unquant_bf16_linear_torch_compile_configured:
+        return
+
+    force_inductor_max_autotune_gemm_on_small_gpus()
+    _unquant_bf16_linear_torch_compile_configured = True
+
+
+def _unquant_bf16_linear_cache_key(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> tuple:
+    return (
+        tuple(x.shape),
+        tuple(x.stride()),
+        x.dtype,
+        tuple(weight.shape),
+        tuple(weight.stride()),
+        weight.dtype,
+        None if bias is None else tuple(bias.shape),
+        None if bias is None else tuple(bias.stride()),
+        None if bias is None else bias.dtype,
+        x.device.type,
+        x.device.index,
+    )
+
+
+def _compile_unquant_bf16_linear_kernel(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> Callable:
+    _configure_unquant_bf16_linear_torch_compile_once()
+    compile_id = next(_unquant_bf16_linear_id_gen)
+    name_suffix = f"_{compile_id}"
+
+    if bias is None:
+
+        def _linear_no_bias(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.linear(x, weight, None)
+
+        _linear_no_bias.__name__ += name_suffix
+        compiled = torch.compile(
+            _linear_no_bias,
+            fullgraph=True,
+            dynamic=False,
+            mode="max-autotune-no-cudagraphs",
+        )
+        compiled(x, weight)
+        return compiled
+
+    def _linear_with_bias(
+        x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.nn.functional.linear(x, weight, bias)
+
+    _linear_with_bias.__name__ += name_suffix
+    compiled = torch.compile(
+        _linear_with_bias,
+        fullgraph=True,
+        dynamic=False,
+        mode="max-autotune-no-cudagraphs",
+    )
+    compiled(x, weight, bias)
+    return compiled
+
+
+def _get_or_create_unquant_bf16_linear_kernel(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    allow_new_compile: bool,
+) -> Callable | None:
+    key = _unquant_bf16_linear_cache_key(x, weight, bias)
+    compiled = _unquant_bf16_linear_cache.get(key)
+    if compiled is not None:
+        return compiled
+    if not allow_new_compile:
+        return None
+
+    compiled = _compile_unquant_bf16_linear_kernel(x, weight, bias)
+    _unquant_bf16_linear_cache[key] = compiled
+    return compiled
+
+
+def _should_use_unquant_bf16_linear_torch_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if _unquant_bf16_linear_torch_compile_disabled:
+        return False
+    if torch._dynamo.is_compiling():
+        return False
+    if not x.is_cuda:
+        return False
+    if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        return False
+    if bias is not None and bias.dtype != torch.bfloat16:
+        return False
+    return x.is_contiguous()
+
+
+def _apply_unquant_bf16_linear_torch_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor | None:
+    global _unquant_bf16_linear_torch_compile_disabled
+
+    key = _unquant_bf16_linear_cache_key(x, weight, bias)
+    is_capturing = torch.cuda.is_current_stream_capturing()
+    if is_capturing and key not in _unquant_bf16_linear_capture_safe_keys:
+        return None
+
+    compiled = _get_or_create_unquant_bf16_linear_kernel(
+        x,
+        weight,
+        bias,
+        allow_new_compile=not is_capturing,
+    )
+    if compiled is None:
+        return None
+
+    try:
+        output = compiled(x, weight) if bias is None else compiled(x, weight, bias)
+    except Exception:
+        if is_capturing:
+            return None
+        logger.warning(
+            "Disabling compiled BF16 linear fast path after torch.compile failure.",
+            exc_info=True,
+        )
+        _unquant_bf16_linear_torch_compile_disabled = True
+        return None
+
+    if not is_capturing:
+        _unquant_bf16_linear_capture_safe_keys.add(key)
+    return output
+
+
+def _torch_compile_bf16_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _should_use_unquant_bf16_linear_torch_compile(x, weight, bias):
+        output = _apply_unquant_bf16_linear_torch_compile(x, weight, bias)
+        if output is not None:
+            return output
+    return torch.nn.functional.linear(x, weight, bias)
 
 
 def default_unquantized_gemm(
@@ -311,5 +599,10 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
+    elif (
+        envs.VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE
+        and current_platform.is_cuda()
+    ):
+        return _torch_compile_bf16_unquantized_gemm
     else:
         return default_unquantized_gemm
