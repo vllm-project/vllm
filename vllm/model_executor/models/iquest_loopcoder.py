@@ -71,6 +71,7 @@ class LoopCoderAttention(nn.Module):
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
         layer_idx: int = 0,
+        plt_window_size: int = -1,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -99,6 +100,8 @@ class LoopCoderAttention(nn.Module):
         self.loop_num = getattr(config, "loop_num", 2)
 
         self.loop_window_size = getattr(config, "loop_window_size", 64)
+        if plt_window_size != -1:
+            self.loop_window_size = plt_window_size
 
         # Use total number of hidden layers instead of hardcoded 24
         total_layers = config.num_hidden_layers
@@ -216,6 +219,7 @@ class LoopCoderDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
+        plt_window_size: int = -1,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -240,6 +244,7 @@ class LoopCoderDecoderLayer(nn.Module):
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
             layer_idx=self.layer_idx,
+            plt_window_size=plt_window_size,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -480,6 +485,7 @@ class IQuestLoopCoderModel(nn.Module):
             prefix=f"{prefix}.gate_projections",
         )
 
+        plt_window_size = model_config.get_plt_window_size()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: LoopCoderDecoderLayer(
@@ -488,6 +494,7 @@ class IQuestLoopCoderModel(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 layer_idx=extract_layer_index(prefix),
+                plt_window_size=plt_window_size,
             ),
             prefix=f"{prefix}.layers",
         )

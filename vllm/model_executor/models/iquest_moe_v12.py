@@ -555,7 +555,8 @@ class IquestMoeDecoderLayer(nn.Module):
 
         plt_loop_nums = vllm_config.model_config.get_plt_num_loops()
         plt_num_layers = config.num_hidden_layers
-        plt_sliding_window_size = getattr(config, "plt_sliding_window_size", 64)
+        plt_sliding_window_size = vllm_config.model_config.get_plt_window_size()
+        print(f"yxing plt_window_size: {plt_sliding_window_size=}")
         self.self_attn = IquestMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,

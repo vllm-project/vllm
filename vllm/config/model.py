@@ -1322,8 +1322,11 @@ class ModelConfig:
         else:
             return plt_hidden_scale
 
-    def get_plt_window_size(self) -> tuple:
-        return getattr(self.hf_config, "plt_window_size", [-1, 0])
+    def get_plt_window_size(self) -> int:
+        # NOTE(yxing): for training, the left window size is equal
+        # to window_size of flash_attn + 1
+        window_size, _ = getattr(self.hf_config, "plt_window_size", [-2, 0])
+        return window_size + 1
 
     def get_multimodal_config(self) -> MultiModalConfig:
         """
