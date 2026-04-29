@@ -307,6 +307,8 @@ class DeepGemmPaged:
         )
 
         block_table = block_table_cpu.cuda()
+        query_start_loc = query_start_loc_cpu.cuda()
+        seq_lens = seq_lens_cpu.cuda()
         if do_chunk:
             chunk_specs = split_indexer_paged_prefill_chunks(
                 compressed_seq_lens_cpu,
@@ -323,8 +325,9 @@ class DeepGemmPaged:
             metadata = build_paged_prefill_metadata(
                 req_slice.start,
                 req_slice.stop,
+                query_start_loc,
                 query_start_loc_cpu,
-                seq_lens_cpu,
+                seq_lens,
                 compressed_seq_lens_cpu,
                 block_table,
                 compress_ratio,

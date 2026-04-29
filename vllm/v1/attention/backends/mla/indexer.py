@@ -610,8 +610,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     paged_metadata = build_paged_prefill_metadata(
                         req_slice.start,
                         req_slice.stop,
+                        query_start_loc,
                         query_start_loc_cpu,
-                        seq_lens_cpu,
+                        seq_lens,
                         compressed_seq_lens_cpu,
                         common_attn_metadata.block_table_tensor,
                         self.compress_ratio,
@@ -823,8 +824,9 @@ def build_prefill_chunk_metadata(
 def build_paged_prefill_metadata(
     start_idx: int,
     end_idx: int,
+    query_start_loc: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
+    seq_lens: torch.Tensor,
     compressed_seq_lens_cpu: torch.Tensor,
     block_table: torch.Tensor,
     compress_ratio: int,
@@ -834,8 +836,9 @@ def build_paged_prefill_metadata(
 ) -> DeepseekV32IndexerPagedPrefillMetadata | None:
     # DeepGEMM varlen paged logits consumes per-query-token request ids and
     # context lengths, unlike flat prefill which consumes per-row K offsets.
-    query_start_locs = query_start_loc_cpu[start_idx : end_idx + 1].to(torch.long)
-    total_query_len = int((query_start_locs[-1] - query_start_locs[0]).item())
+    total_query_len = (
+        query_start_loc_cpu[end_idx].item() - query_start_loc_cpu[start_idx].item()
+    )
     if query_slice is not None:
         qs_start = query_slice.start
         qs_stop = query_slice.stop
@@ -848,38 +851,32 @@ def build_paged_prefill_metadata(
     if output_query_len <= 0:
         return None
 
-    req_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device="cpu")
-    query_lens = torch.diff(query_start_locs)
+    device = seq_lens.device
+    req_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device=device)
+    query_lens = query_start_loc[start_idx : end_idx + 1].diff()
     req_idx = torch.repeat_interleave(req_ids, query_lens, output_size=total_query_len)[
         qs_start:qs_stop
     ]
-    selected_compressed_seq_lens = compressed_seq_lens_cpu[req_idx]
-    max_context_len = int(selected_compressed_seq_lens.max().item())
+    max_context_len = compressed_seq_lens_cpu[start_idx:end_idx].max().item()
     if max_context_len == 0:
         return None
 
-    token_idx = torch.arange(qs_start, qs_stop, dtype=torch.long, device="cpu")
-    query_offsets = token_idx - (
-        query_start_loc_cpu[req_idx].to(torch.long) - query_start_locs[0]
-    )
-    req_query_lens = (
-        query_start_loc_cpu[req_idx + 1] - query_start_loc_cpu[req_idx]
-    ).to(torch.long)
+    token_idx = torch.arange(qs_start, qs_stop, dtype=torch.long, device=device)
+    query_offsets = token_idx - (query_start_loc[req_idx] - query_start_loc[start_idx])
+    req_query_lens = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
     context_lens = (
-        seq_lens_cpu[req_idx].to(torch.long) - req_query_lens + query_offsets + 1
+        seq_lens[req_idx] - req_query_lens + query_offsets + 1
     ) // compress_ratio
 
-    device = block_table.device
-    req_idx_device = req_idx.to(device=device)
-    indices = req_idx_device.to(torch.int32)
-    context_lens = context_lens.to(device=device, dtype=torch.int32).view(-1, 1)
+    indices = req_idx.to(torch.int32)
+    context_lens = context_lens.to(torch.int32).view(-1, 1)
     schedule_metadata = get_paged_mqa_logits_metadata(
         context_lens,
         block_size,
         num_sms,
         indices=indices,
     )
-    token_start = int(query_start_loc_cpu[start_idx].item()) + qs_start
+    token_start = query_start_loc_cpu[start_idx].item() + qs_start
     token_end = token_start + output_query_len
 
     return DeepseekV32IndexerPagedPrefillMetadata(
@@ -887,7 +884,7 @@ def build_paged_prefill_metadata(
         token_end=token_end,
         context_lens=context_lens,
         indices=indices,
-        block_table=block_table[req_idx_device],
+        block_table=block_table[req_idx],
         schedule_metadata=schedule_metadata,
         max_context_len=max_context_len,
     )
