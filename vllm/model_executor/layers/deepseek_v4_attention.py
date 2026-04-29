@@ -4,9 +4,8 @@
 DeepseekV4 MLA Attention Layer
 """
 
-from collections.abc import Callable
 import math
-
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,11 +58,11 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
+from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
 )
-from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     DeepseekV4FlashMLASparseBackend,
@@ -1185,8 +1184,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         scale_dim = fp8_dim // 64
 
         fp8_vals = rows[:, :fp8_dim].contiguous().view(fp8_dtype)
-        rope_vals = rows[:, fp8_dim : fp8_dim + rope_bytes].contiguous().view(
-            torch.bfloat16
+        rope_vals = (
+            rows[:, fp8_dim : fp8_dim + rope_bytes].contiguous().view(torch.bfloat16)
         )
         scale_bytes = rows[
             :, fp8_dim + rope_bytes : fp8_dim + rope_bytes + scale_dim
@@ -1203,7 +1202,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         block_size: int,
     ) -> torch.Tensor:
         if slot_ids.numel() == 0:
-            return torch.empty((0, self.head_dim), dtype=torch.bfloat16, device=cache.device)
+            return torch.empty(
+                (0, self.head_dim), dtype=torch.bfloat16, device=cache.device
+            )
         slot_ids = slot_ids.to(torch.int64)
         rows = cache[slot_ids // block_size, slot_ids % block_size]
         return self._dequantize_cache_rows(rows).reshape(-1, self.head_dim)
@@ -1266,9 +1267,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 ..., tile_idx * tile_size : (tile_idx + 1) * tile_size
             ].to(torch.bfloat16)
             cur_scales = input_scale[:, :, tile_idx].to(torch.bfloat16).unsqueeze(-1)
-            result[
-                ..., tile_idx * tile_size : (tile_idx + 1) * tile_size
-            ] = (cur_nope * cur_scales).unsqueeze(2)
+            result[..., tile_idx * tile_size : (tile_idx + 1) * tile_size] = (
+                cur_nope * cur_scales
+            ).unsqueeze(2)
         return result
 
     def _ref_sparse_attn_prefill(
@@ -1283,7 +1284,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         topk = indices.shape[-1]
         s_kv = kv.shape[0]
         if topk_length is not None:
-            mask = torch.arange(topk, device=indices.device).unsqueeze(0) >= topk_length.unsqueeze(1)
+            mask = torch.arange(topk, device=indices.device).unsqueeze(
+                0
+            ) >= topk_length.unsqueeze(1)
             indices[mask] = -1
         invalid_mask = (indices < 0) | (indices >= s_kv)
         indices[invalid_mask] = 0
@@ -1300,7 +1303,10 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         lse_for_o = orig_lse
         if self.attn_sink is not None:
             lse_for_o = torch.logsumexp(
-                torch.stack([orig_lse, self.attn_sink[:h_q].view(1, h_q).expand_as(orig_lse)], dim=0),
+                torch.stack(
+                    [orig_lse, self.attn_sink[:h_q].view(1, h_q).expand_as(orig_lse)],
+                    dim=0,
+                ),
                 dim=0,
             )
         lse_for_o = lse_for_o.clone()
@@ -1363,7 +1369,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         attn_weight = qf @ gathered_kv.transpose(-1, -2)
         attn_weight *= self.scale
         attn_weight[
-            invalid_mask.view(b * s_q, 1, -1).expand(b * s_q, h_q, invalid_mask.size(-1))
+            invalid_mask.view(b * s_q, 1, -1).expand(
+                b * s_q, h_q, invalid_mask.size(-1)
+            )
         ] = float("-inf")
         lse = attn_weight.logsumexp(dim=-1)
         attn_weight = torch.exp(attn_weight - lse.unsqueeze(-1))

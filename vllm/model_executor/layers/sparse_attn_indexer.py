@@ -540,6 +540,4 @@ class SparseAttnIndexer(CustomOp):
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
             )
-        raise RuntimeError(
-            "Sparse attention indexer ROCm path could not be selected."
-        )
+        raise RuntimeError("Sparse attention indexer ROCm path could not be selected.")

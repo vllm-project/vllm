@@ -249,10 +249,9 @@ def mhc_pre(
         )
         post_mix = torch.sigmoid(post_logits) * hc_post_mult_value
 
-        comb_logits = (
-            mixes[:, 2 * hc_mult :].view(num_tokens, hc_mult, hc_mult) * hc_scale[2]
-            + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
-        )
+        comb_logits = mixes[:, 2 * hc_mult :].view(
+            num_tokens, hc_mult, hc_mult
+        ) * hc_scale[2] + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
         comb_mix = torch.softmax(comb_logits, dim=-1) + hc_sinkhorn_eps
         comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
         for _ in range(sinkhorn_repeat - 1):

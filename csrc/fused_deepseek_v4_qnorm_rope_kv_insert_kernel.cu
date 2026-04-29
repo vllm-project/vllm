@@ -57,9 +57,9 @@
 // ROCm-compatible FP8 conversion helpers
 __device__ __forceinline__ uint8_t rocm_cvt_float_to_fp8_e4m3(float val) {
   #if defined(HIP_FP8_TYPE_OCP)
-    __hip_fp8_e4m3 fp8_val(val);
+  __hip_fp8_e4m3 fp8_val(val);
   #else
-    __hip_fp8_e4m3_fnuz fp8_val(val);
+  __hip_fp8_e4m3_fnuz fp8_val(val);
   #endif
   return reinterpret_cast<uint8_t&>(fp8_val);
 }
@@ -339,7 +339,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
             __nv_cvt_float_to_fp8(scaled, __NV_SATFINITE, __NV_E4M3);
         out_bytes[i] = static_cast<uint8_t>(s);
 #else
-        out_bytes[i] = rocm_cvt_float_to_fp8_e4m3(scaled);
+      out_bytes[i] = rocm_cvt_float_to_fp8_e4m3(scaled);
 #endif
       }
       // One 16-byte STG per lane.
@@ -438,10 +438,10 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 #else
   // ROCm: use standard kernel launch syntax (no PDL/stream serialization)
   fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<scalar_t_in>
-      <<<grid, kBlockSize, 0, stream>>>(
-      q_inout, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache, eps,
-      num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
-      kv_block_stride);
+      <<<grid, kBlockSize, 0, stream> > >(
+          q_inout, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache,
+          eps, num_tokens_full, num_tokens_insert, num_heads_q,
+          cache_block_size, kv_block_stride);
 #endif
 }
 
