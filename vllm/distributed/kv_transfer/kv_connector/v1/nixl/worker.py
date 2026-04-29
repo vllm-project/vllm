@@ -109,8 +109,10 @@ class NixlConnectorWorker:
         for region in plan.all_regions:
             base_addr = nixl_agent_meta.kv_caches_base_addr[region.layer_idx]
             for blk in range(region.num_blocks):
-                addr = base_addr + blk * region.page_stride + region.offset_in_page
-                result.append((addr, region.descriptor_bytes, dev_id))
+                blk_addr = base_addr + blk * region.page_stride + region.offset_in_page
+                for sub in range(region.descs_per_block):
+                    addr = blk_addr + sub * region.desc_stride_bytes
+                    result.append((addr, region.descriptor_bytes, dev_id))
 
         return result
 
@@ -192,10 +194,11 @@ class NixlConnectorWorker:
           ``_remap_remote_blocks_to_desc_ids``.
         - **Standard**: direct per-rank group filtering.
         """
-        if plan.local_page_size > plan.remote_page_size:
-            specs = _build_gather_read_specs(
-                plan, local_block_ids, remote_block_ids
-            )
+        if (
+            plan.local_page_size > plan.remote_page_size
+            and plan.remote_blocks_per_local_block
+        ):
+            specs = _build_gather_read_specs(plan, local_block_ids, remote_block_ids)
             if logger.isEnabledFor(logging.DEBUG):
                 for s in specs:
                     for g in range(len(s.local_block_ids)):
@@ -213,10 +216,8 @@ class NixlConnectorWorker:
                             )
             return specs
 
-        remote_block_ids, local_block_ids = (
-            _remap_remote_blocks_to_desc_ids(
-                plan, remote_block_ids, local_block_ids
-            )
+        remote_block_ids, local_block_ids = _remap_remote_blocks_to_desc_ids(
+            plan, remote_block_ids, local_block_ids
         )
 
         num_groups = len(local_block_ids)
@@ -291,10 +292,12 @@ class NixlConnectorWorker:
             else 0
         )
 
+        fa_slot_map = plan.rank_to_attention_slot[0]
+
         result: list[list[tuple[int, int, int]]] = []
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
-            fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
+            fa_slot = fa_slot_map.get(p_rank, 0)
 
             handle: list[tuple[int, int, int]] = []
             for j, (addr, local_len, dev) in enumerate(src_blocks_data):
@@ -1267,8 +1270,7 @@ class NixlConnectorWorker:
         elif self._is_hetero_attn:
             remote_tpb = tuple(nixl_agent_meta.tokens_per_block_per_group or ())
             group_spec_types = tuple(
-                type(g.kv_cache_spec)
-                for g in self.kv_cache_config.kv_cache_groups
+                type(g.kv_cache_spec) for g in self.kv_cache_config.kv_cache_groups
             )
             assert len(remote_tpb) == len(group_spec_types), (
                 f"Remote tokens_per_block_per_group length "
@@ -1276,11 +1278,11 @@ class NixlConnectorWorker:
             )
             logger.info(
                 "[HeteroTP] Generating Gemma4 plan: "
-                "group_kinds=%s, total_kv_heads_per_group=%s, "
+                "group_spec_types=%s, total_kv_heads_per_group=%s, "
                 "local_tpb_per_group=%s, remote_tpb_per_group=%s, "
                 "local_block_len_per_layer=%s, remote_block_lens=%s, "
                 "local_tp=%d, remote_tp=%d, tp_rank=%d",
-                [k.value for k in self._group_kinds],
+                [t.__name__ for t in group_spec_types],
                 self._total_kv_heads_per_group,
                 self._local_tokens_per_block_per_group,
                 remote_tpb,
@@ -1959,7 +1961,7 @@ class NixlConnectorWorker:
                 "[HeteroTP _read_blocks_for_req] req=%s engine=%s "
                 "tp_ratio=%d, n_read_specs=%d, "
                 "plan: local_page=%d, remote_page=%d, "
-                "group_kinds=%s, "
+                "group_spec_types=%s, "
                 "local_physical_block_ids=[%s], "
                 "remote_block_ids=[%s]",
                 req_id,
@@ -1968,7 +1970,7 @@ class NixlConnectorWorker:
                 len(read_specs),
                 plan.local_page_size,
                 plan.remote_page_size,
-                [k.value for k in plan.group_kinds],
+                [t.__name__ for t in plan.group_spec_types],
                 ", ".join(
                     f"g{i}:{meta.local_physical_block_ids[i][:5]}"
                     for i in range(len(meta.local_physical_block_ids))

@@ -415,8 +415,10 @@ def _make_mamba_plan_for_desc_ids(
         group_spec_types=group_spec_types,
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=(0,),
-        rank_to_attention_slot=({0: 0},) * len(group_kinds),
+        rank_to_attention_slot=({0: 0},) * len(group_spec_types),
         remote_expansion_stride=1,
+        local_page_size=100,
+        remote_page_size=100,
     )
 
 
@@ -490,6 +492,8 @@ class TestMambaPlanReadSpecs:
             all_source_ranks=(0, 1),
             rank_to_attention_slot=({0: 0, 1: 1}, {0: 0, 1: 1}),
             remote_expansion_stride=1,
+            local_page_size=100,
+            remote_page_size=100,
         )
 
         local_ids = ([1, 2], [3, 4])
@@ -515,6 +519,8 @@ class TestMambaPlanReadSpecs:
             all_source_ranks=(0, 1, 2),
             rank_to_attention_slot=({0: 0}, {0: 0}),
             remote_expansion_stride=1,
+            local_page_size=100,
+            remote_page_size=100,
         )
 
         local_ids = ([1, 2], [3, 4])
@@ -561,6 +567,8 @@ class TestMambaPlanSplitHandles:
             all_source_ranks=(0, 1),
             rank_to_attention_slot=({0: 0, 1: 0}, {0: 0, 1: 0}),
             remote_expansion_stride=1,
+            local_page_size=100,
+            remote_page_size=100,
         )
 
         # 2 FA descs + 1 SSM desc
@@ -635,7 +643,7 @@ def _make_gemma4_plan_params(
             block_lens=[p_page] * num_layers,
             block_size=16,
         ),
-        group_kinds=(GroupKind.SWA, GroupKind.FA),
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
         total_num_kv_heads_per_group=(8, 2),
         local_tokens_per_block=(16, 16),
         remote_tokens_per_block=(16, 32),
@@ -651,7 +659,7 @@ class TestGemma4PlanStructure:
 
         assert plan.remote_page_size == 65536
         assert plan.local_page_size == 32768
-        assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
+        assert plan.group_spec_types == (FullAttentionSpec, FullAttentionSpec)
         assert plan.local_blocks_per_remote_block == (1, 2)
         assert plan.remote_desc_offset_per_group == (0, 0)  # rank 0: index=0
         assert plan.all_source_ranks == (0,)
@@ -692,7 +700,7 @@ class TestGemma4RemoteDescs:
             num_blocks=500,
             block_lens=[65536, 65536],
         )
-        descs = build_remote_descs_from_plan(plan, meta)
+        descs = NixlConnectorWorker._build_remote_descs_from_plan(plan, meta)
 
         # 2 layers × 1 region/layer × 500 blocks × 2 descs/block = 2000
         expected_count = 2 * 500 * 2
@@ -706,7 +714,7 @@ class TestGemma4RemoteDescs:
             num_blocks=500,
             block_lens=[65536, 65536],
         )
-        descs = build_remote_descs_from_plan(plan, meta)
+        descs = NixlConnectorWorker._build_remote_descs_from_plan(plan, meta)
 
         # First block, layer 0: descriptor 0 and descriptor 1
         addr_d0, len_d0, _ = descs[0]
@@ -724,7 +732,7 @@ class TestGemma4DescIds:
 
         # SWA blocks [3, 7], FA blocks [10, 11]
         # Remapped to descriptor indices:
-        #   SWA (sub_desc_index=0): [3*2+0, 7*2+0] = [6, 14]
+        #   SWA (desc_index=0): [3*2+0, 7*2+0] = [6, 14]
         #   FA  (2 local per remote): [10*2, 10*2+1, 11*2, 11*2+1] = [20,21,22,23]
         #
         # dst_num_blocks = 500 * 2 = 1000 (num_blocks * descs_per_block)
@@ -741,7 +749,7 @@ class TestGemma4DescIds:
         remote_swa = [3, 7]
         remote_fa = [10, 11]
 
-        specs = compute_read_specs_from_plan(
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(
             plan,
             local_block_ids=(local_swa, local_fa),
             remote_block_ids=(remote_swa, remote_fa),
@@ -758,19 +766,23 @@ class TestGemma4DescIds:
         assert list(spec.local_block_ids[1]) == [20, 21, 22, 23]
 
         # Now compute desc IDs with the remapped remote blocks
-        remote_ids = compute_desc_ids_from_plan(
+        remote_ids = NixlConnectorWorker._compute_desc_ids_from_plan(
             plan,
             block_ids=spec.remote_block_ids,
             dst_num_blocks=500 * 2,  # num_blocks * descs_per_block
+            block_size_ratio=None,
+            physical_blocks_per_logical=1,
         )
         expected_remote = [6, 14, 1006, 1014, 20, 21, 22, 23, 1020, 1021, 1022, 1023]
         assert list(remote_ids) == expected_remote
 
         # Local desc IDs (standard, descs_per_block=1 locally)
-        local_ids = compute_desc_ids_from_plan(
+        local_ids = NixlConnectorWorker._compute_desc_ids_from_plan(
             plan,
             block_ids=spec.local_block_ids,
             dst_num_blocks=1000,  # local num_blocks
+            block_size_ratio=None,
+            physical_blocks_per_logical=1,
         )
         expected_local = [10, 11, 1010, 1011, 20, 21, 22, 23, 1020, 1021, 1022, 1023]
         assert list(local_ids) == expected_local
@@ -823,7 +835,7 @@ def _make_gemma4_gather_plan_params(
             block_lens=[p_page] * num_layers,
             block_size=16,
         ),
-        group_kinds=(GroupKind.SWA, GroupKind.FA),
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
         total_num_kv_heads_per_group=(8, 2),
         local_tokens_per_block=(16, 32),
         remote_tokens_per_block=(16, 16),
@@ -839,7 +851,7 @@ class TestGemma4GatherReadPlanStructure:
 
         assert plan.local_page_size == 65536
         assert plan.remote_page_size == 32768
-        assert plan.group_kinds == (GroupKind.SWA, GroupKind.FA)
+        assert plan.group_spec_types == (FullAttentionSpec, FullAttentionSpec)
         assert plan.remote_blocks_per_local_block == (1, 2)
         assert plan.local_blocks_per_remote_block == (1, 1)
         # SWA: D rank 0 reads from P rank 0 and P rank 1
@@ -874,7 +886,7 @@ class TestGemma4GatherReadRemoteDescs:
             num_blocks=500,
             block_lens=[32768, 32768],
         )
-        descs = build_remote_descs_from_plan(plan, meta)
+        descs = NixlConnectorWorker._build_remote_descs_from_plan(plan, meta)
 
         # 2 layers × 1 region/layer × 500 blocks × 1 desc/block = 1000
         assert len(descs) == 2 * 500 * 1
@@ -887,7 +899,7 @@ class TestGemma4GatherReadRemoteDescs:
             num_blocks=500,
             block_lens=[32768, 32768],
         )
-        descs = build_remote_descs_from_plan(plan, meta)
+        descs = NixlConnectorWorker._build_remote_descs_from_plan(plan, meta)
 
         for _, length, _ in descs:
             assert length == 32768
@@ -907,7 +919,7 @@ class TestGemma4GatherReadSpecs:
         remote_swa = [5, 6]
         remote_fa = [30, 31]
 
-        specs = compute_read_specs_from_plan(
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(
             plan,
             local_block_ids=(local_swa, local_fa),
             remote_block_ids=(remote_swa, remote_fa),
@@ -943,7 +955,7 @@ class TestGemma4GatherReadSpecs:
         remote_swa = [5, 6]
         remote_fa = [30, 31]
 
-        specs = compute_read_specs_from_plan(
+        specs = NixlConnectorWorker._compute_read_specs_from_plan(
             plan,
             local_block_ids=(local_swa, local_fa),
             remote_block_ids=(remote_swa, remote_fa),
@@ -951,16 +963,20 @@ class TestGemma4GatherReadSpecs:
 
         for spec in specs:
             # Remote desc IDs: standard (no sub-descs), num_blocks=500
-            remote_ids = compute_desc_ids_from_plan(
+            remote_ids = NixlConnectorWorker._compute_desc_ids_from_plan(
                 plan,
                 block_ids=spec.remote_block_ids,
                 dst_num_blocks=500,
+                block_size_ratio=None,
+                physical_blocks_per_logical=1,
             )
             # Local desc IDs: gather sub-descs, num_blocks=1000*gather_ratio
-            local_ids = compute_desc_ids_from_plan(
+            local_ids = NixlConnectorWorker._compute_desc_ids_from_plan(
                 plan,
                 block_ids=spec.local_block_ids,
                 dst_num_blocks=1000 * 2,  # local_num_blocks * gather_ratio
+                block_size_ratio=None,
+                physical_blocks_per_logical=1,
             )
             assert len(remote_ids) == len(local_ids), (
                 f"Desc ID length mismatch for rank {spec.remote_rank}: "

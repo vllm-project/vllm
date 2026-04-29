@@ -335,10 +335,6 @@ def generate_dense_plan(
     """Generate transfer plan for dense (attention-only) models."""
     local_page = block_len_per_layer[0]
     remote_page = remote_meta.block_lens[0]
-    assert local_page == remote_page, (
-        f"Dense plan does not support different page sizes: "
-        f"local={local_page}, remote={remote_page}"
-    )
 
     block_size_ratio = transfer_topo.block_size // remote_info.remote_block_size
 
@@ -486,10 +482,6 @@ def generate_mamba_plan(
 
     local_page = block_len_per_layer[0]
     remote_page = remote_block_lens[0]
-    assert local_page == remote_page, (
-        f"Mamba plan does not support different page sizes: "
-        f"local={local_page}, remote={remote_page}"
-    )
 
     n_groups = len(group_spec_types)
     return EngineTransferPlan(
@@ -605,12 +597,12 @@ def generate_gemma4_plan(
     )
     for g in range(n_groups):
         logger.info(
-            "[HeteroTP Plan] group=%d kind=%s: K=%d, "
+            "[HeteroTP Plan] group=%d spec=%s: K=%d, "
             "local_tpb=%d, remote_tpb=%d, "
             "blocks_per_remote=%d, remote_blocks_per_local=%d, "
             "desc_offset=%d, source_ranks=%s, slot_map=%s",
             g,
-            group_kinds[g].value,
+            group_spec_types[g].__name__,
             total_num_kv_heads_per_group[g],
             local_tokens_per_block[g],
             remote_tokens_per_block[g],
@@ -651,7 +643,6 @@ def generate_gemma4_plan(
 
         fa_regions.append(
             RegionPlan(
-                kind=RegionKind.FA_K,
                 layer_idx=i,
                 descriptor_bytes=desc_bytes,
                 offset_in_page=0,
@@ -665,7 +656,6 @@ def generate_gemma4_plan(
         if is_blocks_first:
             fa_regions.append(
                 RegionPlan(
-                    kind=RegionKind.FA_V,
                     layer_idx=i,
                     descriptor_bytes=desc_bytes,
                     offset_in_page=page_stride // 2,
@@ -727,6 +717,8 @@ def _remap_remote_blocks_to_desc_ids(
     Local block IDs are returned unchanged.
     """
     if plan.remote_page_size <= plan.local_page_size:
+        return remote_block_ids, local_block_ids
+    if not plan.local_blocks_per_remote_block:
         return remote_block_ids, local_block_ids
 
     descs_per_remote_block = plan.remote_page_size // plan.local_page_size
@@ -886,7 +878,6 @@ def _build_gather_read_specs(
 
 
 logger = logging.getLogger(__name__)
-
 
 
 # ======================================================================
