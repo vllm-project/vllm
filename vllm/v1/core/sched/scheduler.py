@@ -101,6 +101,10 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
+        # Request IDs present in the most recent worker persistent batch that
+        # produced a ModelRunnerOutput. Async scheduling can issue a later
+        # SchedulerOutput before that worker-side state is confirmed.
+        self.prev_model_runner_batch_req_ids: set[str] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -1090,10 +1094,18 @@ class Scheduler(SchedulerInterface):
                 ]
                 new_token_ids.append(token_ids)
             scheduled_in_prev_step = req_id in self.prev_step_scheduled_req_ids
+            if self.scheduler_config.async_scheduling:
+                has_worker_state = (
+                    scheduled_in_prev_step
+                    and req_id in self.prev_model_runner_batch_req_ids
+                )
+            else:
+                has_worker_state = scheduled_in_prev_step
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            if not scheduled_in_prev_step:
+                has_worker_state = False
+            if not has_worker_state:
                 all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
@@ -1313,6 +1325,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        self.prev_model_runner_batch_req_ids = set(model_runner_output.req_id_to_index)
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
