@@ -948,7 +948,6 @@ class RocmPlatform(Platform):
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
-
         # This (mostly) preserves previous CustomOp behavior
         # Necessary on ROCm because it's common that users
         # enable rms_norm to use the aiter kernel.
@@ -962,7 +961,23 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        # TODO(luka/TJ/Badr) remove env vars completely.
+        # See https://github.com/vllm-project/vllm/issues/39357
+        # for more details.
+        use_aiter_quant = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+        quant_fp8 = ["aiter"] + default if use_aiter_quant else default
+        dynamic_group_quant_fp8 = (
+            ["aiter", "triton", "native"] if use_aiter_quant else ["triton", "native"]
+        )
+
+        return IrOpPriorityConfig.with_default(
+            default,
+            rms_norm=rms_norm,
+            static_quant_fp8=quant_fp8,
+            static_group_quant_fp8=default,
+            dynamic_quant_fp8=quant_fp8,
+            dynamic_group_quant_fp8=dynamic_group_quant_fp8,
+        )
 
     @classmethod
     @with_amdsmi_context

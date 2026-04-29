@@ -2,16 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
-    group_broadcast,
-    prep_scale_for_group_broadcast,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -23,6 +20,10 @@ from vllm.utils.deep_gemm import (
 _FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
+
+# TODO: Remove QuantFP8 and directly call ir ops.
+# See https://github.com/vllm-project/vllm/issues/40617
+# for more details.
 
 
 # --8<-- [start:quant_fp8]
@@ -101,35 +102,7 @@ class QuantFP8(CustomOp):
                 use_ue8m0=True,
             )
 
-        if self.is_group_quant and not self.static:
-            assert scale is None, "Dynamic group quantization does not use scale"
-
-            return fp8_utils.per_token_group_quant_fp8(
-                x,
-                group_size=self.group_size,
-                column_major_scales=self.column_major_scales,
-                tma_aligned_scales=self.tma_aligned_scales,
-                dtype=_FP8_DTYPE,
-                use_ue8m0=self.use_ue8m0,
-            )
-
-        assert (scale is not None) == self.static
-        assert scale_ub is None or (
-            not self.static
-            and self.group_shape == GroupShape.PER_TOKEN
-            and scale_ub.numel() == 1
-        )
-
-        return ops.scaled_fp8_quant(
-            x,
-            scale,
-            num_token_padding=self.num_token_padding,
-            scale_ub=scale_ub,
-            use_per_token_if_dynamic=self.use_per_token_if_dynamic,
-            group_shape=(self.group_shape.row, self.group_shape.col)
-            if self.static
-            else None,
-        )
+        return self.forward_native(x, scale, scale_ub)
 
     def forward_hip(
         self,
@@ -138,33 +111,7 @@ class QuantFP8(CustomOp):
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.is_group_quant and use_triton:
-            assert scale is None, "Dynamic group quantization does not use scale"
-
-            return torch.ops.vllm.triton_per_token_group_quant_fp8(x, self.group_size)
-
-        use_aiter_quant = self.use_aiter and scale_ub is None and x.is_contiguous()
-        use_aiter_per_tensor_quant = (
-            use_aiter_quant and self.group_shape.is_per_tensor()
-        )
-        use_aiter_per_token_quant = use_aiter_quant and self.group_shape.is_per_token()
-
-        use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
-
-        if use_aiter_per_group_quant:
-            return rocm_aiter_ops.group_fp8_quant(x, self.group_size)
-        if use_aiter_per_tensor_quant:
-            return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
-        if use_aiter_per_token_quant:
-            return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
-
-        # Fallback to native implementation for group quantization.
-        if self.is_group_quant:
-            assert scale is None, "Dynamic group quantization does not use scale"
-            return self._quantize_group_native(x)
-
-        # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        return self.forward_native(x, scale, scale_ub)
 
     def forward_xpu(
         self,
@@ -174,7 +121,8 @@ class QuantFP8(CustomOp):
         use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # XPU can use same code path as CUDA.
-        return self.forward_cuda(x, scale, scale_ub, use_triton)
+        # Irops will dispatch cuda implementations in forward native.
+        return self.forward_native(x, scale, scale_ub, use_triton)
 
     def forward_native(
         self,
@@ -185,7 +133,15 @@ class QuantFP8(CustomOp):
     ):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
-            return self._quantize_group_native(x)
+            scale_alignment = 4 if self.tma_aligned_scales else 1
+            return ir.ops.dynamic_group_quant_fp8(
+                x,
+                group_shape=list(self.group_shape),
+                column_major=self.column_major_scales,
+                use_ue8m0=self.use_ue8m0,
+                fp8_dtype=_FP8_DTYPE,
+                scale_alignment=scale_alignment,
+            )
 
         assert (scale is not None) == self.static
         assert scale_ub is None or (
@@ -195,67 +151,21 @@ class QuantFP8(CustomOp):
         )
 
         if scale is None:
-            if self.group_shape == GroupShape.PER_TOKEN:
-                x_max, _ = x.abs().max(dim=-1)
-                x_max = x_max.unsqueeze(-1).to(torch.float32)
-                if scale_ub is not None:
-                    x_max = x_max.clamp(max=scale_ub)
-            else:
-                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
-
-            scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+            out, scale = ir.ops.dynamic_quant_fp8(
+                x,
+                per_token=self.use_per_token_if_dynamic,
+                fp8_dtype=_FP8_DTYPE,
+                scale_ub=scale_ub,
+                num_token_padding=self.num_token_padding,
+            )
         else:
-            scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
-
-        # Even for dynamic per-token scales,
-        # reciprocal performs slightly better than division
-        out = (
-            x.to(torch.float32)
-            * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-        )
-        out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
-
-        # This currently generates an extra Triton kernel in compilation.
-        # Fortunately, we don't use padding if compiling.
-        # TODO(luka): benchmark torch._scaled_mm to hopefully remove padding
-        #  in general.
-        if self.num_token_padding is not None:
-            padding = max(self.num_token_padding - out.size(0), 0)
-            out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
+            if self.is_group_quant:
+                out = ir.ops.static_group_quant_fp8(
+                    x, scale, _FP8_DTYPE, self.num_token_padding
+                )
+            else:
+                out = ir.ops.static_quant_fp8(
+                    x, scale, _FP8_DTYPE, self.num_token_padding
+                )
 
         return out, scale
-
-    def _quantize_group_native(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_shape = x.shape
-        hidden_dim = x.shape[-1]
-        num_groups = (hidden_dim + self.group_size - 1) // self.group_size
-        padded_dim = num_groups * self.group_size
-
-        if padded_dim != hidden_dim:
-            padding = padded_dim - hidden_dim
-            x = F.pad(x, (0, padding), mode="constant", value=0.0)
-
-        x_grouped = x.view(-1, num_groups, self.group_size)
-        absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-        scales_raw = absmax / _FP8_MAX
-        if self.use_ue8m0:
-            scales_raw = torch.exp2(torch.ceil(torch.log2(scales_raw)))
-        scales = (scales_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
-
-        x_scaled = x_grouped / scales
-        x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
-
-        x_quant = x_quant.view(-1, padded_dim)
-        if padded_dim != hidden_dim:
-            x_quant = x_quant[..., :hidden_dim]
-        x_quant = x_quant.view(orig_shape)
-
-        scales = scales.squeeze(-1)
-        scales = scales.reshape(orig_shape[:-1] + (num_groups,))
-
-        if self.column_major_scales:
-            scales = scales.transpose(-2, -1).contiguous().transpose(-1, -2)
-
-        return x_quant, scales

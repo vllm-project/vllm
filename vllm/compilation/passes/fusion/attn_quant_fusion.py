@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
+import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -20,8 +21,6 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import _USE_LAYERNAME, _encode_layer_name
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
-from .matcher_utils import MatcherQuantFP8
-from .rms_quant_fusion import QUANT_OPS
 
 logger = init_logger(__name__)
 
@@ -50,7 +49,6 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         self._num_heads = layer.num_heads
         self._head_size = layer.head_size
         self._dtype = dtype
-        self._quant_matcher = MatcherQuantFP8(_FP8_QUANT_KEY)
 
     @property
     def pattern(self) -> Callable[..., torch.Tensor]:
@@ -98,7 +96,7 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self._num_heads * self._head_size]
             )
-            return self._quant_matcher(attn_out_view, scale)[0]
+            return vllm.ir.ops.static_quant_fp8(attn_out_view, scale, FP8_DTYPE)
 
         return _pattern
 
@@ -186,7 +184,7 @@ class AttnNvfp4QuantPattern(
         self._num_heads = layer.num_heads
         self._head_size = layer.head_size
         self._dtype = dtype
-        self._QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
+        self._QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
     @property
     def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:

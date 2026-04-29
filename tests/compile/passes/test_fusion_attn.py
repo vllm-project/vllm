@@ -427,15 +427,11 @@ def test_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph before and after fusion
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
-    )
-
     # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
     # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
+    test_backend.check_before_ops(
+        [QUANT_OPS[quant_key]], fully_replaced=quant_key is kNvfp4Dynamic
+    )
 
     # access the underlying `AttnQuantFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

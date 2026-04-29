@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.ir.ops  # noqa: F401
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer
@@ -17,7 +18,6 @@ from vllm.compilation.passes.fusion.act_quant_fusion import (
     SILU_MUL_OP,
     ActivationQuantFusionPass,
 )
-from vllm.compilation.passes.fusion.rms_quant_fusion import QUANT_OPS
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -86,11 +86,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            (
-                QUANT_OPS[kFp8StaticTensorSym]
-                if self.enable_quant_fp8_custom_op
-                else torch.ops.aten.reciprocal
-            ),
+            torch.ops.vllm_ir.static_quant_fp8,
         ]
 
     def ops_in_model_after(self):
@@ -134,7 +130,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            QUANT_OPS[kNvfp4Dynamic],
+            torch.ops._C.scaled_fp4_quant.out,
         ]
 
     def ops_in_model_after(self):
@@ -215,11 +211,7 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
             ops.append(SILU_MUL_OP)
         # When silu custom op is disabled, aten.mul.Tensor also appears
         # in dequant code, so we skip checking it to avoid false positives.
-        ops.append(
-            QUANT_OPS[self.quant_key]
-            if self.enable_quant_fp8_custom_op
-            else torch.ops.aten.reciprocal.default
-        )
+        ops.append(torch.ops.vllm_ir.dynamic_group_quant_fp8)
         return ops
 
     def ops_in_model_after(self):
@@ -310,6 +302,12 @@ def test_fusion_silu_and_mul_quant(
 
     x = torch.rand(num_tokens, hidden_size * 2)
 
+    if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
     # Reshape pass is needed for the fusion pass to work
     custom_ops = ["none"]
     if enable_silu_mul_custom_op:
@@ -325,15 +323,16 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config), monkeypatch.context() as m:
+    with (
+        set_current_vllm_config(config),
+        config.kernel_config.ir_op_priority.set_priority(),
+    ):
         fusion_passes = [ActivationQuantFusionPass(config)]
         if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
-            m.setenv("VLLM_ROCM_USE_AITER", "1")
-            rocm_aiter_ops.refresh_env_variables()
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]

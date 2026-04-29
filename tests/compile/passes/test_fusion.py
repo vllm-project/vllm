@@ -194,22 +194,7 @@ class TestModel(torch.nn.Module):
         return y4
 
     def ops_in_model_before(self):
-        if self.group_shape.is_per_group():
-            # Blockwise path
-            if self.use_aiter_fusion and self.use_aiter_quant_op:
-                return [rocm_aiter_ops.get_group_quant_op()]
-            if self.use_aiter_fusion:
-                return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
-        else:
-            if self.use_aiter_quant_op:
-                return [rocm_aiter_ops.get_per_token_quant_op()]
-
-        # Common path
-        return (
-            [QUANT_OPS[self.activation_quant_key]]
-            if self.enable_quant_fp8_custom_op
-            else [torch.ops.aten.reciprocal]
-        )
+        return [QUANT_OPS[self.activation_quant_key]]
 
     def ops_in_model_after(self):
         if self.use_aiter_fusion:
@@ -415,6 +400,11 @@ def test_aiter_fusion_rmsnorm_quant(
     monkeypatch: pytest.MonkeyPatch,
 ):
     force_kernel, group_shape, use_aiter_quant_op = kernel_groupshape_quant
+
+    # Set env vars before VllmConfig is created so set_platform_defaults sees them
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
@@ -424,14 +414,13 @@ def test_aiter_fusion_rmsnorm_quant(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
         from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
             RocmAiterRMSNormQuantFusionPass,
         )
-
-        m.setenv("VLLM_ROCM_USE_AITER", "1")
-
-        rocm_aiter_ops.refresh_env_variables()
 
         torch.set_default_device("cuda")
         torch.set_default_dtype(dtype)
