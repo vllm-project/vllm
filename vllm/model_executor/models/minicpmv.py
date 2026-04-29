@@ -590,14 +590,17 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             if max_slice_nums is None:
                 max_slice_nums = image_processor.max_slice_nums
             grids = image_processor.get_sliced_grid(
-                image_size, max_slice_nums=max_slice_nums,
+                image_size,
+                max_slice_nums=max_slice_nums,
             )
             patch_size = image_processor.patch_size
             scale_resolution = image_processor.scale_resolution
 
             allow_upscale = grids is None
             best_size = image_processor.find_best_resize(
-                image_size, scale_resolution, patch_size,
+                image_size,
+                scale_resolution,
+                patch_size,
                 allow_upscale=allow_upscale,
             )
             h_patches = best_size[1] // patch_size
@@ -606,14 +609,15 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
             if grids is not None:
                 refine_size = image_processor.get_refine_size(
-                    image_size, grids, scale_resolution, patch_size,
+                    image_size,
+                    grids,
+                    scale_resolution,
+                    patch_size,
                     allow_upscale=True,
                 )
                 pw = refine_size[0] // grids[0]
                 ph = refine_size[1] // grids[1]
-                patch_visual_tokens = (
-                    (ph // patch_size // 4) * (pw // patch_size // 4)
-                )
+                patch_visual_tokens = (ph // patch_size // 4) * (pw // patch_size // 4)
             else:
                 patch_visual_tokens = source_image_visual_tokens
 
@@ -672,7 +676,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
             allow_upscale = grid is None
             best_size = image_processor.find_best_resize(
-                image_size, scale_resolution, patch_size,
+                image_size,
+                scale_resolution,
+                patch_size,
                 allow_upscale=allow_upscale,
             )
             h_p = best_size[1] // patch_size
@@ -683,7 +689,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
                 return source_tokens
 
             refine_size = image_processor.get_refine_size(
-                image_size, grid, scale_resolution, patch_size,
+                image_size,
+                grid,
+                scale_resolution,
+                patch_size,
                 allow_upscale=True,
             )
             pw = refine_size[0] // grid[0]
@@ -1045,12 +1054,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 im_end = image_processor.im_id_end
             else:
                 # transformers v5.7+ keeps im_id tokens on the tokenizer.
-                im_start = getattr(
-                    tokenizer, "image_id_start_token", "<image_id>"
-                )
-                im_end = getattr(
-                    tokenizer, "image_id_end_token", "</image_id>"
-                )
+                im_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+                im_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
 
             embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
