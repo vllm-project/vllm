@@ -111,6 +111,26 @@ def sample_tools(request):
         ]
 
 
+def _as_chat_completion_tools(
+    tools: list[ChatCompletionToolsParam | FunctionTool],
+) -> list[ChatCompletionToolsParam]:
+    normalized: list[ChatCompletionToolsParam] = []
+    for tool in tools:
+        if isinstance(tool, ChatCompletionToolsParam):
+            normalized.append(tool)
+        else:
+            normalized.append(
+                ChatCompletionToolsParam(
+                    type="function",
+                    function={
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                ))
+    return normalized
+
+
 def assert_tool_calls(
     actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
 ):
@@ -1159,10 +1179,11 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
+    request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=request_tools,
         tool_choice="auto",
     )
     tag = qwen3_tool_parser.get_structural_tag(req)
@@ -1171,18 +1192,18 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=request_tools,
         tool_choice="required",
     )
     tag = qwen3_tool_parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
-    if sample_tools:
-        tool = sample_tools[0]
+    if request_tools:
+        tool = request_tools[0]
         req = ChatCompletionRequest(
             messages=[],
             model="m",
-            tools=sample_tools,
+            tools=request_tools,
             tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
         )
         tag = qwen3_tool_parser.get_structural_tag(req)
@@ -1194,10 +1215,11 @@ def test_adjust_request_auto_structural_tag_is_json_string(
     sample_tools: list[ChatCompletionToolsParam],
     include_reasoning: bool,
 ) -> None:
+    request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=request_tools,
         tool_choice="auto",
         include_reasoning=include_reasoning,
     )
@@ -1213,10 +1235,11 @@ def test_adjust_request_required_uses_json_schema_not_structural_tag(
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
+    request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=request_tools,
         tool_choice="required",
     )
     out = qwen3_tool_parser.adjust_request(req)

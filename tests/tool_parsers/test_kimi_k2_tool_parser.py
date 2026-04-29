@@ -507,6 +507,7 @@ class TestAdjustRequest:
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = [{"type": "function", "function": {"name": "test"}}]
         request.tool_choice = "auto"
+        request.include_reasoning = True
         request.skip_special_tokens = True
 
         result = parser.adjust_request(request)
@@ -516,6 +517,7 @@ class TestAdjustRequest:
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = [{"type": "function", "function": {"name": "test"}}]
         request.tool_choice = "none"
+        request.include_reasoning = True
         request.skip_special_tokens = True
 
         result = parser.adjust_request(request)
@@ -525,6 +527,7 @@ class TestAdjustRequest:
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = None
         request.tool_choice = "auto"
+        request.include_reasoning = False
         request.skip_special_tokens = True
 
         result = parser.adjust_request(request)
