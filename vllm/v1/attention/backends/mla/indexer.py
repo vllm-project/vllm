@@ -871,40 +871,54 @@ def build_paged_prefill_metadata(
     if output_query_len <= 0:
         return None
 
-    device = seq_lens.device
-    req_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device=device)
-    query_lens = query_start_loc[start_idx : end_idx + 1].diff()
-    req_idx = torch.repeat_interleave(req_ids, query_lens, output_size=total_query_len)[
-        qs_start:qs_stop
-    ]
-    max_context_len = compressed_seq_lens_cpu[start_idx:end_idx].max().item()
+    max_context_len = int(compressed_seq_lens_cpu[start_idx:end_idx].max().item())
     if max_context_len == 0:
         return None
 
-    token_idx = torch.arange(qs_start, qs_stop, dtype=torch.long, device=device)
-    query_offsets = token_idx - (query_start_loc[req_idx] - query_start_loc[start_idx])
-    req_query_lens = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
-    context_lens = (
-        seq_lens[req_idx] - req_query_lens + query_offsets + 1
-    ) // compress_ratio
+    token_start = int(query_start_loc_cpu[start_idx].item()) + qs_start
+    token_end = token_start + output_query_len
+    device = seq_lens.device
+    block_table_cols = block_table.shape[1]
+    context_lens = torch.empty((output_query_len, 1), dtype=torch.int32, device=device)
+    indices = torch.empty(output_query_len, dtype=torch.int32, device=device)
+    expanded_block_table = torch.empty(
+        (output_query_len, block_table_cols),
+        dtype=block_table.dtype,
+        device=device,
+    )
 
-    indices = req_idx.to(torch.int32)
-    context_lens = context_lens.to(torch.int32).view(-1, 1)
+    _build_paged_prefill_metadata_kernel[
+        (cdiv(output_query_len * block_table_cols, 1024),)
+    ](
+        query_start_loc,
+        seq_lens,
+        block_table,
+        context_lens,
+        indices,
+        expanded_block_table,
+        token_start,
+        output_query_len,
+        start_idx,
+        end_idx,
+        BLOCK_TABLE_STRIDE=block_table.stride(0),
+        BLOCK_TABLE_COLS=block_table_cols,
+        BLOCK_SIZE=1024,
+        REQ_SEARCH_STEPS=(end_idx - start_idx).bit_length(),
+        COMPRESS_RATIO=compress_ratio,
+    )
     schedule_metadata = get_paged_mqa_logits_metadata(
         context_lens,
         block_size,
         num_sms,
         indices=indices,
     )
-    token_start = query_start_loc_cpu[start_idx].item() + qs_start
-    token_end = token_start + output_query_len
 
     return DeepseekV32IndexerPagedPrefillMetadata(
         token_start=token_start,
         token_end=token_end,
         context_lens=context_lens,
         indices=indices,
-        block_table=block_table[req_idx],
+        block_table=expanded_block_table,
         schedule_metadata=schedule_metadata,
         max_context_len=max_context_len,
     )
@@ -934,91 +948,185 @@ def build_full_paged_prefill_metadata(
 
     token_start = int(query_start_loc_cpu[start_idx].item())
     token_end = int(query_start_loc_cpu[end_idx].item())
-    query_lens_cpu = torch.diff(query_start_loc_cpu[start_idx : end_idx + 1])
-    total_atoms = int(((query_lens_cpu + 1) // 2).sum().item())
 
     device = seq_lens.device
-    req_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device=device)
-    query_lens = query_start_loc[start_idx : end_idx + 1].diff()
-    req_idx = torch.repeat_interleave(req_ids, query_lens, output_size=total_query_len)
-    token_idx = torch.arange(total_query_len, dtype=torch.long, device=device)
-    query_offsets = token_idx - (query_start_loc[req_idx] - token_start)
-    req_query_lens = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
-    context_lens = (
-        seq_lens[req_idx] - req_query_lens + query_offsets + 1
-    ) // compress_ratio
-
-    indices = req_idx.to(torch.int32)
-    split_kv = 256
-    context_lens = context_lens.to(torch.int32).view(-1, 1)
-    batch_size = context_lens.shape[0]
-
-    # Varlen paged logits groups adjacent tokens from the same request into
-    # one scheduler atom. Full prefill preserves those request runs, so build
-    # atom starts from query_lens instead of scanning the per-token indices.
-    atoms_per_req = torch.div(query_lens + 1, 2, rounding_mode="floor")
-    atom_req_idx = torch.repeat_interleave(
-        req_ids,
-        atoms_per_req,
-        output_size=total_atoms,
-    )
-
-    atom_start_locs = torch.empty(
-        end_idx - start_idx + 1,
-        dtype=torch.long,
+    block_table_cols = block_table.shape[1]
+    context_lens = torch.empty((total_query_len, 1), dtype=torch.int32, device=device)
+    indices = torch.empty(total_query_len, dtype=torch.int32, device=device)
+    expanded_block_table = torch.empty(
+        (total_query_len, block_table_cols),
+        dtype=block_table.dtype,
         device=device,
     )
-    atom_start_locs[:1] = 0
-    atom_start_locs[1:] = torch.cumsum(atoms_per_req.to(torch.long), dim=0)
+    schedule_metadata = torch.empty((num_sms + 1, 2), dtype=torch.int32, device=device)
 
-    atom_local_req_idx = atom_req_idx - start_idx
-    atom_positions = torch.arange(total_atoms, dtype=torch.long, device=device)
-    atom_offsets = (atom_positions - atom_start_locs[atom_local_req_idx]) * 2
-    atom_req_query_lens = query_lens[atom_local_req_idx].to(torch.long)
-    atom_context_offsets = torch.minimum(
-        atom_offsets + 1,
-        atom_req_query_lens - 1,
+    _build_paged_prefill_metadata_kernel[
+        (cdiv(total_query_len * block_table_cols, 1024),)
+    ](
+        query_start_loc,
+        seq_lens,
+        block_table,
+        context_lens,
+        indices,
+        expanded_block_table,
+        token_start,
+        total_query_len,
+        start_idx,
+        end_idx,
+        BLOCK_TABLE_STRIDE=block_table.stride(0),
+        BLOCK_TABLE_COLS=block_table_cols,
+        BLOCK_SIZE=1024,
+        REQ_SEARCH_STEPS=(end_idx - start_idx).bit_length(),
+        COMPRESS_RATIO=compress_ratio,
     )
-    atom_context_lens = (
-        seq_lens[atom_req_idx].to(torch.long)
-        - atom_req_query_lens
-        + atom_context_offsets
-        + 1
-    ) // compress_ratio
-    atom_starts = query_start_loc[atom_req_idx].to(torch.long) - token_start
-    atom_starts = atom_starts + atom_offsets
-
-    num_segs = torch.div(
-        atom_context_lens + split_kv - 1, split_kv, rounding_mode="floor"
+    # Build the varlen schedule directly from request/query metadata so the
+    # full path does not materialize per-atom PyTorch temporaries.
+    _build_full_paged_prefill_schedule_metadata_kernel[(num_sms + 1,)](
+        query_start_loc,
+        seq_lens,
+        schedule_metadata,
+        token_start,
+        start_idx,
+        end_idx,
+        total_query_len,
+        NUM_SMS=num_sms,
+        COMPRESS_RATIO=compress_ratio,
+        SPLIT_KV=256,
     )
-    prefix_sum = torch.cumsum(num_segs, dim=0)
-    prefix_sum_with_zero = torch.cat((prefix_sum[:1] * 0, prefix_sum))
-
-    total = prefix_sum[-1]
-    sm_indices = torch.arange(num_sms + 1, dtype=torch.int64, device=device)
-    q = total // num_sms
-    r = total % num_sms
-    seg_starts = sm_indices * q + torch.minimum(sm_indices, r)
-
-    atom_idx = torch.searchsorted(prefix_sum, seg_starts, right=True)
-    kv_split_idx = seg_starts - prefix_sum_with_zero[atom_idx]
-    clamped_atom_idx = atom_idx.clamp(max=atom_starts.shape[0] - 1)
-    q_atom_idx = torch.where(
-        atom_idx < atom_starts.shape[0],
-        atom_starts[clamped_atom_idx],
-        torch.full_like(atom_idx, batch_size),
-    )
-    schedule_metadata = torch.stack((q_atom_idx, kv_split_idx), dim=1).to(torch.int32)
 
     return DeepseekV32IndexerPagedPrefillMetadata(
         token_start=token_start,
         token_end=token_end,
         context_lens=context_lens,
         indices=indices,
-        block_table=block_table[req_idx],
+        block_table=expanded_block_table,
         schedule_metadata=schedule_metadata,
         max_context_len=max_context_len,
     )
+
+
+@triton.jit
+def _build_paged_prefill_metadata_kernel(
+    # Inputs
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    # Outputs
+    context_lens_ptr,
+    indices_ptr,
+    expanded_block_table_ptr,
+    token_start,
+    output_query_len,
+    start_idx,
+    end_idx,
+    BLOCK_TABLE_STRIDE: tl.constexpr,
+    BLOCK_TABLE_COLS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    REQ_SEARCH_STEPS: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    num_items = output_query_len * BLOCK_TABLE_COLS
+    mask = offsets < num_items
+
+    out_rows = offsets // BLOCK_TABLE_COLS
+    block_cols = offsets - out_rows * BLOCK_TABLE_COLS
+    query_pos = token_start + out_rows
+
+    lo = tl.full((BLOCK_SIZE,), 0, tl.int64) + start_idx
+    hi = tl.full((BLOCK_SIZE,), 0, tl.int64) + end_idx
+    for _ in tl.static_range(0, REQ_SEARCH_STEPS):
+        mid = (lo + hi) // 2
+        mid_start = tl.load(query_start_loc_ptr + mid)
+        pred = mid_start <= query_pos
+        lo = tl.where(pred, mid, lo)
+        hi = tl.where(pred, hi, mid)
+    req_idx = lo
+
+    query_start = tl.load(query_start_loc_ptr + req_idx)
+    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    query_len = query_end - query_start
+    query_offsets = query_pos - query_start
+
+    block_values = tl.load(
+        block_table_ptr + req_idx * BLOCK_TABLE_STRIDE + block_cols,
+        mask=mask,
+    )
+    tl.store(
+        expanded_block_table_ptr + out_rows * BLOCK_TABLE_COLS + block_cols,
+        block_values,
+        mask=mask,
+    )
+
+    row_mask = mask & (block_cols == 0)
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    context_lens = (seq_len - query_len + query_offsets + 1) // COMPRESS_RATIO
+    tl.store(context_lens_ptr + out_rows, context_lens, mask=row_mask)
+    tl.store(indices_ptr + out_rows, req_idx, mask=row_mask)
+
+
+@triton.jit
+def _build_full_paged_prefill_schedule_metadata_kernel(
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    schedule_metadata_ptr,
+    token_start,
+    start_idx,
+    end_idx,
+    total_query_len,
+    NUM_SMS: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SPLIT_KV: tl.constexpr,
+):
+    sm_idx = tl.program_id(0).to(tl.int64)
+
+    total = tl.full((), 0, tl.int64)
+    req_idx = start_idx
+    while req_idx < end_idx:
+        query_start = tl.load(query_start_loc_ptr + req_idx)
+        query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        query_len = query_end - query_start
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+
+        query_offset = tl.full((), 0, tl.int64)
+        while query_offset < query_len:
+            context_offset = tl.minimum(query_offset + 1, query_len - 1)
+            context_len = (seq_len - query_len + context_offset + 1) // COMPRESS_RATIO
+            total += (context_len + SPLIT_KV - 1) // SPLIT_KV
+            query_offset += 2
+        req_idx += 1
+
+    segs_per_sm = total // NUM_SMS
+    extra = total - segs_per_sm * NUM_SMS
+    seg_start = sm_idx * segs_per_sm + tl.minimum(sm_idx, extra)
+
+    prefix = tl.full((), 0, tl.int64)
+    out_q = tl.full((), 0, tl.int64) + total_query_len
+    out_kv = tl.full((), 0, tl.int64)
+    found = tl.full((), False, tl.int1)
+
+    req_idx = start_idx
+    while req_idx < end_idx:
+        query_start = tl.load(query_start_loc_ptr + req_idx)
+        query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        query_len = query_end - query_start
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+
+        query_offset = tl.full((), 0, tl.int64)
+        while query_offset < query_len:
+            context_offset = tl.minimum(query_offset + 1, query_len - 1)
+            context_len = (seq_len - query_len + context_offset + 1) // COMPRESS_RATIO
+            num_segs = (context_len + SPLIT_KV - 1) // SPLIT_KV
+            is_target = (~found) & (prefix + num_segs > seg_start)
+            out_q = tl.where(is_target, query_start - token_start + query_offset, out_q)
+            out_kv = tl.where(is_target, seg_start - prefix, out_kv)
+            found = found | is_target
+            prefix += num_segs
+            query_offset += 2
+        req_idx += 1
+
+    tl.store(schedule_metadata_ptr + sm_idx * 2, out_q)
+    tl.store(schedule_metadata_ptr + sm_idx * 2 + 1, out_kv)
 
 
 @triton.jit
