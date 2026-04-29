@@ -10,6 +10,11 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
 - If not specified, default to writing concise Rust documentation and comments that match the style of the existing codebase when generating code.
 - When migrating code from Python or any other language, preserve the original documentation comments whenever they still make sense in the Rust code.
 - Although you might be asked to only implement or migrate minimal functionality at the beginning, you should still leave necessary `TODO` comments in the code for the future improvements of the lacked features, so that it's easier for the next iteration to build upon the existing codebase.
+- When writing parsers with `winnow`:
+  - Prefer a declarative parser shape over imperative step-by-step parsing, as long as it's more readable and maintainable.
+  - Prefer tuple-based parser composition over calling `parse_next` one parser at a time.
+  - Prefer built-in combinators and token parsers before adding local helpers.
+  - Add short documentation comments like `Parse a ..` to all local parser/combinator functions.
 - Rust error handling:
   - Never call `to_string()` directly on an error value.
   - Use `ToReportString` or `AsReport` by `thiserror-ext` instead.

@@ -101,6 +101,14 @@ fn factory_new_resolves_external_default_patterns() {
         Some(names::DEEPSEEK_V32)
     );
     assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4-Chat"),
+        Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek_v4"),
+        Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-R1-0528"),
         Some(names::DEEPSEEK_V3)
     );

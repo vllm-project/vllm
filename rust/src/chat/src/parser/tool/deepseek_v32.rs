@@ -10,14 +10,25 @@ use super::utils::partial_prefix_len;
 use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
 
-const TOOL_CALLS_START: &str = "<｜DSML｜function_calls>";
-const TOOL_CALLS_END: &str = "</｜DSML｜function_calls>";
 const INVOKE_START: &str = "<｜DSML｜invoke";
 const INVOKE_END: &str = "</｜DSML｜invoke>";
 const PARAMETER_START: &str = "<｜DSML｜parameter";
 const PARAMETER_END: &str = "</｜DSML｜parameter>";
 
 type DsmlInput<'i> = Partial<&'i str>;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DsmlTokens {
+    pub tool_calls_start: &'static str,
+    pub tool_calls_end: &'static str,
+}
+
+impl DsmlTokens {
+    const V32: Self = Self {
+        tool_calls_start: "<｜DSML｜function_calls>",
+        tool_calls_end: "</｜DSML｜function_calls>",
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DsmlMode {
@@ -74,15 +85,23 @@ pub struct DeepSeekV32ToolParser {
     mode: DsmlMode,
     emitted_invoke_count: usize,
     tools: Vec<ChatTool>,
+    tokens: DsmlTokens,
 }
 
 impl DeepSeekV32ToolParser {
     fn new(tools: &[ChatTool]) -> Self {
+        Self::with_tokens(tools, DsmlTokens::V32)
+    }
+
+    /// Create a parser with custom DSML tokens, for reuse by DeepSeek V4 which has different
+    /// markers but mostly shared logic.
+    pub(super) fn with_tokens(tools: &[ChatTool], tokens: DsmlTokens) -> Self {
         Self {
             buffer: String::new(),
             mode: DsmlMode::Text,
             emitted_invoke_count: 0,
             tools: tools.to_vec(),
+            tokens,
         }
     }
 
@@ -205,7 +224,7 @@ impl ToolParser for DeepSeekV32ToolParser {
         loop {
             let mut input = Partial::new(self.buffer.as_str());
             let checkpoint = input.checkpoint();
-            let event = match parse_next_dsml_event(&mut input, self.mode) {
+            let event = match parse_next_dsml_event(&mut input, self.mode, self.tokens) {
                 Ok(event) => event,
                 Err(ErrMode::Incomplete(_)) => break,
                 Err(error) => {
@@ -234,35 +253,46 @@ impl ToolParser for DeepSeekV32ToolParser {
 }
 
 /// Parse a DSML event for the current parser mode.
-fn parse_next_dsml_event(input: &mut DsmlInput<'_>, mode: DsmlMode) -> ModalResult<DsmlEvent> {
+fn parse_next_dsml_event(
+    input: &mut DsmlInput<'_>,
+    mode: DsmlMode,
+    tokens: DsmlTokens,
+) -> ModalResult<DsmlEvent> {
     match mode {
-        DsmlMode::Text => parse_text_event(input),
-        DsmlMode::ToolBlock => parse_tool_block_event(input),
+        DsmlMode::Text => parse_text_event(input, tokens),
+        DsmlMode::ToolBlock => parse_tool_block_event(input, tokens),
         DsmlMode::Done => ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode DSML event.
-fn parse_text_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
-    alt((tool_calls_start_event, safe_text_event)).parse_next(input)
+fn parse_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+    alt((
+        |input: &mut DsmlInput<'_>| tool_calls_start_event(input, tokens),
+        |input: &mut DsmlInput<'_>| safe_text_event(input, tokens),
+    ))
+    .parse_next(input)
 }
 
 /// Parse a tool-block DSML event.
-fn parse_tool_block_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
+fn parse_tool_block_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     ws0.void().parse_next(input)?;
-    alt((invoke_event, tool_calls_end_event)).parse_next(input)
+    alt((invoke_event, |input: &mut DsmlInput<'_>| {
+        tool_calls_end_event(input, tokens)
+    }))
+    .parse_next(input)
 }
 
 /// Parse a DSML function-calls start marker.
-fn tool_calls_start_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
-    literal(TOOL_CALLS_START)
+fn tool_calls_start_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+    literal(tokens.tool_calls_start)
         .value(DsmlEvent::ToolCallsStart)
         .parse_next(input)
 }
 
 /// Parse a DSML function-calls end marker.
-fn tool_calls_end_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
-    literal(TOOL_CALLS_END)
+fn tool_calls_end_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+    literal(tokens.tool_calls_end)
         .value(DsmlEvent::ToolCallsEnd)
         .parse_next(input)
 }
@@ -273,18 +303,18 @@ fn ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
 }
 
 /// Parse a safe text run before the next DSML marker.
-fn safe_text_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
+fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     let text = **input;
     if text.is_empty() {
         return incomplete();
     }
 
-    if let Some(start_idx) = text.find(TOOL_CALLS_START) {
+    if let Some(start_idx) = text.find(tokens.tool_calls_start) {
         input.next_slice(start_idx);
         return Ok(DsmlEvent::Text { len: start_idx });
     }
 
-    let keep_len = partial_prefix_len(text, TOOL_CALLS_START);
+    let keep_len = partial_prefix_len(text, tokens.tool_calls_start);
     let emit_len = text.len().saturating_sub(keep_len);
     if emit_len == 0 {
         return incomplete();
