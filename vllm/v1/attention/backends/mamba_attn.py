@@ -108,12 +108,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
-            max_num_blocks = cdiv(
-                self.vllm_config.model_config.max_model_len,
-                self.kv_cache_spec.block_size,
+            max_num_blocks = (
+                cdiv(
+                    self.vllm_config.model_config.max_model_len,
+                    self.kv_cache_spec.block_size,
+                )
+                + self.kv_cache_spec.num_speculative_blocks
             )
-            # Speculative decoding not supported with prefix caching,
-            # so keep shape consistent with prefill buffer
             # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d: torch.Tensor = torch.empty(
                 (
@@ -524,16 +525,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     non_blocking=True,
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    : metadata.num_decode_tokens
+                    :padded_bs
                 ]
+                block_idx_last_scheduled_token[metadata.num_decodes :] = 0
 
                 self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
                     block_idx_last_computed_token[: metadata.num_decodes],
                     non_blocking=True,
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    : metadata.num_decode_tokens
+                    :padded_bs
                 ]
+                block_idx_last_computed_token[metadata.num_decodes :] = 0
 
         return replace(
             metadata,
