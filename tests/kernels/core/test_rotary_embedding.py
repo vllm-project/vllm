@@ -35,9 +35,7 @@ def rotary_embedding_opcheck(
 @pytest.mark.parametrize("seq_len", [11, 1024])
 @pytest.mark.parametrize("use_key", [True, False])
 @pytest.mark.parametrize("head_stride_is_contiguous", [True, False])
-@pytest.mark.parametrize(
-    "dtype", [torch.float32, torch.bfloat16]
-)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rotary_embedding_opcheck(
     default_vllm_config,
     dist_init,
