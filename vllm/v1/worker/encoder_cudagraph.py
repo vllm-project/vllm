@@ -18,6 +18,7 @@ from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
+    EncoderItemSpec,
 )
 
 logger = init_logger(__name__)
@@ -98,8 +99,8 @@ class EncoderCudaGraphManager:
         elif user_max_frames is not None:
             self.max_frames_per_batch = user_max_frames
         else:
-            # Set it to the model-specific value according to its `processing_info`.
-            max_frames_per_video = self.model.get_max_frames_per_video()
+            # Set it to the model-specific value from config.
+            max_frames_per_video = self.config.max_frames_per_video
             self.max_frames_per_batch = self.max_batch_size * max_frames_per_video
 
         mm_config = vllm_config.model_config.multimodal_config
@@ -140,6 +141,21 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
+    def _detect_input_key(self, mm_kwargs: dict[str, Any]) -> str:
+        """Auto-detect the input tensor key from mm_kwargs.
+
+        Uses the ``input_key_by_modality`` mapping in config to find which
+        input key is present in mm_kwargs. The modality is inferred rather
+        than requiring the model to implement ``get_input_modality``.
+        """
+        for key in self.config.input_key_by_modality.values():
+            if key in mm_kwargs:
+                return key
+        raise ValueError(
+            f"No known input key found in mm_kwargs. "
+            f"Expected one of {list(self.config.input_key_by_modality.values())}"
+        )
+
     def capture(self):
         """Capture CUDA graphs for all token budgets."""
         for token_budget in self.token_budgets:
@@ -172,12 +188,12 @@ class EncoderCudaGraphManager:
         buffers = capture_inputs.buffers
 
         with torch.inference_mode():
-            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
+            output = self.model.encoder_forward(mm_kwargs, buffers)
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode(), torch.cuda.graph(graph):
-            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
+            output = self.model.encoder_forward(mm_kwargs, buffers)
             output_buffer.copy_(output)
 
         # Since the image and video modalities share the same per-patch shape,
@@ -207,12 +223,13 @@ class EncoderCudaGraphManager:
                 return budget
         return None
 
+    def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
+        """Get item specs from the model."""
+        return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
+
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
-        return [
-            int(t)
-            for t in self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
-        ]
+        return [spec.output_tokens for spec in self._get_item_specs(mm_kwargs)]
 
     @staticmethod
     def _scatter_output_slices(
@@ -247,7 +264,7 @@ class EncoderCudaGraphManager:
         Returns:
             Encoder outputs, or None if graph not captured.
         """
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
+        num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_graphs:
             self.graph_misses += num_items
             return None
@@ -257,9 +274,7 @@ class EncoderCudaGraphManager:
         # Copy the input tensor. Buffers are sized for the full budget;
         # actual inputs may be smaller. Zero then slice-copy so padded
         # positions are invisible to attention (cu_seqlens masks them out).
-        input_key = self.config.input_key_by_modality[
-            self.model.get_input_modality(mm_kwargs)
-        ]
+        input_key = self._detect_input_key(mm_kwargs)
         src = mm_kwargs[input_key]
         n = src.shape[0]
         graph_meta.input_buffer[:n].copy_(src)
@@ -305,10 +320,11 @@ class EncoderCudaGraphManager:
                          always satisfy total_tokens <= max_budget and therefore
                          always find a valid budget (no miss).
         """
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
+        item_specs = self._get_item_specs(mm_kwargs)
+        num_items = len(item_specs)
         max_budget = self.token_budgets[-1]
 
-        per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
+        per_item_out_tokens = [spec.output_tokens for spec in item_specs]
 
         # Sort ascending by output token count (smallest first)
         sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
@@ -373,7 +389,7 @@ class EncoderCudaGraphManager:
                 )
                 self.graph_misses += len(batch_orig_indices)
                 with torch.inference_mode():
-                    raw = self.model.encoder_eager_forward(batch_mm_kwargs)
+                    raw = self.model.encoder_forward(batch_mm_kwargs)
                 self._scatter_output_slices(
                     raw,
                     batch_orig_indices,
@@ -431,9 +447,8 @@ class EncoderCudaGraphManager:
         tp_size = get_tensor_model_parallel_world_size()
         current_rank = get_tensor_model_parallel_rank()
 
-        per_item_input_sizes = self.model.get_encoder_cudagraph_per_item_input_sizes(
-            mm_kwargs
-        )
+        item_specs = self._get_item_specs(mm_kwargs)
+        per_item_input_sizes = [spec.input_size for spec in item_specs]
 
         (image_rank_assignment, images_per_rank, input_patches_per_rank) = (
             get_load_balance_assignment(per_item_input_sizes, tp_size)
