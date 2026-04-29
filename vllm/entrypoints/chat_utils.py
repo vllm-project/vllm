@@ -255,6 +255,23 @@ class CustomThinkCompletionContentParam(TypedDict, total=False):
     """The thinking type."""
 
 
+class CustomChatCompletionContentToolReferenceParam(TypedDict, total=False):
+    """A tool reference content param that only accepts a plain tool name.
+
+    Example:
+    {
+        "name": "get_weather",
+        "type": "tool_reference"
+    }
+    """
+
+    name: str
+    """The name of the tool being referenced."""
+
+    type: Literal["tool_reference"]
+    """The content type."""
+
+
 ChatCompletionContentPartParam: TypeAlias = (
     OpenAIChatCompletionContentPartParam
     | ChatCompletionContentPartAudioParam
@@ -267,6 +284,7 @@ ChatCompletionContentPartParam: TypeAlias = (
     | ChatCompletionContentPartAudioEmbedsParam
     | CustomChatCompletionContentSimpleAudioParam
     | CustomChatCompletionContentSimpleVideoParam
+    | CustomChatCompletionContentToolReferenceParam
     | str
     | CustomThinkCompletionContentParam
 )
@@ -1281,6 +1299,9 @@ MM_PARSER_MAP: dict[
     "input_audio": lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal": lambda part: _RefusalParser(part).get("refusal", None),
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
+    "tool_reference": lambda part: cast(
+        CustomChatCompletionContentToolReferenceParam, part
+    ).get("name", None),
 }
 
 
@@ -1372,6 +1393,12 @@ def _parse_chat_message_content_mm_part(
                 # with url as a dict of {"url": url}
                 video_url = video_url.get("url", None)
             return "video_url", video_url
+        if "tool_reference" in part:
+            tool_reference_params = cast(
+                CustomChatCompletionContentToolReferenceParam, part
+            )
+            tool_reference = tool_reference_params.get("name", None)
+            return "tool_reference", tool_reference
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
 
@@ -1501,6 +1528,12 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
+    elif part_type == "tool_reference":
+        # Tool references are not multimodal data — they reference deferred
+        # tools and are passed through as-is for the chat template to expand.
+        if wrap_dicts:
+            return {"type": "tool_reference", "name": cast(str, content)}
+        return cast(str, content)
     else:
         supported = sorted(MM_PARSER_MAP.keys() | set(PART_TYPES_TO_SKIP_NONE_CONTENT))
         raise VLLMValidationError(
@@ -1567,14 +1600,24 @@ def _parse_chat_message_content(
             # string. Clients like Claude Code / Cursor send tool results as
             # [{"type": "text", "text": "..."}], but most chat templates only
             # handle string content for tool messages.
+            # However, tool_reference items must be preserved as structured
+            # dicts for the chat template to expand them.
             msg_content = result_msg.get("content")
             if isinstance(msg_content, list):
-                texts = [
-                    item.get("text", "")
+                has_non_text = any(
+                    isinstance(item, dict) and item.get("type") != "text"
                     for item in msg_content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                ]
-                result_msg["content"] = "\n".join(texts) if texts else ""
+                )
+                if has_non_text:
+                    # Keep structured content (e.g., tool_reference)
+                    result_msg["content"] = msg_content
+                else:
+                    texts = [
+                        item.get("text", "")
+                        for item in msg_content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    ]
+                    result_msg["content"] = "\n".join(texts) if texts else ""
 
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
