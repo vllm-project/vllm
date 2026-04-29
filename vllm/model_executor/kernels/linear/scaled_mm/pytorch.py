@@ -6,6 +6,10 @@ import math
 import torch
 
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    normalize_e4m3fn_to_e4m3fnuz,
+)
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
@@ -39,6 +43,16 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires compute capability 89 and above."
 
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w, w_s, x_s, _ = self._get_layer_params(layer)
+        if current_platform.is_fp8_fnuz() and w.dtype == torch.float8_e4m3fn:
+            w, w_s, x_s = normalize_e4m3fn_to_e4m3fnuz(w, w_s, x_s)
+            w_name, w_s_name, x_s_name, _ = self.layer_param_names
+            replace_parameter(layer, w_name, w)
+            replace_parameter(layer, w_s_name, w_s)
+            if x_s is not None:
+                replace_parameter(layer, x_s_name, x_s)
 
     def get_output_padding(self) -> int | None:
         # Note: we pad the input because torch._scaled_mm is more performant
