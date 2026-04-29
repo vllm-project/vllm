@@ -1291,15 +1291,12 @@ class OpenAIServingChat(OpenAIServing):
         auto_tools_called: bool,
     ) -> str:
         """Determine the finish_reason for a non-streaming choice."""
+        # In OpenAI's API, when a tool is called, the finish_reason is:
+        # "tool_calls" for "auto" or "required" tool calls,
+        # and "stop" for named tool calls.
         if auto_tools_called:
             return "tool_calls"
-        if (
-            request.tool_choice not in ["none", "auto"]
-            and output.finish_reason == "stop"
-        ):
-            # openai spec: For named/required tool choices,
-            # if the model stopped because it made a tool call,
-            # we override the finish reason to "tool_calls".
+        if request.tool_choice == "required" and output.finish_reason == "stop":
             return "tool_calls"
         return output.finish_reason if output.finish_reason else "stop"
 
