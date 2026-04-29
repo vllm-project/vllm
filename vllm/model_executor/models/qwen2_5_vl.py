@@ -779,7 +779,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         *,
         max_batch_size: int | None = None,
         max_frames_per_batch: int | None = None,
+        max_window_seqs_per_batch: int | None = None,
         max_seqlen_override: int | None = None,
+        max_seqlen_window_override: int | None = None,
         device: torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute encoder metadata from grid_thw.
@@ -795,9 +797,16 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_seqlens padding. For video inputs each item contributes
                 T attention sequences (frames); this sizes the buffer to
                 the total frame budget so video replays never overflow.
+            max_window_seqs_per_batch: If set, pad cu_window_seqlens to this
+                number of window sequences. This keeps cu_window_seqlens shape
+                stable across capture/replay for CUDA graph safety.
             max_seqlen_override: If set, use this value for max_seqlen
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
+            max_seqlen_window_override: If set, use this value for
+                window-attention max_seqlen instead of computing from
+                cu_window_seqlens (needed for CUDA graph capture to
+                cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
         """
 
@@ -872,13 +881,36 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     )
                 )
 
+        # Pad cu_window_seqlens to a stable number of window sequences.
+        # Like cu_seqlens, we repeat the last cumulative offset so padded
+        # entries represent empty sequences.
+        if max_window_seqs_per_batch is not None:
+            num_window_seqs = len(cu_window_seqlens) - 1
+            if num_window_seqs < max_window_seqs_per_batch:
+                cu_window_seqlens = torch.cat(
+                    (
+                        cu_window_seqlens,
+                        torch.full(
+                            (max_window_seqs_per_batch - num_window_seqs,),
+                            cu_window_seqlens[-1],
+                            dtype=cu_window_seqlens.dtype,
+                            device=cu_window_seqlens.device,
+                        ),
+                    )
+                )
+
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
         if max_seqlen_override is None:
             max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
         else:
             max_seqlen_full = torch.tensor(max_seqlen_override, dtype=torch.int32)
-        max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
+        if max_seqlen_window_override is None:
+            max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
+        else:
+            max_seqlen_window = torch.tensor(
+                max_seqlen_window_override, dtype=torch.int32
+            )
 
         cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=device, non_blocking=True)
@@ -1534,14 +1566,12 @@ class Qwen2_5_VLForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        modalities = ["image"]
-        # NOTE: When EVS (Efficient Video Sampling) pruning is enabled, the number
-        # of tokens becomes data-dependent (i.e., the retained tokens are
-        # dynamically selected based on inter-frame differences) and therefore
-        # cannot be captured by CUDA Graphs. As a result, video CUDA Graphs are
-        # only enabled when EVS is disabled.
-        if not self.is_multimodal_pruning_enabled:
-            modalities.append("video")
+        # NOTE: With EVS pruning enabled, multimodal embeddings are post-processed
+        # (append positions for image and prune+append positions for video) in
+        # embed_multimodal(). The encoder CUDA graph path bypasses that postprocess
+        # hook, so disable CUDA graph for all modalities to avoid inconsistent
+        # embedding formats between eager and cudagraph paths.
+        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -1690,6 +1720,10 @@ class Qwen2_5_VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
+        max_window_seqs_per_batch = min(
+            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
         # Use ceil here (not floor) so total captured capacity is never smaller
         # than token_budget when token_budget is not divisible by max_batch_size
         # (e.g., 324 budget with max_batch_size=8). Floor under-allocates
@@ -1742,11 +1776,23 @@ class Qwen2_5_VLForConditionalGeneration(
         # so the capture value must cover any replay scenario.
         # Worst case: 1 item consuming the full budget ->
         # seq_len = token_budget * spatial_merge_size^2.
+        # For window-attention, each local window is bounded by fixed geometry:
+        # (window_size / patch_size / spatial_merge_size)^2 windows in merged
+        # token space, multiplied by spatial_merge_size^2 to map back to the
+        # unmerged sequence length used by attention kernels.
+        vit_merger_window_size = (
+            self.visual.window_size
+            // self.visual.spatial_merge_size
+            // self.visual.patch_size
+        )
+        max_seqlen_window_override = vit_merger_window_size**2 * (spatial_merge_size**2)
         buffers = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
+            max_window_seqs_per_batch=max_window_seqs_per_batch,
             max_seqlen_override=token_budget * (spatial_merge_size**2),
+            max_seqlen_window_override=max_seqlen_window_override,
             device=device,
         )
 
@@ -1775,11 +1821,19 @@ class Qwen2_5_VLForConditionalGeneration(
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
+                max_window_seqs_per_batch=min(
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                    self.model_config.max_model_len,
+                ),
             )
         else:
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
+                max_window_seqs_per_batch=min(
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                    self.model_config.max_model_len,
+                ),
             )
 
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
