@@ -140,16 +140,39 @@ def amd_smi_list_gpu_count() -> int:
 
 
 def make_results_dir(artifact_mode: bool) -> Path:
-    root = os.environ.get("VLLM_CI_RESULTS_ROOT")
-    if root is None and artifact_mode:
-        root = str(Path.cwd() / ".buildkite" / "amd-ci-results")
+    configured_root = os.environ.get("VLLM_CI_RESULTS_ROOT")
+    if configured_root:
+        root_path = Path(configured_root).resolve()
+        root_path.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="vllm-ci-results-", dir=root_path))
 
-    if root is None:
+    if not artifact_mode:
         return Path(tempfile.mkdtemp(prefix="vllm-ci-results-"))
 
-    root_path = Path(root).resolve()
-    root_path.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="vllm-ci-results-", dir=root_path))
+    candidates = [
+        Path.cwd() / "amd-ci-results",
+        Path(os.environ.get("BUILDKITE_BUILD_CHECKOUT_PATH", "")) / "amd-ci-results",
+        Path(os.environ.get("BUILDKITE_BUILD_PATH", "")) / "amd-ci-results",
+        Path(os.environ.get("HF_HOME", "")) / "amd-ci-results",
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if str(candidate) in {"", "."}:
+            continue
+        root_path = candidate.resolve()
+        if root_path in seen:
+            continue
+        seen.add(root_path)
+        try:
+            root_path.mkdir(parents=True, exist_ok=True)
+            return Path(tempfile.mkdtemp(prefix="vllm-ci-results-", dir=root_path))
+        except OSError as exc:
+            log.warning("Could not use ROCm CI results dir %s: %s", root_path, exc)
+
+    raise RuntimeError(
+        "Could not create a Docker-visible ROCm CI results directory. "
+        "Set VLLM_CI_RESULTS_ROOT to a writable path shared with Docker."
+    )
 
 
 @dataclass(frozen=True)
