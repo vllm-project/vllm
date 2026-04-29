@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import gc
 import random
 
 import torch
@@ -348,14 +349,15 @@ class DeepGemmPaged:
         return self.topk_indices_buffer
 
 
+IMPLEMENTATIONS = (
+    ("deepgemm_flat", DeepGemmFlat),
+    ("deepgemm_paged", DeepGemmPaged),
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run the DeepGEMM prefill sparse-indexer path."
-    )
-    parser.add_argument(
-        "--impl",
-        choices=["deepgemm_flat", "deepgemm_paged"],
-        default="deepgemm_flat",
+        description="Run all DeepGEMM prefill sparse-indexer paths."
     )
     parser.add_argument("--dtype", choices=["fp4", "fp8"], required=True)
     parser.add_argument("--num-requests", type=int, default=8)
@@ -370,17 +372,24 @@ def parse_args():
     return parser.parse_args()
 
 
-def check_topk(
+def print_topk_result(
+    impl_name: str,
     actual: Tensor,
     expected: Tensor,
     query_lens: list[int],
     seq_lens: list[int],
     compress_ratio: int,
     topk: int,
+    peak_memory_mib: float,
 ) -> None:
     actual_cpu = actual.cpu()
     expected_cpu = expected.cpu()
     row_idx = 0
+    compared_rows = 0
+    wrong_rows = 0
+    compared_entries = 0
+    wrong_entries = 0
+
     for query_len, seq_len in zip(query_lens, seq_lens):
         context_len = seq_len - query_len
         for offset in range(query_len):
@@ -389,18 +398,29 @@ def check_topk(
             if k > 0:
                 actual_row = actual_cpu[row_idx, :k].sort().values
                 expected_row = expected_cpu[row_idx, :k].sort().values
-                if not torch.equal(actual_row, expected_row):
-                    raise AssertionError(
-                        f"top-k mismatch at row {row_idx}: "
-                        f"actual={actual_cpu[row_idx, :k].tolist()}, "
-                        f"expected={expected_cpu[row_idx, :k].tolist()}"
-                    )
+                row_mismatches = int(
+                    (~torch.isin(actual_row, expected_row)).sum().item()
+                )
+                compared_rows += 1
+                compared_entries += k
+                if row_mismatches > 0:
+                    wrong_rows += 1
+                    wrong_entries += row_mismatches
             row_idx += 1
 
+    correctness = "passed" if wrong_entries == 0 else "failed"
+    print(
+        f"{impl_name}: correctness={correctness}, "
+        f"wrong_entries={wrong_entries}/{compared_entries}, "
+        f"wrong_rows={wrong_rows}/{compared_rows}, "
+        f"peak_memory={peak_memory_mib:.2f} MiB"
+    )
 
-def main() -> Tensor:
+
+def main() -> None:
     args = parse_args()
     print(args)
+    print("implementations:", ", ".join(name for name, _ in IMPLEMENTATIONS))
 
     torch.set_default_device("cuda")
     torch.manual_seed(args.seed)
@@ -492,23 +512,6 @@ def main() -> Tensor:
             kv_cache[block_id, scale_off : scale_off + block_ks.numel()] = block_ks
 
     kv_cache = kv_cache.view(-1, block_size, cache_dim)
-    impl_cls = {
-        "deepgemm_flat": DeepGemmFlat,
-        "deepgemm_paged": DeepGemmPaged,
-    }[args.impl]
-    impl = impl_cls(
-        block_table_cpu,
-        query_lens_cpu,
-        seq_lens_cpu,
-        compressed_seq_lens_cpu,
-        query_start_loc_cpu,
-        args.compress_ratio,
-        block_size,
-        use_fp4,
-        args.topk,
-    )
-    topk_indices = impl.run(q_quant, q_scale, kv_cache, weights)
-
     reference = Reference(
         block_table_cpu,
         query_lens_cpu,
@@ -521,17 +524,39 @@ def main() -> Tensor:
         args.topk,
     )
     expected_topk = reference.run(q_quant, q_scale, kv_cache, weights)
-    check_topk(
-        topk_indices,
-        expected_topk,
-        query_lens,
-        seq_lens,
-        args.compress_ratio,
-        args.topk,
-    )
-    print("correctness check passed")
 
-    return topk_indices
+    for impl_name, impl_cls in IMPLEMENTATIONS:
+        impl = None
+        topk_indices = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+        impl = impl_cls(
+            block_table_cpu,
+            query_lens_cpu,
+            seq_lens_cpu,
+            compressed_seq_lens_cpu,
+            query_start_loc_cpu,
+            args.compress_ratio,
+            block_size,
+            use_fp4,
+            args.topk,
+        )
+        topk_indices = impl.run(q_quant, q_scale, kv_cache, weights)
+        torch.cuda.synchronize()
+        peak_memory_mib = torch.cuda.max_memory_allocated() / 1024 / 1024
+        print_topk_result(
+            impl_name,
+            topk_indices,
+            expected_topk,
+            query_lens,
+            seq_lens,
+            args.compress_ratio,
+            args.topk,
+            peak_memory_mib,
+        )
 
 
 if __name__ == "__main__":
