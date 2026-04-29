@@ -205,6 +205,7 @@ class DeepGemmFlatChunk:
             )
             if metadata is not None:
                 self.chunks.append(metadata)
+        self.num_chunks = len(self.chunks)
         if not self.chunks:
             raise RuntimeError("generated requests produced no prefill chunks")
 
@@ -319,6 +320,7 @@ class DeepGemmPaged:
         self.schedule_metadata = get_paged_mqa_logits_metadata(
             self.context_lens, block_size, NUM_SMS, indices=self.indices
         )
+        self.num_chunks = 1
 
     def run(
         self, q_quant: Tensor, q_scale: Tensor | None, kv_cache: Tensor, weights: Tensor
@@ -429,6 +431,7 @@ class DeepGemmPagedChunk:
             )
             self.chunks.append(chunk)
 
+        self.num_chunks = len(self.chunks)
         if not self.chunks:
             raise RuntimeError("generated requests produced no prefill chunks")
 
@@ -494,7 +497,7 @@ def parse_args():
     parser.add_argument("--max_context_len", type=int, nargs="+", default=[1024])
     parser.add_argument("--block_size", type=int, default=64)
     parser.add_argument("--compress_ratio", type=int, default=4)
-    parser.add_argument("--topk", type=int, default=2048)
+    parser.add_argument("--topk", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log_axis", action="store_true")
     parser.add_argument("--graph_path")
@@ -551,7 +554,9 @@ def export_sweep_graph(
 ) -> None:
     import matplotlib.pyplot as plt
 
-    fig, (latency_ax, memory_ax) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+    fig, (latency_ax, memory_ax, chunks_ax) = plt.subplots(
+        3, 1, figsize=(9, 9), sharex=True
+    )
 
     for impl_name, impl_results in results_df.groupby("implementation", sort=False):
         impl_results = impl_results.sort_values("max_context_len")
@@ -560,26 +565,38 @@ def export_sweep_graph(
         p20_us = impl_results["p20_us"].to_numpy()
         p80_us = impl_results["p80_us"].to_numpy()
         peak_memory_mib = impl_results["peak_memory_mib"].to_numpy()
+        num_chunks = impl_results["num_chunks"].to_numpy()
 
         latency_ax.plot(x_values, latency_us, marker="o", label=impl_name)
         latency_ax.fill_between(x_values, p20_us, p80_us, alpha=0.15)
         memory_ax.plot(x_values, peak_memory_mib, marker="o", label=impl_name)
+        chunks_ax.plot(x_values, num_chunks, marker="o", label=impl_name)
 
     latency_ax.set_title("Latency")
     latency_ax.set_ylabel("us")
     latency_ax.tick_params(axis="x", labelbottom=True)
     if log_axis:
         latency_ax.set_xscale("log", base=10)
+    latency_ax.set_ylim(bottom=0)
     latency_ax.grid(True, axis="y", alpha=0.25)
     latency_ax.legend()
 
-    memory_ax.set_xlabel("max_context_len")
     memory_ax.set_title("Peak memory")
     memory_ax.set_ylabel("MiB")
     if log_axis:
         memory_ax.set_xscale("log", base=10)
+    memory_ax.set_ylim(bottom=0)
     memory_ax.grid(True, axis="y", alpha=0.25)
     memory_ax.legend()
+
+    chunks_ax.set_xlabel("max_context_len")
+    chunks_ax.set_title("Chunks")
+    chunks_ax.set_ylabel("count")
+    if log_axis:
+        chunks_ax.set_xscale("log", base=10)
+    chunks_ax.set_ylim(bottom=0)
+    chunks_ax.grid(True, axis="y", alpha=0.25)
+    chunks_ax.legend()
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -714,6 +731,7 @@ def run_benchmark_batch(
             {
                 "max_context_len": max_context_len,
                 "implementation": impl_name,
+                "num_chunks": impl.num_chunks,
                 "wrong_entries": f"{wrong_entries}/{compared_entries}",
                 "peak_memory_mib": peak_memory_mib,
                 "latency_us": latency_ms * 1000,
