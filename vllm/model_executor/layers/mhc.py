@@ -448,3 +448,168 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=_mhc_post_fake,
 )
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    },
+)
+def hc_head_fuse_tilelang(
+    residual,
+    fn,
+    hc_scale,
+    hc_base,
+    out,
+    hidden_size: int,
+    rms_eps: float,
+    hc_eps: float,
+    h_block: int,
+    hc_mult: int = 4,
+):
+    """Two-pass fused kernel for hc_head.
+
+    Pass 1: accumulate per-token squared sum and hc_mult dot-products
+            (projections onto fn rows) using cross-thread reducers.
+    Pass 2: apply sigmoid-gated weighted sum of residual channels to output.
+
+    Avoids materialising mixes / rsqrt / pre tensors to global memory.
+    """
+    num_tokens = T.dynamic("num_tokens")
+    hc_dim = hc_mult * hidden_size
+    n_h = hidden_size // h_block
+
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
+    fn: T.Tensor[[hc_mult, hc_dim], T.float32]  # type: ignore[no-redef,valid-type]
+    hc_scale: T.Tensor[[1], T.float32]  # type: ignore[no-redef,valid-type]
+    hc_base: T.Tensor[[hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
+    out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
+
+    with T.Kernel(num_tokens, threads=64) as i:
+        T.pdl_sync()
+
+        # ------------------------------------------------------------------
+        # Pass 1 – for each residual channel m_c and h_block:
+        #   • accumulate squared sum (for RMS norm denominator)
+        #   • accumulate hc_mult dot-products with fn rows
+        # ------------------------------------------------------------------
+        sqrsum_r = T.alloc_reducer((1,), T.float32, replication="all")
+        mixes_r = T.alloc_reducer((hc_mult,), T.float32, replication="all")
+        T.fill(sqrsum_r, 0.0)
+        T.fill(mixes_r, 0.0)
+
+        for m_c in T.serial(hc_mult):
+            for i_h in T.serial(n_h):
+                x_local = T.alloc_fragment(h_block, T.float32)
+                T.copy(residual[i, m_c, i_h * h_block], x_local)
+
+                for k in T.Parallel(h_block):
+                    sqrsum_r[0] += x_local[k] * x_local[k]
+
+                for m_m in T.unroll(hc_mult):
+                    fn_local = T.alloc_fragment(h_block, T.float32)
+                    T.copy(fn[m_m, m_c * hidden_size + i_h * h_block], fn_local)
+                    for k in T.Parallel(h_block):
+                        mixes_r[m_m] += x_local[k] * fn_local[k]
+
+        T.finalize_reducer(sqrsum_r)
+        T.finalize_reducer(mixes_r)
+
+        # ------------------------------------------------------------------
+        # Compute pre_mix = sigmoid(mix * rsqrt * scale + base) + eps
+        # ------------------------------------------------------------------
+        pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
+        rsqrt_val = T.alloc_fragment(1, T.float32)
+        rsqrt_val[0] = T.rsqrt(sqrsum_r[0] / hc_dim + rms_eps)
+        for m in T.Parallel(hc_mult):
+            pre_mix_shared[m] = (
+                T.sigmoid(mixes_r[m] * rsqrt_val[0] * hc_scale[0] + hc_base[m]) + hc_eps
+            )
+
+        # ------------------------------------------------------------------
+        # Pass 2 – apply_mix: pipelined weighted sum over residual channels
+        # ------------------------------------------------------------------
+        for i0_h in T.Pipelined(n_h, num_stages=2):
+            xs = T.alloc_shared((hc_mult, h_block), T.bfloat16)
+            xl = T.alloc_fragment((hc_mult, h_block), T.float32)
+            T.copy(residual[i, 0, i0_h * h_block], xs, disable_tma=True)
+            T.copy(xs, xl)
+
+            ol = T.alloc_fragment(h_block, T.float32)
+            T.clear(ol)
+            for i_hc in T.serial(hc_mult):
+                pre = pre_mix_shared[i_hc]
+                for i1_h in T.Parallel(h_block):
+                    ol[i1_h] += pre * xl[i_hc, i1_h]
+
+            T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
+
+        T.pdl_trigger()
+
+
+def hc_head(
+    hidden_states: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    """Hyperconnection head: fused RMS-norm projection + sigmoid gating + reduce.
+
+    Args:
+        hidden_states: shape (*, hc_mult, hidden_size), dtype bfloat16.
+        fn: shape (hc_mult, hc_mult * hidden_size), dtype float32.
+        hc_scale: shape (1,), dtype float32.
+        hc_base: shape (hc_mult,), dtype float32.
+        rms_eps: RMS normalisation epsilon.
+        hc_eps: post-sigmoid epsilon added to pre_mix.
+
+    Returns:
+        Tensor of shape (*, hidden_size), dtype bfloat16.
+    """
+    assert hidden_states.dtype == torch.bfloat16
+    assert fn.dtype == hc_scale.dtype == hc_base.dtype == torch.float32
+
+    hc_mult = hidden_states.shape[-2]
+    hidden_size = hidden_states.shape[-1]
+    outer_shape = hidden_states.shape[:-2]
+
+    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+    num_tokens = hs_flat.shape[0]
+
+    h_block = math.gcd(512, hidden_size)
+    out = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device)
+
+    hc_head_fuse_tilelang(
+        hs_flat, fn, hc_scale, hc_base, out,
+        hidden_size, rms_eps, hc_eps, h_block, hc_mult,
+    )
+
+    return out.view(*outer_shape, hidden_size)
+
+
+def _hc_head_fake(
+    hidden_states: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    return torch.empty(
+        *hidden_states.shape[:-2],
+        hidden_states.shape[-1],
+        dtype=torch.bfloat16,
+        device=hidden_states.device,
+    )
+
+
+direct_register_custom_op(
+    op_name="hc_head",
+    op_func=hc_head,
+    mutates_args=[],
+    fake_impl=_hc_head_fake,
+)

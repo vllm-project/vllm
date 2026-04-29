@@ -7,7 +7,6 @@ from itertools import islice
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -1443,7 +1442,6 @@ class DeepseekV4Model(nn.Module):
             layer.ffn.finalize_mega_moe_weights()
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
 def hc_head(
     hidden_states: torch.Tensor,
     hc_fn: torch.Tensor,
@@ -1452,14 +1450,9 @@ def hc_head(
     rms_norm_eps: float,
     hc_eps: float,
 ) -> torch.Tensor:
-    x = hidden_states
-    shape, dtype = x.size(), x.dtype
-    x = x.flatten(1).float()
-    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + rms_norm_eps)
-    mixes = F.linear(x, hc_fn) * rsqrt
-    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
-    return y.to(dtype)
+    return torch.ops.vllm.hc_head(
+        hidden_states, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps
+    )
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
