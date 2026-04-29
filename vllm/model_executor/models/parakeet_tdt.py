@@ -97,9 +97,7 @@ class ParakeetTDTProcessingInfo(BaseProcessingInfo):
         return self.get_feature_extractor().audio_token_count(num_samples)
 
 
-class ParakeetTDTDummyInputsBuilder(
-    BaseDummyInputsBuilder[ParakeetTDTProcessingInfo]
-):
+class ParakeetTDTDummyInputsBuilder(BaseDummyInputsBuilder[ParakeetTDTProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
 
@@ -282,6 +280,59 @@ class ParakeetTDTJoint(nn.Module):
         return self.head(hidden_states)
 
 
+class ParakeetTDTForcedDecoderState:
+    """Request-keyed token sequences produced by Parakeet's TDT decoder."""
+
+    def __init__(self, eos_token_id: int) -> None:
+        self.eos_token_id = eos_token_id
+        self._sequences: dict[str, list[int]] = {}
+
+    def set_sequences(
+        self,
+        request_ids: Sequence[str],
+        sequences: Sequence[Sequence[int]],
+    ) -> None:
+        for request_id, sequence in zip(request_ids, sequences):
+            self._sequences[request_id] = list(sequence)
+
+    def remove_sequences(self, request_ids: Iterable[str]) -> None:
+        for request_id in request_ids:
+            self._sequences.pop(request_id, None)
+
+    def get_forced_token_ids(
+        self,
+        *,
+        request_ids: Sequence[str],
+        request_indices: torch.Tensor | None,
+        positions: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if positions.ndim > 1:
+            positions = positions[0]
+
+        forced_token_ids: list[int] = []
+        for token_idx, position in enumerate(positions):
+            if request_indices is None:
+                request_index = token_idx
+            elif token_idx < request_indices.shape[0]:
+                request_index = int(request_indices[token_idx].item())
+            else:
+                request_index = -1
+
+            if 0 <= request_index < len(request_ids):
+                sequence = self._sequences.get(request_ids[request_index])
+            else:
+                sequence = None
+
+            seq_idx = int(position.item())
+            if sequence is not None and 0 <= seq_idx < len(sequence):
+                forced_token_ids.append(sequence[seq_idx])
+            else:
+                forced_token_ids.append(self.eos_token_id)
+
+        return torch.tensor(forced_token_ids, dtype=torch.long, device=device)
+
+
 class ParakeetTDTModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -354,6 +405,8 @@ class ParakeetTDTModel(nn.Module):
                 duration_idx = int(duration_logits.argmax().item())
                 skip = cfg.durations[duration_idx]
                 token_id = int(token.item())
+                if token_id == cfg.blank_token_id and skip == 0:
+                    skip = 1
 
                 if token_id != cfg.blank_token_id:
                     token_ids.append(token_id)
@@ -380,6 +433,7 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     supports_transcription_only = True
     supported_languages = PARAKEET_SUPPORTED_LANGUAGES
     no_space_languages: set[str] = set()
+    uses_request_ids_for_generation = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "encoder.": "model.encoder.",
@@ -397,7 +451,9 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         with self._mark_tower_model(vllm_config, "audio"):
             self.model = ParakeetTDTModel(vllm_config=vllm_config, prefix=prefix)
 
-        self._forced_sequences: list[list[int]] = []
+        self._forced_decoder_state = ParakeetTDTForcedDecoderState(
+            eos_token_id=self.config.eos_token_id
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -415,6 +471,17 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_features = kwargs.pop("input_features", None)
         attention_mask = kwargs.pop("attention_mask", None)
+
+        if isinstance(input_features, Sequence):
+            input_features = nn.utils.rnn.pad_sequence(
+                list(input_features),
+                batch_first=True,
+            )
+        if isinstance(attention_mask, Sequence):
+            attention_mask = nn.utils.rnn.pad_sequence(
+                list(attention_mask),
+                batch_first=True,
+            )
 
         if not isinstance(input_features, torch.Tensor):
             raise ValueError("Parakeet TDT requires input_features.")
@@ -442,18 +509,29 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         encoder_outputs: list[torch.Tensor] | None = None,
+        request_ids: Sequence[str] | None = None,
+        request_indices: torch.Tensor | None = None,
+        encoder_request_ids: Sequence[str] | None = None,
+        finished_request_ids: Iterable[str] | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         del intermediate_tensors, kwargs
 
+        if finished_request_ids is not None:
+            self._forced_decoder_state.remove_sequences(finished_request_ids)
+
         if encoder_outputs:
-            self._forced_sequences = [
+            sequences = [
                 self.model.greedy_decode(encoder_output)
                 for encoder_output in encoder_outputs
             ]
-
-        if positions.ndim > 1:
-            positions = positions[0]
+            if encoder_request_ids is not None:
+                sequence_request_ids = encoder_request_ids
+            elif request_ids is not None:
+                sequence_request_ids = request_ids[: len(sequences)]
+            else:
+                sequence_request_ids = [str(i) for i in range(len(sequences))]
+            self._forced_decoder_state.set_sequences(sequence_request_ids, sequences)
 
         batch_size = input_ids.shape[0]
         vocab_size = self.config.vocab_size
@@ -464,19 +542,22 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
             device=input_ids.device,
         )
 
-        for i in range(batch_size):
-            sequence = (
-                self._forced_sequences[min(i, len(self._forced_sequences) - 1)]
-                if self._forced_sequences
-                else [self.config.eos_token_id]
+        if request_ids is not None:
+            forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
+                request_ids=request_ids,
+                request_indices=request_indices,
+                positions=positions,
+                device=input_ids.device,
             )
-            seq_idx = int(positions[i].item())
-            token_id = (
-                sequence[seq_idx]
-                if seq_idx < len(sequence)
-                else self.config.eos_token_id
+        else:
+            forced_token_ids = torch.full(
+                (batch_size,),
+                self.config.eos_token_id,
+                dtype=torch.long,
+                device=input_ids.device,
             )
-            logits[i, token_id] = 0.0
+
+        logits.scatter_(1, forced_token_ids.unsqueeze(1), 0.0)
 
         return logits
 
@@ -535,4 +616,4 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         return text.strip()
 
 
-__all__ = ["ParakeetForTDT"]
+__all__ = ["ParakeetForTDT", "ParakeetTDTForcedDecoderState"]
