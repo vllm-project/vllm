@@ -42,6 +42,13 @@ def _window_attention_regression_image():
     return image.resize((image.width // 2, image.height // 2))
 
 
+def _encoder_cudagraph_config(*, max_vision_items: int) -> dict:
+    return {
+        "cudagraph_mm_encoder": True,
+        "encoder_cudagraph_max_vision_items_per_batch": max_vision_items,
+    }
+
+
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("video_pruning_rate", [0.0, 0.75])
@@ -187,6 +194,7 @@ def test_qwen2_5_vl_window_attention_image(
         max_model_len=4096,
         dtype=dtype,
         limit_mm_per_prompt={"image": 1},
+        compilation_config=_encoder_cudagraph_config(max_vision_items=1),
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompt, max_tokens, images=images)
 
@@ -224,6 +232,7 @@ def test_qwen2_5_vl_window_attention_image_batch(
         max_num_seqs=2,
         dtype=dtype,
         limit_mm_per_prompt={"image": 1},
+        compilation_config=_encoder_cudagraph_config(max_vision_items=2),
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
 
