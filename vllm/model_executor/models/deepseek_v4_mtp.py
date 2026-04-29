@@ -35,7 +35,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.multi_stream_utils import AuxStreamType
 
 from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
@@ -65,6 +64,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         vllm_config: VllmConfig,
         topk_indices_buffer: torch.Tensor,
         prefix: str,
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ) -> None:
         super().__init__()
 
@@ -112,14 +112,11 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-        self.aux_stream_dict = {
-            AuxStreamType.Attention: torch.cuda.Stream(),
-        }
         self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
             prefix,
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream_dict=self.aux_stream_dict,
+            aux_stream_list=aux_stream_list,
         )
 
     def forward(
@@ -169,6 +166,10 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             device=self.device,
         )
 
+        # Three aux streams shared across all MTP layers, mirroring
+        # DeepseekV4Model.
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
@@ -176,6 +177,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
                     vllm_config,
                     self.topk_indices_buffer,
                     f"{prefix}.layers.{idx}",
+                    aux_stream_list=aux_stream_list,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
