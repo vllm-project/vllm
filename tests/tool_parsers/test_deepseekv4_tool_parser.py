@@ -26,6 +26,43 @@ INV_END = "</｜DSML｜invoke>"
 PARAM_START = '<｜DSML｜parameter name="'
 PARAM_END = "</｜DSML｜parameter>"
 
+@pytest.fixture
+def sample_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get the current weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "The city name"},
+                        "state": {"type": "string", "description": "The state code"},
+                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
+                    },
+                    "required": ["city", "state"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "calculate_area",
+                "description": "Calculate area of a shape",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "shape": {"type": "string"},
+                        "dimensions": {"type": "object"},
+                        "precision": {"type": "integer"},
+                    },
+                },
+            },
+        ),
+    ]
+
+
 
 def make_parser(tools=None) -> DeepSeekV4ToolParser:
     return DeepSeekV4ToolParser(MOCK_TOKENIZER, tools=tools)
