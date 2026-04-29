@@ -360,6 +360,23 @@ class RunResult:
     log_path: Path | None = None
 
 
+def copy_artifact_to_container(artifact_dir: Path, container_name: str) -> None:
+    # docker cp streams from the client filesystem, avoiding bind-mount path
+    # mismatches between the Buildkite workspace and the Docker daemon.
+    result = run_command(
+        [
+            "docker",
+            "cp",
+            str(artifact_dir),
+            f"{container_name}:{ARTIFACT_MOUNT}",
+        ],
+        timeout=600,
+    )
+    if result.returncode != 0:
+        output = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"copy ROCm artifact into {container_name} failed: {output}")
+
+
 class ArtifactPackage:
     def __init__(self, request: RunRequest) -> None:
         self.request = request
@@ -477,10 +494,20 @@ class ContainerRunner:
         log.info("--- Single-node job")
         log.info("Container name: %s", self.container_name)
 
-        start = run_command(self._build_cmd(), timeout=120)
-        if start.returncode != 0:
-            raise RuntimeError(f"docker run failed: {start.stderr.strip()}")
-        self._created = True
+        try:
+            create = run_command(self._build_cmd(), timeout=120)
+            if create.returncode != 0:
+                raise RuntimeError(f"docker create failed: {create.stderr.strip()}")
+            self._created = True
+            if self.artifact_dir is not None:
+                copy_artifact_to_container(self.artifact_dir, self.container_name)
+
+            start = run_command(["docker", "start", self.container_name], timeout=120)
+            if start.returncode != 0:
+                raise RuntimeError(f"docker start failed: {start.stderr.strip()}")
+        except Exception:
+            self._cleanup()
+            raise
 
         log_path = self.request.results_dir / "container.log"
         junit_path = self.request.results_dir / "results.xml"
@@ -527,13 +554,11 @@ class ContainerRunner:
         except KeyError as err:
             raise RuntimeError("render group not found") from err
 
-        cmd = ["docker", "run", "--detach", "--device", "/dev/kfd"]
+        cmd = ["docker", "create", "--device", "/dev/kfd"]
         for device in self.request.render_devices:
             cmd.extend(["--device", device])
         if Path("/dev/infiniband").exists():
             cmd.extend(["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"])
-        if self.artifact_dir is not None:
-            cmd.extend(["-v", f"{self.artifact_dir}:{ARTIFACT_MOUNT}:ro"])
 
         cmd.extend(["--network=host", "--shm-size=16gb", "--group-add", render_gid])
         for env_name in self._ENV_PASSTHROUGH:
@@ -682,6 +707,7 @@ class MultiNodeRunner:
             self._created_containers.append(name)
 
             if self.artifact_dir is not None:
+                copy_artifact_to_container(self.artifact_dir, name)
                 self._exec_checked(
                     name,
                     self.request.setup_command(),
@@ -715,8 +741,6 @@ class MultiNodeRunner:
             cmd.extend(["--device", device])
         if Path("/dev/infiniband").exists():
             cmd.extend(["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"])
-        if self.artifact_dir is not None:
-            cmd.extend(["-v", f"{self.artifact_dir}:{ARTIFACT_MOUNT}:ro"])
 
         for env_name in self._ENV_PASSTHROUGH:
             cmd.extend(["-e", env_name])
@@ -1219,7 +1243,9 @@ class AmdTestRunner:
 
         try:
             self._ensure_image(self.request.image)
-            return self.request, ArtifactPackage(self.request).prepare()
+            artifact_dir = ArtifactPackage(self.request).prepare()
+            self._check_artifact_container_visibility(artifact_dir)
+            return self.request, artifact_dir
         except Exception as exc:
             if not self.request.fallback_image:
                 raise
@@ -1237,6 +1263,45 @@ class AmdTestRunner:
             )
             self._ensure_image(fallback_request.image)
             return fallback_request, None
+
+    def _check_artifact_container_visibility(self, artifact_dir: Path | None) -> None:
+        if artifact_dir is None:
+            return
+
+        name = f"rocm_artifact_check_{self.request.commit}_{os.urandom(4).hex()}"
+        create = run_command(
+            [
+                "docker",
+                "create",
+                "--name",
+                name,
+                self.request.image,
+                "/bin/bash",
+                "-euo",
+                "pipefail",
+                "-c",
+                (
+                    f'test -n "$(find "{ARTIFACT_MOUNT}" -maxdepth 1 '
+                    "-name '*.whl' -print -quit)\""
+                ),
+            ],
+            timeout=120,
+        )
+        if create.returncode != 0:
+            raise RuntimeError(
+                f"artifact visibility check create failed: {create.stderr.strip()}"
+            )
+
+        try:
+            copy_artifact_to_container(artifact_dir, name)
+            start = run_command(["docker", "start", "--attach", name], timeout=120)
+            if start.returncode != 0:
+                output = start.stderr.strip() or start.stdout.strip()
+                raise RuntimeError(
+                    f"artifact is not visible inside Docker container: {output}"
+                )
+        finally:
+            run_command(["docker", "rm", "-f", name], timeout=30)
 
     def _ensure_image(self, image: str) -> None:
         if self._image_exists_locally(image):
