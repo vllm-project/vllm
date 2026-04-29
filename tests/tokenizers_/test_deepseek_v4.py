@@ -182,7 +182,7 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
     assert 'parameter name="arguments"' not in prompt
 
 
-@pytest.mark.parametrize("reasoning_effort", ["none", "low", "medium", "high"])
+@pytest.mark.parametrize("reasoning_effort", ["minimal", "low", "medium", "high"])
 def test_deepseek_v4_accepts_openai_reasoning_effort_values(reasoning_effort):
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
@@ -195,12 +195,77 @@ def test_deepseek_v4_accepts_openai_reasoning_effort_values(reasoning_effort):
     assert "Reasoning Effort: Absolute maximum" not in prompt
 
 
+def test_deepseek_v4_none_reasoning_effort_disables_thinking():
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        enable_thinking=True,
+        reasoning_effort="none",
+    )
+
+    assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+
+
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected_mode", "expected_effort"),
+    [
+        ("none", "chat", None),
+        ("minimal", "thinking", "high"),
+        ("low", "thinking", "high"),
+        ("medium", "thinking", "high"),
+        ("high", "thinking", "high"),
+        ("xhigh", "thinking", "max"),
+        ("max", "thinking", "max"),
+        ("unexpected", "thinking", "high"),
+    ],
+)
+def test_deepseek_v4_maps_compatible_thinking_reasoning_effort_values(
+    monkeypatch: pytest.MonkeyPatch,
+    reasoning_effort,
+    expected_mode,
+    expected_effort,
+):
+    captured_kwargs = []
+
+    def fake_encode_messages(messages, **kwargs):
+        captured_kwargs.append(kwargs)
+        return "prompt"
+
+    monkeypatch.setattr(
+        "vllm.tokenizers.deepseek_v4.encode_messages",
+        fake_encode_messages,
+    )
+
+    _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        enable_thinking=True,
+        reasoning_effort=reasoning_effort,
+    )
+
+    assert captured_kwargs[-1]["thinking_mode"] == expected_mode
+    assert captured_kwargs[-1]["reasoning_effort"] == expected_effort
+
+
 def test_deepseek_v4_preserves_reference_max_reasoning_effort():
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
         tokenize=False,
         enable_thinking=True,
         reasoning_effort="max",
+    )
+
+    assert prompt.startswith(
+        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
+    )
+
+
+def test_deepseek_v4_maps_xhigh_to_reference_max_reasoning_effort():
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        enable_thinking=True,
+        reasoning_effort="xhigh",
     )
 
     assert prompt.startswith(
