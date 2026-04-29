@@ -199,9 +199,9 @@ class DeepseekV2Eagle3Model(nn.Module):
             ]
         )
 
-        num_aux_layers = len(
-            getattr(self.config, "eagle_aux_hidden_state_layer_ids", [])
-        ) or 3
+        num_aux_layers = (
+            len(getattr(self.config, "eagle_aux_hidden_state_layer_ids", [])) or 3
+        )
         if hasattr(self.config, "target_hidden_size"):
             fc_input_size = self.config.target_hidden_size * num_aux_layers
         else:
