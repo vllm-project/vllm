@@ -1544,9 +1544,8 @@ class NemotronH_Nano_VL_V2(
                 hf_key = name[len("vision_model.") :]  # Remove "vision_model." prefix
                 vision_weights.append((hf_key, w))
             elif is_sound_weights(name):
-                if not load_multimodal_weights:
+                if not load_multimodal_weights or self.sound_encoder is None:
                     continue
-                assert self.sound_encoder is not None
                 sound_weights.append((name, w))
 
         self.language_model.load_weights(llm_weights)

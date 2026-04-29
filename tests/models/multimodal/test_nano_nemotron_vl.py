@@ -10,8 +10,18 @@ class _TextOnlyMultiModalConfig:
         return 0
 
 
+class _ImageOnlyMultiModalConfig:
+
+    def get_limit_per_prompt(self, modality: str) -> int:
+        return 1 if modality == "image" else 0
+
+
 class _ModelConfig:
     multimodal_config = _TextOnlyMultiModalConfig()
+
+
+class _ImageOnlyModelConfig:
+    multimodal_config = _ImageOnlyMultiModalConfig()
 
 
 class _LanguageModel:
@@ -30,6 +40,21 @@ class _MissingMultiModalModule:
 
     def load_weights(self, weights):
         raise AssertionError("multimodal weights should not be loaded")
+
+
+class _AdapterModule:
+
+    def named_parameters(self):
+        return []
+
+
+class _VisionModel:
+
+    def __init__(self) -> None:
+        self.loaded_weights = []
+
+    def load_weights(self, weights):
+        self.loaded_weights = list(weights)
 
 
 def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
@@ -52,3 +77,27 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     )
 
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
+
+
+def test_nano_nemotron_vl_skips_sound_weights_without_sound_encoder():
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    language_model = _LanguageModel()
+    vision_model = _VisionModel()
+    object.__setattr__(model, "model_config", _ImageOnlyModelConfig())
+    object.__setattr__(model, "language_model", language_model)
+    object.__setattr__(model, "mlp1", _AdapterModule())
+    object.__setattr__(model, "vision_model", vision_model)
+    object.__setattr__(model, "sound_encoder", None)
+
+    language_weight = object()
+    vision_weight = object()
+    model.load_weights(
+        [
+            ("language_model.layers.0.weight", language_weight),
+            ("vision_model.radio_model.encoder.weight", vision_weight),
+            ("sound_encoder.encoder.weight", object()),
+        ]
+    )
+
+    assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
+    assert vision_model.loaded_weights == [("radio_model.encoder.weight", vision_weight)]
