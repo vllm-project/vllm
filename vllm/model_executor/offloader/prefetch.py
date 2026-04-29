@@ -259,18 +259,20 @@ class PrefetchOffloader(BaseOffloader):
             if not offloader._prefetch_in_capture:
                 return
             # Event-based wait for in-capture prefetches (graph-compatible)
-            torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+            torch.accelerator.current_stream().wait_event(offloader._copy_done_event)
             # Mark that this prefetch has been waited on (joined).
             offloader._prefetch_in_capture = False
         else:
             if offloader._event_valid_for_eager:
                 # Use per-layer event to only wait for THIS layer's copy,
                 # allowing other layers' prefetches to run concurrently.
-                torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+                torch.accelerator.current_stream().wait_event(
+                    offloader._copy_done_event
+                )
             else:
                 # Event not usable (unrecorded or recorded during capture).
                 # Fall back to wait_stream to drain all copy_stream work.
-                torch.cuda.current_stream().wait_stream(self.copy_stream)
+                torch.accelerator.current_stream().wait_stream(self.copy_stream)
 
     def sync_prev_onload(self):
         """Sync previous onload operations.
@@ -279,7 +281,7 @@ class PrefetchOffloader(BaseOffloader):
         the compute stream continues. Call this before CUDA graph
         capture/replay or when synchronization is needed.
         """
-        torch.cuda.current_stream().wait_stream(self.copy_stream)
+        torch.accelerator.current_stream().wait_stream(self.copy_stream)
 
     def _start_prefetch(self, layer_idx: int):
         """Called by custom op - start async copy to static buffer."""
@@ -304,7 +306,9 @@ class PrefetchOffloader(BaseOffloader):
         # Join all layers whose prefetch was started in capture but not waited on
         for offloader in self.module_offloaders:
             if offloader._prefetch_in_capture:
-                torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+                torch.accelerator.current_stream().wait_event(
+                    offloader._copy_done_event
+                )
                 offloader._prefetch_in_capture = False
 
     def post_init(self):
@@ -519,7 +523,7 @@ class _ModuleOffloader:
         # Fork: record event on compute stream, copy_stream waits on it
         # This joins copy_stream to any active CUDA graph capture
         fork_event = torch.cuda.Event()
-        torch.cuda.current_stream().record_event(fork_event)
+        torch.accelerator.current_stream().record_event(fork_event)
         self.copy_stream.wait_event(fork_event)
 
         with torch.cuda.stream(self.copy_stream):

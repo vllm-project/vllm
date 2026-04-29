@@ -81,7 +81,7 @@ class Hf3fsClient:
         results = []
 
         try:
-            torch.cuda.current_stream().wait_event(event)
+            torch.accelerator.current_stream().wait_event(event)
 
             # Convert tensors to bytes
             data_bytes_list = [self._tensor_to_bytes(tensor) for tensor in tensors]

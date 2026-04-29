@@ -135,11 +135,11 @@ If GPU/CPU communication cannot be established, you can use the following Python
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(cuda_graph=g, stream=s):
-        out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+        out = pynccl.all_reduce(data, stream=torch.accelerator.current_stream())
 
     data.fill_(1)
     g.replay()
-    torch.cuda.current_stream().synchronize()
+    torch.accelerator.current_stream().synchronize()
     value = out.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
