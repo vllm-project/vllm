@@ -1027,7 +1027,6 @@ class DeepseekV4Attention(nn.Module):
             max_position=self.max_position_embeddings,
             rope_parameters=rope_parameters,
             is_neox_style=False,
-            dtype=config.torch_dtype,
         )
 
         self.indexer = None
