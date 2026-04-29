@@ -25,7 +25,6 @@ import os
 import pybase64 as base64
 import requests
 from openai import OpenAI
-from utils import get_first_model
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -407,7 +406,7 @@ def parse_args():
 
 def main(args) -> None:
     chat_type = args.chat_type
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
     example_function_map[chat_type](model, args.max_completion_tokens)
 
 

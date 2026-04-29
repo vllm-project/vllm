@@ -9,7 +9,7 @@ This directory contains examples demonstrating how to use custom logits processo
 Demonstrates how to instantiate vLLM with a custom logits processor class that operates at the batch level. The example uses a `DummyLogitsProcessor` that masks out all tokens except a specified `target_token` when passed via `SamplingParams.extra_args`.
 
 ```bash
-python examples/offline_inference/logits_processor/custom.py
+python examples/features/logits_processor/custom.py
 ```
 
 ### `custom_req.py` — Request-level logits processor wrapper
@@ -17,7 +17,7 @@ python examples/offline_inference/logits_processor/custom.py
 Shows how to wrap a request-level logits processor (which operates on individual requests) to be compatible with vLLM's batch-level logits processing interface.
 
 ```bash
-python examples/offline_inference/logits_processor/custom_req.py
+python examples/features/logits_processor/custom_req.py
 ```
 
 ### `custom_req_init.py` — Request-level processor with engine config
@@ -25,7 +25,7 @@ python examples/offline_inference/logits_processor/custom_req.py
 A special case of wrapping a request-level logits processor where the processor needs access to engine configuration or model metadata during initialization (e.g., vocabulary size, tokenizer info).
 
 ```bash
-python examples/offline_inference/logits_processor/custom_req_init.py
+python examples/features/logits_processor/custom_req_init.py
 ```
 
 ## Key Concepts
