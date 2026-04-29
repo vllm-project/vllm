@@ -19,6 +19,7 @@ from vllm.third_party.deep_gemm import (
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
+    build_full_paged_prefill_metadata,
     build_paged_prefill_metadata,
     build_prefill_chunk_metadata,
     split_indexer_paged_prefill_chunks,
@@ -315,16 +316,27 @@ class DeepGemmPaged:
                 query_lens_cpu,
                 DEEPGEMM_MAX_LOGITS_BYTES,
             )
+            self.chunks = []
+            for req_slice, query_slice in chunk_specs:
+                metadata = build_paged_prefill_metadata(
+                    req_slice.start,
+                    req_slice.stop,
+                    query_start_loc,
+                    query_start_loc_cpu,
+                    seq_lens,
+                    compressed_seq_lens_cpu,
+                    block_table,
+                    compress_ratio,
+                    block_size,
+                    NUM_SMS,
+                    query_slice=query_slice,
+                )
+                if metadata is not None:
+                    self.chunks.append(metadata)
         else:
-            chunk_specs = [
-                (slice(0, query_lens_cpu.numel()), slice(0, total_query_len))
-            ]
-
-        self.chunks = []
-        for req_slice, query_slice in chunk_specs:
-            metadata = build_paged_prefill_metadata(
-                req_slice.start,
-                req_slice.stop,
+            metadata = build_full_paged_prefill_metadata(
+                0,
+                query_lens_cpu.numel(),
                 query_start_loc,
                 query_start_loc_cpu,
                 seq_lens,
@@ -333,10 +345,8 @@ class DeepGemmPaged:
                 compress_ratio,
                 block_size,
                 NUM_SMS,
-                query_slice=query_slice,
             )
-            if metadata is not None:
-                self.chunks.append(metadata)
+            self.chunks = [] if metadata is None else [metadata]
 
         self.num_chunks = len(self.chunks)
         if not self.chunks:

@@ -126,13 +126,23 @@ def sparse_attn_indexer(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
 
-        # Dummy byte allocation to simulate peak materialized logits memory.
-        # Materialized paged-prefill logits are still large, but chunking bounds
-        # them by the paged chunk size.
         if use_paged_prefill:
-            max_logits_bytes = min(hidden_states.shape[0], 2048) * max_model_len * 4
+            if envs.VLLM_SPARSE_INDEXER_DISABLE_PAGED_PREFILL_CHUNKING:
+                # The experimental full-paged path materializes one logits
+                # tensor for all query tokens.
+                max_logits_bytes = hidden_states.shape[0] * max_model_len * 4
+            else:
+                # Chunked paged prefill is bounded by both the metadata safety
+                # chunk size and the configured materialized logits cap.
+                paged_chunk_bytes = min(hidden_states.shape[0], 2048)
+                paged_chunk_bytes *= max_model_len * 4
+                max_logits_bytes = min(
+                    paged_chunk_bytes,
+                    envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+                )
         else:
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # Dummy byte allocation to simulate peak materialized logits memory.
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
         )
@@ -192,6 +202,47 @@ def sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
+
+        if prefill_metadata.full_paged_metadata is not None:
+            paged_metadata = prefill_metadata.full_paged_metadata
+            paged_kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
+            num_tokens = paged_metadata.context_lens.shape[0]
+            token_slice = slice(paged_metadata.token_start, paged_metadata.token_end)
+            q_slice = q_quant[token_slice].view(num_tokens, 1, *q_quant.shape[1:])
+            if use_fp4_cache:
+                q_slice = q_slice.view(torch.int8)
+                assert q_scale is not None
+                q_scale_slice = q_scale[token_slice].view(
+                    num_tokens, 1, *q_scale.shape[1:]
+                )
+            else:
+                q_scale_slice = None
+
+            logits = fp8_fp4_paged_mqa_logits(
+                (q_slice, q_scale_slice),
+                paged_kv_cache,
+                weights[token_slice],
+                paged_metadata.context_lens,
+                paged_metadata.block_table,
+                paged_metadata.schedule_metadata,
+                max_model_len=paged_metadata.max_context_len,
+                clean_logits=False,
+                indices=paged_metadata.indices,
+            )
+            topk_indices = topk_indices_buffer[
+                paged_metadata.token_start : paged_metadata.token_end,
+                :topk_tokens,
+            ]
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                1,
+                paged_metadata.context_lens,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if prefill_metadata.paged_chunks:
             # Paged prefill has already expanded each query token into its own
