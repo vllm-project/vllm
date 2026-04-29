@@ -66,7 +66,6 @@ class TritonAttentionMetadata:
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
     seq_threshold_3D: int
     num_par_softmax_segments: int
@@ -221,7 +220,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
-        slot_mapping = common_attn_metadata.slot_mapping
 
         use_cascade = common_prefix_len > 0
 
@@ -247,7 +245,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=block_table_tensor,
-            slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,

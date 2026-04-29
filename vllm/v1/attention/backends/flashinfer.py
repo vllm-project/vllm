@@ -500,9 +500,6 @@ class FlashInferMetadata:
     num_actual_tokens: int
     """Total number of tokens in the batch (excluding padding)."""
 
-    slot_mapping: torch.Tensor
-    """Tensor for writing K/V to the cache. Shape: [num_actual_tokens]"""
-
     q_data_type: torch.dtype
 
     num_decodes: int
@@ -951,7 +948,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # case by case depending on the batch contents and backend selection.
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
-            slot_mapping=common_attn_metadata.slot_mapping,
             q_data_type=self.q_data_type,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,

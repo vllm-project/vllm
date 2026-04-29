@@ -300,7 +300,11 @@ def run_attention_backend(
     # in the calling test function.
     if not try_backend_includes_kv_cache_update(actual_backend):
         impl.do_kv_cache_update(
-            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+            mock_layer,
+            key,
+            value,
+            kv_cache,
+            common_attn_metadata.slot_mapping,
         )
     output = impl.forward(
         mock_layer, query, key, value, kv_cache, attn_metadata, output=output
