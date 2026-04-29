@@ -219,8 +219,8 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
     def __init__(self, *args, **kwargs):
         # Avoid compute cache repeatedly
-        kwargs["init_cache"] = False
-        super().__init__(*args, **kwargs)
+        kwargs.pop("init_cache", None)
+        super().__init__(*args, **kwargs, init_cache=False)
         cache_fp32 = self._compute_cos_sin_cache()
         self.register_buffer("cos_sin_cache", cache_fp32, persistent=False)
 
