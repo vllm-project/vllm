@@ -105,7 +105,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self._process_multimodal_async = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
-        if config.model_config.is_multimodal_model:
+        if mm_registry.supports_multimodal_inputs(config.model_config):
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
             # Deep-copy the tokenizer so the multimodal processor gets its
