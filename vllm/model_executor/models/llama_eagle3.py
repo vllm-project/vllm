@@ -300,10 +300,14 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        self.draft_id_to_target_id = nn.Parameter(
-            torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-            requires_grad=False,
-        )
+        target_vocab_size = vllm_config.model_config.get_vocab_size()
+        if self.config.draft_vocab_size != target_vocab_size:
+            self.draft_id_to_target_id = nn.Parameter(
+                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
+                requires_grad=False,
+            )
+        else:
+            self.draft_id_to_target_id = None
 
         self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
 
@@ -359,6 +363,20 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         logits_new[:, targets] = logits
         return logits_new
 
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Vocab-parallel argmax without all-gathering full logits.
+
+        Falls back to full logits when draft_id_to_target_id remapping is
+        active, since the draft model predicts over draft_vocab_size while
+        speculative decoding expects target vocab ids.
+        """
+        if self.draft_id_to_target_id is not None:
+            return self.compute_logits(hidden_states).argmax(dim=-1)
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def combine_hidden_states(
         self,
         hidden_states: torch.Tensor,
@@ -380,6 +398,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             if "t2d" in name:
                 continue
             if "d2t" in name:
+                # When draft_vocab_size == target vocab_size, the parameter
+                # is set to None (no remapping needed), so skip loading d2t.
+                if self.draft_id_to_target_id is None:
+                    continue
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
             elif "mask_hidden" in name:
