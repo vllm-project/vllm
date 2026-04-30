@@ -125,9 +125,7 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
                     "RDNA3 W4A16 kernel: zero-bias 4-bit quant requires "
                     "explicit zero points (GPTQv1 +1 quirk)."
                 )
-            zeros = pack_quantized_values_into_int32(
-                zeros, c.weight_type, packed_dim=1
-            )
+            zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
             setattr(
                 layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
             )
@@ -196,9 +194,7 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         assert w_zp is not None, "Zero points are required by RDNA3 W4A16"
         assert w_g_idx is not None, "g_idx tensor (possibly empty) required"
 
-        output = ops.gptq_gemm_rdna3(
-            x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format
-        )
+        output = ops.gptq_gemm_rdna3(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
 
         if bias is not None:
             output.add_(bias)

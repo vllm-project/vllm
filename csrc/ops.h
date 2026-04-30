@@ -259,8 +259,7 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx,
-                                   bool use_v2_format);
+                                   torch::Tensor b_g_idx, bool use_v2_format);
 
 torch::Tensor gptq_gemm_rdna3_wmma_probe(torch::Tensor a, torch::Tensor b,
                                          int64_t mode);

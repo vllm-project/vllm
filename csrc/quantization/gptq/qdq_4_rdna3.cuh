@@ -98,18 +98,20 @@ __forceinline__ __device__ void prep_zero_scale_fp16(uint32_t zero, half scale,
 //   dq[1] = (q[2], q[3]) * scale - zero*scale
 //   dq[2] = (q[4], q[5]) * scale - zero*scale
 //   dq[3] = (q[6], q[7]) * scale - zero*scale
-__forceinline__ __device__ void dequant_4bit_8_fp16(uint32_t qa,
-                                                    half2 (&dq)[4],
+__forceinline__ __device__ void dequant_4bit_8_fp16(uint32_t qa, half2 (&dq)[4],
                                                     half2 (&z1z16)[2],
                                                     half2 (&y1y16)[2]) {
   const uint32_t c0 = 0x64006400;
 
-  union { uint32_t u; half2 h2; } q0, q1, q2, q3;
-  q0.u = (qa & 0x000F000F) | c0;        // half2(q[0]+1024, q[1]+1024)
-  q1.u = (qa & 0x00F000F0) | c0;        // half2(q[2]*16+1024, q[3]*16+1024)
+  union {
+    uint32_t u;
+    half2 h2;
+  } q0, q1, q2, q3;
+  q0.u = (qa & 0x000F000F) | c0;  // half2(q[0]+1024, q[1]+1024)
+  q1.u = (qa & 0x00F000F0) | c0;  // half2(q[2]*16+1024, q[3]*16+1024)
   uint32_t qa_hi = qa >> 8;
-  q2.u = (qa_hi & 0x000F000F) | c0;     // half2(q[4]+1024, q[5]+1024)
-  q3.u = (qa_hi & 0x00F000F0) | c0;     // half2(q[6]*16+1024, q[7]*16+1024)
+  q2.u = (qa_hi & 0x000F000F) | c0;  // half2(q[4]+1024, q[5]+1024)
+  q3.u = (qa_hi & 0x00F000F0) | c0;  // half2(q[6]*16+1024, q[7]*16+1024)
 
   dq[0] = __hfma2(q0.h2, y1y16[0], z1z16[0]);
   dq[1] = __hfma2(q1.h2, y1y16[1], z1z16[1]);
@@ -149,10 +151,13 @@ __forceinline__ __device__ void dequant_4bit_8_bf16(uint32_t qa,
                                                     bf162_t y_prep) {
   const uint32_t c0 = 0x43004300;
 
-  union { uint32_t u; bf162_t b2; } q0, q1, q2, q3;
-  q0.u = ((qa >>  0) & 0x000F000F) | c0;  // bf162(128+q[0], 128+q[1])
-  q1.u = ((qa >>  4) & 0x000F000F) | c0;  // bf162(128+q[2], 128+q[3])
-  q2.u = ((qa >>  8) & 0x000F000F) | c0;  // bf162(128+q[4], 128+q[5])
+  union {
+    uint32_t u;
+    bf162_t b2;
+  } q0, q1, q2, q3;
+  q0.u = ((qa >> 0) & 0x000F000F) | c0;   // bf162(128+q[0], 128+q[1])
+  q1.u = ((qa >> 4) & 0x000F000F) | c0;   // bf162(128+q[2], 128+q[3])
+  q2.u = ((qa >> 8) & 0x000F000F) | c0;   // bf162(128+q[4], 128+q[5])
   q3.u = ((qa >> 12) & 0x000F000F) | c0;  // bf162(128+q[6], 128+q[7])
 
   // dq = q_b * scale + (-(128+zero)*scale) = (q - zero) * scale
@@ -176,9 +181,9 @@ __forceinline__ __device__ void dequant_4bit_8_bf16(uint32_t qa,
 // Output: fp32 dq[8], one element per K position (consumed by the
 // fp32-overload of dot22_8_f in q_gemm_rdna3.cu).
 __forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
-                                                          bf16_t scale,
-                                                          float& z_prep,
-                                                          float& y_prep) {
+                                                         bf16_t scale,
+                                                         float& z_prep,
+                                                         float& y_prep) {
   float scale_f = __bfloat162float(scale);
   z_prep = -(128.0f + (float)zero) * scale_f;
   y_prep = scale_f;
@@ -192,11 +197,11 @@ __forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
 //
 // Cost: 0 FMAs (pure bit-trick + as_float reinterprets).
 __forceinline__ __device__ void dequant_4bit_8_bf16_q_only(uint32_t qa,
-                                                            float (&q_f32)[8]) {
+                                                           float (&q_f32)[8]) {
   const uint32_t c0 = 0x43004300;
-  const uint32_t q0 = ((qa >>  0) & 0x000F000F) | c0;
-  const uint32_t q1 = ((qa >>  4) & 0x000F000F) | c0;
-  const uint32_t q2 = ((qa >>  8) & 0x000F000F) | c0;
+  const uint32_t q0 = ((qa >> 0) & 0x000F000F) | c0;
+  const uint32_t q1 = ((qa >> 4) & 0x000F000F) | c0;
+  const uint32_t q2 = ((qa >> 8) & 0x000F000F) | c0;
   const uint32_t q3 = ((qa >> 12) & 0x000F000F) | c0;
   q_f32[0] = __uint_as_float((q0 & 0xFFFFu) << 16);
   q_f32[1] = __uint_as_float(q0 & 0xFFFF0000u);
@@ -209,13 +214,13 @@ __forceinline__ __device__ void dequant_4bit_8_bf16_q_only(uint32_t qa,
 }
 
 __forceinline__ __device__ void dequant_4bit_8_bf16_f32(uint32_t qa,
-                                                         float (&dq)[8],
-                                                         float z_prep,
-                                                         float y_prep) {
+                                                        float (&dq)[8],
+                                                        float z_prep,
+                                                        float y_prep) {
   const uint32_t c0 = 0x43004300;
-  const uint32_t q0 = ((qa >>  0) & 0x000F000F) | c0;
-  const uint32_t q1 = ((qa >>  4) & 0x000F000F) | c0;
-  const uint32_t q2 = ((qa >>  8) & 0x000F000F) | c0;
+  const uint32_t q0 = ((qa >> 0) & 0x000F000F) | c0;
+  const uint32_t q1 = ((qa >> 4) & 0x000F000F) | c0;
+  const uint32_t q2 = ((qa >> 8) & 0x000F000F) | c0;
   const uint32_t q3 = ((qa >> 12) & 0x000F000F) | c0;
   // bf16(128+nibble) bits → fp32(128+nibble) bits via left-shift by 16
   // (just zero-extends the mantissa from 7 to 23 bits; exponent preserved).

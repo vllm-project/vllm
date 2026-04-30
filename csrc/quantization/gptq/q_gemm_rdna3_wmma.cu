@@ -56,8 +56,8 @@ namespace gptq_rdna3_wmma {
 #if defined(USE_ROCM)
 
 // Pull dequant types from the sibling namespace.
-using vllm::gptq_rdna3::bf16_t;
 using vllm::gptq_rdna3::bf162_t;
+using vllm::gptq_rdna3::bf16_t;
 
 // PRECISE dequant variants live HERE, not in the shared qdq_4_rdna3.cuh
 // header. Reason: hipcc takes different register/scheduling decisions when
@@ -66,10 +66,11 @@ using vllm::gptq_rdna3::bf162_t;
 // it. Keeping them in the WMMA TU only restores scalar's binary identity
 // to its tuned baseline.
 //
-// Numerics: the classic fp16 bit-trick (FMA form: q*scale + (-(1024+zero)*scale))
-// loses up to ~0.025 per cell at scale=0.1 because fp16(scale) ≠ scale and
-// the FMA amplifies that by 1024× without cancelling against the precomputed
-// (1024+zero)*scale (which is rounded to fp16 BEFORE the FMA).
+// Numerics: the classic fp16 bit-trick (FMA form: q*scale +
+// (-(1024+zero)*scale)) loses up to ~0.025 per cell at scale=0.1 because
+// fp16(scale) ≠ scale and the FMA amplifies that by 1024× without cancelling
+// against the precomputed (1024+zero)*scale (which is rounded to fp16 BEFORE
+// the FMA).
 //
 // Fix: subtract (1024+zero) as an integer FIRST — exact in fp16 because
 // integers in [1024, 2047] are exactly representable — then multiply by
@@ -80,7 +81,10 @@ __forceinline__ __device__ void prep_zero_scale_fp16_precise(uint32_t zero,
                                                              half scale,
                                                              half2& z_prep,
                                                              half2& y_prep) {
-  union { uint16_t u; half h; } zu;
+  union {
+    uint16_t u;
+    half h;
+  } zu;
   zu.u = (uint16_t)(0x6400 | zero);
   z_prep = __half2half2(zu.h);
   y_prep = __half2half2(scale);
@@ -91,10 +95,13 @@ __forceinline__ __device__ void dequant_4bit_8_fp16_precise(uint32_t qa,
                                                             half2 z_prep,
                                                             half2 y_prep) {
   const uint32_t c0 = 0x64006400;
-  union { uint32_t u; half2 h2; } q0, q1, q2, q3;
-  q0.u = ((qa >>  0) & 0x000F000F) | c0;
-  q1.u = ((qa >>  4) & 0x000F000F) | c0;
-  q2.u = ((qa >>  8) & 0x000F000F) | c0;
+  union {
+    uint32_t u;
+    half2 h2;
+  } q0, q1, q2, q3;
+  q0.u = ((qa >> 0) & 0x000F000F) | c0;
+  q1.u = ((qa >> 4) & 0x000F000F) | c0;
+  q2.u = ((qa >> 8) & 0x000F000F) | c0;
   q3.u = ((qa >> 12) & 0x000F000F) | c0;
   dq[0] = __hmul2(__hsub2(q0.h2, z_prep), y_prep);
   dq[1] = __hmul2(__hsub2(q1.h2, z_prep), y_prep);
@@ -106,7 +113,10 @@ __forceinline__ __device__ void prep_zero_scale_bf16_precise(uint32_t zero,
                                                              bf16_t scale,
                                                              bf162_t& z_prep,
                                                              bf162_t& y_prep) {
-  union { uint16_t u; bf16_t h; } zu;
+  union {
+    uint16_t u;
+    bf16_t h;
+  } zu;
   zu.u = (uint16_t)(0x4300 | zero);
   z_prep = __bfloat162bfloat162(zu.h);
   y_prep = __bfloat162bfloat162(scale);
@@ -117,10 +127,13 @@ __forceinline__ __device__ void dequant_4bit_8_bf16_precise(uint32_t qa,
                                                             bf162_t z_prep,
                                                             bf162_t y_prep) {
   const uint32_t c0 = 0x43004300;
-  union { uint32_t u; bf162_t b2; } q0, q1, q2, q3;
-  q0.u = ((qa >>  0) & 0x000F000F) | c0;
-  q1.u = ((qa >>  4) & 0x000F000F) | c0;
-  q2.u = ((qa >>  8) & 0x000F000F) | c0;
+  union {
+    uint32_t u;
+    bf162_t b2;
+  } q0, q1, q2, q3;
+  q0.u = ((qa >> 0) & 0x000F000F) | c0;
+  q1.u = ((qa >> 4) & 0x000F000F) | c0;
+  q2.u = ((qa >> 8) & 0x000F000F) | c0;
   q3.u = ((qa >> 12) & 0x000F000F) | c0;
   dq[0] = __hmul2(__hsub2(q0.b2, z_prep), y_prep);
   dq[1] = __hmul2(__hsub2(q1.b2, z_prep), y_prep);
@@ -156,8 +169,7 @@ __forceinline__ __device__ void atomic_add_pk_f16(half2* addr, half2 val) {
   }
 }
 
-__forceinline__ __device__ void atomic_add_pk_bf16(bf162_t* addr,
-                                                   bf162_t val) {
+__forceinline__ __device__ void atomic_add_pk_bf16(bf162_t* addr, bf162_t val) {
   uint32_t* addr_u = reinterpret_cast<uint32_t*>(addr);
   uint32_t old = *addr_u;
   while (true) {
@@ -269,14 +281,11 @@ __device__ __forceinline__ bf16_t tzero<bf16_t>() {
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
-                                    const uint32_t* __restrict__ b_q,
-                                    const uint32_t* __restrict__ b_qzeros,
-                                    const T* __restrict__ b_scales,
-                                    T* __restrict__ c, const int size_m,
-                                    const int size_n, const int size_k,
-                                    const int groups, const int zero_offset,
-                                    const int* __restrict__ b_q_perm) {
+__global__ void gemm_q4_wmma_kernel(
+    const T* __restrict__ a, const uint32_t* __restrict__ b_q,
+    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
+    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -376,7 +385,7 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
         // Permuted (act-order): scattered global reads, no vectorization.
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -394,7 +403,7 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
@@ -402,18 +411,18 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
     // slot, N-axis in lane). This is the AMD WMMA convention for the right
     // operand of a matrix multiply — K-axis aligns with A's K-axis (also
     // in slot), enabling per-lane inner products.
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag[i] = bitcast_elem<T, E>(b_lds[i][lane_lo]);
     }
 
-#ifdef VLLM_WMMA_LAYOUT_DEBUG
+  #ifdef VLLM_WMMA_LAYOUT_DEBUG
     // Diagnostic: skip WMMA, force c_acc to encode (lane, slot) so the
     // store pattern reveals the C-output lane→matrix mapping. Compile with
     // -DVLLM_WMMA_LAYOUT_DEBUG to enable. Output: c[m][n] = lane + slot/16.
     (void)a_frag;
     (void)b_frag;
-#pragma unroll
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
       c_acc[i] = (float)lane + (float)i / 16.0f;
     }
@@ -421,9 +430,9 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
     if (k_tile == 0) {
       k_tile = size_k;  // exit loop on next check
     }
-#else
+  #else
     c_acc = wmma_mma(a_frag, b_frag, c_acc);
-#endif
+  #endif
 
     // No __syncthreads() needed before the next iter overwrites b_lds:
     // single-wave block, and the next iter's ds_write to b_lds is preceded
@@ -449,7 +458,7 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
     // (gridDim.z-way per cell) remains and is the residual atomic cost.
     const bool is_even_lane = (lane_lo & 1) == 0;
     const int out_n_pair = n_tile + lane_lo;  // valid only on even lane
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 8; i++) {
       // Wave-wide shuffle: every lane participates so the side-effect is
       // visible. Only even lanes use the result. shfl_xor with mask 1
@@ -463,8 +472,8 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
       T* dst = c + out_m * size_n + out_n_pair;
       if constexpr (std::is_same<T, half>::value) {
         // Pack: .x = mine (col=lane_lo even), .y = neighbour (col=lane_lo+1)
-        half2 packed = __halves2half2(__float2half_rn(c_acc[i]),
-                                      __float2half_rn(other_f));
+        half2 packed =
+            __halves2half2(__float2half_rn(c_acc[i]), __float2half_rn(other_f));
         atomic_add_pk_f16(reinterpret_cast<half2*>(dst), packed);
       } else {
         bf162_t packed;
@@ -479,7 +488,7 @@ __global__ void gemm_q4_wmma_kernel(const T* __restrict__ a,
     // assigned exactly once.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -549,8 +558,7 @@ __global__ void gemm_q4_wmma_kernel_v2(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset,
-    const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -558,8 +566,8 @@ __global__ void gemm_q4_wmma_kernel_v2(
   const int n_tile = blockIdx.x * 16;
   if (m_tile >= size_m || n_tile >= size_n) return;
 
-  const int tid = threadIdx.x;        // 0..63
-  const int wave_id = tid >> 5;       // 0 or 1
+  const int tid = threadIdx.x;   // 0..63
+  const int wave_id = tid >> 5;  // 0 or 1
   const int lane = tid & 31;
   const int lane_lo = lane & 15;
   const int lane_hi = lane >> 4;
@@ -573,7 +581,8 @@ __global__ void gemm_q4_wmma_kernel_v2(
   const int k_start = blockIdx.z * k_per_split;
   const int k_end = k_start + k_per_split;
 
-  // Double-buffered LDS B-tile. 2 × 16K × 16N × sizeof(T) = 1024 B for fp16/bf16.
+  // Double-buffered LDS B-tile. 2 × 16K × 16N × sizeof(T) = 1024 B for
+  // fp16/bf16.
   __shared__ T b_lds[2][16][16];
 
   // Dequant a 16K × 16N B-tile into b_lds[buf]. Only wave 0 participates
@@ -650,7 +659,7 @@ __global__ void gemm_q4_wmma_kernel_v2(
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -660,12 +669,12 @@ __global__ void gemm_q4_wmma_kernel_v2(
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
     // Load B from current buffer (both waves read identical data).
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo]);
     }
@@ -691,7 +700,7 @@ __global__ void gemm_q4_wmma_kernel_v2(
     // own pairing — the two waves don't interact during the store.
     const bool is_even_lane = (lane_lo & 1) == 0;
     const int out_n_pair = n_tile + lane_lo;
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 8; i++) {
       float other_f = __shfl_xor(c_acc[i], 1);
       if (!is_even_lane) continue;
@@ -701,8 +710,8 @@ __global__ void gemm_q4_wmma_kernel_v2(
 
       T* dst = c + out_m * size_n + out_n_pair;
       if constexpr (std::is_same<T, half>::value) {
-        half2 packed = __halves2half2(__float2half_rn(c_acc[i]),
-                                      __float2half_rn(other_f));
+        half2 packed =
+            __halves2half2(__float2half_rn(c_acc[i]), __float2half_rn(other_f));
         atomic_add_pk_f16(reinterpret_cast<half2*>(dst), packed);
       } else {
         bf162_t packed;
@@ -715,7 +724,7 @@ __global__ void gemm_q4_wmma_kernel_v2(
     // Single writer per cell, direct non-atomic write.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -746,8 +755,7 @@ void launch_gemm_q4_wmma_v2(const T* a, const uint32_t* b_q_weight,
   // but the fallback costs nothing and is the right shape.
   if (size_m < 32) {
     launch_gemm_q4_wmma<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
-                           size_m, size_n, size_k, groups, zero_offset,
-                           stream);
+                           size_m, size_n, size_k, groups, zero_offset, stream);
     return;
   }
 
@@ -838,17 +846,18 @@ __global__ void gemm_q4_wmma_dump_kernel(
 
     if (m_row < size_m) {
       const half* a_row = a + m_row * size_k;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) {
-        half v = (k_tile + i < size_k) ? a_row[k_tile + i] : __float2half_rn(0.0f);
+        half v =
+            (k_tile + i < size_k) ? a_row[k_tile + i] : __float2half_rn(0.0f);
         a_frag[i] = bitcast_elem<half, _Float16>(v);
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (_Float16)0;
     }
 
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag[i] = bitcast_elem<half, _Float16>(b_lds[i][lane_lo]);
     }
@@ -858,7 +867,7 @@ __global__ void gemm_q4_wmma_dump_kernel(
     __syncthreads();
   }
 
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     dump_out[lane * 8 + i] = c_acc[i];
   }
@@ -874,8 +883,7 @@ __global__ void wmma_lds_check_kernel(const uint32_t* __restrict__ b_q,
                                       const half* __restrict__ b_scales,
                                       half* __restrict__ lds_dump,
                                       const int size_n, const int size_k,
-                                      const int groups,
-                                      const int zero_offset) {
+                                      const int groups, const int zero_offset) {
   const int lane = threadIdx.x;
   const int lane_lo = lane & 15;
   const int lane_hi = lane >> 4;
@@ -932,7 +940,7 @@ __global__ void wmma_layout_probe_kernel(const half* a_in, const half* b_in,
   const int lane_lo = lane & 15;
 
   v16fp16 a_frag, b_frag;
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 16; i++) {
     half av, bv;
     if (mode == 0) {
@@ -955,7 +963,7 @@ __global__ void wmma_layout_probe_kernel(const half* a_in, const half* b_in,
   v8fp32 c = {0, 0, 0, 0, 0, 0, 0, 0};
   c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c);
 
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     dump_out[lane * 8 + i] = c[i];
   }
@@ -989,17 +997,16 @@ __global__ void wmma_layout_probe_kernel(const half* a_in, const half* b_in,
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx,
-                                   bool use_v2_format) {
+                                   torch::Tensor b_g_idx, bool use_v2_format) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");
   TORCH_CHECK(b_scales.is_cuda(), "b_scales must be a CUDA/HIP tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D [M, K]");
   TORCH_CHECK(b_q_weight.dim() == 2, "b_q_weight must be 2D [K/8, N]");
-  TORCH_CHECK(a.scalar_type() == torch::kHalf ||
-                  a.scalar_type() == torch::kBFloat16,
-              "a must be half or bfloat16");
+  TORCH_CHECK(
+      a.scalar_type() == torch::kHalf || a.scalar_type() == torch::kBFloat16,
+      "a must be half or bfloat16");
   TORCH_CHECK(a.scalar_type() == b_scales.scalar_type(),
               "b_scales dtype must match a");
 
@@ -1046,11 +1053,10 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 #if defined(USE_ROCM)
   if (a.scalar_type() == torch::kHalf) {
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v2<half>(
-        (const half*)a.data_ptr(),
-        (const uint32_t*)b_q_weight.data_ptr(),
-        (const uint32_t*)b_qzeros.data_ptr(),
-        (const half*)b_scales.data_ptr(), g_idx_ptr, (half*)c.data_ptr(),
-        size_m, size_n, size_k, groups, zero_offset, stream);
+        (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
+        (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
+        g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
+        zero_offset, stream);
   } else {
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v2<
         vllm::gptq_rdna3_wmma::bf16_t>(
@@ -1062,8 +1068,7 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
         groups, zero_offset, stream);
   }
 #else
-  TORCH_CHECK(false,
-              "gptq_gemm_rdna3_wmma is only available on ROCm (gfx11)");
+  TORCH_CHECK(false, "gptq_gemm_rdna3_wmma is only available on ROCm (gfx11)");
 #endif
 
   return c;
@@ -1076,12 +1081,14 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 // Diagnostic: runs the FULL gemm_q4_wmma path (dequant + LDS + WMMA) for a
 // single 16x16 output tile, dumps c_acc per lane to fp32 [32, 8]. Tells us
 // whether c_acc itself is correct or whether the bug is in the store mapping.
-torch::Tensor gptq_gemm_rdna3_wmma_dump(torch::Tensor a, torch::Tensor b_q_weight,
+torch::Tensor gptq_gemm_rdna3_wmma_dump(torch::Tensor a,
+                                        torch::Tensor b_q_weight,
                                         torch::Tensor b_qzeros,
                                         torch::Tensor b_scales,
                                         bool use_v2_format) {
   TORCH_CHECK(a.is_cuda() && b_q_weight.is_cuda() && b_qzeros.is_cuda() &&
-              b_scales.is_cuda(), "all tensors must be CUDA");
+                  b_scales.is_cuda(),
+              "all tensors must be CUDA");
   TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be fp16");
   TORCH_CHECK(b_scales.scalar_type() == torch::kHalf, "b_scales must be fp16");
 
@@ -1099,12 +1106,9 @@ torch::Tensor gptq_gemm_rdna3_wmma_dump(torch::Tensor a, torch::Tensor b_q_weigh
 
 #if defined(USE_ROCM)
   vllm::gptq_rdna3_wmma::gemm_q4_wmma_dump_kernel<<<1, 32, 0, stream>>>(
-      (const half*)a.data_ptr(),
-      (const uint32_t*)b_q_weight.data_ptr(),
-      (const uint32_t*)b_qzeros.data_ptr(),
-      (const half*)b_scales.data_ptr(),
-      (float*)dump.data_ptr(),
-      size_m, size_n, size_k, groups, zero_offset);
+      (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
+      (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
+      (float*)dump.data_ptr(), size_m, size_n, size_k, groups, zero_offset);
 #else
   TORCH_CHECK(false, "gptq_gemm_rdna3_wmma_dump is ROCm-only");
 #endif
@@ -1121,8 +1125,7 @@ torch::Tensor gptq_gemm_rdna3_wmma_lds_check(torch::Tensor b_q_weight,
                                              bool use_v2_format) {
   TORCH_CHECK(b_q_weight.is_cuda() && b_qzeros.is_cuda() && b_scales.is_cuda(),
               "all tensors must be CUDA");
-  TORCH_CHECK(b_scales.scalar_type() == torch::kHalf,
-              "b_scales must be fp16");
+  TORCH_CHECK(b_scales.scalar_type() == torch::kHalf, "b_scales must be fp16");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(b_q_weight));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1132,16 +1135,15 @@ torch::Tensor gptq_gemm_rdna3_wmma_lds_check(torch::Tensor b_q_weight,
   int groups = (int)b_qzeros.size(0);
   const int zero_offset = use_v2_format ? 0 : 1;
 
-  auto opts = torch::TensorOptions().dtype(torch::kHalf).device(b_q_weight.device());
+  auto opts =
+      torch::TensorOptions().dtype(torch::kHalf).device(b_q_weight.device());
   at::Tensor dump = torch::zeros({16, 16}, opts);
 
 #if defined(USE_ROCM)
   vllm::gptq_rdna3_wmma::wmma_lds_check_kernel<<<1, 32, 0, stream>>>(
       (const uint32_t*)b_q_weight.data_ptr(),
-      (const uint32_t*)b_qzeros.data_ptr(),
-      (const half*)b_scales.data_ptr(),
-      (half*)dump.data_ptr(),
-      size_n, size_k, groups, zero_offset);
+      (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
+      (half*)dump.data_ptr(), size_n, size_k, groups, zero_offset);
 #else
   TORCH_CHECK(false, "gptq_gemm_rdna3_wmma_lds_check is ROCm-only");
 #endif

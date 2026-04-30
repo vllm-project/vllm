@@ -226,8 +226,8 @@ __forceinline__ __device__ void atomic_add_pk4_bf16(bf16_t* addr, bf162_t v01,
 // uint32 tensor. n is a multiple of 4 by construction (n = offset_n + t*4 with
 // offset_n = blockIdx.x * 512), so the 4 nibbles always live within one or two
 // uint32 words; in practice within one because n & 7 is 0 or 4.
-__forceinline__ __device__ void load4_zeros(const uint32_t* qzeros_row,
-                                            int n, int (&zeros)[4]) {
+__forceinline__ __device__ void load4_zeros(const uint32_t* qzeros_row, int n,
+                                            int (&zeros)[4]) {
   int qcol = n / 8;
   int shift = (n & 0x07) * 4;
   uint32_t d = qzeros_row[qcol] >> shift;
@@ -251,15 +251,11 @@ __forceinline__ __device__ void load4_scales(const T* scales_row, int n,
 // ---------------------------------------------------------------------------
 
 template <typename T, int M_COUNT>
-__global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
-                                     const uint32_t* __restrict__ b_q_weight,
-                                     const uint32_t* __restrict__ b_qzeros,
-                                     const T* __restrict__ b_scales,
-                                     T* __restrict__ c,
-                                     const int size_m, const int size_n,
-                                     const int size_k, const int groups,
-                                     const int zero_offset,
-                                     const int* __restrict__ b_q_perm) {
+__global__ void gemm_q4_kernel_rdna3(
+    const T* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
+    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   const int offset_m = blockIdx.y * M_COUNT;
@@ -392,19 +388,14 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
 
       if constexpr (std::is_same<T, half>::value) {
         half2 dq[4][4];
-        dequant_4bit_8_fp16((uint32_t)b_w[j].x, dq[0], z1z16_h[0],
-                            y1y16_h[0]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].y, dq[1], z1z16_h[1],
-                            y1y16_h[1]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2], z1z16_h[2],
-                            y1y16_h[2]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3], z1z16_h[3],
-                            y1y16_h[3]);
+        dequant_4bit_8_fp16((uint32_t)b_w[j].x, dq[0], z1z16_h[0], y1y16_h[0]);
+        dequant_4bit_8_fp16((uint32_t)b_w[j].y, dq[1], z1z16_h[1], y1y16_h[1]);
+        dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2], z1z16_h[2], y1y16_h[2]);
+        dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3], z1z16_h[3], y1y16_h[3]);
 
 #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
-          const half* a_ptr =
-              reinterpret_cast<const half*>(&block_a[m][a_off]);
+          const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
           block_c[m][0] += dot22_8_f(dq[0], a_ptr);
           block_c[m][1] += dot22_8_f(dq[1], a_ptr);
           block_c[m][2] += dot22_8_f(dq[2], a_ptr);
@@ -437,8 +428,8 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
         }
         // sum_a = Σa[i], computed once and reused across all 4 N cols.
         // 7 fp32 adds (vs 4 cols × 8 FMAs of dequant = 32 FMAs saved).
-        float sum_a = a_f[0] + a_f[1] + a_f[2] + a_f[3] +
-                      a_f[4] + a_f[5] + a_f[6] + a_f[7];
+        float sum_a = a_f[0] + a_f[1] + a_f[2] + a_f[3] + a_f[4] + a_f[5] +
+                      a_f[6] + a_f[7];
         // unroll 1 forces a real loop so the compiler must free q_f32 at
         // each col-iter boundary instead of expanding the 4 cols into a
         // straight-line block where all 4 q_f32 arrays are alive at once
@@ -457,9 +448,9 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
           //   y_b_f[col] = scale            (per-col scale)
           //   z_b_f[col] = -(128+zero)*scale (per-col negative bias)
           // Nested fmaf_rn keeps the dependency chain on 1 accumulator VGPR.
-          block_c[0][col] = __fmaf_rn(
-              y_b_f[col], partial,
-              __fmaf_rn(z_b_f[col], sum_a, block_c[0][col]));
+          block_c[0][col] =
+              __fmaf_rn(y_b_f[col], partial,
+                        __fmaf_rn(z_b_f[col], sum_a, block_c[0][col]));
         }
       } else {
         // fp32 dequant: avoids the slow packed bf16 FMA on gfx11. dq is a
@@ -563,24 +554,24 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
   const int zero_offset = use_v2_format ? 0 : 1;
 
   if (size_m == 1) {
-    launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales,
-                                    b_q_perm, c, size_m, size_n, size_k,
-                                    groups, zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
+                                    c, size_m, size_n, size_k, groups,
+                                    zero_offset, stream);
   } else if (size_m <= 3) {
-    launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales,
-                                    b_q_perm, c, size_m, size_n, size_k,
-                                    groups, zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
+                                    c, size_m, size_n, size_k, groups,
+                                    zero_offset, stream);
   } else if (size_m <= 7) {
-    launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales,
-                                    b_q_perm, c, size_m, size_n, size_k,
-                                    groups, zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
+                                    c, size_m, size_n, size_k, groups,
+                                    zero_offset, stream);
   } else {
     // M_COUNT=8 covers M up to 15 here; M >= 16 should ideally take the
     // WMMA path, but if it falls through we still produce correct output —
     // just leaving 3-5× of throughput on the table for prefill workloads.
-    launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales,
-                                    b_q_perm, c, size_m, size_n, size_k,
-                                    groups, zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
+                                    c, size_m, size_n, size_k, groups,
+                                    zero_offset, stream);
   }
 }
 
@@ -609,8 +600,7 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx,
-                                   bool use_v2_format);
+                                   torch::Tensor b_g_idx, bool use_v2_format);
 #endif
 
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
@@ -633,9 +623,9 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // scalar+fdot2 path within run-to-run variance (440.7 vs 445.7 tk/s at
   // max-num-seqs=32) despite a 47% kernel-microbench advantage; the
   // scalar path's lower complexity wins.
-  if (a.scalar_type() == torch::kBFloat16 &&
-      a.dim() == 2 && b_q_weight.dim() == 2 && a.size(0) >= 16 &&
-      a.size(1) % 16 == 0 && b_q_weight.size(1) % 16 == 0) {
+  if (a.scalar_type() == torch::kBFloat16 && a.dim() == 2 &&
+      b_q_weight.dim() == 2 && a.size(0) >= 16 && a.size(1) % 16 == 0 &&
+      b_q_weight.size(1) % 16 == 0) {
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
                                 use_v2_format);
   }
@@ -646,9 +636,9 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(b_scales.is_cuda(), "b_scales must be a CUDA/HIP tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D [M, K]");
   TORCH_CHECK(b_q_weight.dim() == 2, "b_q_weight must be 2D [K/8, N]");
-  TORCH_CHECK(a.scalar_type() == torch::kHalf ||
-                  a.scalar_type() == torch::kBFloat16,
-              "a must be half or bfloat16");
+  TORCH_CHECK(
+      a.scalar_type() == torch::kHalf || a.scalar_type() == torch::kBFloat16,
+      "a must be half or bfloat16");
   TORCH_CHECK(a.scalar_type() == b_scales.scalar_type(),
               "b_scales dtype must match a");
 
@@ -680,19 +670,18 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
 
   if (a.scalar_type() == torch::kHalf) {
     vllm::gptq_rdna3::launch_gemm_q4<half>(
-        (const half*)a.data_ptr(),
-        (const uint32_t*)b_q_weight.data_ptr(),
-        (const uint32_t*)b_qzeros.data_ptr(),
-        (const half*)b_scales.data_ptr(), g_idx_ptr, (half*)c.data_ptr(),
-        size_m, size_n, size_k, groups, use_v2_format, stream);
+        (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
+        (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
+        g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
+        use_v2_format, stream);
   } else {
     vllm::gptq_rdna3::launch_gemm_q4<vllm::gptq_rdna3::bf16_t>(
         (const vllm::gptq_rdna3::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(),
         (const vllm::gptq_rdna3::bf16_t*)b_scales.data_ptr(), g_idx_ptr,
-        (vllm::gptq_rdna3::bf16_t*)c.data_ptr(), size_m, size_n, size_k,
-        groups, use_v2_format, stream);
+        (vllm::gptq_rdna3::bf16_t*)c.data_ptr(), size_m, size_n, size_k, groups,
+        use_v2_format, stream);
   }
 
   return c;

@@ -454,8 +454,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
   ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 
-  ops.def(
-      "gptq_gemm_rdna3_wmma_probe(Tensor a, Tensor b, int mode) -> Tensor");
+  ops.def("gptq_gemm_rdna3_wmma_probe(Tensor a, Tensor b, int mode) -> Tensor");
   ops.impl("gptq_gemm_rdna3_wmma_probe", torch::kCUDA,
            &gptq_gemm_rdna3_wmma_probe);
 

@@ -504,8 +504,8 @@ they're recorded where we have verified measurements.
   concurrency where decode batches reach M ≥ 16 and prefill chunks
   exercise WMMA. Final bf16 max-num-seqs=32 is **345.6 tk/s**.
 * **Round 4 (fp16 fdot2 lesson 11):**
-  * fp16 max-num-seqs=8: 247 → **270.2 tk/s** (+9.4 %),
-  * fp16 max-num-seqs=32: 402 → **445.7 tk/s** (+10.9 %).
+    * fp16 max-num-seqs=8: 247 → **270.2 tk/s** (+9.4 %),
+    * fp16 max-num-seqs=32: 402 → **445.7 tk/s** (+10.9 %).
   Tested under WMMA dispatch too: serving was a wash (445.7 vs 440.7
   tk/s within run-to-run variance), so the dispatch stays bf16-only.
 
