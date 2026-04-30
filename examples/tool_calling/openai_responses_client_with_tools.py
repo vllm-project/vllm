@@ -14,7 +14,6 @@ vllm serve Qwen/Qwen3-1.7B --reasoning-parser qwen3 \
 import json
 
 from openai import OpenAI
-from utils import get_first_model
 
 
 def get_weather(latitude: float, longitude: float) -> str:
@@ -51,7 +50,7 @@ input_messages = [
 def main():
     base_url = "http://0.0.0.0:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
     response = client.responses.create(
         model=model, input=input_messages, tools=tools, tool_choice="required"
     )

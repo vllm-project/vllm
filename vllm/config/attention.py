@@ -54,6 +54,9 @@ class AttentionConfig:
     use_fp4_indexer_cache: bool = False
     """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
 
+    use_non_causal: bool = False
+    """Whether to use non-causal (bidirectional) attention."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
