@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 NUM_BITS = 4
@@ -136,7 +137,7 @@ def _run_hybrid_moe(
 
     Returns (hybrid_output, reference_output).
     """
-    torch.cuda.manual_seed(1)
+    set_random_seed(1)
     device = torch.device("cuda")
 
     assert k % group_size == 0
