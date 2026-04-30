@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -258,6 +258,7 @@ class LagunaAttention(nn.Module):
         max_position_embeddings: int = 131072,
         head_dim: int | None = None,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attention_sink: bool = False,
@@ -405,6 +406,7 @@ class LagunaAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
@@ -457,6 +459,7 @@ class LagunaDecoderLayer(nn.Module):
         self,
         config,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -492,6 +495,7 @@ class LagunaDecoderLayer(nn.Module):
             max_position_embeddings=config.max_position_embeddings,
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attention_sink=attention_sink,
@@ -558,7 +562,8 @@ class LagunaModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
@@ -596,6 +601,7 @@ class LagunaModel(nn.Module):
             lambda prefix: LagunaDecoderLayer(
                 config=config,
                 cache_config=cache_config,
+                model_config=model_config,
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
