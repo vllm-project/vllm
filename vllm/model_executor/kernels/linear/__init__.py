@@ -19,6 +19,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+import vllm.model_executor.kernels.linear.cpu.w16a16 as cpu_w16a16
+import vllm.model_executor.kernels.linear.native.w16a16 as native_w16a16
+import vllm.model_executor.kernels.linear.triton.w16a16 as triton_w16a16
+import vllm.model_executor.kernels.linear.rocm.w16a16 as rocm_w16a16
+import vllm.model_executor.kernels.linear.base.w16a16 as base_w16a16
 from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
@@ -146,6 +151,36 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
+
+_POSSIBLE_W16A16_KERNELS: dict[PlatformEnum, list[type[base_w16a16.Kernel]]] = {
+    PlatformEnum.CUDA: [triton_w16a16.Kernel, native_w16a16.Kernel],
+    PlatformEnum.ROCM: [rocm_w16a16.Kernel],
+    PlatformEnum.CPU: [cpu_w16a16.Kernel],
+    PlatformEnum.XPU: [native_w16a16.Kernel],
+}
+
+
+def choose_w16a16_kernel(
+    config: base_w16a16.Config,
+    compute_capability: int | None = None,
+) -> type[base_w16a16.Kernel]:
+    if compute_capability is None:
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    failure_reasons = []
+    for cls in _POSSIBLE_W16A16_KERNELS.get(current_platform._enum, [native_w16a16.Kernel]):
+        selected, reason = cls.try_select(config, compute_capability)
+        if selected is not None:
+            return selected
+        failure_reasons.append(reason)
+
+    raise ValueError(
+        "Failed to find a w16a16 kernel. Reasons:\n"
+        + "\n".join(r for r in failure_reasons if r)
+    )
+
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
