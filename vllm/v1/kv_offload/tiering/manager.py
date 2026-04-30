@@ -31,9 +31,9 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,

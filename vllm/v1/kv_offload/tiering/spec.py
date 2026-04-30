@@ -38,10 +38,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.base import OffloadingManager
+from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.spec import CanonicalKVCaches
 from vllm.v1.kv_offload.tiering.factory import create_secondary_tier
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
