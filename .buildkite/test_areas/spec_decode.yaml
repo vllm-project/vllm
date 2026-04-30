@@ -84,6 +84,22 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
+- label: Spec Decode MTP hybrid (B200)
+  key: spec-decode-mtp-hybrid-b200
+  timeout_in_minutes: 30
+  device: b200
+  optional: true
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/qwen3_next.py
+    - vllm/model_executor/models/qwen3_next_mtp.py
+    - vllm/model_executor/layers/mamba/gdn_linear_attn.py
+    - tests/v1/e2e/spec_decode/test_mtp.py
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/test_mtp.py -k "mtp_hybrid"
+
 - label: DFlash Speculators Correctness
   key: dflash-speculators-correctness
   timeout_in_minutes: 30
