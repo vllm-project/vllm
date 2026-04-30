@@ -23,6 +23,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    sparse_indexer_paged_prefill_supported,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -100,7 +101,8 @@ def sparse_attn_indexer(
     use_fp4_cache: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
-    attn_metadata = get_forward_context().attn_metadata
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
@@ -108,9 +110,10 @@ def sparse_attn_indexer(
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
         use_paged_prefill = (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
-            and has_deep_gemm()
+            forward_context.additional_kwargs.get(
+                "enable_sparse_indexer_paged_prefill", False
+            )
+            and sparse_indexer_paged_prefill_supported()
         )
         if use_paged_prefill:
             current_workspace_manager().get_simultaneous(
@@ -127,22 +130,12 @@ def sparse_attn_indexer(
             )
 
         if use_paged_prefill:
-            if envs.VLLM_SPARSE_INDEXER_DISABLE_PAGED_PREFILL_CHUNKING:
-                # The experimental full-paged path materializes one logits
-                # tensor for all query tokens. max_model_len is already the
-                # indexer context length after any KV compression.
-                # Example: 8192 prefill tokens at 1M context with compression
-                # ratio 4 gives 8192 * (1048576 / 4) * 4 bytes = 8 GiB.
-                max_logits_bytes = hidden_states.shape[0] * max_model_len * 4
-            else:
-                # Chunked paged prefill is bounded by both the metadata safety
-                # chunk size and the configured materialized logits cap.
-                paged_chunk_bytes = min(hidden_states.shape[0], 2048)
-                paged_chunk_bytes *= max_model_len * 4
-                max_logits_bytes = min(
-                    paged_chunk_bytes,
-                    envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-                )
+            # The experimental full-paged path materializes one logits tensor
+            # for all query tokens. max_model_len is already the indexer context
+            # length after any KV compression.
+            # Example: 8192 prefill tokens at 1M context with compression ratio
+            # 4 gives 8192 * (1048576 / 4) * 4 bytes = 8 GiB.
+            max_logits_bytes = hidden_states.shape[0] * max_model_len * 4
         else:
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         # Dummy byte allocation to simulate peak materialized logits memory.
@@ -206,8 +199,8 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        if prefill_metadata.full_paged_metadata is not None:
-            paged_metadata = prefill_metadata.full_paged_metadata
+        if prefill_metadata.paged_metadata is not None:
+            paged_metadata = prefill_metadata.paged_metadata
             paged_kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
             num_tokens = paged_metadata.context_lens.shape[0]
             token_slice = slice(paged_metadata.token_start, paged_metadata.token_end)
@@ -248,51 +241,6 @@ def sparse_attn_indexer(
                 logits.stride(1),
                 topk_tokens,
             )
-
-        if prefill_metadata.paged_chunks:
-            # Paged prefill has already expanded each query token into its own
-            # varlen row, so it uses the decode-shaped DeepGEMM/top-k kernels.
-            paged_kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
-            for paged_metadata in prefill_metadata.paged_chunks:
-                num_tokens = paged_metadata.context_lens.shape[0]
-                token_slice = slice(
-                    paged_metadata.token_start, paged_metadata.token_end
-                )
-                q_slice = q_quant[token_slice].view(num_tokens, 1, *q_quant.shape[1:])
-                if use_fp4_cache:
-                    q_slice = q_slice.view(torch.int8)
-                    assert q_scale is not None
-                    q_scale_slice = q_scale[token_slice].view(
-                        num_tokens, 1, *q_scale.shape[1:]
-                    )
-                else:
-                    q_scale_slice = None
-
-                logits = fp8_fp4_paged_mqa_logits(
-                    (q_slice, q_scale_slice),
-                    paged_kv_cache,
-                    weights[token_slice],
-                    paged_metadata.context_lens,
-                    paged_metadata.block_table,
-                    paged_metadata.schedule_metadata,
-                    max_model_len=paged_metadata.max_context_len,
-                    clean_logits=False,
-                    indices=paged_metadata.indices,
-                )
-                topk_indices = topk_indices_buffer[
-                    paged_metadata.token_start : paged_metadata.token_end,
-                    :topk_tokens,
-                ]
-                torch.ops._C.top_k_per_row_decode(
-                    logits,
-                    1,
-                    paged_metadata.context_lens,
-                    topk_indices,
-                    logits.shape[0],
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
 
         if prefill_metadata.chunks:
             # Get the full shared workspace buffers once (will allocate on first use).

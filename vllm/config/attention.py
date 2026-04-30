@@ -54,6 +54,9 @@ class AttentionConfig:
     use_fp4_indexer_cache: bool = False
     """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
 
+    enable_sparse_indexer_paged_prefill: bool = False
+    """Whether to use the experimental sparse-indexer paged prefill path."""
+
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 

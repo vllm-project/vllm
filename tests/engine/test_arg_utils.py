@@ -307,6 +307,7 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
+    assert engine_args.attention_config.enable_sparse_indexer_paged_prefill is False
 
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
@@ -343,6 +344,8 @@ def test_attention_config():
             "true",
             "--attention-config.disable_flashinfer_q_quantization",
             "true",
+            "--attention-config.enable_sparse_indexer_paged_prefill",
+            "true",
         ]
     )
     assert args is not None
@@ -357,6 +360,7 @@ def test_attention_config():
     assert engine_args.attention_config.use_trtllm_attention is True
     assert engine_args.attention_config.disable_flashinfer_prefill is True
     assert engine_args.attention_config.disable_flashinfer_q_quantization is True
+    assert engine_args.attention_config.enable_sparse_indexer_paged_prefill is True
 
     # set to string form of a dict with all fields
     args = parser.parse_args(
@@ -369,7 +373,8 @@ def test_attention_config():
             '"use_trtllm_ragged_deepseek_prefill": false, '
             '"use_trtllm_attention": false, '
             '"disable_flashinfer_prefill": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            '"disable_flashinfer_q_quantization": false, '
+            '"enable_sparse_indexer_paged_prefill": true}',
         ]
     )
     assert args is not None
@@ -384,6 +389,7 @@ def test_attention_config():
     assert engine_args.attention_config.use_trtllm_attention is False
     assert engine_args.attention_config.disable_flashinfer_prefill is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
+    assert engine_args.attention_config.enable_sparse_indexer_paged_prefill is True
 
     # test --attention-backend flows into VllmConfig.attention_config
     args = parser.parse_args(
@@ -412,6 +418,21 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+    # test --enable-sparse-indexer-paged-prefill flows into
+    # VllmConfig.attention_config
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--enable-sparse-indexer-paged-prefill",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.enable_sparse_indexer_paged_prefill is True
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.attention_config.enable_sparse_indexer_paged_prefill is True
 
     # test --attention-backend and --attention-config.backend are mutually exclusive
     args = parser.parse_args(

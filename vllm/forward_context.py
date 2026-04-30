@@ -306,6 +306,9 @@ def set_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
     )
+    additional_kwargs["enable_sparse_indexer_paged_prefill"] = (
+        vllm_config.attention_config.enable_sparse_indexer_paged_prefill
+    )
 
     forward_context = create_forward_context(
         attn_metadata,

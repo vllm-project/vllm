@@ -17,12 +17,12 @@ from vllm.third_party.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
 )
 from vllm.triton_utils import triton
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerPagedPrefillMetadata,
     build_full_paged_prefill_metadata,
-    build_paged_prefill_metadata,
     build_prefill_chunk_metadata,
-    split_indexer_paged_prefill_chunks,
     split_indexer_prefill_chunks,
 )
 
@@ -65,6 +65,118 @@ def dequant(values: Tensor, scales: Tensor | None, use_fp4: bool) -> Tensor:
     scale = scales.view(torch.float8_e8m0fnu).float()
     dq = LUT[nibbles].unflatten(-1, (-1, MXFP4_BLOCK_SIZE)) * scale[..., None]
     return dq.flatten(-2)
+
+
+def split_indexer_paged_prefill_chunks(
+    compressed_seq_lens_cpu: Tensor,
+    query_lens_cpu: Tensor,
+    max_logits_bytes: int,
+    request_offset: int = 0,
+) -> list[tuple[slice, slice]]:
+    chunks: list[tuple[slice, slice]] = []
+    n = len(query_lens_cpu)
+    max_logits_elems = max_logits_bytes // 4
+    end = 0
+
+    while end < n:
+        start, chunk_m, chunk_max_context_len = end, 0, 0
+
+        while end < n:
+            q = query_lens_cpu[end].item()
+            max_context_len = compressed_seq_lens_cpu[end].item()
+            new_m = chunk_m + q
+            new_max_context_len = max(chunk_max_context_len, max_context_len)
+            if new_m <= 2048 and new_m * new_max_context_len <= max_logits_elems:
+                chunk_m = new_m
+                chunk_max_context_len = new_max_context_len
+                end += 1
+            else:
+                break
+
+        if end == start:
+            chunk_m = query_lens_cpu[end].item()
+            chunk_max_context_len = compressed_seq_lens_cpu[end].item()
+            end += 1
+
+        req_slice = slice(start + request_offset, end + request_offset)
+        max_q_by_logits = (
+            max(1, max_logits_elems // chunk_max_context_len)
+            if chunk_max_context_len > 0
+            else chunk_m
+        )
+        max_q = max(1, min(2048, max_q_by_logits))
+        for q_off in range(0, chunk_m, max_q):
+            sub_m = min(max_q, chunk_m - q_off)
+            chunks.append((req_slice, slice(q_off, q_off + sub_m)))
+
+    return chunks
+
+
+def build_paged_prefill_metadata(
+    start_idx: int,
+    end_idx: int,
+    query_start_loc: Tensor,
+    query_start_loc_cpu: Tensor,
+    seq_lens: Tensor,
+    compressed_seq_lens_cpu: Tensor,
+    block_table: Tensor,
+    compress_ratio: int,
+    block_size: int,
+    num_sms: int,
+    query_slice: slice | None = None,
+) -> DeepseekV32IndexerPagedPrefillMetadata | None:
+    total_query_len = (
+        query_start_loc_cpu[end_idx].item() - query_start_loc_cpu[start_idx].item()
+    )
+    if query_slice is not None:
+        qs_start = query_slice.start
+        qs_stop = query_slice.stop
+    else:
+        qs_start = 0
+        qs_stop = total_query_len
+    assert qs_start is not None
+    assert qs_stop is not None
+    output_query_len = qs_stop - qs_start
+    if output_query_len <= 0:
+        return None
+
+    device = seq_lens.device
+    req_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device=device)
+    query_lens = query_start_loc[start_idx : end_idx + 1].diff()
+    req_idx = torch.repeat_interleave(req_ids, query_lens, output_size=total_query_len)[
+        qs_start:qs_stop
+    ]
+    max_context_len = int(compressed_seq_lens_cpu[start_idx:end_idx].max().item())
+    if max_context_len == 0:
+        return None
+
+    token_idx = torch.arange(qs_start, qs_stop, dtype=torch.long, device=device)
+    query_offsets = token_idx - (query_start_loc[req_idx] - query_start_loc[start_idx])
+    req_query_lens = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
+    context_lens = (
+        seq_lens[req_idx] - req_query_lens + query_offsets + 1
+    ) // compress_ratio
+
+    indices = req_idx.to(torch.int32)
+    context_lens = context_lens.to(torch.int32).view(-1, 1)
+    schedule_metadata = get_paged_mqa_logits_metadata(
+        context_lens,
+        block_size,
+        num_sms,
+        indices=indices,
+    )
+    token_start = int(query_start_loc_cpu[start_idx].item()) + qs_start
+    token_end = token_start + output_query_len
+
+    return DeepseekV32IndexerPagedPrefillMetadata(
+        token_start=token_start,
+        token_end=token_end,
+        context_lens=context_lens,
+        indices=indices,
+        block_table=block_table[req_idx],
+        schedule_metadata=schedule_metadata,
+        max_context_len=max_context_len,
+    )
 
 
 class Reference:

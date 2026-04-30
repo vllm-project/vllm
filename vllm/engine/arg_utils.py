@@ -639,6 +639,7 @@ class EngineArgs:
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    enable_sparse_indexer_paged_prefill: bool | None = None
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -865,6 +866,15 @@ class EngineArgs:
         )
         attention_group.add_argument(
             "--attention-backend", **attention_kwargs["backend"]
+        )
+        attention_group.add_argument(
+            "--enable-sparse-indexer-paged-prefill",
+            action="store_true",
+            default=None,
+            help=(
+                "Enable the experimental sparse-indexer paged prefill path "
+                "on supported CUDA SM100 platforms with DeepGEMM."
+            ),
         )
 
         # Mamba arguments
@@ -2026,6 +2036,10 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+        if self.enable_sparse_indexer_paged_prefill is not None:
+            attention_config.enable_sparse_indexer_paged_prefill = (
+                self.enable_sparse_indexer_paged_prefill
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert

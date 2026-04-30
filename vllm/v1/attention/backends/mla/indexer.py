@@ -32,6 +32,14 @@ from vllm.v1.worker.cp_utils import get_total_cp_world_size
 logger = init_logger(__name__)
 
 
+def sparse_indexer_paged_prefill_supported() -> bool:
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_deep_gemm()
+    )
+
+
 @triton.jit
 def _prepare_uniform_decode_kernel(
     seq_lens_ptr,
@@ -108,62 +116,6 @@ def split_indexer_prefill_chunks(
 
         req_slice = slice(start + request_offset, end + request_offset)
         max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else chunk_m
-        for q_off in range(0, chunk_m, max_q):
-            sub_m = min(max_q, chunk_m - q_off)
-            chunks.append((req_slice, slice(q_off, q_off + sub_m)))
-
-    return chunks
-
-
-def split_indexer_paged_prefill_chunks(
-    compressed_seq_lens_cpu: torch.Tensor,
-    query_lens_cpu: torch.Tensor,
-    max_logits_bytes: int,
-    request_offset: int = 0,
-) -> list[tuple[slice, slice]]:
-    """
-    Split paged prefill requests into chunks for the sparse indexer, respecting:
-    - DeepGEMM metadata constraint: total query tokens <= 2048
-    - Logits constraint: M * max_context_len * 4 <= max_logits_bytes
-
-    Returns list of (req_slice, query_slice) tuples.
-    """
-    chunks: list[tuple[slice, slice]] = []
-    n = len(query_lens_cpu)
-    max_logits_elems = max_logits_bytes // 4
-    end = 0
-
-    while end < n:
-        start, chunk_m, chunk_max_context_len = end, 0, 0
-
-        while end < n:
-            q = query_lens_cpu[end].item()
-            max_context_len = compressed_seq_lens_cpu[end].item()
-            new_m = chunk_m + q
-            new_max_context_len = max(chunk_max_context_len, max_context_len)
-            if new_m <= 2048 and new_m * new_max_context_len <= max_logits_elems:
-                chunk_m = new_m
-                chunk_max_context_len = new_max_context_len
-                end += 1
-            else:
-                break
-
-        # A single request can exceed either the metadata bound or the logits
-        # budget, requiring sub-chunking on the query dimension.
-        if end == start:
-            chunk_m = query_lens_cpu[end].item()
-            chunk_max_context_len = compressed_seq_lens_cpu[end].item()
-            end += 1
-
-        req_slice = slice(start + request_offset, end + request_offset)
-        max_q_by_logits = (
-            max(1, max_logits_elems // chunk_max_context_len)
-            if chunk_max_context_len > 0
-            else chunk_m
-        )
-        # DeepGEMM's paged metadata JIT kernel uses static shared memory
-        # proportional to the metadata batch size, so bound query rows per call.
-        max_q = max(1, min(2048, max_q_by_logits))
         for q_off in range(0, chunk_m, max_q):
             sub_m = min(max_q, chunk_m - q_off)
             chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -249,8 +201,7 @@ class DeepseekV32IndexerPagedPrefillMetadata:
 @dataclass
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
-    paged_chunks: list[DeepseekV32IndexerPagedPrefillMetadata]
-    full_paged_metadata: DeepseekV32IndexerPagedPrefillMetadata | None = None
+    paged_metadata: DeepseekV32IndexerPagedPrefillMetadata | None = None
 
 
 @dataclass
@@ -346,10 +297,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             or not current_platform.is_device_capability_family(100)
         ) and next_n not in self.natively_supported_next_n_fp4
         self.use_paged_prefill = (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
-            and has_deep_gemm()
+            self.vllm_config.attention_config.enable_sparse_indexer_paged_prefill
+            and sparse_indexer_paged_prefill_supported()
         )
+        if self.use_paged_prefill:
+            logger.warning_once(
+                "Sparse-indexer paged prefill is enabled. "
+                "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB is not respected by this "
+                "path because it materializes logits for the full paged "
+                "prefill batch."
+            )
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -592,57 +549,32 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 else seq_lens_cpu
             )
             chunks = []
-            paged_chunks = []
-            full_paged_metadata = None
+            paged_metadata = None
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
-            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
             if self.use_paged_prefill:
-                if envs.VLLM_SPARSE_INDEXER_DISABLE_PAGED_PREFILL_CHUNKING:
-                    # Experimental path: build the full DeepGEMM schedule in
-                    # PyTorch so large metadata batches do not JIT a
-                    # shared-memory-heavy metadata kernel.
-                    full_paged_metadata = build_full_paged_prefill_metadata(
-                        num_decodes,
-                        num_decodes + num_prefills,
-                        query_start_loc,
-                        query_start_loc_cpu,
-                        seq_lens,
-                        compressed_seq_lens_cpu,
-                        common_attn_metadata.block_table_tensor,
-                        self.compress_ratio,
-                        self.kv_cache_spec.storage_block_size,
-                        self.num_sms,
-                    )
-                else:
-                    # This is a DeepGEMM metadata-kernel safety bound, not a
-                    # gathered-K workspace bound.
-                    chunk_specs = split_indexer_paged_prefill_chunks(
-                        compressed_seq_lens_cpu[num_decodes:],
-                        prefill_query_lens_cpu,
-                        max_logits_bytes,
-                        request_offset=num_decodes,
-                    )
-
-                    for req_slice, query_slice in chunk_specs:
-                        paged_metadata = build_paged_prefill_metadata(
-                            req_slice.start,
-                            req_slice.stop,
-                            query_start_loc,
-                            query_start_loc_cpu,
-                            seq_lens,
-                            compressed_seq_lens_cpu,
-                            common_attn_metadata.block_table_tensor,
-                            self.compress_ratio,
-                            self.kv_cache_spec.storage_block_size,
-                            self.num_sms,
-                            query_slice=query_slice,
-                        )
-                        # Skip when the chunk has no compressed KV tokens.
-                        if paged_metadata is not None:
-                            paged_chunks.append(paged_metadata)
+                # Experimental path: build the full DeepGEMM schedule in
+                # PyTorch so large metadata batches do not JIT a
+                # shared-memory-heavy metadata kernel. This custom metadata
+                # construction bypasses DeepGEMM's metadata kernel and must be
+                # kept in sync with DeepGEMM scheduler metadata layout or atom
+                # assignment changes. See:
+                # https://github.com/deepseek-ai/DeepGEMM/issues/322
+                paged_metadata = build_full_paged_prefill_metadata(
+                    num_decodes,
+                    num_decodes + num_prefills,
+                    query_start_loc,
+                    query_start_loc_cpu,
+                    seq_lens,
+                    compressed_seq_lens_cpu,
+                    common_attn_metadata.block_table_tensor,
+                    self.compress_ratio,
+                    self.kv_cache_spec.storage_block_size,
+                    self.num_sms,
+                )
             else:
+                max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
                 chunk_specs = split_indexer_prefill_chunks(
                     compressed_seq_lens_cpu[num_decodes:],
                     prefill_query_lens_cpu,
@@ -670,8 +602,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         chunks.append(metadata)
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks=chunks,
-                paged_chunks=paged_chunks,
-                full_paged_metadata=full_paged_metadata,
+                paged_metadata=paged_metadata,
             )
 
         decode_metadata = None
@@ -838,75 +769,6 @@ def build_prefill_chunk_metadata(
         token_end=token_end,
         num_reqs=num_reqs,
         skip_kv_gather=skip_kv_gather,
-    )
-
-
-def build_paged_prefill_metadata(
-    start_idx: int,
-    end_idx: int,
-    query_start_loc: torch.Tensor,
-    query_start_loc_cpu: torch.Tensor,
-    seq_lens: torch.Tensor,
-    compressed_seq_lens_cpu: torch.Tensor,
-    block_table: torch.Tensor,
-    compress_ratio: int,
-    block_size: int,
-    num_sms: int,
-    query_slice: slice | None = None,
-) -> DeepseekV32IndexerPagedPrefillMetadata | None:
-    # DeepGEMM varlen paged logits consumes per-query-token request ids and
-    # context lengths, unlike flat prefill which consumes per-row K offsets.
-    total_query_len = (
-        query_start_loc_cpu[end_idx].item() - query_start_loc_cpu[start_idx].item()
-    )
-    if query_slice is not None:
-        qs_start = query_slice.start
-        qs_stop = query_slice.stop
-    else:
-        qs_start = 0
-        qs_stop = total_query_len
-    assert qs_start is not None
-    assert qs_stop is not None
-    output_query_len = qs_stop - qs_start
-    if output_query_len <= 0:
-        return None
-
-    device = seq_lens.device
-    req_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device=device)
-    query_lens = query_start_loc[start_idx : end_idx + 1].diff()
-    req_idx = torch.repeat_interleave(req_ids, query_lens, output_size=total_query_len)[
-        qs_start:qs_stop
-    ]
-    max_context_len = int(compressed_seq_lens_cpu[start_idx:end_idx].max().item())
-    if max_context_len == 0:
-        return None
-
-    token_idx = torch.arange(qs_start, qs_stop, dtype=torch.long, device=device)
-    query_offsets = token_idx - (query_start_loc[req_idx] - query_start_loc[start_idx])
-    req_query_lens = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
-    context_lens = (
-        seq_lens[req_idx] - req_query_lens + query_offsets + 1
-    ) // compress_ratio
-
-    indices = req_idx.to(torch.int32)
-    context_lens = context_lens.to(torch.int32).view(-1, 1)
-    schedule_metadata = get_paged_mqa_logits_metadata(
-        context_lens,
-        block_size,
-        num_sms,
-        indices=indices,
-    )
-    token_start = int(query_start_loc_cpu[start_idx].item()) + qs_start
-    token_end = token_start + output_query_len
-
-    return DeepseekV32IndexerPagedPrefillMetadata(
-        token_start=token_start,
-        token_end=token_end,
-        context_lens=context_lens,
-        indices=indices,
-        block_table=block_table[req_idx],
-        schedule_metadata=schedule_metadata,
-        max_context_len=max_context_len,
     )
 
 
