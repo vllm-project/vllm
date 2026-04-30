@@ -195,9 +195,9 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
 
 # DeepEP build stage
 FROM base AS build_deep
-ARG ROCSHMEM_BRANCH="04f13a60d1"
+ARG ROCSHMEM_BRANCH="f0acb0c6"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG DEEPEP_BRANCH="0ae6f25e"
+ARG DEEPEP_BRANCH="a9ea9774"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
 ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
@@ -381,11 +381,14 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 COPY --from=export_vllm /*.whl /opt/vllm-wheels/
 
 # Update rdma-core to support latest rocshmem
-RUN git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
+ARG DEEPEP_NIC
+RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
+    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
     cd /tmp/rdma-core && \
     mkdir -p build && cd build && \
     cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
-    ninja &&     ninja install &&     ldconfig &&     rm -rf /tmp/rdma-core
+    ninja &&     ninja install &&     ldconfig &&     rm -rf /tmp/rdma-core; \
+fi
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
