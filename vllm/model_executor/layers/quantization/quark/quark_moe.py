@@ -1484,6 +1484,31 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
     ):
         super().__init__(weight_config, input_config, moe)
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        # This path still swizzles MXFP4 weights/scales with Triton kernels,
+        # even though the base OCP-MX method classifies w_mxfp4_a_fp8 as
+        # emulation. Apply the Triton/CDNA4 padding before weights are created.
+        hidden_size, intermediate_size_per_partition = (
+            FusedMoEMethodBase.maybe_roundup_sizes(
+                self,
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=intermediate_size_per_partition,
+                act_dtype=act_dtype,
+                moe_parallel_config=moe_parallel_config,
+            )
+        )
+        return mxfp4_round_up_hidden_size_and_intermediate_size(
+            Mxfp4MoeBackend.TRITON,
+            hidden_size,
+            intermediate_size_per_partition,
+        )
+
     def process_weights_after_loading(self, layer):
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
