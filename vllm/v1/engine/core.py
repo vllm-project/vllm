@@ -113,6 +113,7 @@ class EngineCore:
             )
 
         self.log_stats = log_stats
+        self._iteration_index = 0
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -397,7 +398,6 @@ class EngineCore:
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
-        self._iteration_index = getattr(self, "_iteration_index", 0)
         # In DP mode, an engine without local work still performs a dummy
         # forward pass so all DP peers participate in collectives. Pass
         # scheduler_output=None for those iterations so the index stays in
@@ -1839,6 +1839,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
+            prev_iteration_index = self._iteration_index
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
@@ -1849,8 +1850,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     continue
 
                 # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                with self.log_iteration_details(None):
+                # if the model didn't execute any ready requests. Only emit a
+                # dummy iteration log if step_fn didn't already log one (e.g.
+                # when it scheduled zero tokens despite having requests),
+                # otherwise the iteration index would double-advance and DP
+                # peers would diverge.
+                if self._iteration_index == prev_iteration_index:
+                    with self.log_iteration_details(None):
+                        self.execute_dummy_batch()
+                else:
                     self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
