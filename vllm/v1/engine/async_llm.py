@@ -26,7 +26,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -78,7 +77,6 @@ class AsyncLLM(EngineClient):
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
@@ -96,7 +94,6 @@ class AsyncLLM(EngineClient):
             log_stats: Whether to log stats.
             usage_context: Usage context of the LLM.
             mm_registry: Multi-modal registry.
-            use_cached_outputs: Whether to use cached outputs.
             log_requests: Whether to log requests.
             start_engine_loop: Whether to start the engine loop.
             stat_loggers: customized stat loggers for the engine.
@@ -133,11 +130,6 @@ class AsyncLLM(EngineClient):
             )
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
-        self.io_processor = get_io_processor(
-            self.vllm_config,
-            self.renderer,
-            self.model_config.io_processor_plugin,
-        )
 
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)

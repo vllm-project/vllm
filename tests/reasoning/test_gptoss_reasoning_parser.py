@@ -280,3 +280,72 @@ class TestGptOssStructuralTags:
             assert tag["content"]["type"] == "any_text"
             assert tag["end"] == "<|end|>"
             assert tag["begin"].startswith("<|channel|>")
+
+
+@pytest.mark.parametrize(
+    "output, is_reasoning_end",
+    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
+)
+def test_gptoss_is_reasoning_end_streaming(
+    output,
+    is_reasoning_end,
+    gpt_oss_tokenizer,
+):
+    """Streaming override must agree with is_reasoning_end for all cases."""
+    tokens = gpt_oss_tokenizer.tokenize(output)
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(tokens)
+    delta_ids = output_ids[-1:] if output_ids else []
+    actual = parser.is_reasoning_end_streaming(output_ids, delta_ids)
+    assert is_reasoning_end == actual
+
+
+@pytest.mark.parametrize(
+    "output, is_reasoning_end",
+    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
+)
+def test_gptoss_is_reasoning_end_streaming_long_prefix(
+    output,
+    is_reasoning_end,
+    gpt_oss_tokenizer,
+):
+    """Windowing must produce correct results even with a long prefix."""
+    tokens = gpt_oss_tokenizer.tokenize(output)
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(tokens)
+    # Prepend 10k dummy reasoning tokens to simulate a long generation
+    long_prefix = [1] * 10_000
+    padded_ids = long_prefix + list(output_ids)
+    delta_ids = output_ids[-1:] if output_ids else []
+    actual = parser.is_reasoning_end_streaming(padded_ids, delta_ids)
+    assert is_reasoning_end == actual
+
+
+@pytest.mark.parametrize(
+    "output, is_reasoning_end",
+    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
+)
+def test_gptoss_is_reasoning_end_streaming_large_delta(
+    output,
+    is_reasoning_end,
+    gpt_oss_tokenizer,
+):
+    """Simulate speculative decoding where the entire test sequence arrives
+    as a single large delta appended after a long prefix.  The window must
+    expand to cover delta_ids so the end pattern is never missed."""
+    tokens = gpt_oss_tokenizer.tokenize(output)
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(tokens)
+    long_prefix = [1] * 10_000
+    padded_ids = long_prefix + list(output_ids)
+    # delta_ids = the entire test sequence (as if accepted in one spec step)
+    delta_ids = list(output_ids)
+    actual = parser.is_reasoning_end_streaming(padded_ids, delta_ids)
+    assert is_reasoning_end == actual
+
+
+def test_gptoss_is_reasoning_end_streaming_signature(gpt_oss_tokenizer):
+    """Verify the method is callable with the expected signature."""
+    parser = GptOssReasoningParser(gpt_oss_tokenizer)
+    result = parser.is_reasoning_end_streaming([], [])
+    assert result is False
