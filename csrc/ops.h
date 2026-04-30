@@ -124,6 +124,11 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
 void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);
+void persistent_topk_with_page_table(
+    const torch::Tensor& logits, const torch::Tensor& lengths,
+    torch::Tensor& output, torch::Tensor& topk_lens, torch::Tensor& workspace,
+    int64_t k, int64_t max_seq_len, const torch::Tensor& block_table,
+    const torch::Tensor& slot_mapping, int64_t page_block_size);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,

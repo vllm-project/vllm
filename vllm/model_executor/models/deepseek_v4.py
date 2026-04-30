@@ -924,6 +924,7 @@ class DeepseekV4Attention(nn.Module):
         vllm_config: VllmConfig,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
+        topk_lens_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
@@ -1039,6 +1040,7 @@ class DeepseekV4Attention(nn.Module):
                 quant_config=quant_config,
                 cache_config=vllm_config.cache_config,
                 topk_indices_buffer=topk_indices_buffer,
+                topk_lens_buffer=topk_lens_buffer,
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
             )
@@ -1056,6 +1058,7 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             indexer_rotary_emb=self.rotary_emb,
             topk_indices_buffer=topk_indices_buffer,
+            topk_lens_buffer=topk_lens_buffer,
             aux_stream_list=aux_stream_list,
         )
         self.mla_attn = DeepseekV4MultiHeadLatentAttentionWrapper(
@@ -1092,6 +1095,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         vllm_config,
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
+        topk_lens_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
@@ -1108,6 +1112,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
+            topk_lens_buffer=topk_lens_buffer,
             aux_stream_list=aux_stream_list,
         )
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
@@ -1250,6 +1255,11 @@ class DeepseekV4Model(nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
+        self.topk_lens_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=self.device,
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -1264,6 +1274,7 @@ class DeepseekV4Model(nn.Module):
                 vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
+                topk_lens_buffer=self.topk_lens_buffer,
                 aux_stream_list=aux_stream_list,
             ),
             prefix=f"{prefix}.layers",

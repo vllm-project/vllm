@@ -16,7 +16,10 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    can_use_page_table_fusion,
+)
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -53,6 +56,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
+from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -99,6 +103,7 @@ class DeepseekV4MLAModules:
     indexer: torch.nn.Module | None
     indexer_rotary_emb: torch.nn.Module
     topk_indices_buffer: torch.Tensor | None
+    topk_lens_buffer: torch.Tensor | None
     aux_stream_list: list[torch.cuda.Stream] | None = None
 
 
@@ -198,7 +203,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Pick fp8_einsum recipe based on GPU arch:
         # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
         # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        from vllm.platforms import current_platform
 
         cap = current_platform.get_device_capability()
         assert cap is not None, "DeepseekV4 attention requires a CUDA device"
@@ -255,6 +259,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             prefix=prefix,
             indexer=self.indexer,
             topk_indices_buffer=self.topk_indices_buffer,
+            topk_lens_buffer=mla_modules.topk_lens_buffer,
         )
         # Register this layer in the compilation config's static forward context
         # This allows the custom op to retrieve the layer during execution
@@ -612,6 +617,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         # Sparse MLA Args
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        topk_lens_buffer: torch.Tensor | None = None,
         aux_stream: torch.cuda.Stream | None = None,
         **extra_impl_args,
     ) -> None:
@@ -629,6 +635,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.rope_head_dim = qk_rope_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self.topk_lens_buffer = topk_lens_buffer
 
         self.prefix = prefix  # Alias for compatibility with compressor
 
@@ -794,14 +801,29 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                    self.topk_indices_buffer[:num_decode_tokens],
-                    swa_metadata.token_to_req_indices,
-                    attn_metadata.block_table[:num_decodes],
-                    block_size,
-                    is_valid,
+                use_page_table_fusion = can_use_page_table_fusion(
+                    topk_lens_buffer=self.topk_lens_buffer,
+                    topk_tokens=self.topk_indices_buffer.shape[-1],
+                    num_tokens=num_decode_tokens,
+                    num_seqs=num_decodes,
+                    page_table_block_size=block_size,
+                    page_table=attn_metadata.block_table,
                 )
-                topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                if use_page_table_fusion:
+                    assert self.topk_lens_buffer is not None
+                    topk_indices = self.topk_indices_buffer[:num_decode_tokens].view(
+                        num_decode_tokens, 1, -1
+                    )
+                    topk_lens = self.topk_lens_buffer[:num_decode_tokens]
+                else:
+                    global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                    )
+                    topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
                 # C128A: pre-computed during metadata build.
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
@@ -1036,6 +1058,7 @@ class DeepseekV4Indexer(nn.Module):
         quant_config: QuantizationConfig | None,
         cache_config: CacheConfig | None,
         topk_indices_buffer: torch.Tensor | None,
+        topk_lens_buffer: torch.Tensor | None,
         compress_ratio: int = 1,
         prefix: str = "",
     ):
@@ -1077,6 +1100,7 @@ class DeepseekV4Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
+        self.topk_lens_buffer = topk_lens_buffer
 
         self.max_model_len = (
             vllm_config.model_config.max_model_len // self.compress_ratio
@@ -1120,6 +1144,9 @@ class DeepseekV4Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            topk_lens_buffer=topk_lens_buffer,
+            page_table_block_size=cache_config.block_size // self.compress_ratio,
+            enable_page_table_fusion=self.compress_ratio == 4,
             skip_k_cache_insert=True,
             use_fp4_cache=self.use_fp4_kv,
         )

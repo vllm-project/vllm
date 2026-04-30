@@ -221,6 +221,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor workspace, int k, int max_seq_len) -> ()");
   ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
 
+  ops.def(
+      "persistent_topk_with_page_table(Tensor logits, Tensor lengths, "
+      "Tensor! output, Tensor! topk_lens, Tensor workspace, int k, "
+      "int max_seq_len, Tensor block_table, Tensor slot_mapping, "
+      "int page_block_size) -> ()");
+  ops.impl("persistent_topk_with_page_table", torch::kCUDA,
+           &persistent_topk_with_page_table);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
