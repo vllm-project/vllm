@@ -344,20 +344,6 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     target_compile_options(dnnl_ext PRIVATE ${DNNL_COMPILE_FLAGS} -fPIC)
     list(APPEND LIBS dnnl_ext)
 
-    if (ENABLE_X86_ISA)
-        # Separate target required: dnnl_helper.cpp must be compiled twice —
-        # once with AVX512 flags (dnnl_ext, linked into _C/_C_AVX512) and once
-        # with AVX2 flags (dnnl_ext_avx2, linked into _C_AVX2).
-        add_library(dnnl_ext_avx2 OBJECT "csrc/cpu/dnnl_helper.cpp")
-        target_include_directories(
-            dnnl_ext_avx2
-            PUBLIC ${oneDNN_SOURCE_DIR}/include
-            PUBLIC ${oneDNN_BINARY_DIR}/include
-            PRIVATE ${oneDNN_SOURCE_DIR}/src
-        )
-        target_link_libraries(dnnl_ext_avx2 dnnl torch)
-        target_compile_options(dnnl_ext_avx2 PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
-    endif()
 
     set(USE_ONEDNN ON)
 else()
@@ -465,7 +451,7 @@ if (ENABLE_X86_ISA)
 
     set(_C_LIBS numa dnnl_ext)
     set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa dnnl_ext_avx2)
+    set(_C_AVX2_LIBS numa dnnl_ext)
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
