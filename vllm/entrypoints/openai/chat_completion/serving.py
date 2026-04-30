@@ -1327,12 +1327,12 @@ class OpenAIServingChat(OpenAIServing):
                                 tool_call_class(id=generated_id, function=tc)
                             )
                     history_tool_call_cnt += 1
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content="",
-                        tool_calls=tool_call_class_items,
-                    )
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content="",
+                    tool_calls=tool_call_class_items,
+                )
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
