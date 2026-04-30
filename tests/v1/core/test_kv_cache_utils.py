@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -203,6 +204,35 @@ def test_attention_spec_copy_with_new_block_size_raises_when_not_divisible():
 
     with pytest.raises(ValueError, match="page_size_padded"):
         spec.copy_with_new_block_size(3)
+
+
+def test_unify_kv_cache_spec_page_size_handles_gemma4_padded_global_layers():
+    local_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.int8,
+        kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+    )
+    global_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.int8,
+        kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+        page_size_padded=16 * 1040,
+    )
+
+    unified_specs = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "local": local_spec,
+            "global": global_spec,
+        }
+    )
+
+    assert unified_specs["global"] == global_spec
+    assert unified_specs["local"].block_size == 32
+    assert unified_specs["local"].page_size_bytes == global_spec.page_size_bytes
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1883,10 +1913,11 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def new_mla_spec(cache_dtype_str=None):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=16,
-        num_kv_heads=16,
-        head_size=64,
+        num_kv_heads=1,
+        head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
@@ -2099,6 +2130,54 @@ def test_auto_fit_max_model_len_not_triggered():
         vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
     )
     assert vllm_config.model_config.max_model_len == 16
+
+
+def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
+    """Auto-fit must size max_model_len against the override-clamped pool, not
+    the raw `available_memory`. Without this, auto-fit could pick a
+    max_model_len that no longer fits once `num_gpu_blocks_override` is applied.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    model_config.original_max_model_len = -1  # request auto-fit
+    vllm_config = VllmConfig(model_config=model_config)
+    # Cap the cache to 32 blocks regardless of available memory.
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),  # block_size=16
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory (1024 blocks per layer would fit max_model_len=16384).
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+
+    # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
+    # auto-fit at or below that.
+    assert 0 < vllm_config.model_config.max_model_len <= 32 * 16
+
+
+def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
+    """Admission check must use the override-clamped pool size, not raw
+    `available_memory`. Without this, startup could accept a max_model_len
+    that does not actually fit in `num_gpu_blocks_override` blocks.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    vllm_config = VllmConfig(model_config=model_config)
+    # 32 blocks is far too small for max_model_len=16384 (would need 1024).
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory: a bytes-only check against this would pass.
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
 def test_unify_hybrid_kv_cache_specs():

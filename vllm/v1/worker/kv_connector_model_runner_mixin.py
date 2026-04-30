@@ -24,10 +24,6 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
-from vllm.v1.worker.kv_cache_shape_utils import (
-    adjust_kv_cache_shape_for_padded_page_size,
-    get_padded_page_size_for_kernel_block_size,
-)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -242,27 +238,12 @@ class KVConnectorModelRunnerMixin:
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
         attn_backend = attn_group.backend
-        kv_cache_shape = tuple(
-            attn_backend.get_kv_cache_shape(
-                kernel_num_blocks,
-                kernel_block_size,
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
-                cache_dtype_str=cache_dtype,
-            )
-        )
-
-        padded_page_size_bytes = get_padded_page_size_for_kernel_block_size(
-            padded_page_size_bytes=kv_cache_spec.page_size_padded,
-            kv_block_size=kv_cache_spec.block_size,
-            kernel_block_size=kernel_block_size,
-        )
-
-        kv_cache_shape = adjust_kv_cache_shape_for_padded_page_size(
-            kv_cache_shape=kv_cache_shape,
-            num_blocks=kernel_num_blocks,
-            padded_page_size_bytes=padded_page_size_bytes,
-            dtype=kv_cache_spec.dtype,
+        kv_cache_shape = attn_backend.get_kv_cache_shape(
+            kernel_num_blocks,
+            kernel_block_size,
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size,
+            cache_dtype_str=cache_dtype,
         )
 
         # prepend a num_layers dimension into the shape
