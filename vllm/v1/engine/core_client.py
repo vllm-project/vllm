@@ -638,6 +638,10 @@ class MPClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return self.engines_running
 
+    def _is_fault_tolerant(self) -> bool:
+        """Whether this client supports single-engine fault tolerance."""
+        return False
+
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
@@ -647,8 +651,12 @@ class MPClient(EngineCoreClient):
 
         self_ref = weakref.ref(self)
 
-        # Monitor engine core process liveness. If any die unexpectedly,
-        # marks the engine as dead, and shuts down the client.
+        if self._is_fault_tolerant():
+            self._start_fault_tolerant_monitor(engine_manager, self_ref)
+        else:
+            self._start_standard_monitor(engine_manager, self_ref)
+
+    def _start_standard_monitor(self, engine_manager, self_ref):
         def monitor_engine_cores():
             engine_manager.monitor_engine_liveness()
             _self = self_ref()
@@ -656,9 +664,6 @@ class MPClient(EngineCoreClient):
                 return
             _self.resources.engine_dead = True
             _self.shutdown()
-            # Note: For MPClient, we don't have a failure callback mechanism
-            # like MultiprocExecutor, but we set engine_dead flag which will
-            # cause subsequent operations to raise EngineDeadError
 
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
@@ -689,6 +694,34 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = response.dp_stats_address
             else:
                 assert response.dp_stats_address == self.stats_update_address
+
+    def _start_fault_tolerant_monitor(self, engine_manager, self_ref):
+        def on_engine_died(proc_name: str, dp_rank: int) -> bool:
+            _self = self_ref()
+            if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
+                return False
+            return _self._on_engine_process_died(proc_name, dp_rank)
+
+        def monitor_engine_cores_ft():
+            engine_manager.monitor_engine_liveness_fault_tolerant(on_engine_died)
+            _self = self_ref()
+            if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
+                return
+            _self.resources.engine_dead = True
+            _self.shutdown()
+
+        Thread(
+            target=monitor_engine_cores_ft,
+            daemon=True,
+            name="MPClientFTEngineMonitor",
+        ).start()
+
+    def _on_engine_process_died(self, proc_name: str, dp_rank: int) -> bool:
+        """Handle a single engine process death. Returns True to keep
+        monitoring, False to stop. Default: stop everything."""
+        self.resources.engine_dead = True
+        self.shutdown()
+        return False
 
 
 def _process_utility_output(
@@ -1138,6 +1171,11 @@ class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore. Assumes external load-balancing by default."""
 
+    # Declared at the base class so subclasses can assign None during
+    # __init__ before the loop is captured. The FT monitor thread reads
+    # this lazily; subclasses without FT support never assign it.
+    _ft_event_loop: asyncio.AbstractEventLoop | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1217,12 +1255,13 @@ class DPAsyncMPClient(AsyncMPClient):
                         decoded = msgspec.msgpack.decode(buf)
                         if (
                             isinstance(decoded, (list, tuple))
-                            and len(decoded) == 2
+                            and len(decoded) >= 2
                             and decoded[0] == "SCALE_ELASTIC_EP"
                         ):
-                            # Extract new engine count from the decoded message
                             new_engine_count = decoded[1]
-                            # Update engine_ranks_managed and count_slice
+                            removed_ranks = (
+                                set(decoded[2]) if len(decoded) >= 3 else set()
+                            )
                             parallel_config = self.vllm_config.parallel_config
                             dp_size = parallel_config.data_parallel_size
                             dp_rank = parallel_config.data_parallel_rank
@@ -1243,11 +1282,21 @@ class DPAsyncMPClient(AsyncMPClient):
                                         new_engine_count - len(self.lb_engines)
                                     )
                                 ]
+                            elif removed_ranks:
+                                self.lb_engines = [
+                                    lb
+                                    for i, lb in enumerate(self.lb_engines)
+                                    if i not in removed_ranks
+                                ]
                             else:
                                 self.lb_engines = self.lb_engines[:new_engine_count]
-                            # Send scale up notification to coordinator
+                            # Forward to coordinator (include removed ranks).
                             scale_msg = msgspec.msgpack.encode(
-                                ("SCALE_ELASTIC_EP", new_engine_count)
+                                (
+                                    "SCALE_ELASTIC_EP",
+                                    new_engine_count,
+                                    sorted(removed_ranks),
+                                )
                             )
                             await socket.send(scale_msg)
                             continue
@@ -1295,6 +1344,12 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         self._ensure_stats_update_task()
+
+        # Lazily capture the event loop for the FT monitor thread.
+        if (
+            getattr(self, "_ft_event_loop", "missing") is None
+        ):  # subclass attribute exists and is None
+            self._ft_event_loop = asyncio.get_running_loop()
 
         request.current_wave = self.current_wave
         request.client_index = self.client_index
@@ -1347,7 +1402,219 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             len(self.core_engines) * self.client_index
         ) // client_count
 
+        # Fault tolerance state.
+        self._ft_scaling_in_progress = False
+        self._dead_engine_identities: set[EngineIdentity] = set()
+        self._initial_dp_size = len(self.core_engines)
+        self._ft_abort_callback: Callable[[list[str]], None] | None = None
+        # Capture the event loop for scheduling async scale-down from
+        # the monitor thread. May be None if __init__ runs outside an
+        # async context; updated lazily when add_request_async is called.
+        # `type: ignore` because the parent class re-narrows this attribute
+        # on its first non-None assignment in add_request_async; the
+        # declaration on DPAsyncMPClient widens it back to Optional but
+        # mypy has trouble seeing through the inheritance chain.
+        try:
+            self._ft_event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._ft_event_loop = None  # type: ignore[assignment]
+
+        # Client-side fault bus. The supervisor on each engine has its own
+        # bus for engine-internal faults; the client owns this one for
+        # engine-PROCESS deaths detected from outside (Ray actor failures,
+        # process exits). External subscribers connect via ZMQ SUB; the
+        # in-process DPRoutingPolicy subscribes via callback.
+        self._fault_bus = None
+        self._dp_routing_policy = None
+        if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
+            # Touch plans so HTTP `apply` can resolve them.
+            import vllm.v1.fault_tolerance.plans  # noqa: F401
+            from vllm.v1.fault_tolerance.dp_routing_policy import DPRoutingPolicy
+            from vllm.v1.fault_tolerance.fault_state_bus import FaultStateBus
+
+            self._fault_bus = FaultStateBus(vllm_config)
+            self._dp_routing_policy = DPRoutingPolicy(
+                self._fault_bus, total_engines=len(self.core_engines)
+            )
+
+    # ------------------------------------------------------------------
+    # Fault-tolerant engine monitoring
+    # ------------------------------------------------------------------
+
+    def _is_fault_tolerant(self) -> bool:
+        pc = self.vllm_config.parallel_config
+        return pc.enable_ep_fault_tolerance
+
+    def _on_engine_process_died(self, proc_name: str, dp_rank: int) -> bool:
+        """Handle a single DP engine death.
+
+        Advisory only — publishes ``FaultInfo(DEAD)`` on the client-side
+        fault bus so external orchestrators (Dynamo, k8s controllers) and
+        the in-process ``DPRoutingPolicy`` can react. Returns True to keep
+        monitoring surviving engines.
+
+        The redesign deliberately does **not** auto-trigger scale-down
+        here. Recovery decisions are policy and live in the orchestrator;
+        callers invoke ``POST /fault_tolerance/apply`` with
+        ``instruction="scale_down"`` (or ``"abort"``) to act on the death.
+        """
+        # Deduplicate: Ray may report the same actor death multiple times.
+        dead_identity = dp_rank.to_bytes(2, "little")
+        if dead_identity in self._dead_engine_identities:
+            logger.warning(
+                "[Fault Tolerance] Engine %s (dp_rank=%d) death already "
+                "handled. Ignoring duplicate notification.",
+                proc_name,
+                dp_rank,
+            )
+            return True
+
+        # Track the dead rank so client-side routing can avoid it and so
+        # `_fail_inflight_requests_for_engine` can be invoked by the
+        # `abort` / `scale_down` plans.
+        self._dead_engine_identities.add(dead_identity)
+
+        cur_dp_size = len(self.core_engines)
+        logger.warning(
+            "[Fault Tolerance] Engine %s (dp_rank=%d) died "
+            "(%d engines remain). Publishing FaultInfo(DEAD); orchestrator "
+            "should POST /fault_tolerance/apply to act.",
+            proc_name,
+            dp_rank,
+            cur_dp_size - 1,
+        )
+
+        if cur_dp_size <= 1:
+            # No survivors — orchestrator can't recover from this; bail.
+            logger.error(
+                "[Fault Tolerance] No surviving engines remain. Shutting down."
+            )
+            self.resources.engine_dead = True
+            self.shutdown()
+            return False
+
+        # Publish to the client-side fault bus (best-effort; bus may not
+        # be configured if the master FT switch is off).
+        bus = getattr(self, "_fault_bus", None)
+        if bus is not None:
+            from vllm.v1.fault_tolerance import FaultInfo, FaultStatus
+
+            bus.publish(
+                FaultInfo(
+                    engine_index=dp_rank,
+                    status=FaultStatus.DEAD,
+                    kind="engine_process_died",
+                    detail=proc_name,
+                )
+            )
+
+        return True
+
+    async def _fault_triggered_scale_down(self, dead_dp_rank: int) -> None:
+        """Scale down after a DP engine process died unexpectedly.
+
+        Args:
+            dead_dp_rank: The ORIGINAL dp_rank from the process name.
+                After previous scale-downs, this may differ from the
+                current list index in core_engines.
+        """
+        try:
+            # Translate original dp_rank → current list index.
+            # After previous scale-downs with rank compaction, the
+            # original rank number may not match the list position.
+            dead_engine_identity = dead_dp_rank.to_bytes(2, "little")
+            try:
+                dead_index = self.core_engines.index(dead_engine_identity)
+            except ValueError:
+                logger.warning(
+                    "[Fault Tolerance] Engine dp_rank=%d (identity=%s) "
+                    "not found in core_engines. Already removed?",
+                    dead_dp_rank,
+                    dead_engine_identity,
+                )
+                return
+
+            cur_dp_size = len(self.core_engines)
+            new_dp_size = cur_dp_size - 1
+
+            logger.info(
+                "[Fault Tolerance] Starting fault-triggered scale-down: "
+                "original_dp_rank=%d, current_index=%d, %d -> %d engines.",
+                dead_dp_rank,
+                dead_index,
+                cur_dp_size,
+                new_dp_size,
+            )
+
+            dead_req_ids = self._fail_inflight_requests_for_engine(dead_engine_identity)
+            if dead_req_ids and self._ft_abort_callback is not None:
+                self._ft_abort_callback(dead_req_ids)
+
+            await self._scale_down_elastic_ep(
+                cur_dp_size,
+                new_dp_size,
+                dead_dp_ranks={dead_index},
+            )
+
+            logger.info(
+                "[Fault Tolerance] Fault-triggered scale-down complete. "
+                "Now running with %d engines.",
+                new_dp_size,
+            )
+        except Exception:
+            logger.exception(
+                "[Fault Tolerance] Fault-triggered scale-down failed. Shutting down."
+            )
+            self.resources.engine_dead = True
+            self.shutdown()
+        finally:
+            self._ft_scaling_in_progress = False
+            self._dead_engine_identities.clear()
+
+    def _fail_inflight_requests_for_engine(
+        self, dead_engine: EngineIdentity
+    ) -> list[str]:
+        """Remove in-flight requests that were assigned to a dead engine.
+
+        Returns the list of dropped request IDs so callers can propagate
+        errors to waiting clients (e.g. via OutputProcessor.abort_requests).
+        """
+        dead_req_ids = [
+            req_id
+            for req_id, engine in self.reqs_in_flight.items()
+            if engine == dead_engine
+        ]
+        for req_id in dead_req_ids:
+            self.reqs_in_flight.pop(req_id, None)
+        if dead_req_ids:
+            logger.warning(
+                "[Fault Tolerance] Dropped %d in-flight requests that "
+                "were assigned to the dead engine.",
+                len(dead_req_ids),
+            )
+        return dead_req_ids
+
+    def register_ft_abort_callback(self, callback: Callable[[list[str]], None]) -> None:
+        """Register a callback to abort requests when an engine dies.
+
+        AsyncLLM sets this so that dead-engine requests go through the
+        proper OutputProcessor.abort_requests() path (LoRA cleanup,
+        pooling handling, parent/child tracking) rather than pushing
+        synthetic EngineCoreOutput objects through the inference pipeline.
+        """
+        self._ft_abort_callback = callback
+
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        # Routing eligibility comes from two sources:
+        # - `_dead_engine_identities`: client-detected process deaths (set
+        #   immediately by `_on_engine_process_died`, before the bus has
+        #   propagated).
+        # - `_dp_routing_policy.eligible_engines()`: bus-driven view that
+        #   also covers PAUSED, UNHEALTHY, RECOVERING. None when FT is off.
+        eligible: frozenset[int] | None = None
+        if self._dp_routing_policy is not None:
+            eligible = self._dp_routing_policy.eligible_engines()
+
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
             eng_index := get_late_interaction_engine_index(
@@ -1355,6 +1622,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         ) is None:
             current_counts = self.lb_engines
+            dead = self._dead_engine_identities
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
             min_score = sys.maxsize
@@ -1363,6 +1631,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
+                if dead and self.core_engines[idx] in dead:
+                    continue
+                if eligible is not None and idx not in eligible:
+                    # PAUSED / UNHEALTHY / RECOVERING per the bus.
+                    continue
                 waiting, running = current_counts[idx]
                 score = waiting * 4 + running
                 if score < min_score:
@@ -1373,6 +1646,20 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts[eng_index][0] += self.client_count
 
         chosen_engine = self.core_engines[eng_index]
+        if (
+            self._dead_engine_identities
+            and chosen_engine in self._dead_engine_identities
+        ):
+            raise ValueError(
+                f"Request targets DP rank {eng_index} which is dead. "
+                "Retry without specifying data_parallel_rank."
+            )
+        if eligible is not None and eng_index not in eligible:
+            raise ValueError(
+                f"Request targets DP rank {eng_index} which is not eligible "
+                "(paused, unhealthy, or recovering). "
+                "Retry without specifying data_parallel_rank."
+            )
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
         return chosen_engine
@@ -1387,6 +1674,100 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
+
+    # ------------------------------------------------------------------
+    # Fault tolerance API surface (called by the HTTP router under
+    # ``/fault_tolerance/*``).  See vllm.v1.fault_tolerance for the
+    # framework, vllm.entrypoints.serve.fault_tolerance for the routes.
+    # ------------------------------------------------------------------
+
+    async def apply_fault_instruction(self, ft_request: Any) -> Any:
+        """Dispatch a recovery instruction.
+
+        Cluster-scope plans (``scale_down``, ``abort``) execute here on
+        the client's event loop because they need access to the
+        ``CoreEngineActorManager`` and in-flight request map. Engine-local
+        plans (``pause``, ``retry``, ``abort_communicator``) are
+        round-tripped to the engine via the existing utility-async path.
+        """
+        from vllm.v1.fault_tolerance import (
+            ClusterRecoveryPlan,
+            FaultToleranceResult,
+            get_plan,
+        )
+        from vllm.v1.fault_tolerance.cluster import get_cluster_coordinator
+
+        try:
+            plan = get_plan(ft_request.instruction)
+        except KeyError as e:
+            return FaultToleranceResult(
+                success=False,
+                reason=str(e),
+                request_id=getattr(ft_request, "request_id", None),
+            )
+        if not plan.is_applicable(self.vllm_config):
+            return FaultToleranceResult(
+                success=False,
+                reason=(
+                    f"Plan '{ft_request.instruction}' is not applicable to "
+                    "this vllm_config."
+                ),
+                request_id=getattr(ft_request, "request_id", None),
+            )
+
+        if isinstance(plan, ClusterRecoveryPlan):
+            coord = get_cluster_coordinator(self)
+            if coord is None:
+                return FaultToleranceResult(
+                    success=False,
+                    reason=(
+                        "No ClusterCoordinator available; cluster-scope plans "
+                        "require a multi-engine deployment."
+                    ),
+                    request_id=getattr(ft_request, "request_id", None),
+                )
+            # Plan execute is sync; run it off the event loop so we don't
+            # block other client coroutines while scale_down churns.
+            return await asyncio.get_running_loop().run_in_executor(
+                None, plan.execute, coord, ft_request.params or {}
+            )
+
+        # Engine-local plan: forward to the engine via collective utility.
+        return await self.call_utility_async("fault_supervisor_apply", ft_request)
+
+    async def get_fault_status(self) -> dict[int, str]:
+        """Return per-engine status as ``{engine_index: status_lower}``."""
+        try:
+            results = await asyncio.gather(
+                *[
+                    self._call_utility_async("fault_supervisor_status", engine=engine)
+                    for engine in self.core_engines
+                ]
+            )
+        except Exception as e:
+            logger.warning("get_fault_status failed: %s", e)
+            return {}
+        merged: dict[int, str] = {}
+        for r in results:
+            if isinstance(r, dict):
+                merged.update(r)
+        # Mark deaths the client has observed — those engines won't reply to
+        # the utility call but the client knows they're DEAD.
+        for ident in self._dead_engine_identities:
+            idx = int.from_bytes(ident, "little")
+            merged[idx] = "dead"
+        return merged
+
+    def publish_fault_event(self, info: Any) -> None:
+        """Publish a FaultInfo to the client-side bus.
+
+        Called by `_on_engine_process_died` after process death is
+        detected. External orchestrators (Dynamo, etc.) receive this via
+        ZMQ SUB; the in-process DPRoutingPolicy receives it via callback.
+        """
+        if self._fault_bus is None:
+            return
+        self._fault_bus.publish(info)
 
     @staticmethod
     async def process_engine_outputs(
@@ -1436,8 +1817,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 assert cache.num_new_core_engines < 0
                 old_dp_size = len(cache.existing_core_engines)
                 new_dp_size = old_dp_size + cache.num_new_core_engines
+                # Collect the ranks that were removed (dead or gracefully
+                # shut down) so the actor manager removes the right entries.
+                removed_ranks = cache.pending_notifications.get(
+                    notification_type, set()
+                )
                 self.resources.engine_manager.scale_down_elastic_ep(
-                    old_dp_size, new_dp_size
+                    old_dp_size,
+                    new_dp_size,
+                    removed_dp_ranks=removed_ranks,
                 )
             else:
                 await asyncio.gather(
@@ -1633,10 +2021,22 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
     async def _scale_down_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
+        self,
+        cur_data_parallel_size: int,
+        new_data_parallel_size: int,
+        dead_dp_ranks: set[int] | None = None,
     ) -> None:
         """Scale down the data parallel size by shutting down and
-        reconfiguring existing engine cores."""
+        reconfiguring existing engine cores.
+
+        Args:
+            dead_dp_ranks: DP ranks that are already dead (fault-triggered).
+                Reconfigure messages are skipped for these ranks, and the
+                elastic EP state machine on surviving ranks will use
+                fault-tolerant barriers that don't wait for them.
+        """
+        if dead_dp_ranks is None:
+            dead_dp_ranks = set()
         cur_data_parallel_size = len(self.core_engines)
 
         self.eep_scaling_cache = ElasticScalingCache(
@@ -1648,11 +2048,38 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         parallel_config = self.vllm_config.parallel_config
         ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
 
-        removed_dp_size = cur_data_parallel_size - new_data_parallel_size
+        # For graceful scale-down, the highest-ranked engines are removed.
+        # For fault-triggered scale-down, the dead engines are removed.
+        if dead_dp_ranks:
+            ranks_to_remove = dead_dp_ranks
+        else:
+            ranks_to_remove = set(range(new_data_parallel_size, cur_data_parallel_size))
+
+        # Compute rank compaction: surviving ranks get new contiguous IDs.
+        surviving_ranks = [
+            r for r in range(cur_data_parallel_size) if r not in ranks_to_remove
+        ]
+        new_rank_map = {old: new for new, old in enumerate(surviving_ranks)}
+
         assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
-        self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
+
+        # Count how many removed engines are local BEFORE lists are modified.
+        mgr = self.resources.engine_manager
+        self._local_engines_removed = sum(
+            1
+            for r in ranks_to_remove
+            if r < len(mgr.placement_group_is_local) and mgr.placement_group_is_local[r]
+        )
+
+        mgr.remove_run_refs_for_scale_down(
+            len(ranks_to_remove),
+            ranks_to_remove=ranks_to_remove,
+        )
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
+            if cur_dp_rank in dead_dp_ranks:
+                continue
+
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
                 new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
@@ -1661,35 +2088,83 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_data_parallel_master_port=parallel_config.data_parallel_master_port,
                 new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
                 coord_store_port=coord_store_port,
+                dead_dp_ranks=list(dead_dp_ranks),
             )
-            if cur_dp_rank >= new_data_parallel_size:
+            if cur_dp_rank in ranks_to_remove:
                 reconfig_request.new_data_parallel_rank = (
                     ReconfigureRankType.SHUTDOWN_CURRENT_RANK
                 )
+            elif dead_dp_ranks:
+                # Fault-triggered: assign compacted rank so surviving
+                # engines form a contiguous group 0..N-1.
+                reconfig_request.new_data_parallel_rank = new_rank_map[cur_dp_rank]
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
             reconfig_futures.append(asyncio.create_task(coro))
 
-        # NOTE(yongji): Immediately stop sending requests to the removing engines.
-        self.core_engines = self.core_engines[:new_data_parallel_size]
-        self.lb_engines = self.lb_engines[:new_data_parallel_size]
+        # Immediately stop sending requests to the removed engines.
+        # Look up actual identities from current core_engines list
+        # (indices may differ from original rank numbers after previous
+        # scale-downs).
+        dead_identities = {
+            self.core_engines[i] for i in ranks_to_remove if i < len(self.core_engines)
+        }
+        self.core_engines = [e for e in self.core_engines if e not in dead_identities]
+        self.lb_engines = [
+            lb for i, lb in enumerate(self.lb_engines) if i not in ranks_to_remove
+        ]
         wait_future = self._eep_wait_for_setup_switch_complete()
 
         await asyncio.gather(*reconfig_futures)
 
+        if dead_dp_ranks:
+            # The dead engines can't send SHUTDOWN_COMPLETE, so we
+            # simulate it to unblock the notification handling.
+            self._synthesize_shutdown_complete_for_dead_ranks(dead_dp_ranks)
+
         self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        local_removed = getattr(self, "_local_engines_removed", 0)
+        if local_removed > 0:
+            self.vllm_config.parallel_config.data_parallel_size_local -= local_removed
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(
-            ("SCALE_ELASTIC_EP", new_data_parallel_size)
+            ("SCALE_ELASTIC_EP", new_data_parallel_size, sorted(ranks_to_remove))
         )
         await self.first_req_send_socket.send(scale_down_marker)
 
-        # NOTE(yongji): Unlike scaling up,
-        # here we don't actually need to wait for the setup switch to complete.
-        # We may want to remove it in the future.
         await wait_future
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
         )
+
+    def _synthesize_shutdown_complete_for_dead_ranks(
+        self, dead_dp_ranks: set[int]
+    ) -> None:
+        """Inject synthetic SHUTDOWN_COMPLETE notifications for dead ranks
+        so the notification handler doesn't wait forever."""
+        cache = self.eep_scaling_cache
+        if cache is None:
+            return
+
+        notification_type = EEPNotificationType.SHUTDOWN_COMPLETE
+        if notification_type not in cache.pending_notifications:
+            cache.pending_notifications[notification_type] = set()
+        for dp_rank in dead_dp_ranks:
+            cache.pending_notifications[notification_type].add(dp_rank)
+
+        if len(cache.pending_notifications[notification_type]) >= abs(
+            cache.num_new_core_engines
+        ):
+            assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+            old_dp_size = len(cache.existing_core_engines)
+            new_dp_size = old_dp_size + cache.num_new_core_engines
+            removed_ranks = cache.pending_notifications.get(notification_type, set())
+            self.resources.engine_manager.scale_down_elastic_ep(
+                old_dp_size,
+                new_dp_size,
+                removed_dp_ranks=removed_ranks,
+            )
+            cache.pending_notifications[notification_type] = set()
+            self.eep_scaling_cache = None

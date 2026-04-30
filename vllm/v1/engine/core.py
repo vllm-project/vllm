@@ -923,6 +923,52 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
+        # Instantiate the fault-tolerance supervisor when the master FT
+        # switch is on. This is what `self.hooks` resolves to (otherwise
+        # `GLOBAL_NOOP_HOOKS`). Plans dispatched via the HTTP API or via
+        # `fault_supervisor_apply` utility method run through this object.
+        if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
+            # Touch the plans package so its `@register_recovery_plan`
+            # decorators populate the registry before any HTTP traffic
+            # arrives.
+            import vllm.v1.fault_tolerance.plans  # noqa: F401
+            from vllm.v1.fault_tolerance.default_supervisor import (
+                DefaultFaultSupervisor,
+            )
+
+            self.fault_supervisor = DefaultFaultSupervisor(vllm_config, engine=self)
+            logger.info(
+                "Fault-tolerance supervisor active for engine %d.",
+                self.engine_index,
+            )
+
+    def fault_supervisor_apply(self, ft_request: Any) -> Any:
+        """Utility hook so the client can dispatch a recovery instruction.
+
+        Reachable from ``MPClient.call_utility_async("fault_supervisor_apply",
+        ft_request)``. Returns a :class:`FaultToleranceResult`. When FT is
+        off this is a no-op that returns failure with a helpful message.
+        """
+        if self.fault_supervisor is None:
+            from vllm.v1.fault_tolerance import FaultToleranceResult
+
+            return FaultToleranceResult(
+                success=False,
+                reason=(
+                    "Fault tolerance is not enabled for this engine. "
+                    "Pass --enable-fault-tolerance to use the recovery API."
+                ),
+            )
+        return self.fault_supervisor.apply(ft_request)
+
+    def fault_supervisor_status(self) -> dict[int, str]:
+        """Utility hook returning the engine's current status snapshot."""
+        if self.fault_supervisor is None:
+            return {}
+        # Convert FaultStatus enum values to lowercase wire strings.
+        snapshot = self.fault_supervisor.get_status()
+        return {idx: status.name.lower() for idx, status in snapshot.items()}
+
     @contextmanager
     def _perform_handshakes(
         self,

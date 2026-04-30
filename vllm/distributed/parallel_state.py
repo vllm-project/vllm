@@ -1215,6 +1215,80 @@ def _replace_active_groups(
     _NODE_COUNT = node_count
 
 
+def _abort_and_replace_active_groups(
+    *,
+    world: GroupCoordinator | None,
+    dp: GroupCoordinator | None,
+    ep: GroupCoordinator | None,
+    eplb: GroupCoordinator | None,
+    node_count: int | None,
+) -> None:
+    """Abort the current DP/EP/WORLD/EPLB groups and replace them.
+
+    Unlike _replace_active_groups, this uses abort() instead of destroy()
+    to avoid hanging when a peer rank has died.
+
+    TODO: This is called from the main worker thread during recovery,
+    which means the worker must not be stuck in a collective to reach
+    here.  For robustness, abort() should be callable from a sentinel
+    thread so that workers stuck in mid-forward collectives can be
+    unblocked immediately on fault detection.
+    """
+    global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
+    for group in (_DP, _EP, _WORLD, _EPLB):
+        if group is not None:
+            # Abort underlying ProcessGroups to unblock pending NCCL/Gloo
+            # ops involving dead ranks.  Wrapped in try/except because the
+            # group may have already been aborted (e.g. EPLB group aborted
+            # early to unblock barriers).
+            try:
+                if hasattr(group, "device_group") and group.device_group:
+                    group.device_group.abort()
+            except Exception:
+                logger.warning(
+                    "[Fault Tolerance] Failed to abort device_group",
+                    exc_info=True,
+                )
+            try:
+                if hasattr(group, "cpu_group") and group.cpu_group:
+                    group.cpu_group.abort()
+            except Exception:
+                logger.warning(
+                    "[Fault Tolerance] Failed to abort cpu_group",
+                    exc_info=True,
+                )
+            # Abort device communicator last — uses ncclCommAbort
+            # (not ncclCommDestroy) to avoid triggering an implicit
+            # ncclCommFinalize collective that would hang.
+            try:
+                if hasattr(group, "device_communicator") and group.device_communicator:
+                    group.device_communicator.abort()
+            except Exception:
+                logger.warning(
+                    "[Fault Tolerance] Failed to abort device_communicator",
+                    exc_info=True,
+                )
+    # Synchronize to surface any async CUDA errors from the aborts
+    # immediately, rather than having them appear later during
+    # unrelated operations (per NCCL team recommendation).
+    try:
+        import torch
+
+        # Use the platform-agnostic accelerator API per
+        # https://github.com/vllm-project/vllm/issues/30679.
+        torch.accelerator.synchronize()
+    except Exception:
+        logger.warning(
+            "[Fault Tolerance] accelerator sync after abort raised an error",
+            exc_info=True,
+        )
+    _WORLD = world
+    _DP = dp
+    _EP = ep
+    _EPLB = eplb
+    _NODE_COUNT = node_count
+
+
 _TP: GroupCoordinator | None = None
 
 

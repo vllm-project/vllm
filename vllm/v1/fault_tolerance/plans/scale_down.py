@@ -70,42 +70,19 @@ class ScaleDownRecoveryPlan(ClusterRecoveryPlan):
                 reason="scale_down requires params.dead_engine_index (int)",
             )
 
-        # Delegate to the existing elastic_ep implementation. The exact
-        # symbol is whatever the existing fault-scale-down entry point is
-        # in `vllm.distributed.elastic_ep`; resolve at call time so we
-        # don't fail at import if the user is on a build that hasn't
-        # landed it yet.
-        try:
-            from vllm.distributed.elastic_ep import elastic_execute
-        except ImportError as e:
+        scale_down_fn = getattr(coord, "scale_down", None)
+        if scale_down_fn is None:
             return FaultToleranceResult(
                 success=False,
                 reason=(
-                    "vllm.distributed.elastic_ep.elastic_execute is "
-                    f"unavailable: {e}. scale_down requires the elastic EP "
-                    "machinery (PR #38862 et al.)."
-                ),
-            )
-
-        entry = getattr(elastic_execute, "execute_fault_scale_down", None)
-        if entry is None:
-            entry = getattr(elastic_execute, "fault_scale_down", None)
-        if entry is None:
-            return FaultToleranceResult(
-                success=False,
-                reason=(
-                    "vllm.distributed.elastic_ep.elastic_execute does not "
-                    "expose execute_fault_scale_down or fault_scale_down. "
-                    "Check the elastic EP API surface for the current "
-                    "entry-point name."
+                    "ClusterCoordinator does not expose scale_down(...); "
+                    "the deployment cannot perform elastic scale-down."
                 ),
             )
 
         try:
-            entry(coord, dead_index)
+            scale_down_fn(dead_index)
         except Exception as e:
-            logger.exception("scale_down execute failed: %s", e)
-            return FaultToleranceResult(
-                success=False, reason=f"elastic_execute raised: {e}"
-            )
+            logger.exception("scale_down(%d) failed: %s", dead_index, e)
+            return FaultToleranceResult(success=False, reason=f"scale_down raised: {e}")
         return FaultToleranceResult(success=True)

@@ -774,6 +774,20 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # Fault tolerance: short-circuit when the worker has been paused via
+        # `ft_pause`. The engine's supervisor reads the typed `fault_signal`
+        # field on the success path (no exception, no string match) and
+        # decides whether to keep the loop paused or to move to RECOVERING.
+        if self._ft_paused:
+            from vllm.v1.fault_tolerance import FaultSignal
+            from vllm.v1.outputs import ModelRunnerOutput
+
+            return ModelRunnerOutput(
+                req_ids=[],
+                req_id_to_index={},
+                fault_signal=FaultSignal(kind="paused"),
+            )
+
         # ensure any previous non-blocking PP sends are complete
         if self._pp_send_work:
             for handle in self._pp_send_work:

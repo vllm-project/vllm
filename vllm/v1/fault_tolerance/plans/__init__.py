@@ -13,6 +13,7 @@ by name from ``/fault_tolerance/apply``.
 # Importing the plan modules executes their module-scope ``@register_*``
 # decorators, populating the registry.
 from vllm.v1.fault_tolerance.plans import (  # noqa: F401
+    abort,
     abort_communicator,
     pause,
     retry,

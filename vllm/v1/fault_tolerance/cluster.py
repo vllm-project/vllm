@@ -4,122 +4,128 @@
 
 Wraps whatever multi-engine manager the deployment uses (Ray actor manager
 or the multiprocessing equivalent) so cluster-scope recovery plans can be
-written backend-agnostically. Today only ``RayClusterCoordinator`` is
-provided; an MP equivalent is straightforward to add.
+written backend-agnostically.
 
-Cluster-scope plans (``scale_down``, future ``scale_up``) call methods on
-this protocol rather than reaching into Ray-specific code.
+Cluster-scope plans (``scale_down``, ``abort``, future ``scale_up``) call
+methods on this protocol rather than reaching into Ray-specific code.
 """
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+import asyncio
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.core_client import MPClient
 
 logger = init_logger(__name__)
 
 
 @runtime_checkable
 class ClusterCoordinator(Protocol):
-    """Protocol over the multi-engine manager.
-
-    Cluster-scope recovery plans (e.g., ``scale_down``) take a coordinator
-    and call these methods. Implementations wrap whatever the deployment
-    uses (Ray ``CoreEngineActorManager``, multiprocessing client, etc.).
-    """
+    """Protocol over the multi-engine manager."""
 
     def alive_engine_indices(self) -> list[int]:
-        """Engine indices that are currently considered alive."""
+        """Engine indices currently considered alive."""
         ...
 
-    def call_engines(
-        self,
-        indices: list[int],
-        method: str,
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-    ) -> dict[int, Any]:
-        """Invoke a method on the given engine indices and aggregate results."""
+    def scale_down(self, dead_index: int) -> None:
+        """Drop ``dead_index`` from the topology and rebuild communicators."""
         ...
 
-    def abort_inflight_on(self, dead_index: int) -> None:
-        """Abort in-flight requests assigned to a dead engine."""
+    def abort_inflight_on(self, dead_index: int) -> int:
+        """Fail every in-flight request assigned to ``dead_index``.
+
+        Returns the number of requests aborted (or ``-1`` if the count is
+        unavailable).
+        """
         ...
 
 
 class RayClusterCoordinator:
-    """Ray-backed coordinator.
+    """Coordinator backed by an ``MPClient`` running on Ray DP backend.
 
-    Wraps an existing ``CoreEngineActorManager`` (or equivalent) without
-    re-implementing any of the elastic EP machinery. Cluster-scope plans
-    use this to talk to surviving engines.
+    Delegates to existing helpers on the client so we don't re-implement
+    elastic EP — we just expose them through the supervisor-friendly
+    protocol.
     """
 
-    def __init__(self, actor_manager: Any):
-        self._actor_manager = actor_manager
+    def __init__(self, client: MPClient):
+        self._client = client
 
     def alive_engine_indices(self) -> list[int]:
-        # The actor manager is expected to expose the alive set; fall back
-        # to "all configured engines" if it doesn't.
-        fn = getattr(self._actor_manager, "alive_engine_indices", None)
-        if fn is None:
-            indices = getattr(self._actor_manager, "engine_indices", None)
-            if indices is None:
-                return []
-            return list(indices)
-        return list(fn())
+        # The client tracks live engines via core_engines (ordered by current
+        # list index, not original dp_rank). Translate to ints.
+        engines = getattr(self._client, "core_engines", None)
+        if engines is None:
+            return []
+        return list(range(len(engines)))
 
-    def call_engines(
-        self,
-        indices: list[int],
-        method: str,
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-    ) -> dict[int, Any]:
-        kwargs = kwargs or {}
-        results: dict[int, Any] = {}
-        for idx in indices:
-            try:
-                actor = self._actor_manager.get_actor(idx)
-            except Exception as e:
-                results[idx] = e
-                continue
-            fn = getattr(actor, method, None)
-            if fn is None:
-                results[idx] = AttributeError(f"engine {idx} has no method '{method}'")
-                continue
-            try:
-                # Ray actor methods return ObjectRefs; the caller is
-                # responsible for `ray.get` on them. We collect the refs.
-                results[idx] = fn(*args, **kwargs)
-            except Exception as e:
-                results[idx] = e
-        return results
+    def scale_down(self, dead_index: int) -> None:
+        """Run the existing fault-triggered scale-down on the client's loop.
 
-    def abort_inflight_on(self, dead_index: int) -> None:
-        fn = getattr(self._actor_manager, "abort_inflight_on", None)
+        The client already has ``_fault_triggered_scale_down`` (an async
+        method that orchestrates fail-inflight + scale_down_elastic_ep).
+        We schedule it on the client's event loop and wait for it.
+        """
+        fn = getattr(self._client, "_fault_triggered_scale_down", None)
         if fn is None:
-            logger.warning(
-                "actor_manager has no abort_inflight_on; skipping abort for engine %d",
-                dead_index,
+            raise RuntimeError(
+                "client does not expose _fault_triggered_scale_down; the "
+                "deployment is not configured for fault-tolerant scale-down."
             )
-            return
-        try:
-            fn(dead_index)
-        except Exception as e:
-            logger.warning("abort_inflight_on(%d) failed: %s", dead_index, e)
+
+        loop = getattr(self._client, "_ft_event_loop", None)
+        if loop is None or loop.is_closed():
+            raise RuntimeError("client's _ft_event_loop is unavailable")
+
+        # Schedule on the client's loop and block until the coroutine is done.
+        future = asyncio.run_coroutine_threadsafe(fn(dead_index), loop)
+        future.result()
+
+    def abort_inflight_on(self, dead_index: int) -> int:
+        """Fail in-flight requests assigned to engine ``dead_index``.
+
+        Resolves dp_rank → engine identity, then calls the existing
+        ``_fail_inflight_requests_for_engine`` helper. Returns the count
+        of dropped request IDs.
+        """
+        fail_fn = getattr(self._client, "_fail_inflight_requests_for_engine", None)
+        if fail_fn is None:
+            logger.warning(
+                "client does not expose _fail_inflight_requests_for_engine; "
+                "abort cannot reach in-flight requests."
+            )
+            return -1
+
+        # The client uses a 2-byte little-endian identity for engines.
+        engine_identity = dead_index.to_bytes(2, "little")
+        dead_req_ids = fail_fn(engine_identity)
+        count = len(dead_req_ids) if dead_req_ids else 0
+
+        # If a higher-level abort callback is registered, propagate so the
+        # OutputProcessor sends FinishReason.ABORT to clients (LoRA cleanup,
+        # pooling handling, etc.). See `register_ft_abort_callback`.
+        cb = getattr(self._client, "_ft_abort_callback", None)
+        if cb is not None and dead_req_ids:
+            try:
+                cb(dead_req_ids)
+            except Exception as e:
+                logger.warning("ft_abort_callback raised: %s", e)
+
+        return count
 
 
 def get_cluster_coordinator(client: Any) -> ClusterCoordinator | None:
     """Resolve a coordinator from an engine client.
 
-    Returns ``None`` if the client doesn't expose a cluster manager — in
-    which case cluster-scope plans aren't applicable to this deployment.
+    Returns ``None`` if the client isn't an MPClient with the elastic-EP
+    helpers, in which case cluster-scope plans aren't applicable.
     """
-    actor_manager = getattr(client, "core_engine_actor_manager", None)
-    if actor_manager is None:
-        actor_manager = getattr(client, "actor_manager", None)
-    if actor_manager is None:
+    if client is None:
         return None
-    return RayClusterCoordinator(actor_manager)
+    if not hasattr(client, "_fault_triggered_scale_down"):
+        return None
+    return RayClusterCoordinator(client)

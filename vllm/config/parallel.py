@@ -191,6 +191,24 @@ class ParallelConfig:
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
 
+    enable_ep_fault_tolerance: bool = False
+    """Enable EP fault tolerance.  When a DP engine process dies, the redesign's
+    fault-tolerance supervisor publishes ``FaultInfo(DEAD)`` on its bus; an
+    external orchestrator (or operator) can then ``POST /fault_tolerance/apply``
+    with ``instruction="scale_down"`` to recover.  Requires
+    ``enable_elastic_ep=True``, ``data_parallel_backend="ray"``,
+    ``tensor_parallel_size=1``, and ``enable_fault_tolerance=True`` (the master
+    FT switch)."""
+
+    enable_fault_tolerance: bool = False
+    """Master switch for the fault-tolerance framework.  Enables the
+    :class:`~vllm.v1.fault_tolerance.default_supervisor.DefaultFaultSupervisor`
+    on each engine, registers HTTP endpoints under ``/fault_tolerance/*``, and
+    activates the typed ``FaultSignal`` path on ``ModelRunnerOutput``.  This
+    flag is orthogonal to ``enable_ep_fault_tolerance``: it provides the
+    framework; ``enable_ep_fault_tolerance`` gates the EP-specific
+    scale-down plan."""
+
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
     ubatch_size: int = 0
@@ -653,13 +671,26 @@ class ParallelConfig:
         return self.world_size // self.nnodes_within_dp
 
     @staticmethod
-    def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
+    def has_unfinished_dp(
+        dp_group: ProcessGroup,
+        has_unfinished: bool,
+        fault_tolerant: bool = False,
+    ) -> bool:
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
         # dp rank 0: has_unfinished_seqs=True
         # dp rank 1: has_unfinished_seqs=False
         # aggregated: has_unfinished_seqs=True
         # so this is an OR operation, i.e. MAX in integers
-        torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
+        try:
+            torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
+        except Exception:
+            if not fault_tolerant:
+                raise
+            logger.warning(
+                "DP all-reduce timed out — a peer may be dead. "
+                "Continuing in fault-tolerant mode."
+            )
+            return True
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
 
@@ -781,6 +812,17 @@ class ParallelConfig:
                     "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
                     "server and core client to coordinate scale up/down."
                 )
+
+        if self.enable_ep_fault_tolerance:
+            if not self.enable_elastic_ep:
+                raise ValueError("EP fault tolerance requires enable_elastic_ep=True.")
+            if self.tensor_parallel_size > 1:
+                raise ValueError(
+                    "EP fault tolerance requires tensor_parallel_size=1. "
+                    "With TP>1, a dead process would hang the NCCL TP group."
+                )
+            if self.data_parallel_size <= 1:
+                raise ValueError("EP fault tolerance requires data_parallel_size > 1.")
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.

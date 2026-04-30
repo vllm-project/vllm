@@ -150,6 +150,19 @@ class PyNcclCommunicator:
             self.available = False
             self.disabled = True
 
+    def abort(self):
+        """Forcefully abort the NCCL communicator via ncclCommAbort.
+
+        Unlike destroy() (which calls ncclCommDestroy and may trigger an
+        implicit ncclCommFinalize collective), abort is safe to call when
+        a peer rank has died and would otherwise cause destroy to hang.
+        """
+        if self.available and not self.disabled:
+            with torch.accelerator.device_index(self.device.index):
+                self.nccl.ncclCommAbort(self.comm)
+            self.available = False
+            self.disabled = True
+
     def all_reduce(
         self,
         in_tensor: torch.Tensor,

@@ -44,6 +44,7 @@ class RetryRecoveryPlan(EngineLocalRecoveryPlan):
     def execute(  # type: ignore[override]
         self, executor: Executor, params: dict[str, Any]
     ) -> FaultToleranceResult:
+        results: list[Any]
         try:
             results = executor.collective_rpc(
                 "ft_resume_after_retry", kwargs=params or {}
