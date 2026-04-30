@@ -48,6 +48,18 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
 
+- label: LM Eval Small Models (2 GPUs)(B200)
+  key: lm-eval-small-models-2-gpus-b200
+  timeout_in_minutes: 120
+  device: b200
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-2gpu.txt
+
 - label: LM Eval Qwen3.5 Models (B200)
   key: lm-eval-qwen3-5-models-b200
   timeout_in_minutes: 120
