@@ -332,6 +332,8 @@ def _make_lm_head_scalar_scale_loader():
     """
 
     def load(param, loaded_weight):
+        if loaded_weight.numel() > param.data.numel():
+            loaded_weight = loaded_weight.flatten()[0]
         param.data.copy_(loaded_weight.reshape(param.data.shape))
 
     return load
@@ -647,6 +649,16 @@ class Fp8EmbeddingMethod(Fp8LinearMethod):
             )
             layer.register_parameter("weight_scale_inv", scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+
     def load_embedding_companion(
         self,
         layer: VocabParallelEmbedding,
@@ -680,7 +692,13 @@ class Fp8EmbeddingMethod(Fp8LinearMethod):
         if self.block_quant:
             assert self.weight_block_size is not None
             block_n = self.weight_block_size[0]
-            start_idx = layer.shard_indices.org_vocab_start_index // block_n
+            start = layer.shard_indices.org_vocab_start_index
+            assert start % block_n == 0, (
+                f"FP8 embedding requires the vocab-parallel shard start "
+                f"({start}) to be divisible by weight_block_size[0] "
+                f"({block_n})"
+            )
+            start_idx = start // block_n
         else:
             start_idx = layer.shard_indices.org_vocab_start_index
 
