@@ -43,7 +43,8 @@ class Eagle3ModelConfig:
 
 # Model configurations for EAGLE3 acceptance length tests.
 # Expected acceptance lengths are determined by running baseline benchmarks
-# using examples/offline_inference/spec_decode.py with the MT-Bench dataset.
+# using examples/features/speculative_decoding/spec_decode_offline.py
+# with the MT-Bench dataset.
 EAGLE3_MODEL_CONFIGS = [
     Eagle3ModelConfig(
         verifier="meta-llama/Llama-3.1-8B-Instruct",
@@ -165,6 +166,7 @@ def get_mt_bench_prompts(
         no_stream=True,
         disable_shuffle=False,
         skip_chat_template=False,
+        trust_remote_code=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -210,8 +212,8 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 
 @large_gpu_mark(min_gb=40)
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="This test is only supported on CUDA platform.",
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
 )
 @pytest.mark.parametrize(
     "model_config",

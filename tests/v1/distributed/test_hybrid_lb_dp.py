@@ -134,11 +134,12 @@ class HybridLBServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
-        while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
+        servers = [s for s, _ in self.servers]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
 
 
 @pytest.fixture(scope="module")

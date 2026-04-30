@@ -10,7 +10,6 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -225,11 +224,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
+            explicitly_destroy=True,
         )
-        if not current_platform.is_rocm():
-            kwargs.update(
-                explicitly_destroy=True,
-            )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -303,13 +299,10 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=num_qps_per_rank,
+            allow_nvlink_for_low_latency_mode=True,
+            allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
+            explicitly_destroy=True,
         )
-        if not current_platform.is_rocm():
-            kwargs.update(
-                allow_nvlink_for_low_latency_mode=True,
-                allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
-                explicitly_destroy=True,
-            )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -492,15 +485,18 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        dp_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
             fabric_page_size=1 << 29,  # 512MB
             allocation_granularity=0,  # Auto-detect
         )
 
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, dp_config)
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
         self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, dp_config
+            self.mapping, ep_config
         )
 
         self.world_size = world_size
@@ -605,8 +601,11 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        dp_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
         )
         total_dispatch_payload_size_per_token = (
             hidden_size // 2  # nvfp4 hidden states
@@ -628,7 +627,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             top_k=top_k,
             num_experts=num_experts,
             workspace_size_per_rank=self.workspace_size,
-            mnnvl_config=dp_config,
+            mnnvl_config=ep_config,
         )
 
         self.gpus_per_node = gpus_per_node
