@@ -29,7 +29,7 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
@@ -1119,13 +1119,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
@@ -1529,6 +1523,12 @@ class SupportsEncoderCudaGraph(Protocol):
         mm_kwargs: dict[str, Any],
     ) -> str:
         """Return the modality of the inputs."""
+        ...
+
+    def get_max_frames_per_video(
+        self,
+    ) -> int:
+        """Return model-specific max frames per video."""
         ...
 
     def get_encoder_cudagraph_budget_range(

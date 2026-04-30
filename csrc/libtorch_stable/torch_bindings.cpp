@@ -252,12 +252,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("silu_and_mul_scaled_fp4_experts_quant",
            TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
   ops.impl("silu_and_mul_nvfp4_quant", TORCH_BOX(&silu_and_mul_nvfp4_quant));
-  ops.impl("mxfp4_experts_quant", TORCH_BOX(&mxfp4_experts_quant));
-  ops.impl("silu_and_mul_mxfp4_experts_quant",
-           TORCH_BOX(&silu_and_mul_mxfp4_experts_quant));
-
-  // W4A8 ops: impl registrations are in the source files
-  // (w4a8_mm_entry.cu and w4a8_grouped_mm_entry.cu)
+  // mxfp4_experts_quant: registered in mxfp4_experts_quant.cu (SM100 only).
+  // W4A8 ops: registered in w4a8_mm_entry.cu / w4a8_grouped_mm_entry.cu.
 #endif
 }
 
