@@ -755,6 +755,8 @@ class OpenAIServing:
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
             return True
+        if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
+            return True
         return self.models.is_base_model(model_name)
 
 
