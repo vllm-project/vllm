@@ -10,9 +10,11 @@ from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
 )
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -42,6 +44,17 @@ class ToolParser:
     derived classes.
     """
 
+    # When True (default), the serving layer uses the standard JSON-based
+    # parsing for tool_choice="required" and named function tool_choice,
+    # which works for models where guided decoding produces well-formed
+    # JSON output (e.g. Hermes).
+    # Subclasses set False when the standard parsing does not work for
+    # their model's output format (e.g. GLM models that use XML).  When
+    # False, the serving layer falls back to the tool_parser's
+    # extract_tool_calls / extract_tool_calls_streaming methods for
+    # required/named tool_choice, treating them the same as "auto".
+    supports_required_and_named: bool = True
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -54,7 +67,14 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
-        self.tools = tools
+        if tools:
+            self.tools: list[ChatCompletionToolsParam | FunctionTool] = [
+                tool
+                for tool in tools
+                if isinstance(tool, (ChatCompletionToolsParam, FunctionTool))
+            ]
+        else:
+            self.tools = []
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -62,7 +82,9 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Static method that used to adjust the request parameters.
         """
@@ -81,13 +103,20 @@ class ToolParser:
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseTextConfig()
-                request.text.format = ResponseFormatTextJSONSchemaConfig(
-                    name="tool_calling_response",
-                    schema=json_schema_from_tool,
-                    type="json_schema",
-                    description="Response format for tool calling",
-                    strict=True,
+                # Single-shot construction so Pydantic v2 tracks `format`
+                # in __fields_set__ — assigning to `.format` after the bare
+                # `ResponseTextConfig()` constructor does not, which can
+                # drop the nested config from `model_dump`. Also drop the
+                # `description` kwarg: it is not a field on
+                # ResponseFormatTextJSONSchemaConfig and was being silently
+                # passed through as extra.
+                request.text = ResponseTextConfig(
+                    format=ResponseFormatTextJSONSchemaConfig(
+                        type="json_schema",
+                        name="tool_calling_response",
+                        schema=json_schema_from_tool,
+                        strict=True,
+                    )
                 )
 
         return request

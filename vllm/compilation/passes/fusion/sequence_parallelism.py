@@ -10,6 +10,7 @@ import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -22,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
 
 logger = init_logger(__name__)
 
@@ -122,35 +123,38 @@ class _SequenceParallelPatternHelper:
             x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
         )
 
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=self.dtype, device=self.device, **kwargs)
+
+    def empty_f32(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
+
 
 class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
-        arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
-
-        return [input, arg3_1]
+        # input, weight
+        return [self.empty([1, 8, 4]), self.empty([4])]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
-            arg3_1: torch.Tensor,
+            weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, arg3_1)
+            rmsnorm = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
 
             return rmsnorm, all_reduce
 
         def replacement(
             input: torch.Tensor,
-            arg3_1: torch.Tensor,
+            weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
 
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, arg3_1)
+            rmsnorm = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             all_gather = self._all_gather(rmsnorm)
             return all_gather, reduce_scatter
 
@@ -222,14 +226,11 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         device: str | None,
     ) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.zeros([1, 8, 4], device=self.device, dtype=self.dtype)
-        weight = torch.empty([4], device=self.device, dtype=self.dtype)
-        scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        return [input, weight, scale]
+        # input, weight, scale
+        return [self.empty([1, 8, 4]), self.empty([4]), self.empty_f32([1, 1])]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -238,7 +239,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rms = self.rmsnorm_matcher(all_reduce, weight)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -248,7 +249,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
-            rms = self.rmsnorm_matcher(reduce_scatter, weight)
+            rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
 
@@ -340,22 +341,18 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     significantly reduce communication overhead and improve overall model
     performance.
 
+    This pass is only supported when compiling the whole graph (fullgraph
+    mode, i.e. using Inductor graph partition or empty splitting_ops).
+    Piecewise compilation is not supported because the residual tensor
+    gets split across TP ranks, causing size mismatches at subgraph
+    boundaries.
 
-    This pass splits up the residual tensor across TP ranks and hence divides its size.
-    Because the pattern matcher starts at the end of the graph, the replacement
-    contains a slice that temporarily conforms the input residual to the correct size.
-    After all patterns have been matched, we use a NoOpEliminationPass to clean up
-    what have now become no-op slices.
-
-    Note that an older version of the pass did not need this as it operated only on
-    custom rms_norm and fused_rms_norm_add custom ops which did not complain about
-    mismatched shapes during replacement. So this approach has the same assumption that
-    correctness is only maintained if all rms_norm operations are split across ranks.
-
-    Correctness-wise, this is approach strictly better than before - before,
-    the graph was incorrect semantically and shape-wise during the pass.
-    With this approach there's only semantic incorrectness during the pass.
-    Both approaches restore a correct graph once all patterns are matched.
+    This pass splits up the residual tensor across TP ranks and hence
+    divides its size. Because the pattern matcher starts at the end of
+    the graph, the replacement contains a slice that temporarily conforms
+    the input residual to the correct size. After all patterns have been
+    matched, we use a NoOpEliminationPass to clean up what have now
+    become no-op slices.
     """
 
     @enable_fake_mode
@@ -418,19 +415,13 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         and gathering tensors across TP ranks outweighs the benefits.
 
         Returns False (SP disabled) when:
-        - Using piecewise compilation with non-concrete or TP-indivisible sizes
         - min_token_num is None (SP disabled for this device/config)
         - The compile range starts below the minimum token threshold
         """
-        # For piecewise compilation (not using inductor graph partition),
-        # we need concrete sizes that are divisible by TP for correct splitting
-        if (
-            not self.compilation_config.use_inductor_graph_partition
-            and self.compilation_config.splitting_ops
-        ):
-            tp_size = get_tensor_model_parallel_world_size()
-            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
-                return False
+        assert (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
+        ), "SequenceParallelismPass requires full-graph compilation"
 
         # min_token_num is None when SP is disabled for this device/config
         # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)

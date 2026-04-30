@@ -246,8 +246,9 @@ def default_vllm_config():
     """
     from vllm.config import VllmConfig, set_current_vllm_config
 
-    with set_current_vllm_config(VllmConfig()):
-        yield
+    config = VllmConfig()
+    with set_current_vllm_config(config):
+        yield config
 
 
 @pytest.fixture()
@@ -363,6 +364,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
+        revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
@@ -382,6 +384,7 @@ class HfRunner:
             self._init(
                 model_name=model_name,
                 dtype=dtype,
+                revision=revision,
                 model_kwargs=model_kwargs,
                 trust_remote_code=trust_remote_code,
                 is_sentence_transformer=is_sentence_transformer,
@@ -395,6 +398,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
+        revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
@@ -409,6 +413,15 @@ class HfRunner:
             model_name,
             trust_remote_code=trust_remote_code,
         )
+        # HF runner should use the HF config so that it's consistent with the HF model
+        if self.config.__module__.startswith("vllm.transformers_utils.configs"):
+            from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+            del CONFIG_MAPPING._extra_content[self.config.model_type]
+            self.config = AutoConfig.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         self.device = self.get_default_device()
         self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,
@@ -427,6 +440,7 @@ class HfRunner:
 
             self.model = SentenceTransformer(
                 model_name,
+                revision=revision,
                 device=self.device,
                 model_kwargs=model_kwargs,
                 trust_remote_code=trust_remote_code,
@@ -437,6 +451,7 @@ class HfRunner:
 
             self.model = CrossEncoder(
                 model_name,
+                revision=revision,
                 device=self.device,
                 automodel_args=model_kwargs,
                 trust_remote_code=trust_remote_code,
@@ -446,6 +461,7 @@ class HfRunner:
                 nn.Module,
                 auto_cls.from_pretrained(
                     model_name,
+                    revision=revision,
                     trust_remote_code=trust_remote_code,
                     **model_kwargs,
                 ),
@@ -1167,7 +1183,7 @@ class VllmRunner:
         return [req_output.outputs.data for req_output in req_outputs]
 
     def reward(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.reward(prompts)
+        req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
@@ -1622,3 +1638,26 @@ def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+@pytest.fixture(scope="function")
+def disable_log_dedup(monkeypatch):
+    """
+    Disable log deduplication such that warning_once and info_once always print.
+    """
+
+    # Patch logger._print_warning_once to remove the lru_cache decorator
+    from vllm import logger
+
+    original_print_warning_once = logger._print_warning_once
+    original_print_info_once = logger._print_info_once
+    original_print_debug_once = logger._print_debug_once
+
+    logger._print_warning_once = original_print_warning_once.__wrapped__
+    logger._print_info_once = original_print_info_once.__wrapped__
+    logger._print_debug_once = original_print_debug_once.__wrapped__
+
+    yield
+    logger._print_warning_once = original_print_warning_once
+    logger._print_info_once = original_print_info_once
+    logger._print_debug_once = original_print_debug_once

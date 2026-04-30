@@ -88,6 +88,13 @@ if current_platform.is_rocm():
     def round_int8(x):
         return tl.extra.hip.libdevice.round(x).to(tl.int8)
 
+
+elif current_platform.is_xpu():
+
+    @triton.jit
+    def round_int8(x):
+        return tl.extra.intel.libdevice.round(x).to(tl.int8)
+
 else:
 
     @triton.jit

@@ -11,6 +11,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 
@@ -22,10 +27,11 @@ from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 # tokenizer object to be truthy (the parser checks `if not self.model_tokenizer`).
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
+MOCK_TOKENIZER.tokenize.return_value = []
 
 
-def make_parser() -> DeepSeekV32ToolParser:
-    return DeepSeekV32ToolParser(MOCK_TOKENIZER)
+def make_parser(tools=None) -> DeepSeekV32ToolParser:
+    return DeepSeekV32ToolParser(MOCK_TOKENIZER, tools=tools)
 
 
 def make_tool_param(name: str, params: dict) -> MagicMock:
@@ -182,6 +188,30 @@ class TestExtractToolCalls:
             "location": "NYC"
         }
 
+    def test_type_conversion_in_non_streaming(self):
+        """Non-streaming extraction must convert params using the tool schema."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="toggle",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {"type": "boolean"},
+                        "count": {"type": "integer"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = build_tool_call("toggle", {"enabled": "true", "count": "42"})
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"enabled": True, "count": 42}
+        assert isinstance(args["enabled"], bool)
+        assert isinstance(args["count"], int)
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_tool_calls_streaming
@@ -275,20 +305,22 @@ class TestExtractToolCallsStreaming:
         content = "".join(d.content for d in deltas if d.content is not None)
         assert "Thinking" in content
 
-    def test_type_conversion_in_streaming(self, parser):
-        tool = make_tool_param(
-            "add",
-            {
-                "type": "object",
-                "properties": {
-                    "x": {"type": "integer"},
-                    "y": {"type": "integer"},
+    def test_type_conversion_in_streaming(self):
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="add",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                    },
                 },
-            },
+            ),
         )
-        request = make_request(tools=[tool])
+        parser = make_parser(tools=[tool])
         full_text = build_tool_call("add", {"x": "3", "y": "4"})
-        deltas = self._stream(parser, full_text, request=request)
+        deltas = self._stream(parser, full_text)
         args_str = self._reconstruct_args(deltas)
         assert json.loads(args_str) == {"x": 3, "y": 4}
 
@@ -475,6 +507,140 @@ class TestExtractToolCallsStreaming:
         deltas = self._stream(parser, partial_text)
         # Should have no tool call deltas yet
         assert all(not d.tool_calls for d in deltas)
+
+    def test_no_marker_leak_chunked(self, parser):
+        """Chunked streaming must NOT leak DSML start-marker fragments
+        as content (GitHub #40801)."""
+        full_text = build_tool_call("fn", {"k": "v"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=5)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"k": "v"}
+
+    def test_no_marker_leak_with_prefix_chunked(self, parser):
+        """Content before a tool call must not include start-marker
+        fragments when chunked (GitHub #40801)."""
+        full_text = "Hello!" + build_tool_call("fn", {"a": "b"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=5)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == "Hello!"
+        assert "DSML" not in content
+        assert "<｜" not in content
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"a": "b"}
+
+    def test_no_marker_leak_char_by_char(self, parser):
+        """Character-by-character streaming must not leak marker
+        fragments (GitHub #40801)."""
+        full_text = build_tool_call("fn", {"k": "v"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=1)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"k": "v"}
+
+    def test_no_marker_leak_all_split_points(self, parser):
+        """Start token split at every possible boundary must not
+        leak (GitHub #40801)."""
+        for chunk_size in range(1, len(FC_START) + 2):
+            p = make_parser()
+            full_text = build_tool_call("fn", {"k": "v"})
+            deltas = self._stream_chunked(p, full_text, chunk_size=chunk_size)
+            content = "".join(d.content for d in deltas if d.content is not None)
+            assert content == "", (
+                f"Leaked content {content!r} at chunk_size={chunk_size}"
+            )
+
+    def test_false_partial_marker_emitted(self, parser):
+        """Text ending with a prefix of the start token that turns out
+        NOT to be a marker must still be emitted as content."""
+        full_text = "<｜DSM some regular text"
+        deltas = self._stream_chunked(parser, full_text, chunk_size=3)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == full_text
+
+
+class TestDelimiterPreservation:
+    """Regression: fast detokenization skipping DSML delimiters (PR #33964)."""
+
+    @pytest.fixture
+    def parser(self):
+        return make_parser()
+
+    def test_delimiter_preserved_fast_detokenization(self, parser):
+        """DSML delimiters as literal text must still be detected."""
+        # Delimiters appear as regular text (fast detokenization scenario).
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}get_weather">\n'
+            f'{PARAM_START}location" string="true">Tokyo{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+
+        # Non-streaming: parser must detect the tool call
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "location": "Tokyo"
+        }
+
+        assert result.content is None
+
+        # With content prefix
+        prefixed_output = "Here is the weather: " + model_output
+        result2 = parser.extract_tool_calls(prefixed_output, None)
+        assert result2.tools_called
+        assert result2.content == "Here is the weather: "
+
+    def test_tool_detection_skip_special_tokens_false(self, parser):
+        """Regression: skip_special_tokens must be False when tools are enabled."""
+        # adjust_request must set skip_special_tokens=False
+        tool = make_tool_param(
+            "search",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                },
+            },
+        )
+        request = make_request(tools=[tool])
+        request.tool_choice = "auto"
+        adjusted = parser.adjust_request(request)
+        assert adjusted.skip_special_tokens is False
+
+        full_text = build_tool_call("search", {"query": "vllm documentation"})
+
+        # Non-streaming extraction
+        non_stream_result = parser.extract_tool_calls(full_text, request)
+        assert non_stream_result.tools_called
+        assert len(non_stream_result.tool_calls) == 1
+        assert non_stream_result.tool_calls[0].function.name == "search"
+        ns_args = json.loads(non_stream_result.tool_calls[0].function.arguments)
+        assert ns_args == {"query": "vllm documentation"}
+
+        # Streaming extraction: drive the parser line-by-line
+        chunks: list[str] = []
+        remaining = full_text
+        while remaining:
+            nl = remaining.find("\n")
+            if nl == -1:
+                chunks.append(remaining)
+                break
+            chunks.append(remaining[: nl + 1])
+            remaining = remaining[nl + 1 :]
+
+        reconstructor = run_tool_extraction_streaming(
+            parser, chunks, request, assert_one_tool_per_delta=False
+        )
+        assert len(reconstructor.tool_calls) == 1
+        assert reconstructor.tool_calls[0].function.name == "search"
+        streamed_args = json.loads(reconstructor.tool_calls[0].function.arguments)
+        assert streamed_args == ns_args
 
 
 @pytest.fixture(scope="module")

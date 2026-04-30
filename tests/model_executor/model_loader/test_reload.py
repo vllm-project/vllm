@@ -19,7 +19,6 @@ from vllm.model_executor.model_loader.reload.meta import (
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 
 def test_move_metatensors():
@@ -140,7 +139,7 @@ def test_get_numel_loaded():
     ],
 )
 def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
-    if cuda_device_count_stateless() < tp_size:
+    if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     if "FP8" in base_model and not current_platform.supports_fp8():
@@ -163,6 +162,34 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+    if not current_platform.supports_fp8():
+        pytest.skip(reason="Requires FP8 support")
+
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
+    with vllm_runner(
+        model_name=model,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
+
+    assert reloaded_perp < 10
 
 
 @pytest.mark.parametrize(
@@ -206,8 +233,8 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
 def test_online_quantize_reload(
     base_model, mul_model, add_model, quantization, tp_size, vllm_runner
 ):
-    if cuda_device_count_stateless() < tp_size:
-        pytest.skip(reason="Not enough CUDA devices")
+    if current_platform.device_count() < tp_size:
+        pytest.skip(reason="Not enough GPU devices")
 
     if quantization == "fp8" and not current_platform.supports_fp8():
         pytest.skip(reason="Requires FP8 support")

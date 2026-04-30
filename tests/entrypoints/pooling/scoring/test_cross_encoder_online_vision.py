@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
-from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
@@ -234,7 +234,7 @@ async def test_score_api_queries_str_documents_image_url_plus_text_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.usage.prompt_tokens == 108
+    assert score.usage.prompt_tokens == 107
     assert_score(
         score.data[0].score, TEXT_VS_TEXT_PLUS_IMAGE, backend, "text_vs_text_plus_image"
     )
@@ -264,7 +264,7 @@ async def test_score_api_queries_str_documents_list(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.usage.prompt_tokens == 368
+    assert score.usage.prompt_tokens == 367
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "list[0]_text_vs_text")
     assert_score(score.data[1].score, TEXT_VS_TEXT, backend, "list[1]_text_vs_text")
     assert_score(score.data[2].score, TEXT_VS_IMAGE, backend, "list[2]_text_vs_image")
@@ -353,7 +353,7 @@ async def test_score_api_queries_list_documents_list(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.usage.prompt_tokens == 368
+    assert score.usage.prompt_tokens == 367
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "paired[0]_text_vs_text")
     assert_score(score.data[1].score, TEXT_VS_TEXT, backend, "paired[1]_text_vs_text")
     assert_score(score.data[2].score, TEXT_VS_IMAGE, backend, "paired[2]_text_vs_image")

@@ -38,15 +38,27 @@ class MockCustomOp:
         return decorator
 
 
+class MockPluggableLayer:
+    @staticmethod
+    def register(name):
+        def decorator(cls):
+            return cls
+
+        return decorator
+
+
 mock_if_no_torch("vllm._C", MagicMock())
-mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
+mock_if_no_torch(
+    "vllm.model_executor.custom_op",
+    MagicMock(CustomOp=MockCustomOp, PluggableLayer=MockPluggableLayer),
+)
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
 
 
 # Mock any version checks by reading from compiled CI requirements
-with open(ROOT_DIR / "requirements/test.txt") as f:
+with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
     VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
@@ -59,7 +71,7 @@ class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
     def __init__(self, *args, **kwargs):
-        name = kwargs.pop("name", None)
+        name = kwargs.get("name")
         super().__init__(*args, **kwargs)
         self.__spec__ = ModuleSpec(name, None)
 
@@ -85,7 +97,8 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock(name=e.name)
         except Exception:
-            logger.exception("Failed to import %s.%s: %s", module_name, attr)
+            logger.exception("Failed to import %s.%s", module_name, attr)
+            raise
 
     raise ImportError(
         f"Failed to import {module_name}.{attr} after mocking {max_mocks} imports"

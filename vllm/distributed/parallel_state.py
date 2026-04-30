@@ -394,8 +394,10 @@ class GroupCoordinator:
             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
 
-        self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
-            torch.ops._C, "init_shm_manager"
+        self.use_cpu_custom_send_recv = (
+            current_platform.is_cpu()
+            and self.device_communicator
+            and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
 
     def create_mq_broadcaster(
@@ -1445,6 +1447,7 @@ def init_distributed_environment(
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
+
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
         _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
@@ -1690,11 +1693,7 @@ def initialize_model_parallel(
         # using torch.distributed in execution with torch.distributed in EPLB.
         global _EPLB
         assert _EPLB is None, "EPLB group is already initialized"
-        if (
-            config is not None
-            and config.parallel_config is not None
-            and config.parallel_config.enable_eplb
-        ):
+        if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
                 _EPLB = _init_stateless_group(
                     group_ranks,

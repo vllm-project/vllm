@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from openai import OpenAI
-from openai_harmony import ToolDescription, ToolNamespaceConfig
+from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import MCPToolServer
@@ -173,10 +173,10 @@ class TestMCPEnabled:
             if recipient and recipient.startswith("python"):
                 tool_call_found = True
                 assert message.get("channel") == "commentary"
-            author = message.get("author", {})
-            if author.get("role") == "tool" and (author.get("name") or "").startswith(
-                "python"
-            ):
+            parsed_message = Message.from_dict(message)
+            if parsed_message.author.role == "tool" and (
+                parsed_message.author.name or ""
+            ).startswith("python"):
                 tool_response_found = True
                 assert message.get("channel") == "commentary"
 
@@ -188,7 +188,7 @@ class TestMCPEnabled:
         assert tool_response_found, "No Python tool response found"
 
         for message in response.input_messages:
-            assert message.get("author", {}).get("role") != "developer"
+            assert Message.from_dict(message).author.role != "developer"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("model_name", [MODEL_NAME])

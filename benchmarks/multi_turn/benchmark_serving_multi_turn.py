@@ -217,6 +217,7 @@ async def send_request(
     min_tokens: int | None = None,
     max_tokens: int | None = None,
     timeout_sec: int = 120,
+    conversation_id: str | None = None,
 ) -> ServerResponse:
     payload = {
         "model": model,
@@ -224,6 +225,9 @@ async def send_request(
         "seed": 0,
         "temperature": 0.0,
     }
+
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
 
     if stream:
         payload["stream"] = True
@@ -419,6 +423,7 @@ async def send_turn(
         min_tokens,
         max_tokens,
         req_args.timeout_sec,
+        conversation_id=conv_id,
     )
 
     if response.valid is False:
@@ -1440,6 +1445,12 @@ async def main() -> None:
         help="Export summary to Excel file (optional)",
     )
     parser.add_argument(
+        "--stats-json-output",
+        type=str,
+        default=None,
+        help="Export per-request stats (ttft_ms, tpot_ms, etc.) to a JSON file",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         default=False,
@@ -1650,6 +1661,19 @@ async def main() -> None:
         excel_output=args.excel_output,
         warmup_runtime_sec=warmup_runtime_sec,
     )
+
+    if args.stats_json_output is not None:
+        # Export per-request metrics as a JSON array for downstream analysis.
+        stats_data = [s._asdict() for s in client_metrics]
+        logger.info(
+            f"{Color.GREEN}Writing per-request stats JSON: "
+            f"{args.stats_json_output}{Color.RESET}"
+        )
+        os.makedirs(
+            os.path.dirname(os.path.abspath(args.stats_json_output)), exist_ok=True
+        )
+        with open(args.stats_json_output, "w") as f:
+            json.dump(stats_data, f, indent=2)
 
     if args.output_file is not None:
         # Write a JSON file with the updated conversations

@@ -17,8 +17,9 @@ PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
-CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
@@ -199,7 +200,7 @@ def _create_weighted_output_token_list(
     return output_token_ids, sorted_token_ids_in_output
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("presence_penalty", [-2.0, 2.0])
 def test_sampler_presence_penalty(
@@ -249,7 +250,7 @@ def test_sampler_presence_penalty(
             assert penalized_token_id not in output_token_ids[batch_idx]
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("frequency_penalty", [-2.0, 2.0])
 def test_sampler_frequency_penalty(
@@ -305,7 +306,7 @@ def test_sampler_frequency_penalty(
             assert penalized_token_id not in distinct_sorted_token_ids_in_output
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("repetition_penalty", [0.1, 1.9])
 def test_sampler_repetition_penalty(
@@ -363,7 +364,7 @@ def test_sampler_repetition_penalty(
             )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("num_allowed_token_ids", [0, 1, 2])
 def test_sampler_allowed_token_ids(
@@ -409,7 +410,7 @@ def test_sampler_allowed_token_ids(
                 assert logits_for_req[token_id] != -float("inf")
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("bad_words_lengths", [(1,), (1, 3), (2, 2)])
 def test_sampler_bad_words(

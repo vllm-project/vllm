@@ -39,15 +39,24 @@ repos:
   rev: 0.11.1
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
-      files: ^requirements/test\.(in|txt)$
+      args: [
+        requirements/test/cuda.in,
+        -c, requirements/cuda.txt,
+        -o, requirements/test/cuda.txt,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cu130,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
-        requirements/rocm-test.in, -o, requirements/rocm-test.txt,
-        --index-strategy, unsafe-best-match,
+        requirements/test/rocm.in,
         -c, requirements/rocm.txt,
+        -o, requirements/test/rocm.txt,
+        --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
         # Exclude torch and CUDA/NVIDIA packages
@@ -59,30 +68,76 @@ repos:
         --no-emit-package, cuda-pathfinder,
         --no-emit-package, cuda-toolkit,
         --no-emit-package, cupy-cuda12x,
+        # nvidia packages (unsuffixed / unified naming)
         --no-emit-package, nvidia-cublas,
         --no-emit-package, nvidia-cuda-cupti,
         --no-emit-package, nvidia-cuda-nvrtc,
         --no-emit-package, nvidia-cuda-runtime,
-        --no-emit-package, nvidia-cudnn-cu13,
+        --no-emit-package, nvidia-cudnn,
         --no-emit-package, nvidia-cufft,
         --no-emit-package, nvidia-cufile,
         --no-emit-package, nvidia-curand,
         --no-emit-package, nvidia-cusolver,
         --no-emit-package, nvidia-cusparse,
+        --no-emit-package, nvidia-cusparselt,
+        --no-emit-package, nvidia-nccl,
+        --no-emit-package, nvidia-nvjitlink,
+        --no-emit-package, nvidia-nvshmem,
+        --no-emit-package, nvidia-nvtx,
+        # nvidia cu12 packages
+        --no-emit-package, nvidia-cublas-cu12,
+        --no-emit-package, nvidia-cuda-cupti-cu12,
+        --no-emit-package, nvidia-cuda-nvrtc-cu12,
+        --no-emit-package, nvidia-cuda-runtime-cu12,
+        --no-emit-package, nvidia-cudnn-cu12,
+        --no-emit-package, nvidia-cufft-cu12,
+        --no-emit-package, nvidia-cufile-cu12,
+        --no-emit-package, nvidia-curand-cu12,
+        --no-emit-package, nvidia-cusolver-cu12,
+        --no-emit-package, nvidia-cusparse-cu12,
+        --no-emit-package, nvidia-cusparselt-cu12,
+        --no-emit-package, nvidia-nccl-cu12,
+        --no-emit-package, nvidia-nvjitlink-cu12,
+        --no-emit-package, nvidia-nvshmem-cu12,
+        --no-emit-package, nvidia-nvtx-cu12,
+        # nvidia cu13 packages
+        --no-emit-package, nvidia-cublas-cu13,
+        --no-emit-package, nvidia-cuda-cupti-cu13,
+        --no-emit-package, nvidia-cuda-nvrtc-cu13,
+        --no-emit-package, nvidia-cuda-runtime-cu13,
+        --no-emit-package, nvidia-cudnn-cu13,
+        --no-emit-package, nvidia-cufft-cu13,
+        --no-emit-package, nvidia-cufile-cu13,
+        --no-emit-package, nvidia-curand-cu13,
+        --no-emit-package, nvidia-cusolver-cu13,
+        --no-emit-package, nvidia-cusparse-cu13,
         --no-emit-package, nvidia-cusparselt-cu13,
         --no-emit-package, nvidia-nccl-cu13,
-        --no-emit-package, nvidia-nvjitlink,
+        --no-emit-package, nvidia-nvjitlink-cu13,
         --no-emit-package, nvidia-nvshmem-cu13,
-        --no-emit-package, nvidia-nvtx,
+        --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/rocm-test\.(in|txt)$
+      files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
+    - id: pip-compile
+      alias: pip-compile-xpu
+      name: pip-compile-xpu
+      args: [
+        requirements/test/xpu.in,
+        -c, requirements/xpu.txt,
+        -o, requirements/test/xpu.txt,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, xpu,
+        --python-platform, x86_64-manylinux_2_39,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
-    name: reformat nightly_torch_test.txt to be in sync with test.in
+    name: reformat test/nightly-torch.txt to be in sync with test/cuda.in
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
-    files: ^requirements/test\.(in|txt)$
+    files: ^requirements/test/cuda\.(in|txt)$
   - id: mypy-local
     name: Run mypy locally for lowest supported Python version
     entry: python tools/pre_commit/mypy.py 0 "3.10"

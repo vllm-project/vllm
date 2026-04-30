@@ -45,6 +45,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        init_cache: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
@@ -65,7 +66,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             and head_size in [64, 128, 256, 512]
         )
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+            init_cache=init_cache,
         )
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
@@ -132,10 +139,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+            cos = torch.cat((cos, cos), dim=-1).unsqueeze(-2)
+            sin = torch.cat((sin, sin), dim=-1).unsqueeze(-2)
         else:
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
@@ -197,3 +202,120 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             return query, key
         else:
             return self.forward_native(positions, query, key, offsets)
+
+
+class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
+    """RotaryEmbedding extended with YaRN method.
+
+    Credits to Peng et al. github.com/jquesnelle/yarn
+
+    Compared to DeepseekScalingRotaryEmbedding:
+    - Applies RoPE to the last rotary_dim
+    - The forward method requires an inverse parameter to indicate
+      whether to negate the sin
+    - Supports applying RoPE to query only (without key)
+    - cos_sin_cache stored as fp32 for higher precision RoPE
+    """
+
+    def __init__(self, *args, **kwargs):
+        # Avoid compute cache repeatedly
+        kwargs.pop("init_cache", None)
+        super().__init__(*args, **kwargs, init_cache=False)
+        cache_fp32 = self._compute_cos_sin_cache()
+        self.register_buffer("cos_sin_cache", cache_fp32, persistent=False)
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        inv_freq = self._compute_inv_freq(self.scaling_factor)
+        t = torch.arange(
+            self.max_position_embeddings * self.scaling_factor,
+            device=current_platform.device_type,
+            dtype=torch.float32,
+        )
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos() * self.mscale
+        sin = freqs.sin() * self.mscale
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        inverse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """PyTorch-native implementation equivalent to forward()."""
+
+        head_size = query.size(-1)
+        query_rot = query[..., -self.rotary_dim :]
+        key_rot = key[..., -self.rotary_dim :] if key is not None else None
+
+        if self.rotary_dim < head_size:
+            query_pass = query[..., : -self.rotary_dim]
+            key_pass = key[..., : -self.rotary_dim] if key is not None else None
+
+        cos_sin = self.cos_sin_cache[
+            torch.add(positions, offsets) if offsets is not None else positions
+        ]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if self.is_neox_style:
+            cos = torch.cat((cos, cos), dim=-1).unsqueeze(-2)
+            sin = torch.cat((sin, sin), dim=-1).unsqueeze(-2)
+        else:
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        if inverse:
+            sin = -sin
+        rotate_fn = rotate_neox if self.is_neox_style else rotate_gptj
+        orig_dtype = query.dtype
+        query_rot = (query_rot * cos + rotate_fn(query_rot) * sin).to(orig_dtype)
+        if key_rot is not None:
+            key_rot = (key_rot * cos + rotate_fn(key_rot) * sin).to(orig_dtype)
+
+        if self.rotary_dim < head_size:
+            query = torch.cat((query_pass, query_rot), dim=-1)
+            key = torch.cat((key_pass, key_rot), dim=-1) if key is not None else None
+        else:
+            query = query_rot
+            key = key_rot
+
+        return query, key
+
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        inverse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_native(positions, query, key, offsets)
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        inverse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from vllm import _custom_ops as ops
+
+        # The indexer and attention have different head_dim,
+        # we obtain the corresponding head_dim via the query.
+        head_size = query.size(-1)
+        rope_dim_offset = head_size - self.rotary_dim
+        # ops.rotary_embedding() is an in-place operation
+        # that updates the query and key tensors.
+        ops.rotary_embedding(
+            torch.add(positions, offsets) if offsets is not None else positions,
+            query,
+            key,
+            head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+            rope_dim_offset=rope_dim_offset,
+            inverse=inverse,
+        )
+        return query, key
