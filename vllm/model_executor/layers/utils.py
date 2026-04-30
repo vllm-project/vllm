@@ -98,6 +98,7 @@ _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT = 1048576
 _inductor_max_autotune_gemm_forced = False
 _dynamo_compile_caches_forced = False
 _unquant_bf16_linear_cache: dict[tuple, Callable] = {}
+_unquant_bf16_linear_lock = threading.Lock()
 _unquant_bf16_linear_id_gen = itertools.count()
 _unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
 _unquant_bf16_linear_torch_compile_configured = False
