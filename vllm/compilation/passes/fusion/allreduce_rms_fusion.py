@@ -1056,7 +1056,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 rocm_aiter_ops.destroy_aiter_allreduce()
             return
 
-        max_token_num = (max_size / 2) // (hidden_dim * element_size)
+        max_token_num = max_size // (hidden_dim * element_size)
         self.max_token_num = min(
             max_token_num,
             config.scheduler_config.max_num_batched_tokens,

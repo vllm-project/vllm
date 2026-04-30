@@ -1457,7 +1457,9 @@ class rocm_aiter_ops:
 
     @classmethod
     def get_aiter_allreduce_max_size(cls) -> int:
-        return cls._ALL_REDUCE_MAX_SIZE
+        # effective max input size (based on upstream aiter version: v0.1.10.post3)
+        # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/aiter/dist/device_communicators/custom_all_reduce.py#L272-L273
+        return int(cls._ALL_REDUCE_MAX_SIZE / 2)
 
     @staticmethod
     @if_aiter_supported
