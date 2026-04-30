@@ -63,7 +63,7 @@ def test_materialize_layer_preserves_non_meta_tensors():
     """Ensure that materialize_layer does not overwrite non meta tensors."""
     layer = torch.nn.Linear(2, 3, bias=True)
 
-    # Create a non meta bias tensor and meta weight, which can happen in FP8 initialization
+    # Create a non meta bias tensor and meta weight, which can happen with FP8
     bias_values = torch.ones(3)
     layer.bias.data.copy_(bias_values)
     layer.weight = torch.nn.Parameter(layer.weight.data.to("meta"))
