@@ -126,7 +126,7 @@ IR torch wrap is only enabled by default when using `mode=VLLM_COMPILE` and `bac
 
 ```sh
 # Online
-vllm serve -cc.ir_enable_torch_wrap=NONE
+vllm serve -cc.ir_enable_torch_wrap=False
 ```
 
 ```py
