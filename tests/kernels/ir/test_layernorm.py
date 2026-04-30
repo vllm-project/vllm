@@ -5,16 +5,16 @@ import torch
 
 # This registers op implementations
 import vllm.kernels  # noqa: F401
+from tests.ir.ir_test_utils import (
+    COMMON_HIDDEN_SIZES,
+    NUM_TOKENS,
+    assert_close,
+    clone_args,
+    supported_providers,
+)
 from tests.kernels.allclose_default import get_default_rtol
 from vllm import ir
 from vllm.platforms import current_platform
-
-
-def rms_norm_inputs(n_tokens: int, hidden_size: int, dtype: torch.dtype):
-    x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-    weight = torch.rand(hidden_size, dtype=dtype)
-    return x, weight
-
 
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
@@ -40,8 +40,8 @@ def test_rms_norm_registration():
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("n_tokens", [1, 8, 17])
-@pytest.mark.parametrize("hidden_size", [16, 4096, 8192])
+@pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
@@ -53,7 +53,9 @@ class TestRMSNorm:
         torch.set_default_device(current_platform.device_type)
 
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
-        x, weight = rms_norm_inputs(4, 8, dtype)
+        x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
+            num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
+        )
         out = rms_norm_native(x, weight, epsilon=epsilon)
 
         # Check shape, dtype, device
@@ -71,59 +73,59 @@ class TestRMSNorm:
         out4 = rms_norm_native(x, None, epsilon=epsilon)
         torch.testing.assert_close(out3, out4)
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels"])
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
         impl = ir.ops.rms_norm.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
-
-        x, weight = rms_norm_inputs(n_tokens, hidden_size, dtype)
-        args = (x, weight, epsilon, None)
-
-        assert impl.supported
-
-        if provider == "aiter" and dtype not in [torch.float16, torch.bfloat16]:
-            assert not impl.supports_args(*args)
-            return
-
-        assert impl.supports_args(*args)
-
-        out_impl = impl.impl_fn(*args)
-        out_native = rms_norm_native(*args)
-
-        torch.testing.assert_close(
-            out_impl, out_native, rtol=get_default_rtol(out_impl), atol=1e-3
+        x, weight, eps = ir.ops.rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
         )
+        args = (x, weight, eps)
+
+        if not impl.supports_args(*args):
+            pytest.skip(f"{provider} does not support args")
+
+        ref_output = rms_norm_native(*clone_args(args))
+        output = impl.impl_fn(*clone_args(args))
+        assert_close(ir.ops.rms_norm, output, ref_output)
 
         # check that dispatched call matches direct call
         with ir.ops.rms_norm.set_priority([provider, "native"]):
-            out_impl2 = ir.ops.rms_norm(*args)
-
-        # exact match
-        torch.testing.assert_close(out_impl2, out_impl, rtol=0.0, atol=0.0)
+            out_dispatched = ir.ops.rms_norm(*args)
+        out_direct = impl.impl_fn(*args)
+        torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
 
         # none of these support variance_size override
-        assert not impl.supports_args(x, weight, epsilon, 4)
-        assert not impl.supports_args(x, weight, epsilon, variance_size=4)
+        assert not impl.supports_args(x, weight, eps, 4)
+        assert not impl.supports_args(x, weight, eps, variance_size=4)
 
         # test weight=None behavior
-        out_impl_no_weight = impl.impl_fn(x, None, epsilon)
-        out_impl_unit_weight = impl.impl_fn(x, torch.ones_like(weight), epsilon)
-        torch.testing.assert_close(
-            out_impl_no_weight,
-            out_impl_unit_weight,
-            rtol=get_default_rtol(out_impl_no_weight),
-            atol=2e-4,
-        )
+        out_no_weight = impl.impl_fn(x, None, eps)
+        out_unit_weight = impl.impl_fn(x, torch.ones_like(weight), eps)
+        assert_close(ir.ops.rms_norm, out_no_weight, out_unit_weight)
 
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
         if not ir.ops.rms_norm.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
-        x, weight = rms_norm_inputs(n_tokens, hidden_size, dtype)
-        args = (x, weight, epsilon, None)
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+        )
 
         # When checking the torch op, we have to set priority and use dispatch
         with ir.ops.rms_norm.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.rms_norm, args)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="aiter is only supported on ROCm",
+)
+def test_aiter_rejects_unsupported_dtypes():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.rms_norm.impls["aiter"]
+    for dtype in [torch.float32, torch.float64]:
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=8, hidden_size=4096, dtype=dtype, epsilon=1e-5
+        )
+        assert not impl.supports_args(*args), f"aiter should reject dtype={dtype}"

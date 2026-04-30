@@ -30,6 +30,21 @@ else()
     list(APPEND CXX_COMPILE_FLAGS
         "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
+
+    # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
+    # and create a local shim dir with it
+    vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
+
+    find_library(OPEN_MP
+        NAMES gomp
+        PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
+    if (OPEN_MP)
+        set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+    endif()
 endif()
 
 if (NOT MACOSX_FOUND)
@@ -146,16 +161,49 @@ elseif (S390_FOUND)
         "-mtune=native")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     message(STATUS "RISC-V detected")
-    if(RVV_BF16_FOUND)
-        message(STATUS "BF16 extension detected")
-        set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl128b -mrvv-vector-bits=zvl -mabi=lp64d)
-        add_compile_definitions(RISCV_BF16_SUPPORT)
-    elseif (RVV_FP16_FOUND)
-        message(WARNING "BF16 functionality is not available")
-        set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl128b -mrvv-vector-bits=zvl -mabi=lp64d)
+    # VLLM_RVV_VLEN selects the target VLEN. Auto-detected from /proc/cpuinfo
+    # by default; override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256.
+    if(NOT DEFINED VLLM_RVV_VLEN)
+        # Auto-detect: find the largest zvl<N>b in /proc/cpuinfo isa line.
+        if(EXISTS /proc/cpuinfo)
+            file(READ /proc/cpuinfo _cpuinfo)
+            set(_best 0)
+            foreach(_n IN ITEMS 128 256 512 1024)
+                if(_cpuinfo MATCHES "zvl${_n}b")
+                    set(_best ${_n})
+                endif()
+            endforeach()
+            if(_best GREATER 0)
+                set(VLLM_RVV_VLEN ${_best})
+            endif()
+        endif()
+        # If auto-detect failed (no /proc/cpuinfo or no zvl<N>b reported)
+        # but the compiler supports RVV, require explicit specification.
+        if(NOT DEFINED VLLM_RVV_VLEN AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+            message(FATAL_ERROR
+                "RISC-V RVV is available but VLEN could not be auto-detected. "
+                "Please specify VLEN explicitly:\n"
+                "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
+                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)\n"
+                "  -DVLLM_RVV_VLEN=0     (force scalar, no RVV)")
+        endif()
+    endif()
+    if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
+        message(STATUS "RISC-V RVV VLEN=${VLLM_RVV_VLEN}")
+        if(RVV_BF16_FOUND)
+            message(STATUS "BF16 extension detected")
+            set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
+            add_compile_definitions(RISCV_BF16_SUPPORT)
+        elseif(RVV_FP16_FOUND)
+            message(WARNING "BF16 functionality is not available")
+            set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
+        else()
+            message(STATUS "compile riscv with scalar (no FP16/BF16)")
+            set(MARCH_FLAGS -march=rv64gc)
+        endif()
     else()
         message(STATUS "compile riscv with scalar")
-        list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
+        set(MARCH_FLAGS -march=rv64gc)
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})
 else()
@@ -174,20 +222,6 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         ProcessorCount(NPROC)
         if(NOT NPROC)
             set(NPROC 4)
-        endif()
-        # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-        # and create a local shim dir with it
-        vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
-
-        find_library(OPEN_MP
-            NAMES gomp
-            PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
-            NO_DEFAULT_PATH
-            REQUIRED
-        )
-        # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
-        if (OPEN_MP)
-            set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
         endif()
 
         # Fetch and populate ACL
@@ -349,6 +383,7 @@ endif()
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/utils.cpp"
+    "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
@@ -359,6 +394,7 @@ set(VLLM_EXT_SRC
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/activation_lut_bf16.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
@@ -383,6 +419,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -395,6 +432,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2 
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files

@@ -28,6 +28,9 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+    AiterMLAHelper,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -78,7 +81,6 @@ def fetch_id_to_ragged_triton(
 
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -300,6 +302,8 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
+        AiterMLAHelper.check_num_heads_validity(num_heads)
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -318,8 +322,9 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
+        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
+            [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=q.dtype,
             device=q.device,
         )
@@ -345,7 +350,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             attn_metadata.paged_kv_last_page_len,
         )
 
-        return output[:, : self.num_heads, :]
+        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
 
     def forward_mqa(
         self,
@@ -375,8 +380,9 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
+        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         attn_out = self._forward_bf16_kv(
-            q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
+            mla_padded_q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
         )
 
         return attn_out, None

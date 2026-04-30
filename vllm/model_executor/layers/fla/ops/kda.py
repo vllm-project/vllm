@@ -23,7 +23,7 @@ from .index import prepare_chunk_indices
 from .l2norm import l2norm_fwd
 from .op import exp, log
 from .solve_tril import solve_tril
-from .utils import is_amd
+from .utils import FLA_CHUNK_SIZE, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -721,7 +721,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
     beta: torch.Tensor | None = None,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    chunk_size: int = 64,
+    chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -1076,10 +1076,10 @@ def chunk_gla_fwd_kernel_o(
         )
         p_h = tl.make_block_ptr(
             h + (i_tg * H + i_h) * K * V,
-            (K, V),
-            (V, 1),
-            (i_k * BK, i_v * BV),
-            (BK, BV),
+            (V, K),
+            (K, 1),
+            (i_v * BV, i_k * BK),
+            (BV, BK),
             (1, 0),
         )
 
@@ -1090,12 +1090,11 @@ def chunk_gla_fwd_kernel_o(
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
         b_qg = (b_q * exp(b_g)).to(b_q.dtype)
-        # [BK, BV]
+        # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
-        # works but dkw, owing to divine benevolence
         # [BT, BV]
         if i_k >= 0:
-            b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+            b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
     p_v = tl.make_block_ptr(
         v + (bos * H + i_h) * V,
         (T, V),
@@ -1178,7 +1177,7 @@ def chunk_kda_fwd(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
 ):
-    chunk_size = 64
+    chunk_size = FLA_CHUNK_SIZE
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
     # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
@@ -1189,6 +1188,7 @@ def chunk_kda_fwd(
         beta=beta,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
         output_dtype=torch.float32,
     )
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
