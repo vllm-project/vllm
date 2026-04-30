@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import ReqId
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import GPULoadStoreSpec, OffloadingManager, OffloadKey
-from vllm.v1.kv_offload.worker.worker import TransferSpec
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
@@ -17,8 +16,19 @@ if TYPE_CHECKING:
         SchedulerOffloadConfig,
     )
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_offload.base import LoadStoreSpec
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class StorePlanEntry:
+    """Store decision for one request returned by OffloadPolicy."""
+
+    src_spec: GPULoadStoreSpec
+    dst_spec: LoadStoreSpec
+    keys: set[OffloadKey]
+    gpu_block_ids: list[int]
 
 
 class OffloadPolicy(ABC):
@@ -36,21 +46,25 @@ class OffloadPolicy(ABC):
         scheduler_output: SchedulerOutput,
         config: SchedulerOffloadConfig,
         manager: OffloadingManager,
-        reqs_being_stored: dict[ReqId, set[OffloadKey]],
-    ) -> dict[ReqId, TransferSpec]:
+    ) -> dict[ReqId, StorePlanEntry]:
         """
         Decide which blocks to store this scheduler step.
 
+        Called after the scheduler has applied block-ID updates and fence
+        checks for the current step.  Implementations read the already-updated
+        ``req_kv_states`` and ``scheduler_output.num_scheduled_tokens`` to
+        determine which blocks are newly computable and eligible for transfer.
+
         Args:
-            req_kv_states: per-request KV tracking state.
+            req_kv_states: per-request KV tracking state (block IDs already
+                updated by the caller for this step).
             scheduler_output: the current scheduler output.
             config: offloading configuration.
             manager: the offloading manager to call prepare_store on.
-            reqs_being_stored: scheduler-owned dict of in-flight store keys,
-                updated in-place for each request that gets a store queued.
 
         Returns:
-            A dict mapping request ID to the TransferSpec to submit.
+            A dict mapping request ID to a StorePlanEntry describing the
+            transfer to submit.
         """
         pass
 
@@ -94,90 +108,130 @@ class StoreOnComputePolicy(OffloadPolicy):
         scheduler_output: SchedulerOutput,
         config: SchedulerOffloadConfig,
         manager: OffloadingManager,
-        reqs_being_stored: dict[ReqId, set[OffloadKey]],
-    ) -> dict[ReqId, TransferSpec]:
-        # Below assertion will be removed once this function supports HMA
-        assert len(config.kv_group_configs) == 1
-        group_config = config.kv_group_configs[0]
+    ) -> dict[ReqId, StorePlanEntry]:
+        block_size_factor = config.block_size_factor
+        reqs_to_store: dict[ReqId, StorePlanEntry] = {}
 
-        reqs_to_store: dict[ReqId, TransferSpec] = {}
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
-            req_kv_state = req_kv_states[req_id]
+        for req_id in scheduler_output.num_scheduled_tokens:
+            req_kv_state = req_kv_states.get(req_id)
+            if req_kv_state is None:
+                continue
             req_kv_state.update_offload_keys()
-
-            if preempted:
-                for group_state in req_kv_state.group_states:
-                    group_state.block_ids.clear()
-
-            if new_block_id_groups:
-                req_kv_state.update_block_id_groups(new_block_id_groups)
-
-            # Below assertion will be removed once this function supports HMA
-            assert len(req_kv_state.group_states) == 1
-            group_state = req_kv_state.group_states[0]
-
-            block_ids = group_state.block_ids
-
             req = req_kv_state.req
-            new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            expected_tokens = req.num_computed_tokens + new_tokens
-            total_tokens = min(expected_tokens, req.num_tokens)
-            num_blocks = total_tokens // group_config.offloaded_block_size
+
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
+            num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
 
             if req_id not in self._next_stored_block_idx:
-                self._next_stored_block_idx[req_id] = [0] * len(
-                    req_kv_state.group_states
-                )
-            start_block_idx = self._next_stored_block_idx[req_id][0]
-            num_new_blocks = num_blocks - start_block_idx
+                self._next_stored_block_idx[req_id] = [
+                    0 for _ in config.kv_group_configs
+                ]
+            watermark = self._next_stored_block_idx[req_id]
 
-            if num_new_blocks <= 0:
+            # Collect eligible offload keys across all groups, filtering out
+            # blocks skipped due to sliding window attention or SSM.
+            new_offload_keys: list[OffloadKey] = []
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(config.kv_group_configs, req_kv_state.group_states)
+            ):
+                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+                start_block_idx = watermark[group_idx]
+                if num_blocks <= start_block_idx:
+                    continue
+                offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
+                # Take the last GPU block of each offloaded block to determine
+                # whether the block was skipped (block_id == 0).
+                offload_block_ids = group_state.block_ids[
+                    start_block_idx * block_size_factor
+                    + block_size_factor
+                    - 1 : num_blocks * block_size_factor : block_size_factor
+                ]
+                assert len(offload_keys) == len(offload_block_ids)
+                for offload_key, block_id in zip(offload_keys, offload_block_ids):
+                    if block_id != 0:
+                        new_offload_keys.append(offload_key)
+
+            if not new_offload_keys:
+                # No new blocks to store; advance the watermark.
+                for group_idx, group_config in enumerate(config.kv_group_configs):
+                    num_blocks = (
+                        num_offloadable_tokens // group_config.offloaded_block_size
+                    )
+                    watermark[group_idx] = max(watermark[group_idx], num_blocks)
                 continue
 
-            num_gpu_blocks = num_blocks * config.block_size_factor
-            assert len(req.block_hashes) >= num_gpu_blocks
-
-            new_offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
             store_output = manager.prepare_store(
                 new_offload_keys, req_kv_state.req_context
             )
             if store_output is None:
-                logger.warning(
-                    "Request %s: cannot store %s blocks", req_id, num_new_blocks
-                )
+                logger.warning("Request %s: cannot store blocks", req_id)
                 continue
-
-            self._next_stored_block_idx[req_id][0] = num_blocks
 
             if not store_output.keys_to_store:
+                # Manager declined; advance the watermark.
+                for group_idx, group_config in enumerate(config.kv_group_configs):
+                    num_blocks = (
+                        num_offloadable_tokens // group_config.offloaded_block_size
+                    )
+                    watermark[group_idx] = max(watermark[group_idx], num_blocks)
                 continue
+
+            for group_state in req_kv_state.group_states:
+                manager.touch(group_state.offload_keys)
+
             keys_to_store = set(store_output.keys_to_store)
 
-            manager.touch(group_state.offload_keys[:num_blocks])
-
-            dst_spec = store_output.store_spec
+            group_sizes: list[int] = []
+            block_indices: list[int] = []
             src_block_ids: list[int] = []
-            for idx, key in enumerate(new_offload_keys):
-                if key not in keys_to_store:
-                    continue
-                offloaded_block_idx = start_block_idx + idx
-                gpu_block_idx = offloaded_block_idx * config.block_size_factor
-                for i in range(config.block_size_factor):
-                    src_block_ids.append(block_ids[gpu_block_idx + i])
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(config.kv_group_configs, req_kv_state.group_states)
+            ):
+                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+                start_block_idx = watermark[group_idx]
+                block_ids = group_state.block_ids
+                num_group_blocks = 0
+                start_gpu_block_idx: int | None = None
+                for idx, offload_key in enumerate(
+                    group_state.offload_keys[start_block_idx:num_blocks]
+                ):
+                    if offload_key not in keys_to_store:
+                        continue
+                    offloaded_block_idx = start_block_idx + idx
+                    gpu_block_idx = offloaded_block_idx * block_size_factor
+                    num_group_blocks += block_size_factor
+                    for i in range(block_size_factor):
+                        block_id = block_ids[gpu_block_idx + i]
+                        if block_id == 0:
+                            # Skipped blocks cannot appear after non-skipped blocks.
+                            assert start_gpu_block_idx is None
+                            continue
+                        elif start_gpu_block_idx is None:
+                            start_gpu_block_idx = gpu_block_idx + i
+                        src_block_ids.append(block_id)
+                group_sizes.append(num_group_blocks)
+                block_indices.append(start_gpu_block_idx or 0)
+                watermark[group_idx] = num_blocks
+
             src_spec = GPULoadStoreSpec(
                 src_block_ids,
-                group_sizes=(len(src_block_ids),),
-                block_indices=(0,),
+                group_sizes=tuple(group_sizes),
+                block_indices=tuple(block_indices),
+            )
+            dst_spec = store_output.store_spec
+
+            reqs_to_store[req_id] = StorePlanEntry(
+                src_spec=src_spec,
+                dst_spec=dst_spec,
+                keys=keys_to_store,
+                gpu_block_ids=src_block_ids,
             )
 
-            reqs_to_store[req_id] = (src_spec, dst_spec)
-            reqs_being_stored[req_id] |= keys_to_store
-
             logger.debug(
-                "Request %s offloading %s blocks starting from block #%d",
+                "Request %s: queuing store for %s blocks",
                 req_id,
                 len(keys_to_store),
-                start_block_idx,
             )
 
         return reqs_to_store

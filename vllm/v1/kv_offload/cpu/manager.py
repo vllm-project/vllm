@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
@@ -288,11 +289,11 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # ------------------------------------------------------------------
 
     def prepare_load(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Sequence[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         return self._backing.prepare_load(keys, req_context)
 
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Sequence[OffloadKey]) -> None:
         return self._backing.touch(keys)
 
     def complete_load(self, keys: Iterable[OffloadKey]) -> None:

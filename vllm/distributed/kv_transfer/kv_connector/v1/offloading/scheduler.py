@@ -6,6 +6,7 @@ from itertools import islice
 from typing import Any, NamedTuple
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -16,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.policy import (
     OffloadPolicy,
     StoreOnComputePolicy,
+    StorePlanEntry,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -132,13 +134,6 @@ class RequestKVState:
         assert len(new_block_id_groups) == len(self.group_states)
         for group_state, new_blocks in zip(self.group_states, new_block_id_groups):
             group_state.block_ids.extend(new_blocks)
-
-    def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, self.group_states
-        ):
-            num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-            group_state.next_stored_block_idx = num_blocks
 
 
 class OffloadingConnectorScheduler:
@@ -341,7 +336,7 @@ class OffloadingConnectorScheduler:
             return
 
         req_status = self._req_kv_states[request.request_id]
-        
+
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
 
@@ -353,6 +348,7 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
+        next_block_idx_per_group: list[int] = []
         for group_config, group_state, group_blocks in zip(
             self.config.kv_group_configs,
             req_status.group_states,
@@ -393,12 +389,15 @@ class OffloadingConnectorScheduler:
             )
             group_sizes.append(num_pending_gpu_blocks)
             block_indices.append(num_locally_computed_gpu_blocks)
+            next_block_idx_per_group.append(num_blocks)
 
-            if not do_remote_decode:
-                # For P/D prefill requests (do_remote_decode=True), we do
-                # NOT skip saving the hit prefix, as we need to stream the
-                # entire KV cache so a remote decode node can consume it.
-                group_state.next_stored_block_idx = num_blocks
+        if not do_remote_decode:
+            # For P/D prefill requests (do_remote_decode=True), we do NOT skip
+            # saving the hit prefix — the entire KV cache must be streamed to
+            # the remote decode node.
+            self._policy.notify_load_scheduled(
+                request.request_id, next_block_idx_per_group
+            )
 
         # Fence dst blocks against finished-request pending stores.
         if (
@@ -430,8 +429,6 @@ class OffloadingConnectorScheduler:
             keys=set(keys_to_load),
             is_store=False,
         )
-        # MH TODO: what happen here now?
-        # self._policy.notify_load_scheduled(request.request_id, [num_blocks])
 
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(keys_to_load)
@@ -440,25 +437,20 @@ class OffloadingConnectorScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> dict[int, TransferJob]:
-        block_size_factor = self.config.block_size_factor
-        store_jobs: dict[int, TransferJob] = {}
-        # iterate over both new and cached requests
+        # Pre-pass: apply block-ID updates from the scheduler output and check
+        # fences before delegating the store decision to the policy.
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
-            req_status = self._req_status[req_id]
-            req_status.update_offload_keys()
-            req = req_status.req
-
+            req_kv_state = self._req_kv_states.get(req_id)
+            if req_kv_state is None:
+                continue
             if preempted:
-                for group_state in req_status.group_states:
+                for group_state in req_kv_state.group_states:
                     group_state.block_ids.clear()
-
             if new_block_id_groups:
-                req_status.update_block_id_groups(new_block_id_groups)
-                # Fence new blocks against in-flight stores.
+                req_kv_state.update_block_id_groups(new_block_id_groups)
+                # Fence new blocks against in-flight stores from finished requests.
                 if self._block_id_to_pending_jobs:
-                    new_blocks_flat = [
-                        bid for new_blocks in new_block_id_groups for bid in new_blocks
-                    ]
+                    new_blocks_flat = [bid for gs in new_block_id_groups for bid in gs]
                     if not self._block_id_to_pending_jobs.keys().isdisjoint(
                         new_blocks_flat
                     ):
@@ -468,141 +460,46 @@ class OffloadingConnectorScheduler:
                             for jid in self._block_id_to_pending_jobs.get(bid, ())
                         )
 
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
-            # with async scheduling, some tokens may be missing
-            num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
+        # Policy decides which blocks to store this step.
+        store_plans: dict[str, StorePlanEntry] = self._policy.get_blocks_to_store(
+            self._req_kv_states, scheduler_output, self.config, self.manager
+        )
 
-            # Filter out blocks skipped due to sliding window attention / SSM
-            new_offload_keys: list[OffloadKey] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-                start_block_idx = group_state.next_stored_block_idx
-                if num_blocks <= start_block_idx:
-                    continue
-                offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
-                # For each block to offload, take the last corresponding GPU block.
-                # e.g. if block size factor is 3 and GPU block IDs are
-                # 1 5 6 7 2 4 9 3 8 then we'll take blocks 6 4 8.
-                # We will use these GPU blocks to determine if the block needs
-                # offloading, or (if the GPU block ID is 0) this block should
-                # be skipped due to sliding window attention / SSM.
-                # We know that if a block is skipped, then all the previous blocks
-                # are skipped as well. This is why we take the last of each block.
-                offload_block_ids = group_state.block_ids[
-                    start_block_idx * block_size_factor
-                    + block_size_factor
-                    - 1 : num_blocks * block_size_factor : block_size_factor
-                ]
-                assert len(offload_keys) == len(offload_block_ids)
-
-                for offload_key, block_id in zip(offload_keys, offload_block_ids):
-                    if block_id != 0:
-                        new_offload_keys.append(offload_key)
-
-            if not new_offload_keys:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                continue
-
-            store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
-            )
-            if store_output is None:
-                logger.warning("Request %s: cannot store blocks", req_id)
-                continue
-
-            if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                continue
-
-            for group_state in req_status.group_states:
-                self.manager.touch(group_state.offload_keys)
-
-            keys_to_store = set(store_output.keys_to_store)
-
-            group_sizes: list[int] = []
-            block_indices: list[int] = []
-            src_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-                start_block_idx = group_state.next_stored_block_idx
-                block_ids = group_state.block_ids
-                num_group_blocks = 0
-                start_gpu_block_idx: int | None = None
-                for idx, offload_key in enumerate(
-                    group_state.offload_keys[start_block_idx:num_blocks]
-                ):
-                    if offload_key not in keys_to_store:
-                        continue
-
-                    offloaded_block_idx = start_block_idx + idx
-                    gpu_block_idx = offloaded_block_idx * block_size_factor
-                    num_group_blocks += block_size_factor
-                    for i in range(block_size_factor):
-                        block_id = block_ids[gpu_block_idx + i]
-                        if block_id == 0:
-                            # skipped blocks cannot appear after non-skipped blocks
-                            assert start_gpu_block_idx is None
-                            continue
-                        elif start_gpu_block_idx is None:
-                            start_gpu_block_idx = gpu_block_idx + i
-                        src_block_ids.append(block_id)
-                group_sizes.append(num_group_blocks)
-                block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_block_idx = num_blocks
-
-            src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=group_sizes, block_indices=block_indices
-            )
-            dst_spec = store_output.store_spec
-
+        # Wrap each plan in a TransferJob and register it.
+        store_jobs: dict[int, TransferJob] = {}
+        for req_id, plan in store_plans.items():
+            req_kv_state = self._req_kv_states[req_id]
             job_id = self._generate_job_id()
-            # a store can only be issued when no load is pending.
-            if req_status.transfer_jobs:
-                any_jid = next(iter(req_status.transfer_jobs))
+            # A store can only be issued when no load is pending.
+            if req_kv_state.transfer_jobs:
+                any_jid = next(iter(req_kv_state.transfer_jobs))
                 assert self._jobs[any_jid].is_store
-            req_status.transfer_jobs.add(job_id)
+            req_kv_state.transfer_jobs.add(job_id)
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
-                keys=set(keys_to_store),
+                keys=plan.keys,
                 is_store=True,
-                gpu_block_ids=src_block_ids,
+                gpu_block_ids=plan.gpu_block_ids,
             )
-
             store_jobs[job_id] = TransferJob(
-                req_id=req_id, transfer_spec=(src_spec, dst_spec)
+                req_id=req_id,
+                transfer_spec=(plan.src_spec, plan.dst_spec),
             )
-
             logger.debug(
-                "Request %s offloading %s blocks upto %d tokens (job %d)",
+                "Request %s offloading %s blocks (job %d)",
                 req_id,
-                len(keys_to_store),
-                num_offloadable_tokens,
+                len(plan.keys),
                 job_id,
             )
 
         return store_jobs
-    
-    # MH TODO: What to do with this now as _build_store_jobs() replaced this func
-    """def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
-        return self._policy.get_blocks_to_store(
-            self._req_kv_states,
-            scheduler_output,
-            self.config,
-            self.manager,
-            self._reqs_being_stored,
-        )"""
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         for req_id in scheduler_output.preempted_req_ids or ():
-            req_status = self._req_status.get(req_id)
+            req_status = self._req_kv_states.get(req_id)
             if req_status is None or not req_status.transfer_jobs:
                 continue
             any_jid = next(iter(req_status.transfer_jobs))
@@ -645,7 +542,7 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            req_status = self._req_status[job_status.req_id]
+            req_status = self._req_kv_states[job_status.req_id]
             if self._block_id_to_pending_jobs and req_status.req.is_finished():
                 for bid in job_status.gpu_block_ids or ():
                     pending = self._block_id_to_pending_jobs[bid]
@@ -656,7 +553,7 @@ class OffloadingConnectorScheduler:
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
-                del self._req_status[job_status.req_id]
+                del self._req_kv_states[job_status.req_id]
 
     def request_finished(
         self,
@@ -675,25 +572,27 @@ class OffloadingConnectorScheduler:
         """
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
-        req_status = self._req_kv_states.get(request.request_id)
+        req_id = request.request_id
+        req_status = self._req_kv_states.get(req_id)
         if req_status is None:
             return False, None
+
+        self._policy.request_finished(req_id)
+
         if not req_status.transfer_jobs:
-            del self._req_kv_states[request.request_id]
-            return False, None
+            del self._req_kv_states[req_id]
+            return self.manager.request_finished(req_id), None
+
         # Pending stores will outlive the request's block ownership.
         # Register them so future block reuse triggers a flush.
         for job_id in req_status.transfer_jobs:
             job_status = self._jobs[job_id]
             for bid in job_status.gpu_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-        return False, None
 
-        # MH TODO: How to merge this or how does it work now?
-        """self._req_kv_states.pop(req_id, None)
-        self._policy.request_finished(req_id)
-
-        return self.manager.request_finished(req_id), None"""
+        # _req_kv_states[req_id] will be cleaned up in update_connector_output
+        # once all in-flight transfer jobs complete.
+        return self.manager.request_finished(req_id), None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         """Take the KV cache events from the connector.
