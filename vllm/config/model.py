@@ -779,7 +779,7 @@ class ModelConfig:
         return used_cls == transformers_backend_cls
 
     @property
-    def registry(self):
+    def registry(self) -> "me_models._ModelRegistry":
         return me_models.ModelRegistry
 
     @property
@@ -1088,7 +1088,7 @@ class ModelConfig:
                 "when expert parallelism is enabled."
             )
 
-    def _try_verify_and_update_model_config(self):
+    def _try_verify_and_update_model_config(self) -> None:
         # Avoid running try_verify_and_update_config multiple times
         if getattr(self, "config_updated", False):
             return

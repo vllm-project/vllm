@@ -53,7 +53,7 @@ class MambaConfig:
             return MambaBackendEnum[value.upper()]
         return value
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 

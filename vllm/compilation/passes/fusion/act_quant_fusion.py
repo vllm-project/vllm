@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -91,7 +91,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
         ]
 
     @property
-    def pattern(self):
+    def pattern(self) -> Callable[..., torch.Tensor]:
         def _pattern(
             input: torch.Tensor,
             scale: torch.Tensor,
@@ -103,7 +103,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
         return _pattern
 
     @property
-    def replacement(self):
+    def replacement(self) -> Callable[..., torch.Tensor]:
         def _replacement(
             input: torch.Tensor,
             scale: torch.Tensor,
@@ -137,7 +137,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         return [result, output_scale, input_, scale]
 
     @property
-    def pattern(self):
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         def _pattern(
             result: torch.Tensor,
             output_scale: torch.Tensor,
@@ -158,7 +158,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         return _pattern
 
     @property
-    def replacement(self):
+    def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         def _replacement(
             result: torch.Tensor,
             output_scale: torch.Tensor,
@@ -208,7 +208,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         return self.silu_and_mul_matcher.inputs() + [scale]
 
     @property
-    def pattern(self):
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         def _pattern(
             input: torch.Tensor,
             scale: torch.Tensor,
@@ -239,7 +239,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         return _pattern
 
     @property
-    def replacement(self):
+    def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         def _replacement(
             input: torch.Tensor,
             scale: torch.Tensor,

@@ -1186,7 +1186,7 @@ class CompilationConfig:
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
-    def set_splitting_ops_for_attn_fusion(self):
+    def set_splitting_ops_for_attn_fusion(self) -> None:
         assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:
             self.splitting_ops = []
@@ -1245,7 +1245,7 @@ class CompilationConfig:
         # Inductor partition case
         return self.backend == "inductor" and self.mode != CompilationMode.NONE
 
-    def custom_op_log_check(self):
+    def custom_op_log_check(self) -> None:
         """
         This method logs the enabled/disabled custom ops and checks that the
         passed custom_ops field only contains relevant ops.

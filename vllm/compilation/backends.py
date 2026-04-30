@@ -946,7 +946,7 @@ class VllmBackend:
                 )
         self.inductor_config[self.pass_key] = self.pass_manager
 
-    def _log_compilation_config(self):
+    def _log_compilation_config(self) -> None:
         """Log vLLM compilation config for TORCH_TRACE/tlparse."""
         cc = self.compilation_config
         pass_cfg = cc.pass_config

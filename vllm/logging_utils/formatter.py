@@ -10,14 +10,14 @@ from vllm import envs
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
-    def __init__(self, fmt, datefmt=None, style="%"):
+    def __init__(self, fmt: str, datefmt: str | None = None, style: str = "%") -> None:
         super().__init__(fmt, datefmt, style)
 
         self.use_relpath = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         if self.use_relpath:
             self.root_dir = Path(__file__).resolve().parent.parent.parent
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         def shrink_path(relpath: Path) -> str:
             """
             Shortens a file path for logging display:
