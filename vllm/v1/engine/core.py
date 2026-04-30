@@ -1571,7 +1571,8 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if not self.has_work():
+
+        if self._pause_complete():
             if clear_cache:
                 self._reset_caches()
             return None
@@ -1579,6 +1580,13 @@ class EngineCoreProc(EngineCore):
         future = Future[Any]()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
+
+    def _pause_complete(self) -> bool:
+        """Returns True if the pause has fully completed and the caller can
+        return ``None`` synchronously; False if the pause is still pending
+        and the caller should register an idle-state callback to finish it.
+        """
+        return not self.has_work()
 
     def _send_finish_outputs_to_client(
         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
@@ -1635,6 +1643,14 @@ class DPEngineCoreProc(EngineCoreProc):
         self.current_wave = 0
         self.last_counts = (0, 0)
 
+        # Two-phase pause protocol state. When pending_pause is True, the
+        # engine keeps stepping (dummy batches) while waiting for all DP
+        # ranks to also set pending_pause. Once all ranks agree via
+        # all-reduce, ignore_start_dp_wave is set so that stale
+        # START_DP_WAVE messages cannot re-wake the engines.
+        self.pending_pause = False
+        self.ignore_start_dp_wave = False
+
         from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
         self.eep_scaling_state: ElasticEPScalingState | None = None
@@ -1664,6 +1680,7 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
+        self.dp_size = dp_size
         dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
         self.dp_group, self.dp_store = dp_group, dp_store
 
@@ -1671,6 +1688,24 @@ class DPEngineCoreProc(EngineCoreProc):
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
+
+    def _pause_complete(self) -> bool:
+        """Two-phase DP-aware pause.
+
+        Phase 1: Set local pause state and ``pending_pause`` flag. If the
+        engines are idle, kick-start them by setting ``engines_running`` to
+        True so ranks enter the stepping loop and reach the all-reduce
+        consensus checkpoint in ``_has_global_unfinished_reqs``.
+
+        Phase 2 (in ``_has_global_unfinished_reqs``): Once the all-reduce
+        confirms that **all** ranks have ``pending_pause`` set, collectively
+        stop stepping and set ``ignore_start_dp_wave`` so that stale
+        ``START_DP_WAVE`` messages cannot re-wake any engine.
+        """
+        self.pending_pause = True
+        self.engines_running = True
+
+        return False
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
@@ -1681,36 +1716,60 @@ class DPEngineCoreProc(EngineCoreProc):
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                self.engines_running = True
                 # Request received for an already-completed wave, notify
                 # front-end that we need to start the next one.
+                self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
 
     def resume_scheduler(self):
-        super().resume_scheduler()
-        if (
-            self.has_coordinator
-            and not self.engines_running
-            and self.scheduler.has_unfinished_requests()
-        ):
-            # Wake up other DP engines.
-            self.output_queue.put_nowait(
-                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+        if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
+            raise RuntimeError(
+                "resume_scheduler called while pause is still in "
+                "flight. Wait for the pause future to resolve before "
+                "resuming."
             )
+        if self.engines_running:
+            logger.debug("Resume called while engines are not paused, ignoring.")
+            return
+
+        super().resume_scheduler()
+        self.ignore_start_dp_wave = False
+
+        # Barrier: wait for all DP ranks to have resumed (and cleared
+        # ignore_start_dp_wave) before any rank starts stepping. Uses
+        # the existing all-reduce which is safe because engines are
+        # stopped.
+        has_global_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, self.scheduler.has_unfinished_requests()
+        )
+
+        if has_global_unfinished:
+            self.engines_running = True
+
+    def barrier(self):
+        """Blocking barrier on the DP process group (test-only utility)."""
+        import torch.distributed as dist
+
+        dist.barrier(group=self.dp_group)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
         if request_type == EngineCoreRequestType.START_DP_WAVE:
+            if self.ignore_start_dp_wave:
+                return
             new_wave, exclude_eng_index = request
             if exclude_eng_index != self.engine_index and (
                 new_wave >= self.current_wave
             ):
                 self.current_wave = new_wave
                 if not self.engines_running:
-                    logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
+                    logger.debug(
+                        "EngineCore starting idle loop for wave %d.",
+                        new_wave,
+                    )
                     self.engines_running = True
         else:
             super()._handle_client_request(request_type, request)
@@ -1790,7 +1849,18 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.step_counter % 32 != 0:
             return True
 
-        return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
+        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
+            self.dp_group,
+            has_unfinished=local_unfinished,
+            pending_pause=self.pending_pause,
+        )
+
+        if pause_consensus:
+            self.ignore_start_dp_wave = True
+            self.pending_pause = False
+            logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+
+        return has_unfinished
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

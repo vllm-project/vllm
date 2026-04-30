@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
-    VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
+    VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -255,6 +255,10 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_SKIP_MODEL_NAME_VALIDATION: bool = False
+    """If set, vLLM will skip model name validation in API requests.
+    This allows any model name to be accepted in the 'model' field of requests,
+    making the server model-name agnostic. Useful for proxy/gateway scenarios."""
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
@@ -712,11 +716,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
-    # If set, vllm will use flashinfer sampler
+    # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
+    # by default when the hardware supports it — set to 0 to opt out
+    # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: (
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
-        else None
+        else True
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -997,6 +1003,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
+    # - use aiter tuned gemms for unquantized gemms
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
     ),
@@ -1708,6 +1715,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
     ),
+    # Skip model name validation in OpenAI API requests.
+    # When set to 1, any model name will be accepted in the 'model' field
+    # of API requests. This is useful for proxy/gateway scenarios where
+    # the actual model is served but different names may be used in requests.
+    "VLLM_SKIP_MODEL_NAME_VALIDATION": lambda: (
+        os.getenv("VLLM_SKIP_MODEL_NAME_VALIDATION", "0").strip().lower()
+        in ("1", "true")
+    ),
     # Whether it is a scale up launch engine for elastic EP,
     # Should only be set by EngineCoreClient.
     "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
@@ -1883,6 +1898,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
+        "VLLM_SKIP_MODEL_NAME_VALIDATION",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",

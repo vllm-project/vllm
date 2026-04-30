@@ -585,9 +585,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ARG FLASHINFER_VERSION=0.6.8.post1
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-    && flashinfer show-config \
-    && flashinfer download-cubin
+        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -668,6 +666,13 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Download FlashInfer precompiled cubins AFTER all pip installs are done.
+# This must run after the vLLM wheel and EP kernels installs above, because
+# those can reinstall/touch flashinfer packages. Downloading cubins earlier
+# (in the flashinfer-jit-cache layer) causes ~2.5 GB of layer duplication
+# when a later pip install overwrites flashinfer package files.
+RUN flashinfer show-config && flashinfer download-cubin
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -758,6 +763,10 @@ FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ARG CUDA_VERSION
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -794,6 +803,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
+ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
+    VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE:-local} \
+    VLLM_BUILD_URL=${VLLM_BUILD_URL:-} \
+    VLLM_IMAGE_TAG=${VLLM_IMAGE_TAG:-local/vllm-openai:dev}
+LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      org.opencontainers.image.url="${VLLM_BUILD_URL}" \
+      ai.vllm.build.commit="${VLLM_BUILD_COMMIT}" \
+      ai.vllm.build.pipeline="${VLLM_BUILD_PIPELINE}" \
+      ai.vllm.build.url="${VLLM_BUILD_URL}" \
+      ai.vllm.image.tag="${VLLM_IMAGE_TAG}"
 
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
