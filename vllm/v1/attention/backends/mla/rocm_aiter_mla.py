@@ -82,6 +82,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     has_persistent_metadata: bool = False
 
 
+@dataclass
 class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     work_meta_data: torch.Tensor | None = None
     work_indptr: torch.Tensor | None = None
