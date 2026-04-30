@@ -6,6 +6,11 @@ import torch
 
 from ....conftest import VllmRunner
 
+pytest.importorskip(
+    "terratorch",
+    reason="terratorch unavailable while PyPI has `lightning` quarantined; see #41376",
+)
+
 
 def _run_test(
     vllm_runner: type[VllmRunner],

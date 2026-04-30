@@ -7,6 +7,11 @@ import torch
 from tests.conftest import VllmRunner
 from tests.utils import create_new_process_for_each_test
 
+pytest.importorskip(
+    "terratorch",
+    reason="terratorch unavailable while PyPI has `lightning` quarantined; see #41376",
+)
+
 
 @create_new_process_for_each_test()  # Hangs otherwise
 @pytest.mark.parametrize(
