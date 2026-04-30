@@ -20,7 +20,7 @@ FAULT_STATE_PUB_TOPIC = "vllm_fault"
 class FaultInfo(msgspec.Struct):
     type: str
     message: str
-    engine_id: str
+    engine_id: int
     engine_status: EngineStatusType
     timestamp: str | None = None
     additional_info: dict | None = None
@@ -29,7 +29,7 @@ class FaultInfo(msgspec.Struct):
     def from_exception(
         cls,
         exception: Exception,
-        engine_id: str | int,
+        engine_id: int,
         engine_status: EngineStatusType,
         additional_info: dict | None = None,
     ) -> "FaultInfo":
@@ -38,7 +38,7 @@ class FaultInfo(msgspec.Struct):
         return cls(
             type=type(exception).__name__,
             message=str(exception),
-            engine_id=str(engine_id),
+            engine_id=engine_id,
             engine_status=engine_status,
             timestamp=time.strftime("%H:%M:%S", local_time),
             additional_info=additional_info or {},
@@ -124,7 +124,7 @@ def notify_engine_down(engine_down_socket, engine_id):
     fault_info = FaultInfo(
         type="EngineDeadError",
         message="Engine died unexpectedly.",
-        engine_id=str(engine_id),
+        engine_id=engine_id,
         engine_status=EngineStatusType.DEAD,
     )
     # During normal shutdown, the DEALER socket may already be closed.

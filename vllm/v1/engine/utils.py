@@ -213,7 +213,7 @@ class CoreEngineProcManager:
                     engine_rank = self.processes.index(proc)
                     notify_engine_down(
                         self.engine_down_socket,
-                        engine_id=str(engine_rank + self.start_index),
+                        engine_id=engine_rank + self.start_index,
                     )
                     sentinels.remove(cast(int, sentinel))
 
@@ -926,7 +926,7 @@ class CoreEngineActorManager:
                         engine_rank = self.get_run_refs().index(actor_ref)
                         notify_engine_down(
                             self.engine_down_socket,
-                            str(engine_rank + self.start_rank),
+                            engine_rank + self.start_rank,
                         )
                         failed_ref.add(actor_ref)
 

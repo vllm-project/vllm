@@ -89,7 +89,7 @@ async def test_client_sentinel_initialization(client_sentinel: ClientSentinel):
 async def test_monitor_and_report_on_fault(client_sentinel: ClientSentinel):
     """Fault should update status and publish fault-state report."""
     fault_info = FaultInfo(
-        engine_id="0",
+        engine_id=0,
         type="EngineDeadError",
         message="dead",
         engine_status=EngineStatusType.DEAD,
