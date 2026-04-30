@@ -147,15 +147,13 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 
 | Parameter | Description | Default |
 | --------- | ----------- | ------- |
-| `window_size` | Number of engine steps to track for rebalancing decisions | `1000` |
-| `step_interval` | Frequency of rebalancing (every N engine steps) | `3000` |
+| `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
+| `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
+| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
-| `log_balancedness` | Log balancedness metric: `max(tokens per rank) / mean(tokens per rank)`, averaged over layers. 1.0 = perfect balance | `false` |
-| `log_balancedness_interval` | How often to log balancedness (every N steps, requires `log_balancedness`) | `1` |
-| `log_balancedness_verbose` | Log a detailed multi-line report (per-rank layout, per-layer token table) | `false` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
-| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, or `null` (auto) | `null` |
+| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
 
 For example:
 

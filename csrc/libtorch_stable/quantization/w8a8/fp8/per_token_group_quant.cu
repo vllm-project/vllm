@@ -240,8 +240,9 @@ template <typename T, typename DST_DTYPE>
 __global__ void per_token_group_quant_8bit_packed_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
     unsigned int* __restrict__ output_s_packed, const int group_size,
-    const int num_groups, const int groups_per_block, const int groups_per_row,
-    const int mn, const int tma_aligned_mn, const float eps,
+    const int num_groups_padded, const int groups_per_block,
+    const int padded_groups_per_row, const int groups_per_row, const int mn,
+    const int tma_aligned_mn, const int num_scale_elems, const float eps,
     const float min_8bit, const float max_8bit) {
   const int threads_per_group = 16;
   const int64_t local_group_id = threadIdx.x / threads_per_group;
@@ -249,51 +250,62 @@ __global__ void per_token_group_quant_8bit_packed_kernel(
 
   const int64_t block_group_id = blockIdx.x * groups_per_block;
   const int64_t global_group_id = block_group_id + local_group_id;
-  if (global_group_id >= num_groups) {
+  if (global_group_id >= num_groups_padded) {
     return;
   }
 
-  const int64_t block_group_offset = global_group_id * group_size;
+  // map flat group id to 2D indices (mn_idx, sf_k_idx)
+  const int sf_k_idx =
+      static_cast<int>(global_group_id % padded_groups_per_row);
+  const int mn_idx = static_cast<int>(global_group_id / padded_groups_per_row);
 
-  const T* group_input = input + block_group_offset;
-  DST_DTYPE* group_output =
-      static_cast<DST_DTYPE*>(output_q) + block_group_offset;
+  // whether it is a valid group (not padding)
+  const bool is_valid_group = (mn_idx < mn) && (sf_k_idx < groups_per_row);
 
   // shared memory to cache each group's data to avoid double DRAM reads.
   extern __shared__ __align__(16) char smem_raw[];
   T* smem = reinterpret_cast<T*>(smem_raw);
   T* smem_group = smem + local_group_id * group_size;
-  const float y_s =
-      ComputeGroupScale<T, true>(group_input, smem_group, group_size, lane_id,
-                                 threads_per_group, eps, max_8bit);
 
-  // pack 4 scales into a uint32
+  // compute scale for valid groups
+  float y_s = 0.f;
+  if (is_valid_group) {
+    const T* group_input =
+        input + static_cast<int64_t>(mn_idx) * groups_per_row * group_size +
+        sf_k_idx * group_size;
+    y_s = ComputeGroupScale<T, true>(group_input, smem_group, group_size,
+                                     lane_id, threads_per_group, eps, max_8bit);
+  }
+
+  // pack 4 scales into a uint32 exponent
   if (lane_id == 0) {
-    // map flat group id to 2D indices (mn_idx, sf_k_idx)
-    const int sf_k_idx = static_cast<int>(global_group_id % groups_per_row);
-    const int mn_idx = static_cast<int>(global_group_id / groups_per_row);
+    // each uint32 in output_s_packed stores 4 packed scales
+    const int sf_k_pack_idx = sf_k_idx / 4;
+    const int pos = sf_k_idx % 4;
+    const int out_idx = sf_k_pack_idx * tma_aligned_mn + mn_idx;
 
-    if (mn_idx < mn) {
-      // each uint32 in output_s_packed stores 4 packed scales
-      const int sf_k_pack_idx = sf_k_idx / 4;
-      const int pos = sf_k_idx % 4;
-
+    if (is_valid_group) {
       // reinterpret the UE8M0 scale y_s as IEEE bits, extract the 8-bit
       // exponent, and place it into the correct byte of the 32-bit word.
       const unsigned int bits = __float_as_uint(y_s);
-      const unsigned int exponent = (bits >> 23u) & 0xffu;
-      const unsigned int contrib = exponent << (pos * 8u);
-
-      const int out_idx = sf_k_pack_idx * tma_aligned_mn + mn_idx;
-      // atomically OR 8-bit exponent into the packed scales buffer
-      atomicOr(output_s_packed + out_idx, contrib);
+      const uint8_t exponent = static_cast<uint8_t>((bits >> 23u) & 0xffu);
+      reinterpret_cast<uint8_t*>(output_s_packed)[out_idx * 4 + pos] = exponent;
+    } else if (out_idx < num_scale_elems) {
+      // write zero for padding groups if within bounds of output_s_packed
+      reinterpret_cast<uint8_t*>(output_s_packed)[out_idx * 4 + pos] = 0;
     }
   }
 
   __syncthreads();
 
-  QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
-                              threads_per_group, y_s, min_8bit, max_8bit);
+  if (is_valid_group) {
+    DST_DTYPE* group_output =
+        static_cast<DST_DTYPE*>(output_q) +
+        static_cast<int64_t>(mn_idx) * groups_per_row * group_size +
+        sf_k_idx * group_size;
+    QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
+                                threads_per_group, y_s, min_8bit, max_8bit);
+  }
 }
 
 void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
@@ -310,7 +322,6 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   const int64_t mn = input.numel() / k;
   const int64_t groups_per_row = k / group_size;
-  const int64_t num_groups = mn * groups_per_row;
 
   STD_TORCH_CHECK(output_s_packed.dim() == 2,
                   "output_s_packed must be 2D, got dim=", output_s_packed.dim(),
@@ -330,36 +341,46 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
                   "output_s_packed shape must be [", mn, ", ", k_num_packed_sfk,
                   "], but got [", output_s_packed.size(0), ", ",
                   output_s_packed.size(1), "].");
+  // Verify column-major TMA-aligned layout
+  STD_TORCH_CHECK(output_s_packed.stride(0) == 1 &&
+                      output_s_packed.stride(1) == tma_aligned_mn,
+                  "output_s_packed must have strides [1, ", tma_aligned_mn,
+                  "], but got [", output_s_packed.stride(0), ", ",
+                  output_s_packed.stride(1), "].");
 
   cudaStream_t stream = get_current_cuda_stream();
 
   constexpr int THREADS_PER_GROUP = 16;
 
-  const int groups_per_block = GetGroupsPerBlock(num_groups);
+  // Expand the grid to cover MN and K padding so every byte in
+  // output_s_packed is written (padding bytes get zeroed by the kernel).
+  const int64_t padded_groups_per_row = k_num_packed_sfk * 4;
+  const int64_t num_groups_padded = tma_aligned_mn * padded_groups_per_row;
+  // Number of elements in output_s_packed.
+  const int64_t num_scale_elems = mn + (k_num_packed_sfk - 1) * tma_aligned_mn;
+
+  const int groups_per_block = GetGroupsPerBlock(num_groups_padded);
 
   auto dst_type = output_q.scalar_type();
-  const int num_blocks = num_groups / groups_per_block;
+  const int num_blocks = num_groups_padded / groups_per_block;
   const int num_threads = groups_per_block * THREADS_PER_GROUP;
 
-  // zero-initialize packed scales, since we use atomicOr to accumulate
-  // exponents from different groups.
-  torch::stable::zero_(output_s_packed);
-
-#define LAUNCH_PACKED_KERNEL(T, DST_DTYPE)                                \
-  do {                                                                    \
-    dim3 grid(num_blocks);                                                \
-    dim3 block(num_threads);                                              \
-    size_t smem_bytes =                                                   \
-        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);   \
-    per_token_group_quant_8bit_packed_kernel<T, DST_DTYPE>                \
-        <<<grid, block, smem_bytes, stream>>>(                            \
-            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(), \
-            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),  \
-            static_cast<int>(group_size), static_cast<int>(num_groups),   \
-            groups_per_block, static_cast<int>(groups_per_row),           \
-            static_cast<int>(mn), static_cast<int>(tma_aligned_mn),       \
-            static_cast<float>(eps), static_cast<float>(min_8bit),        \
-            static_cast<float>(max_8bit));                                \
+#define LAUNCH_PACKED_KERNEL(T, DST_DTYPE)                                     \
+  do {                                                                         \
+    dim3 grid(num_blocks);                                                     \
+    dim3 block(num_threads);                                                   \
+    size_t smem_bytes =                                                        \
+        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);        \
+    per_token_group_quant_8bit_packed_kernel<T, DST_DTYPE>                     \
+        <<<grid, block, smem_bytes, stream>>>(                                 \
+            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),      \
+            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),       \
+            static_cast<int>(group_size), static_cast<int>(num_groups_padded), \
+            groups_per_block, static_cast<int>(padded_groups_per_row),         \
+            static_cast<int>(groups_per_row), static_cast<int>(mn),            \
+            static_cast<int>(tma_aligned_mn),                                  \
+            static_cast<int>(num_scale_elems), static_cast<float>(eps),        \
+            static_cast<float>(min_8bit), static_cast<float>(max_8bit));       \
   } while (0)
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
