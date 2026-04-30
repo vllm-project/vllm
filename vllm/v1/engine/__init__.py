@@ -175,6 +175,12 @@ class EngineCoreOutput(
 
     prefill_stats: PrefillStats | None = None
 
+    # The number of tokens with prefix cache hits (local + external).
+    num_cached_tokens: int = 0
+    # The number of cached tokens to report in user-facing outputs.
+    num_cached_tokens_for_output: int | None = None
+    # The number of tokens computed remotely (original count from connector).
+    num_external_computed_tokens: int = 0
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.

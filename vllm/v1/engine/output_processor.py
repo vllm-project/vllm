@@ -619,6 +619,11 @@ class OutputProcessor:
             routed_experts = engine_core_output.routed_experts
 
             if req_state.is_prefilling:
+                req_state.num_cached_tokens = (
+                    engine_core_output.num_cached_tokens_for_output
+                    if engine_core_output.num_cached_tokens_for_output is not None
+                    else engine_core_output.num_cached_tokens
+                )
                 if engine_core_output.prefill_stats is not None:
                     req_state.num_cached_tokens = (
                         engine_core_output.prefill_stats.num_cached_tokens

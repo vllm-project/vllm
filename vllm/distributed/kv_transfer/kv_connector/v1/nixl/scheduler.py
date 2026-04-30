@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
+    PREFILL_NUM_CACHED_TOKENS_KEY,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
@@ -492,7 +493,7 @@ class NixlConnectorScheduler:
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_sw_clipped_blocks(block_ids)
 
-        return delay_free_blocks, dict(
+        kv_transfer_params = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=block_ids,
@@ -503,3 +504,7 @@ class NixlConnectorScheduler:
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
         )
+        kv_transfer_params[PREFILL_NUM_CACHED_TOKENS_KEY] = max(
+            request.num_cached_tokens, 0
+        )
+        return delay_free_blocks, kv_transfer_params

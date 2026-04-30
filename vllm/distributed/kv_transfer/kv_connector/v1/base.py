@@ -80,6 +80,8 @@ CopyBlocksOp = Callable[
 
 logger = init_logger(__name__)
 
+PREFILL_NUM_CACHED_TOKENS_KEY = "prefill_num_cached_tokens"
+
 
 class SupportsHMA(ABC):
     """
