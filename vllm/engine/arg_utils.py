@@ -1935,6 +1935,7 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
 
+        original_max_num_seqs = self.max_num_seqs
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
             model_config,
@@ -1955,6 +1956,7 @@ class EngineArgs:
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
+            original_max_num_seqs=original_max_num_seqs,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,

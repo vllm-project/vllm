@@ -6434,6 +6434,7 @@ class GPUModelRunner(
             self.kv_cache_config,
             self.max_num_reqs,
             is_profiling=is_profiling,
+            scheduler_config=self.scheduler_config,
         )
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.

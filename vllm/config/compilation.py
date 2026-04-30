@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.scheduler import SchedulerConfig
     from vllm.v1.attention.backend import AttentionCGSupport
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
@@ -1307,6 +1308,7 @@ class CompilationConfig:
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
+        scheduler_config: "SchedulerConfig | None" = None,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1420,9 +1422,10 @@ class CompilationConfig:
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
         # dispatcher already caps batch sizes at max_num_seqs, so we just
-        # need to verify that enough blocks exist. Raising here instead
-        # of silently capping cudagraph_capture_sizes avoids unintended
-        # restrictions on PIECEWISE (prefill) cudagraphs.
+        # need to verify that enough blocks exist. If max_num_seqs was
+        # the engine-determined default, auto-adjust it down to fit the
+        # available blocks; if the user set it explicitly, raise so they
+        # see the actionable error.
         # See: https://github.com/vllm-project/vllm/issues/34094
         if (
             kv_cache_config is not None
@@ -1432,14 +1435,39 @@ class CompilationConfig:
             and kv_cache_config.has_mamba_layers
             and max_num_reqs > kv_cache_config.num_blocks
         ):
-            raise ValueError(
-                f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache "
-                f"blocks ({kv_cache_config.num_blocks}). Each decode sequence "
-                "requires one Mamba cache block, so CUDA graph capture cannot "
-                "proceed. Please lower max_num_seqs to at most "
-                f"{kv_cache_config.num_blocks} or increase "
-                "gpu_memory_utilization."
+            num_blocks = kv_cache_config.num_blocks
+            user_set_max_num_seqs = (
+                scheduler_config is not None
+                and scheduler_config.original_max_num_seqs is not None
             )
+            if user_set_max_num_seqs:
+                raise ValueError(
+                    f"max_num_seqs ({max_num_reqs}) exceeds available Mamba "
+                    f"cache blocks ({num_blocks}). Each decode sequence "
+                    "requires one Mamba cache block, so CUDA graph capture "
+                    "cannot proceed. Please lower max_num_seqs to at most "
+                    f"{num_blocks} or increase gpu_memory_utilization."
+                )
+            logger.warning(
+                "max_num_seqs (%d) exceeds available Mamba cache blocks "
+                "(%d); auto-adjusting max_num_seqs to %d so CUDA graph "
+                "capture can proceed. Pass --max-num-seqs explicitly or "
+                "increase --gpu-memory-utilization to override.",
+                max_num_reqs,
+                num_blocks,
+                num_blocks,
+            )
+            assert scheduler_config is not None
+            scheduler_config.max_num_seqs = num_blocks
+            if self.cudagraph_capture_sizes:
+                self.cudagraph_capture_sizes = [
+                    s for s in self.cudagraph_capture_sizes if s <= num_blocks
+                ]
+                if (
+                    self.max_cudagraph_capture_size is not None
+                    and self.max_cudagraph_capture_size > num_blocks
+                ):
+                    self.max_cudagraph_capture_size = num_blocks
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
