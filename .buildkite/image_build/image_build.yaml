@@ -61,8 +61,6 @@ steps:
     key: arm64-image-build
     depends_on: []
     optional: true
-    agents:
-      queue: arm64_cpu_queue_postmerge
     commands:
     - .buildkite/image_build/image_build_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
