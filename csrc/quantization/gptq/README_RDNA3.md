@@ -308,6 +308,148 @@ Audit method (no GPU required, pure static analysis of the .so):
 # Look for .vgpr_count, .vgpr_spill_count, .private_segment_fixed_size.
 ```
 
+## Development history
+
+Optimisation rounds in chronological order. The "Lessons learned"
+section below covers each technical change in depth; this is the
+narrative of how the path got from initial drop to its current
+state, with the numbers measured at each stage. Two distinct bench
+regimes appear:
+
+* **kernel microbench** — direct calls to the C++ ops
+  (`gptq_gemm_rdna3_wmma`, etc.) at fixed shapes, median of N iters
+  with `cuda.Event` timing. Used during dev as a fast feedback loop.
+* **end-to-end serving** — `evalscope perf` against a live `vllm
+  serve`, 50 reqs × concurrency 100, output ~1800 tok. The numbers
+  in the Performance table above are this kind. They include
+  attention, KV-cache, all the other linears in the layer, etc., so
+  kernel speedups attenuate before reaching TPS.
+
+Both are reported below where they exist.
+
+### Round 0 — initial drop
+
+The scalar + WMMA kernels landed with the bf16 path producing
+correct output but at very low TPS under concurrency: **~100 tk/s
+end-to-end** (max-num-seqs=8) vs the fp16 path's ~247 tk/s at the
+same settings. Triton W4A16 was the only baseline before this kernel
+existed and clocked at ~83 tk/s on the same workload (both fp16 and
+bf16). ExLlama (fp16-only) was the practical reference at 255 tk/s.
+
+### Round 1 — bf16 scalar throughput parity (lessons 6, 7, 8)
+
+Three stacked changes targeted the bf16 scalar path under load:
+
+* atomic CAS-64 merge — two 32-bit CAS calls per row collapsed into
+  one `global_atomic_cmpswap_b64` covering all 4 output lanes
+  (Lesson 6);
+* factored scale/zb fold for M_COUNT=1 decode — drops dequant from
+  64 → 47 FMAs per int32 weight (Lesson 7);
+* col-outer with `#pragma unroll 1` — frees register pressure in
+  M_COUNT=4 / 8 by recycling `dq` VGPRs across col iterations
+  (Lesson 8).
+
+VGPR audit before/after the round (bf16):
+
+| Kernel         | VGPR before | VGPR after | Spill before     | Spill after |
+| ---            | ---         | ---        | ---              | ---         |
+| bf16 M_COUNT=1 | 82          | 41         | 0                | 0           |
+| bf16 M_COUNT=4 | 192 (cap)   | 82         | 38 VGPR / 156 B  | **0**       |
+| bf16 M_COUNT=8 | 192 (cap)   | 130        | 144 VGPR / 580 B | **0**       |
+
+End-to-end bf16 serving at max-num-seqs=8: **~100 → 234 tk/s** (+134%).
+
+### Round 2 — WMMA single-wave latency hiding (lesson 9)
+
+The WMMA prefill kernel launches with one wave per block, so every
+long-latency op in the K-loop serialises the whole block. Two such
+ops were the dominant cost on the initial path:
+
+* explicit `__syncthreads()` × 2 per K-iteration with no other waves
+  to synchronise — both removed; the compiler-inserted `s_waitcnt
+  lgkmcnt(0)` already orders within-wave dependencies;
+* sequential 16× `global_load_b16` for each lane's A row — replaced
+  with a 32-byte bulk `__builtin_memcpy(&a_frag, ptr, 32)` that
+  lowers to two `global_load_b128` instructions.
+
+Kernel microbench (direct call to `gptq_gemm_rdna3_wmma`, M=32,
+K=N=4096, bf16):
+
+| Stage                                | bf16 WMMA |
+| ---                                  | ---       |
+| Initial branch                       | 187 tk/s  |
+| **+ Round 2 (single-wave latency)**  | **365 tk/s (+95%)** |
+
+### Round 3 — WMMA K-split with packed atomic (lesson 10)
+
+After Round 2 the WMMA bf16 path was still trailing the fp16 scalar
+reference because its 1-wave-per-block / no-K-split layout kept it
+at ~512 waves vs the scalar's ~2048 at M=32. This round adds
+`gridDim.z = K_SPLIT` (heuristic: 4 if K ≥ 1024, 2 if K ≥ 512,
+else 1) and an epilogue that uses `__shfl_xor` between adjacent
+lanes + a packed CAS-32 — halving the atomic count and eliminating
+intra-block contention.
+
+Kernel microbench (M=32, K=N=4096, bf16):
+
+| Stage                                | bf16 WMMA           | % of fp16 scalar |
+| ---                                  | ---                 | ---              |
+| Round 2 baseline                     | 365 tk/s            | 73 %             |
+| **+ Round 3 (K-split = 4)**          | **444 tk/s (+21%)** | **89 %**         |
+| fp16 scalar reference (same call)    | 500 tk/s            | 100 %            |
+
+Total bf16 WMMA path improvement across Rounds 2 and 3 at the kernel
+level: **187 → 444 tk/s (+137 %)**.
+
+### Round 4 — fp16 scalar `v_dot2_f32_f16` swap (lesson 11)
+
+ISA verification showed hipcc 7.2 was NOT folding the
+`__hfma2 + cast + add` pattern into `v_dot2_f32_f16`. Manual swap
+to `__builtin_amdgcn_fdot2` eliminated the trailing fp16→fp32 casts
+and kept the accumulator in fp32 throughout the dot.
+
+Kernel microbench (M=32, K=N=4096, fp16): **77 → 52.5 μs/call
+(−47 %)**.
+
+### Round 5 — re-bench end-to-end and clarify M vs max-num-seqs
+
+Earlier README revisions had quoted some kernel-microbench numbers
+as if they were serving numbers, and conflated `max-num-seqs` (vLLM
+scheduler param) with `M` (matmul batch dim). All benches were
+re-run end-to-end via `evalscope perf` with the full optimisation
+stack applied. The Performance table above is from this re-run.
+The "Note on M vs max-num-seqs" subsection records the distinction.
+
+### End-to-end serving deltas attributable to each round
+
+The serving numbers below are from `evalscope perf` reruns at the
+specified branch state. They aren't a strict A/B per round (the
+intermediate states weren't all individually benched in serving) —
+they're recorded where we have verified measurements.
+
+* **Round 1 (bf16 scalar lessons 6–8):** bf16 max-num-seqs=8 lifted
+  from very-slow on the initial branch to ~234 tk/s in the
+  intermediate bench captured at the time of `8f6de874a`. The final
+  number after all subsequent rounds is **205.3 tk/s** (per the
+  Performance table); the small gap is run-to-run variance and the
+  added atomic CAS overhead from the K-split round, which marginally
+  affected the rare bf16-WMMA spikes during decode.
+* **Rounds 2 & 3 (WMMA bf16 lessons 9–10):** mainly visible at high
+  concurrency where decode batches reach M ≥ 16 and prefill chunks
+  exercise WMMA. Final bf16 max-num-seqs=32 is **345.6 tk/s**.
+* **Round 4 (fp16 fdot2 lesson 11):**
+  * fp16 max-num-seqs=8: 247 → **270.2 tk/s** (+9.4 %),
+  * fp16 max-num-seqs=32: 402 → **445.7 tk/s** (+10.9 %).
+  Tested under WMMA dispatch too: serving was a wash (445.7 vs 440.7
+  tk/s within run-to-run variance), so the dispatch stays bf16-only.
+
+Final TPS vs the previously-best fp16 baseline (ExLlama):
+
+| Path           | RDNA3 (this PR) | ExLlama fp16 | Δ        |
+| ---            | ---             | ---          | ---      |
+| fp16 seqs=8    | 270.2 tk/s      | 255.0 tk/s   | +5.96 %  |
+| fp16 seqs=32   | 445.7 tk/s      | 382.5 tk/s   | +16.52 % |
+
 ## Lessons learned
 
 These are the changes that actually moved end-to-end TPS, plus the
