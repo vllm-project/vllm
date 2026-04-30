@@ -267,7 +267,11 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description=(
             "Additional keyword arguments passed to the chat template renderer. "
-            "Useful for model-specific controls such as enable_thinking."
+            "Useful for model-specific controls such as enable_thinking. "
+            "These are merged before internally derived response controls, so "
+            "the Responses API's computed values take precedence for "
+            "overlapping keys such as add_generation_prompt and "
+            "continue_final_message."
         ),
     )
     thinking_token_budget: int | None = Field(
@@ -305,7 +309,9 @@ class ResponsesRequest(OpenAIBaseModel):
         return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(  # To remove unset values
+            # Merge request-provided kwargs first so internally derived
+            # Responses API controls take precedence on overlapping keys.
+            chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=not continue_final,

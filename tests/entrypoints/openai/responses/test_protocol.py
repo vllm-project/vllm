@@ -54,3 +54,21 @@ def test_responses_request_accepts_chat_template_kwargs() -> None:
 
     assert chat_params.chat_template_kwargs["enable_thinking"] is False
     assert chat_params.chat_template_kwargs["reasoning_effort"] == "none"
+
+
+def test_responses_internal_chat_template_kwargs_take_precedence() -> None:
+    request = ResponsesRequest(
+        input="test input",
+        chat_template_kwargs={
+            "add_generation_prompt": False,
+            "continue_final_message": True,
+        },
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert chat_params.chat_template_kwargs["add_generation_prompt"] is True
+    assert chat_params.chat_template_kwargs["continue_final_message"] is False
