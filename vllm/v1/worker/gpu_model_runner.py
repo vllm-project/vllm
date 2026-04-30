@@ -1919,10 +1919,21 @@ class GPUModelRunner(
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         # Record which requests should not be sampled,
-        # so that we could clear the sampled tokens before returning
-        self.discard_request_mask.np[:num_reqs] = (
+        # so that we could clear the sampled tokens before returning.
+        # Also discard tokens for max_tokens=0 (prefill-only) requests
+        # that just finished prefill, so no token is cached.
+        still_prefilling = (
             self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
         )
+        max_tokens_zero = np.array(
+            [
+                self.requests[r].sampling_params is not None
+                and self.requests[r].sampling_params.max_tokens == 0
+                for r in self.input_batch.req_ids
+            ],
+            dtype=bool,
+        )
+        self.discard_request_mask.np[:num_reqs] = still_prefilling | max_tokens_zero
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_accepted_tokens from CPU (set by

@@ -241,15 +241,14 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             logger.exception("Error building prompts")
             return self.create_error_response(e)
 
-        # Create sampling params for scoring
-        # We use max_tokens=1 with logprob_token_ids to efficiently get
-        # logprobs for only the specified label tokens (not full vocab)
-        # Note: temperature/top_k/top_p don't affect logprobs - they only
-        # affect the sampling distribution. Logprobs are computed from raw
-        # logits via log_softmax before any sampling transformations.
+        # Create sampling params for scoring (prefill-only).
+        # max_tokens=0 runs only the prefill forward pass and returns
+        # logprobs for the next-token position without generating tokens.
+        # Using logprob_token_ids without logprobs avoids the expensive
+        # full-vocab log_softmax and top-k gather in the sampler — only
+        # a fused Triton kernel for the specific label tokens runs.
         sampling_params = SamplingParams(
-            max_tokens=1,
-            logprobs=len(request.label_token_ids),
+            max_tokens=0,
             logprob_token_ids=request.label_token_ids,
             n=1,
         )
@@ -426,8 +425,9 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             else:
                 prompt_token_ids = query_token_ids + item_token_ids
 
-            # Truncate to max_model_len - 1 to leave room for 1 output token
-            max_prompt_len = max_model_len - 1
+            # No output tokens are generated (prefill-only), so the full
+            # context window is available for the prompt.
+            max_prompt_len = max_model_len
             if len(prompt_token_ids) > max_prompt_len:
                 prompt_token_ids = prompt_token_ids[:max_prompt_len]
 

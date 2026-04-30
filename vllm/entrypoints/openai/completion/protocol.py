@@ -255,8 +255,6 @@ class CompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.logprobs
 
-        echo_without_generation = self.echo and self.max_tokens == 0
-
         response_format = self.response_format
         if response_format is not None:
             structured_outputs_kwargs = dict[str, Any]()
@@ -307,7 +305,7 @@ class CompletionRequest(OpenAIBaseModel):
             stop_token_ids=self.stop_token_ids,
             logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
-            max_tokens=max_tokens if not echo_without_generation else 1,
+            max_tokens=max_tokens,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,

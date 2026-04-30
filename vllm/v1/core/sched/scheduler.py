@@ -1410,6 +1410,14 @@ class Scheduler(SchedulerInterface):
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
+            elif (
+                request.max_tokens == 0
+                and not request.is_prefill_chunk
+                and request.sampling_params is not None
+            ):
+                # Prefill-only: finish without generating any tokens.
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                stopped = True
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
@@ -1448,10 +1456,20 @@ class Scheduler(SchedulerInterface):
             # Extract sample logprobs if needed.
             if (
                 request.sampling_params is not None
-                and request.sampling_params.logprobs is not None
+                and (
+                    request.sampling_params.logprobs is not None
+                    or request.sampling_params.logprob_token_ids is not None
+                )
                 and logprobs
             ):
-                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+                # For max_tokens=0, tokens were discarded by the model
+                # runner but logprobs were still computed (1 position).
+                num_logprob_positions = (
+                    len(new_token_ids)
+                    if new_token_ids
+                    else (1 if request.max_tokens == 0 else 0)
+                )
+                new_logprobs = logprobs.slice_request(req_index, num_logprob_positions)
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]

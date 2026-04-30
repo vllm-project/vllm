@@ -104,7 +104,7 @@ def _create_mock_request_output(logprobs_dict: dict[int, float]) -> RequestOutpu
     completion_output = CompletionOutput(
         index=0,
         text="",
-        token_ids=[100],
+        token_ids=[],
         cumulative_logprob=-1.0,
         logprobs=[logprobs_with_objs],
         finish_reason="length",
@@ -159,7 +159,7 @@ class TestProtocolModels:
                 GenerativeScoringItemResult(index=0, score=0.7),
                 GenerativeScoringItemResult(index=1, score=0.4),
             ],
-            usage={"prompt_tokens": 10, "total_tokens": 12, "completion_tokens": 2},
+            usage={"prompt_tokens": 10, "total_tokens": 10, "completion_tokens": 0},
         )
         assert response.object == "list"
         assert response.model == "test-model"

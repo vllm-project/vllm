@@ -48,6 +48,10 @@ class LogprobsProcessor:
         sampling_params = request.sampling_params
         assert sampling_params is not None
         num_logprobs = sampling_params.logprobs
+        # When logprob_token_ids is set without logprobs, enable logprobs
+        # processing using the count of specific token IDs.
+        if num_logprobs is None and sampling_params.logprob_token_ids is not None:
+            num_logprobs = len(sampling_params.logprob_token_ids)
         num_prompt_logprobs = sampling_params.prompt_logprobs
         return cls(
             tokenizer=tokenizer,
