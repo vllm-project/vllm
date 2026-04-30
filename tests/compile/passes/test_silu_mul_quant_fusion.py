@@ -245,6 +245,8 @@ def test_activation_quant_fusion_pass_skips_block_quant_on_rocm():
 
     assert kFp8Dynamic128Sym not in QUANT_OPS
     assert kFp8Dynamic64Sym not in QUANT_OPS
+    assert kFp8Dynamic128Sym not in FUSED_OPS
+    assert kFp8Dynamic64Sym not in FUSED_OPS
 
     with set_current_vllm_config(config):
         fusion_pass = ActivationQuantFusionPass(config)
