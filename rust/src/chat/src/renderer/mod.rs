@@ -6,9 +6,11 @@ use crate::error::Result;
 use crate::request::ChatRequest;
 
 pub mod deepseek_v32;
+pub mod deepseek_v4;
 pub mod hf;
 mod selection;
 
+pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
 pub use selection::RendererSelection;
 

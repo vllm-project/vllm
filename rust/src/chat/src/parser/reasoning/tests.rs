@@ -161,7 +161,22 @@ fn deepseek_r1_stops_scanning_at_last_special_token() {
 fn factory_contains_and_lists_registered_parsers() {
     let factory = ReasoningParserFactory::new();
     assert!(factory.contains(names::QWEN3));
+    assert!(factory.contains(names::DEEPSEEK_V4));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
+    assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
+}
+
+#[test]
+fn factory_resolves_deepseek_v4_to_qwen3_alias() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4"),
+        Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek_v4"),
+        Some(names::DEEPSEEK_V4)
+    );
 }
 
 #[test]

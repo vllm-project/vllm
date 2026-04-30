@@ -13,7 +13,7 @@ use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
 use crate::renderer::hf::HfChatRenderer;
-use crate::renderer::{DeepSeekV32ChatRenderer, DynChatRenderer};
+use crate::renderer::{DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer};
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
 
@@ -45,6 +45,7 @@ impl HfChatBackend {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
             RendererSelection::Hf => Arc::new(HfChatRenderer::load(&files, options)?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
+            RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
         };
 
         info!(

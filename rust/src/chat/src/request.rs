@@ -450,7 +450,7 @@ impl ChatRequest {
         }
     }
 
-    fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
+    pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
             Some(Value::Bool(value)) => Ok(Some(*value)),

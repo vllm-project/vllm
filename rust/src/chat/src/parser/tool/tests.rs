@@ -97,6 +97,10 @@ fn factory_new_resolves_external_default_patterns() {
         Some(names::LLAMA3_JSON)
     );
     assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4"),
+        Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-V3.2-Exp"),
         Some(names::DEEPSEEK_V32)
     );

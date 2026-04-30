@@ -31,7 +31,8 @@ pub use parser::reasoning::{
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt, RendererSelection,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt,
+    RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -232,6 +233,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
     }
 }

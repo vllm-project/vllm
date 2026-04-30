@@ -119,7 +119,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4)
 
         For more information, try '--help'.
     "#]]

@@ -40,6 +40,7 @@ pub mod names {
     pub const COHERE_CMD: &str = "cohere_cmd";
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
+    pub const DEEPSEEK_V4: &str = "deepseek_v4";
     pub const GEMMA4: &str = "gemma4";
     pub const GLM45: &str = "glm45";
     pub const KIMI: &str = "kimi";
@@ -52,6 +53,8 @@ pub mod names {
 
 /// DeepSeek V3 currently shares the standard `<think>...</think>` parser.
 pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
+/// DeepSeek V4 currently shares the standard `<think>...</think>` parser.
+pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
 /// GLM45 currently shares the standard `<think>...</think>` parser.
 pub type Glm45ReasoningParser = Qwen3ReasoningParser;
 /// Kimi K2 currently shares the standard `<think>...</think>` parser.
@@ -162,6 +165,7 @@ impl ReasoningParserFactory {
             .register_parser::<CohereCmdReasoningParser>(names::COHERE_CMD)
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
+            .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
             .register_parser::<Gemma4ReasoningParser>(names::GEMMA4)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<KimiReasoningParser>(names::KIMI)
@@ -173,6 +177,8 @@ impl ReasoningParserFactory {
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
+            .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
+            .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("gemma4", names::GEMMA4)
