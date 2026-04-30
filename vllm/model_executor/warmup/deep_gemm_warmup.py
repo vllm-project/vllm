@@ -11,15 +11,15 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm.model_executor.layers.quantization.mxfp8 import Mxfp8OnlineLinearMethod
+from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineLinearMethod
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,

@@ -54,7 +54,10 @@ elif current_platform.is_rocm():
 
 
 def get_flash_attn_version(
-    requires_alibi: bool = False, head_size: int | None = None
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -112,13 +115,29 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        # The FA3 kernel rejects s_aux (sinks) when hdim != hdim_v; upgrade to
+        # FA4 on SM90 when available.
+        if (
+            fa_version == 3
+            and has_sinks
+            and head_size is not None
+            and head_size_v is not None
+            and head_size != head_size_v
+            and device_capability.major == 9
+            and is_fa_version_supported(4)
+        ):
+            logger.info_once(
+                "Diff-KV with sinks: upgrading FlashAttention 3 -> 4",
+                scope="local",
+            )
+            fa_version = 4
+
         # FA4 currently uses batch-shape-dependent scheduling
         # heuristics on SM100+, which breaks batch invariance.
         if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
                 "defaulting to FA version 2.",
-                scope="local",
             )
             fa_version = 2
 
@@ -154,18 +173,34 @@ def get_flash_attn_version(
         return None
 
 
+def is_fa_version_supported(fa_version: int) -> bool:
+    try:
+        from vllm.vllm_flash_attn.flash_attn_interface import (
+            is_fa_version_supported as _is_fa_version_supported,
+        )
+
+        return _is_fa_version_supported(fa_version)
+    except ImportError:
+        return False
+
+
 def flash_attn_supports_fp8() -> bool:
+    if current_platform.is_xpu():
+        return True
     return (
         get_flash_attn_version() == 3
         and current_platform.is_device_capability_family(90)
     )
 
 
+def flash_attn_supports_quant_query_input() -> bool:
+    return not current_platform.is_xpu()
+
+
 def flash_attn_supports_sinks() -> bool:
     if current_platform.is_xpu():
         return True
-    else:
-        return get_flash_attn_version() == 3
+    return get_flash_attn_version() in (3, 4)
 
 
 def flash_attn_supports_mla():

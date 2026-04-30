@@ -375,6 +375,7 @@ def softmax(data):
 @dataclass
 class ModelInfo:
     name: str
+    revision: str | None = None
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
@@ -475,7 +476,16 @@ def dummy_hf_overrides(
     else:
         # Use minimal layers for testing
         num_layers = 1
-        num_hidden_layers = 3 if model_arch == "Gemma3nForConditionalGeneration" else 1
+        num_hidden_layers = (
+            3
+            if model_arch
+            in (
+                "Gemma3nForConditionalGeneration",
+                "Gemma4ForCausalLM",
+                "Gemma4ForConditionalGeneration",
+            )
+            else 1
+        )
 
     update_dict = {
         "num_layers": num_layers,

@@ -66,6 +66,13 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+if Version(version("transformers")) < Version("5.0.0"):
+    logger.warning(
+        "Support for Transformers v4 is deprecated. The Transformers v4 codepath will "
+        "become unmaintained in vLLM v0.22.0 and will be removed in vLLM v0.24.0. "
+        "Please upgrade to Transformers v5: pip install --upgrade transformers"
+    )
+
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -82,16 +89,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
-    colmodernvbert="ColModernVBertConfig",
+    modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    deepseek_v4="DeepseekV4Config",
     flex_olmo="FlexOlmoConfig",
+    fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
+    granite4_vision="Granite4VisionConfig",
     hunyuan_vl="HunYuanVLConfig",
+    hy_v3="HYV3Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
@@ -116,6 +127,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_moe="Qwen3_5MoeConfig",
+    laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
@@ -209,6 +221,16 @@ class HFConfigParser(ConfigParserBase):
                 config_class = _CONFIG_REGISTRY[model_type]
                 config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
+                # If the on-disk model_type differs from the overridden
+                # one, register under both so AutoConfig.from_pretrained
+                # returns the correct class regardless of what the
+                # checkpoint says
+                if (
+                    config_model_type := config_dict.get("model_type")
+                ) and config_model_type != model_type:
+                    config_class.model_type = config_model_type
+                    AutoConfig.register(config_model_type, config_class, exist_ok=True)
+                    config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
             try:
@@ -388,22 +410,33 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     ompe = getattr(config, "original_max_position_embeddings", None)
 
     if Version(version("transformers")) < Version("5.0.0"):
-        # Transformers v4 installed, legacy config fields may be present
-        if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
-            config.rope_parameters = rope_scaling
-        if (
-            rope_theta is not None
-            or partial_rotary_factor is not None
-            or ompe is not None
-        ) and not getattr(config, "rope_parameters", None):
-            config.rope_parameters = {"rope_type": "default"}
-        # Patch legacy fields into rope_parameters
-        if rope_theta is not None:
-            config.rope_parameters["rope_theta"] = rope_theta
-        if partial_rotary_factor is not None:
-            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-        if ompe is not None:
-            config.rope_parameters["original_max_position_embeddings"] = ompe
+        # Transformers v4 installed, legacy config fields may be present.
+        existing_rp = getattr(config, "rope_parameters", None)
+        if isinstance(existing_rp, dict) and is_rope_parameters_nested(existing_rp):
+            # Interleaved-attention models (e.g. Laguna-XS.2) ship a nested
+            # {layer_type: {...}} rope_parameters that the model code indexes
+            # by layer_type. The per-layer-type sub-dicts already carry the
+            # correct rope_theta / partial_rotary_factor / ompe (the converter
+            # places top-level legacy fields inside full_attention), so don't
+            # merge top-level fields here — that would shadow the per-type
+            # values and break sliding-attention layers.
+            pass
+        else:
+            if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
+                config.rope_parameters = rope_scaling
+            if (
+                rope_theta is not None
+                or partial_rotary_factor is not None
+                or ompe is not None
+            ) and not getattr(config, "rope_parameters", None):
+                config.rope_parameters = {"rope_type": "default"}
+            # Patch legacy fields into rope_parameters
+            if rope_theta is not None:
+                config.rope_parameters["rope_theta"] = rope_theta
+            if partial_rotary_factor is not None:
+                config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+            if ompe is not None:
+                config.rope_parameters["original_max_position_embeddings"] = ompe
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
         # Patch these fields in case they used non-standard names
