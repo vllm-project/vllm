@@ -409,24 +409,24 @@ class DefaultModelLoader(BaseModelLoader):
         if enable_weights_track:
             self.track_weights_loading(model, loaded_weights)
 
-    def track_weights_loading(
-        self, model: nn.Module, loaded_weights: set[str] | None
-    ) -> None:
-        weights_to_load = {name for name, _ in model.named_parameters()}
-        if loaded_weights is not None:
-            # ignore online quantization scales
-            for name, module in model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                has_online_quant = getattr(quant_method, "uses_meta_device", False)
-                has_postprocess_quant = getattr(
-                    quant_method, "process_weights_after_loading", None
-                )
-                # ignore kv_cache scale and online quant scale,
-                # which can be missing in checkpoints
-                if has_online_quant or has_postprocess_quant:
-                    for param_name, _ in module.named_parameters():
-                        full_name = f"{name}.{param_name}" if name else param_name
-                        loaded_weights.add(full_name)
+        def track_weights_loading(
+            self, model: nn.Module, loaded_weights: set[str] | None
+        ) -> None:
+            weights_to_load = {name for name, _ in model.named_parameters()}
+            if loaded_weights is not None:
+                # ignore online quantization scales
+                for name, module in model.named_modules():
+                    quant_method = getattr(module, "quant_method", None)
+                    has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                    has_postprocess_quant = getattr(
+                        quant_method, "process_weights_after_loading", None
+                    )
+                    # ignore kv_cache scale and online quant scale,
+                    # which can be missing in checkpoints
+                    if has_online_quant or has_postprocess_quant:
+                        for param_name, _ in module.named_parameters():
+                            full_name = f"{name}.{param_name}" if name else param_name
+                            loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 if model_config.quantization is not None:
