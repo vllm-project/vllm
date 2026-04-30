@@ -155,16 +155,16 @@ def main(args: argparse.Namespace):
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
-    print(f"Avg latency: {np.mean(latencies)} seconds")
-    print(f"Std latency: {np.std(latencies)} seconds")
+    print(f"Avg latency: {np.mean(latencies).item()} seconds")
+    print(f"Std latency: {np.std(latencies).item()} seconds")
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile} seconds")
 
     # Output JSON results if specified
     if args.output_json:
         results = {
-            "avg_latency": np.mean(latencies),
-            "std_latency": np.std(latencies),
+            "avg_latency": np.mean(latencies).item(),
+            "std_latency": np.std(latencies).item(),
             "latencies": latencies.tolist(),
             "percentiles": dict(zip(percentages, percentiles.tolist())),
         }
