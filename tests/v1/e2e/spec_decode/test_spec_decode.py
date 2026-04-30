@@ -755,7 +755,43 @@ def test_medusa_correctness(
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
         assert ref_output.outputs[0].text == spec_output.outputs[0].text
 
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+def test_medusa_acceptance_rate(
+    sampling_config: SamplingParams,
+):
+    """Verify a trained Medusa checkpoint achieves nonzero acceptance rate.
 
+    Uses the canonical FasterDecoding vicuna-7b checkpoint to confirm the
+    speculation path actually accepts tokens — unlike test_medusa_correctness,
+    which uses a random head and only validates output correctness.
+    """
+    target_model = "lmsys/vicuna-7b-v1.3"
+    medusa_model = "FasterDecoding/medusa-vicuna-7b-v1.3"
+    test_prompts = get_test_prompts(mm_enabled=False)
+
+    spec_llm = LLM(
+        model=target_model,
+        speculative_config={
+            "model": medusa_model,
+            "num_speculative_tokens": 3,
+        },
+        max_model_len=1024,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+    spec_llm.chat(test_prompts, sampling_config)
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    assert acceptance_rate > 0, (
+        f"Expected nonzero acceptance rate for trained Medusa checkpoint, "
+        f"got {acceptance_rate:.4f}"
+    )                                                                                                                                                                                                                    
+        
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
