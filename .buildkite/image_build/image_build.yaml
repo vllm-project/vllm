@@ -60,7 +60,10 @@ steps:
   - label: ":docker: Build arm64 image"
     key: arm64-image-build
     depends_on: []
-    optional: true
+    source_file_dependencies:
+      - ".buildkite/image_build/image_build.yaml"
+      - ".buildkite/image_build/image_build_arm64.sh"
+      - "docker/Dockerfile"
     commands:
     - .buildkite/image_build/image_build_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
