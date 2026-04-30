@@ -21,9 +21,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.utils.import_utils import has_deep_ep
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -309,7 +308,9 @@ def torch_moe_impl(
         # blockwise quant and de-quant.
         assert not per_act_token_quant
         a = test_tensors.rank_tokens
-        aq, aq_scale = per_token_group_quant_fp8(a, 128, use_ue8m0=False)
+        aq, aq_scale = ir.ops.dynamic_group_quant_fp8(
+            a, 128, 1e-10, None, False, False, False, None
+        )
         a = (
             (aq.view(-1, 128).to(torch.float32) * aq_scale.view(-1, 1))
             .view(a.shape)

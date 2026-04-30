@@ -13,8 +13,9 @@ from tests.kernels.quant_utils import (
 )
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
 from vllm.platforms import current_platform
@@ -86,11 +87,15 @@ def test_per_token_group_quant_fp8(
     x = torch.rand(num_tokens, d, dtype=dtype)
 
     ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
-    out, scale = per_token_group_quant_fp8(
+    out, scale = ir.ops.dynamic_group_quant_fp8(
         x,
         group_size,
-        column_major_scales=column_major_scales,
-        tma_aligned_scales=tma_aligned_scales,
+        1e-10,
+        None,
+        column_major_scales,
+        tma_aligned_scales,
+        None,
+        None,
     )
 
     assert torch.allclose(out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15)
@@ -165,12 +170,12 @@ def test_w8a8_block_fp8_cutlass_matmul():
 
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    A_fp8, As = per_token_group_quant_fp8(
-        A_fp32, block_size[1], column_major_scales=False
+    A_fp8, As = ir.ops.dynamic_group_quant_fp8(
+        A_fp32, block_size[1], 1e-10, None, False, False, None, None
     )
     # CUTLASS uses column-major format for scales
-    A_fp8_cutlass, As_cutlass = per_token_group_quant_fp8(
-        A_fp32, block_size[1], column_major_scales=True
+    A_fp8_cutlass, As_cutlass = ir.ops.dynamic_group_quant_fp8(
+        A_fp32, block_size[1], 1e-10, None, True, False, None, None
     )
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
@@ -206,8 +211,8 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     ):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
-    A_fp8, As_fp8 = per_token_group_quant_fp8(
-        A_fp32, block_size[1], column_major_scales=True, tma_aligned_scales=True
+    A_fp8, As_fp8 = ir.ops.dynamic_group_quant_fp8(
+        A_fp32, block_size[1], 1e-10, None, True, True, None, None
     )
     B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)
 
@@ -255,7 +260,9 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
     A_bf16 = (torch.rand(M, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
     B_bf16 = (torch.rand(N, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
 
-    A_fp8, As_fp8 = per_token_group_quant_fp8(A_bf16, block_size[1], use_ue8m0=False)
+    A_fp8, As_fp8 = ir.ops.dynamic_group_quant_fp8(
+        A_bf16, block_size[1], 1e-10, None, False, False, False, None
+    )
     B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_bf16, block_size, use_ue8m0=False)
 
     As = As_fp8.to(torch.float32)

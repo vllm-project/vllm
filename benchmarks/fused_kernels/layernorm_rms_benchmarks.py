@@ -12,12 +12,11 @@ import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 from tqdm import tqdm
 
+import vllm.kernels  # noqa: F401
 import vllm._custom_ops as ops
+from vllm import ir
 from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 
 
 @dataclass
@@ -105,8 +104,15 @@ def unfused_groupwise_fp8_impl(
         torch_out, _ = rms_norm_layer.forward_cuda(x, residual)
 
     # Quant
-    torch_out, _ = per_token_group_quant_fp8(
-        torch_out, group_size=group_size[1], use_ue8m0=False
+    torch_out, _ = ir.ops.dynamic_group_quant_fp8(
+        torch_out,
+        group_size[1],
+        1e-10,
+        None,
+        False,
+        False,
+        False,
+        None,
     )
 
 

@@ -4,7 +4,7 @@
 import torch
 import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
+from vllm import _custom_ops as ops, ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -104,13 +104,15 @@ class QuantFP8(CustomOp):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
 
-            return fp8_utils.per_token_group_quant_fp8(
+            return ir.ops.dynamic_group_quant_fp8(
                 x,
-                group_size=self.group_size,
-                column_major_scales=self.column_major_scales,
-                tma_aligned_scales=self.tma_aligned_scales,
-                dtype=_FP8_DTYPE,
-                use_ue8m0=self.use_ue8m0,
+                self.group_size,
+                1e-10,
+                _FP8_DTYPE,
+                self.column_major_scales,
+                self.tma_aligned_scales,
+                self.use_ue8m0,
+                None,
             )
 
         assert (scale is not None) == self.static

@@ -10,9 +10,8 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
@@ -76,8 +75,15 @@ def ref_dynamic_per_token_or_block_quant(
     # Quant
     if group_size is not None:
         if quant_dtype == current_platform.fp8_dtype():
-            torch_out, scales = per_token_group_quant_fp8(
-                torch_out, group_size=group_size[1], use_ue8m0=False
+            torch_out, scales = ir.ops.dynamic_group_quant_fp8(
+                torch_out,
+                group_size[1],
+                1e-10,
+                None,
+                False,
+                False,
+                False,
+                None,
             )
         else:
             assert quant_dtype == torch.int8

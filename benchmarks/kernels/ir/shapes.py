@@ -26,4 +26,18 @@ SHAPE_CONFIGS: dict[str, list[dict]] = {
         for d in COMMON_HIDDEN_SIZES
         for n in NUM_TOKENS
     ],
+    "dynamic_group_quant_fp8": [
+        {
+            "num_tokens": n,
+            "hidden_size": h,
+            "dtype": dtype,
+            "group_size": g,
+            "column_major_scales": cm,
+        }
+        for dtype in [torch.bfloat16]
+        for n in [1, 64, 1024]
+        for h in [2048, 8192]
+        for g in [128]
+        for cm in [False, True]
+    ],
 }

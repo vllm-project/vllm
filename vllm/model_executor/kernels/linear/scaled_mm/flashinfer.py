@@ -7,9 +7,7 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+from vllm import ir
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
@@ -272,11 +270,15 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        q_input, input_scale = per_token_group_quant_fp8(
+        q_input, input_scale = ir.ops.dynamic_group_quant_fp8(
             input,
-            group_size=group_size,
-            column_major_scales=True,
-            use_ue8m0=use_deep_gemm_e8m0,
+            group_size,
+            1e-10,
+            None,
+            True,
+            False,
+            use_deep_gemm_e8m0,
+            None,
         )
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),

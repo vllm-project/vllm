@@ -7,9 +7,8 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
@@ -42,8 +41,8 @@ def ref_silu_and_mul_per_block_quant(
     silu_out = F.silu(gate) * up
 
     if quant_dtype == current_platform.fp8_dtype():
-        return per_token_group_quant_fp8(
-            silu_out, group_size=group_size, use_ue8m0=False
+        return ir.ops.dynamic_group_quant_fp8(
+            silu_out, group_size, 1e-10, None, False, False, False, None
         )
     elif quant_dtype == torch.int8:
         return per_token_group_quant_int8(silu_out, group_size=group_size)
