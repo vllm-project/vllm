@@ -402,11 +402,12 @@ class EngineCore:
         # forward pass so all DP peers participate in collectives. Pass
         # scheduler_output=None for those iterations so the index stays in
         # sync across engines and the dummy step is visible in the log.
-        is_dummy = scheduler_output is None
-        if is_dummy:
+        if scheduler_output is None:
             iteration_details = IterationDetails(0, 0, 0, 0)
+            is_dummy = True
         else:
             iteration_details = compute_iteration_details(scheduler_output)
+            is_dummy = False
         before = time.monotonic()
         yield
         logger.info(
