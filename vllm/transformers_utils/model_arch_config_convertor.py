@@ -351,6 +351,9 @@ class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
         return enc_num_kv_heads
 
+    def is_mm_prefix_lm(self) -> bool:
+        return False
+
 
 class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
