@@ -1401,8 +1401,12 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            if request.max_tokens == 0 and request.sampling_params is not None:
+                new_token_ids = []
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                stopped = True
             # Check for stop and update request status.
-            if new_token_ids:
+            elif new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )

@@ -225,7 +225,10 @@ class SamplingParams(
     """Whether to ignore the EOS token and continue generating
     tokens after the EOS token is generated."""
     max_tokens: int | None = 16
-    """Maximum number of tokens to generate per output sequence."""
+    """Maximum number of tokens to generate per output sequence.
+
+    When set to 0, only prefill processing is performed (e.g., for embeddings)
+    and the request finishes immediately without generating any tokens."""
     min_tokens: int = 0
     """Minimum number of tokens to generate per output sequence before EOS or
     `stop_token_ids` can be generated"""
@@ -486,9 +489,9 @@ class SamplingParams(
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
-        if self.max_tokens is not None and self.max_tokens < 1:
+        if self.max_tokens is not None and self.max_tokens < 0:
             raise VLLMValidationError(
-                f"max_tokens must be at least 1, got {self.max_tokens}.",
+                f"max_tokens must be at least 0, got {self.max_tokens}.",
                 parameter="max_tokens",
                 value=self.max_tokens,
             )
