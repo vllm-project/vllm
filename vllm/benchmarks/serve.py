@@ -695,7 +695,7 @@ async def benchmark(
         prompt=test_prompt,
         api_url=api_url,
         prompt_len=test_prompt_len,
-        output_len=test_output_len,
+        output_len=test_output_len or 0,
         logprobs=logprobs,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
@@ -772,7 +772,7 @@ async def benchmark(
             prompt=test_prompt,
             api_url=base_url + "/start_profile",
             prompt_len=test_prompt_len,
-            output_len=test_output_len,
+            output_len=test_output_len or 0,
             logprobs=logprobs,
             multi_modal_content=test_mm_content,
             ignore_eos=ignore_eos,
@@ -856,8 +856,13 @@ async def benchmark(
         )
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
-            req_lora_module = next(lora_modules)
+            req_lora_module = next(iter(lora_modules))
             req_model_id, req_model_name = req_lora_module, req_lora_module
+
+        # Narrow mm_content type for RequestFuncInput
+        mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
+        if isinstance(mm_content, (dict, list)):
+            mm_content_typed = mm_content
 
         request_func_input = RequestFuncInput(
             model=req_model_id,
@@ -865,9 +870,9 @@ async def benchmark(
             prompt=prompt,
             api_url=api_url,
             prompt_len=prompt_len,
-            output_len=output_len,
+            output_len=output_len or 0,
             logprobs=logprobs,
-            multi_modal_content=mm_content,
+            multi_modal_content=mm_content_typed,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
             extra_body=extra_body,
@@ -1133,7 +1138,7 @@ async def benchmark(
             prompt=test_prompt,
             api_url=base_url + "/stop_profile",
             prompt_len=test_prompt_len,
-            output_len=test_output_len,
+            output_len=test_output_len or 0,
             logprobs=logprobs,
         )
         profile_output = await request_func(

@@ -14,7 +14,8 @@ class BenchmarkLatencySubcommand(BenchmarkSubcommandBase):
 
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
-        add_cli_args(parser)
+        # Type ignore since ArgumentParser is compatible with FlexibleArgumentParser
+        add_cli_args(parser)  # type: ignore[arg-type]
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:

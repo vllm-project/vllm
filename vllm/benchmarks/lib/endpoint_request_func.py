@@ -809,7 +809,12 @@ async def async_request_vllm_pooling(
         "truncate_prompt_tokens": -1,
     }
 
-    payload = payload | request_func_input.prompt
+    # Merge prompt into payload only if it's a dict
+    if isinstance(request_func_input.prompt, dict):
+        payload = payload | request_func_input.prompt
+    else:
+        # For str or list types, add as 'input' field
+        payload["input"] = request_func_input.prompt
 
     _update_payload_common(payload, request_func_input)
 
