@@ -714,6 +714,10 @@ class CrossDPScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # Track the batch type: either "prefill" or "decode".
+        # A batch must contain only one type of requests.
+        batch_type = None  # None means not determined yet
+
         self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
@@ -783,6 +787,18 @@ class CrossDPScheduler(Scheduler):
                 req_index += 1
                 continue
 
+            # Determine the request type: prefill or decode.
+            # prefill: num_computed_tokens < num_prompt_tokens (prompt not fully processed)
+            # decode: num_computed_tokens >= num_prompt_tokens (generating output tokens)
+            req_type = "prefill" if request.num_computed_tokens < request.num_prompt_tokens else "decode"
+            # Enforce batch homogeneity: a batch must be all-prefill or all-decode.
+            if batch_type is None:
+                batch_type = req_type
+            elif batch_type != req_type:
+                # This request's type conflicts with the batch type, skip it.
+                req_index += 1
+                continue
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -819,6 +835,7 @@ class CrossDPScheduler(Scheduler):
 
                     for rank in preempted_req.cp_ranks:
                         preempted_reqs[rank].append(preempted_req)
+                    preempted_req.prev_cp_ranks = preempted_req.cp_ranks
                     preempted_req.cp_ranks = []
                     # preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -986,6 +1003,17 @@ class CrossDPScheduler(Scheduler):
                     num_new_tokens = min(num_new_tokens, effective_budget)
                     assert num_new_tokens > 0
 
+                    # Determine the request type for batch homogeneity check.
+                    # For waiting requests, use num_computed_tokens (which may
+                    # include cached tokens) to determine if it's still in prefill.
+                    req_type = "prefill" if num_computed_tokens < request.num_prompt_tokens else "decode"
+                    if batch_type is None:
+                        batch_type = req_type
+                    elif batch_type != req_type:
+                        # This request's type conflicts with the batch type, skip it.
+                        # Do not pop from waiting queue, just break to stop scheduling.
+                        break
+
                 # [vllm add]
                 if self.need_mamba_block_aligned_split:
                     num_new_tokens = self._mamba_block_aligned_split(
@@ -1114,7 +1142,10 @@ class CrossDPScheduler(Scheduler):
                     if request.status == RequestStatus.WAITING:
                         scheduled_new_reqs[rank].append(request)
                     elif request.status == RequestStatus.PREEMPTED:
-                        scheduled_resumed_reqs[rank].append(request)
+                        if rank in request.prev_cp_ranks:
+                            scheduled_resumed_reqs[rank].append(request)
+                        else:
+                            scheduled_new_reqs[rank].append(request)
                     else:
                         raise RuntimeError(f"Invalid request status: {request.status}")
 
@@ -1124,6 +1155,7 @@ class CrossDPScheduler(Scheduler):
                     cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
 
                 _deduct_budget(request.cp_ranks, num_new_tokens)
+                request.prev_cp_ranks = []
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.

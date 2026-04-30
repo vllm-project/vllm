@@ -148,6 +148,8 @@ class Request:
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
+        self.num_local_cached_tokens = -1
+        self.num_external_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -177,6 +179,8 @@ class Request:
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
         self.cp_ranks: list[int] = []
+        # The rank before the record was taken
+        self.prev_cp_ranks: list[int] = []
 
     @classmethod
     def from_engine_core_request(
@@ -271,8 +275,9 @@ class Request:
         self,
         event_type: EngineCoreEventType,
         timestamp: float | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> None:
-        self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
+        self.events.append(EngineCoreEvent.new_event(event_type, timestamp, attributes))
 
     def take_events(self) -> list[EngineCoreEvent] | None:
         if not self.events:
