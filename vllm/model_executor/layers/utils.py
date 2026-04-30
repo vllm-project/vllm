@@ -6,6 +6,7 @@ import contextlib
 import itertools
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 
@@ -94,6 +95,10 @@ def apply_penalties(
 
 _DYNAMO_CACHE_SIZE_LIMIT = 65536
 _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT = 1048576
+_VLLM_ROOT = Path(__file__).resolve().parents[3]
+_INDUCTOR_CUTLASS_DIR_FALLBACKS = (
+    _VLLM_ROOT.parent / "pytorch" / "third_party" / "cutlass",
+)
 
 _inductor_max_autotune_gemm_forced = False
 _dynamo_compile_caches_forced = False
@@ -103,6 +108,30 @@ _unquant_bf16_linear_id_gen = itertools.count()
 _unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
 _unquant_bf16_linear_torch_compile_configured = False
 _unquant_bf16_linear_torch_compile_disabled = False
+
+
+def _set_inductor_cutlass_dir_if_needed(inductor_config) -> None:
+    cuda_config = getattr(inductor_config, "cuda", None)
+    if cuda_config is None or not hasattr(cuda_config, "cutlass_dir"):
+        return
+
+    configured_cutlass_dir = getattr(cuda_config, "cutlass_dir", None)
+    if configured_cutlass_dir:
+        with contextlib.suppress(TypeError, OSError):
+            if Path(configured_cutlass_dir).exists():
+                return
+
+    for fallback in _INDUCTOR_CUTLASS_DIR_FALLBACKS:
+        if fallback.exists():
+            resolved_fallback = str(fallback.resolve())
+            cuda_config.cutlass_dir = resolved_fallback
+            cutlass_config = getattr(inductor_config, "cutlass", None)
+            if cutlass_config is not None and hasattr(cutlass_config, "cutlass_dir"):
+                cutlass_config.cutlass_dir = resolved_fallback
+            logger.info(
+                "Set inductor CUTLASS source directory to %s", resolved_fallback
+            )
+            return
 
 
 def force_large_dynamo_compile_caches() -> None:
@@ -221,6 +250,11 @@ def force_inductor_max_autotune_gemm_on_small_gpus() -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
+
+    # Ensure CUTLASS source dir is set so the inductor backend can find it.
+    # The default points to ../third_party/cutlass/ (developer source tree),
+    # which does not exist in pip-installed or container environments.
+    _set_inductor_cutlass_dir_if_needed(inductor_config)
 
 
 def _configure_unquant_bf16_linear_torch_compile_once() -> None:

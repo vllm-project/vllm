@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -170,6 +171,39 @@ def test_compile_failure_disables_fast_path(monkeypatch):
     assert utils._unquant_bf16_linear_torch_compile_disabled is True
 
 
+def test_set_inductor_cutlass_dir_uses_existing_dir(monkeypatch, tmp_path):
+    configured_dir = tmp_path / "configured-cutlass"
+    fallback_dir = tmp_path / "fallback-cutlass"
+    configured_dir.mkdir()
+    fallback_dir.mkdir()
+    inductor_config = SimpleNamespace(
+        cuda=SimpleNamespace(cutlass_dir=str(configured_dir)),
+        cutlass=SimpleNamespace(cutlass_dir="unchanged"),
+    )
+    monkeypatch.setattr(utils, "_INDUCTOR_CUTLASS_DIR_FALLBACKS", (fallback_dir,))
+
+    utils._set_inductor_cutlass_dir_if_needed(inductor_config)
+
+    assert inductor_config.cuda.cutlass_dir == str(configured_dir)
+    assert inductor_config.cutlass.cutlass_dir == "unchanged"
+
+
+def test_set_inductor_cutlass_dir_falls_back(monkeypatch, tmp_path):
+    fallback_dir = tmp_path / "cutlass-src"
+    fallback_dir.mkdir()
+    inductor_config = SimpleNamespace(
+        cuda=SimpleNamespace(cutlass_dir=str(tmp_path / "missing")),
+        cutlass=SimpleNamespace(cutlass_dir=str(tmp_path / "missing")),
+    )
+    monkeypatch.setattr(utils, "_INDUCTOR_CUTLASS_DIR_FALLBACKS", (fallback_dir,))
+
+    utils._set_inductor_cutlass_dir_if_needed(inductor_config)
+
+    resolved_fallback = str(fallback_dir.resolve())
+    assert inductor_config.cuda.cutlass_dir == resolved_fallback
+    assert inductor_config.cutlass.cutlass_dir == resolved_fallback
+
+
 @pytest.fixture
 def _restore_inductor_state():
     pytest.importorskip("torch._inductor.utils")
@@ -180,6 +214,9 @@ def _restore_inductor_state():
     import torch._inductor.utils as inductor_utils
     from torch._inductor.codegen.cuda import cuda_env
 
+    missing = object()
+    cuda_config = getattr(inductor_config, "cuda", None)
+    cutlass_config = getattr(inductor_config, "cutlass", None)
     originals = {
         "is_big_gpu": inductor_utils.is_big_gpu,
         "is_datacenter_blackwell_arch": cuda_env.is_datacenter_blackwell_arch,
@@ -187,6 +224,8 @@ def _restore_inductor_state():
         "max_autotune_gemm": inductor_config.max_autotune_gemm,
         "max_autotune_gemm_backends": inductor_config.max_autotune_gemm_backends,
         "coordinate_descent_tuning": inductor_config.coordinate_descent_tuning,
+        "cuda_cutlass_dir": getattr(cuda_config, "cutlass_dir", missing),
+        "cutlass_cutlass_dir": getattr(cutlass_config, "cutlass_dir", missing),
         "cache_size_limit": getattr(dynamo_config, "cache_size_limit", None),
         "accumulated_cache_size_limit": getattr(
             dynamo_config, "accumulated_cache_size_limit", None
@@ -199,6 +238,10 @@ def _restore_inductor_state():
     inductor_config.max_autotune_gemm = originals["max_autotune_gemm"]
     inductor_config.max_autotune_gemm_backends = originals["max_autotune_gemm_backends"]
     inductor_config.coordinate_descent_tuning = originals["coordinate_descent_tuning"]
+    if originals["cuda_cutlass_dir"] is not missing:
+        inductor_config.cuda.cutlass_dir = originals["cuda_cutlass_dir"]
+    if originals["cutlass_cutlass_dir"] is not missing:
+        inductor_config.cutlass.cutlass_dir = originals["cutlass_cutlass_dir"]
     if originals["cache_size_limit"] is not None:
         dynamo_config.cache_size_limit = originals["cache_size_limit"]
     if originals["accumulated_cache_size_limit"] is not None:
