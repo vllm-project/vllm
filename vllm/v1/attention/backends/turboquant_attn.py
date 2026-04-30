@@ -269,14 +269,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         self.tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, head_size)
 
-        # Pre-compute kernel constants from config (avoid repeated arithmetic)
+        # Pre-compute kernel constants from config (avoid repeated arithmetic).
+        # MSE keys live in WHT space at padded_head_dim (next pow-2). FP8
+        # keys are not rotated, so byte counts use head_size directly.
         cfg = self.tq_config
         self._mse_bytes = (
-            math.ceil(head_size * cfg.key_mse_bits / 8)
+            math.ceil(cfg.padded_head_dim * cfg.key_mse_bits / 8)
             if not cfg.key_fp8
             else head_size
         )
-        self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
+        d_for_v = head_size if cfg.key_fp8 else cfg.padded_head_dim
+        self._val_data_bytes = math.ceil(d_for_v * cfg.effective_value_quant_bits / 8)
         self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
         # Detect flash-attn version (FA2/3/4) for prefill paths.
@@ -333,9 +336,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         flips do not improve Lloyd-Max quantization quality because the
         quantizer is symmetric around zero (sign-flipping a coordinate
         maps it to the mirror centroid with identical distortion).
+
+        For non-power-of-2 head_dim (e.g. 80) the WHT, centroid table, and
+        cached PiT live at padded_head_dim. Padding/slicing of K and Q is
+        handled at the kernel-launch boundary in store/decode.
         """
         if not hasattr(layer, "_tq_cached"):
-            D = self.head_size
+            D = self.tq_config.padded_head_dim
 
             # Pure Hadamard: orthonormal + symmetric (H = H^T), enabling
             # in-kernel butterfly fusion and trivial inverse for continuation.
@@ -345,7 +352,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # fp16 copy for rotation in continuation prefill path
             layer._tq_Pi_half = H.to(torch.float16)
 
-            # Centroids for Lloyd-Max quantization.
+            # Centroids for Lloyd-Max quantization (in padded WHT space).
             layer._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
                 device=device, dtype=torch.float32
             )
@@ -534,6 +541,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             key_packed_size=self.tq_config.key_packed_size,
             value_quant_bits=self.tq_config.effective_value_quant_bits,
             key_fp8=self.tq_config.key_fp8,
+            padded_head_dim=self.tq_config.padded_head_dim,
         )
 
     # ------------------------------------------------------------------ #
@@ -662,6 +670,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
+                        padded_head_dim=self.tq_config.padded_head_dim,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -704,7 +713,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Hk = key_chunk.shape[1]
         device = query.device
         block_size = kv_cache.shape[1]
-        BLOCK_D = triton.next_power_of_2(D)
+        # Cached K/V live at padded_head_dim on the MSE path (zero-padded
+        # at store time). FP8 path stays at head_dim because keys are not
+        # rotated. D_pad == D for pow-2 head_dim regardless.
+        D_pad = (
+            self.tq_config.padded_head_dim if not self.tq_config.key_fp8 else D
+        )
+        BLOCK_D = triton.next_power_of_2(D_pad)
 
         mse_bytes = self._mse_bytes
         val_data_bytes = self._val_data_bytes
@@ -713,7 +728,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Allocate slightly over to align to block_size for the grid.
         # Reuse cached buffers to avoid per-call allocation (~16MB at 8K).
         alloc_len = math.ceil(cached_len / block_size) * block_size
-        buf_shape = (1, Hk, alloc_len, D)
+        buf_shape = (1, Hk, alloc_len, D_pad)
         # Use WorkspaceManager for dequant buffers.
         # Shared across all layers — saves 60× memory at long context.
         # Required for CUDA Graph capture (per-layer growth incompatible with CG).
@@ -743,7 +758,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             kv_cache.stride(1),
             kv_cache.stride(2),
             block_table.stride(0),
-            HEAD_DIM=D,
+            HEAD_DIM=D_pad,
             BLOCK_SIZE=block_size,
             NUM_KV_HEADS=Hk,
             MSE_BYTES=mse_bytes,
@@ -762,11 +777,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if not self.tq_config.key_fp8:
             # fp16 matmul for rotation (2× less bandwidth, uses fp16 tensor cores)
             Pi_half = layer._tq_Pi_half
-            k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D)
+            k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D_pad)
             k_flat = k_flat @ Pi_half
-            k_cached_trim = k_flat.reshape(Hk, cached_len, D).transpose(
+            k_cached_trim = k_flat.reshape(Hk, cached_len, D_pad).transpose(
                 0, 1
-            )  # (cached_len, Hk, D) — already fp16
+            )  # (cached_len, Hk, D_pad) — already fp16
+            # Slice padded dimensions back to head_dim before flash_attn.
+            if D_pad > D:
+                k_cached_trim = k_cached_trim[:, :, :D]
         else:
             k_cached_trim = k_cached[0, :, :cached_len, :].transpose(
                 0, 1
@@ -774,6 +792,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Skip .contiguous() — the copy into k_full/v_full handles layout
         v_cached_trim = v_cached[0, :, :cached_len, :].transpose(0, 1)
+        if D_pad > D:
+            v_cached_trim = v_cached_trim[:, :, :D]
 
         # Concatenate cached + current chunk K/V (match query dtype)
         # Pre-allocate full K/V buffer, copy into slices (no cat alloc)
@@ -874,5 +894,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             lse_buf=lse_buf,
             buf_holder=layer,
             max_num_kv_splits=self.max_num_kv_splits,
+            padded_head_dim=self.tq_config.padded_head_dim,
         )
         return result
