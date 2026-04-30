@@ -159,6 +159,7 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
@@ -174,17 +175,21 @@ def rocm_unquantized_gemm_impl(
         and k % 8 == 0
     )
 
-    if not use_skinny:
-        return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 4:
+            cu_count = num_compute_units()
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
+
     return torch.nn.functional.linear(x, weight, bias)
 
 
