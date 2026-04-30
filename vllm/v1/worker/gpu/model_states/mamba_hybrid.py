@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -8,12 +9,48 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
+
+
+@dataclass
+class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
+    is_prefilling: torch.Tensor
+    num_accepted_tokens: torch.Tensor | None = None
+    num_decode_draft_tokens_cpu: torch.Tensor | None = None
+
+    def get_extra_common_attn_kwargs(
+        self,
+        kv_cache_group_id: int,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+
+    def get_extra_attn_kwargs(
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        if not isinstance(
+            attn_metadata_builder,
+            (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+        ):
+            return {}
+        return {
+            "num_accepted_tokens": None
+            if self.num_accepted_tokens is None
+            else self.num_accepted_tokens[:num_reqs],
+            "num_decode_draft_tokens_cpu": None
+            if self.num_decode_draft_tokens_cpu is None
+            else self.num_decode_draft_tokens_cpu[:num_reqs],
+        }
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -77,10 +114,13 @@ class MambaHybridModelState(DefaultModelState):
                     input_batch.num_draft_tokens_per_req,
                     -1,
                 )
-            num_decode_draft_tokens_cpu = torch.from_numpy(
-                num_decode_draft_tokens_np
-            )
+            num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        mamba_attn_metadata = MambaHybridAttnMetadata(
+            is_prefilling=is_prefilling,
+            num_accepted_tokens=num_accepted_tokens,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+        )
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -94,9 +134,7 @@ class MambaHybridModelState(DefaultModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            is_prefilling=is_prefilling,
-            num_accepted_tokens=num_accepted_tokens,
-            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
         )
 

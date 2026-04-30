@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -15,8 +14,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -24,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 
@@ -311,18 +309,13 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
-    encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
-    is_prefilling: torch.Tensor | None = None,
-    num_accepted_tokens: torch.Tensor | None = None,
-    num_decode_draft_tokens_cpu: torch.Tensor | None = None,
-    for_cudagraph_capture: bool = False,
     positions: torch.Tensor | None = None,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    for_cudagraph_capture: bool = False,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
-    if is_prefilling is not None:
-        is_prefilling = is_prefilling[:num_reqs]
     if seq_lens_cpu_upper_bound is not None:
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
@@ -332,6 +325,11 @@ def build_attn_metadata(
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
 
+        common_attn_metadata_extra_kwargs = (
+            model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
+            if model_specific_attn_metadata is not None
+            else {}
+        )
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -346,12 +344,8 @@ def build_attn_metadata(
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
-            is_prefilling=is_prefilling,
+            **common_attn_metadata_extra_kwargs,
         )
-        if encoder_seq_lens and i in encoder_seq_lens:
-            encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
-            common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
-            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
@@ -359,20 +353,19 @@ def build_attn_metadata(
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata
                 )
-            elif isinstance(
-                attn_metadata_builder,
-                (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
-            ):
-                metadata = attn_metadata_builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    num_accepted_tokens=num_accepted_tokens,
-                    num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-                )
             else:
+                attn_metadata_extra_kwargs = (
+                    model_specific_attn_metadata.get_extra_attn_kwargs(
+                        attn_metadata_builder,
+                        num_reqs,
+                    )
+                    if model_specific_attn_metadata is not None
+                    else {}
+                )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
+                    **attn_metadata_extra_kwargs,
                 )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
