@@ -756,6 +756,7 @@ def test_medusa_correctness(
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
         assert ref_output.outputs[0].text == spec_output.outputs[0].text
 
+
 @single_gpu_only
 @large_gpu_mark(min_gb=24)
 def test_medusa_acceptance_rate(
@@ -791,8 +792,9 @@ def test_medusa_acceptance_rate(
     assert acceptance_rate > 0, (
         f"Expected nonzero acceptance rate for trained Medusa checkpoint, "
         f"got {acceptance_rate:.4f}"
-    )                                                                                                                                                                                                                    
-        
+    )
+
+
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
