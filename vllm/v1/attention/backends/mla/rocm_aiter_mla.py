@@ -15,7 +15,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    MLACommonPrefillMetadata,
     QueryLenSupport,
 )
 from vllm.triton_utils import tl, triton
@@ -83,9 +82,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     has_persistent_metadata: bool = False
 
 
-class AiterMLAMetadata(
-    MLACommonMetadata[MLACommonPrefillMetadata, AiterMLADecodeMetadata]
-):
+class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     work_meta_data: torch.Tensor | None = None
     work_indptr: torch.Tensor | None = None
     work_info_set: torch.Tensor | None = None

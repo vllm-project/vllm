@@ -1240,12 +1240,11 @@ class MLACommonDecodeMetadata:
     dcp_tot_seq_lens: torch.Tensor | None
 
 
-P = TypeVar("P", bound=MLACommonPrefillMetadata)
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
 
 
 @dataclass
-class MLACommonMetadata(AttentionMetadata, Generic[P, D]):
+class MLACommonMetadata(AttentionMetadata, Generic[D]):
     """Metadata for MLACommon.
 
     NOTE: Please read the comment at the top of the file before trying to
@@ -1277,7 +1276,7 @@ class MLACommonMetadata(AttentionMetadata, Generic[P, D]):
     # The dimension of the attention heads
     head_dim: int | None = None
 
-    prefill: P | None = None
+    prefill: MLACommonPrefillMetadata | None = None
     decode: D | None = None
 
     def __post_init__(self):

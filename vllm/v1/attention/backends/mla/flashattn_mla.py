@@ -16,7 +16,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    MLACommonPrefillMetadata,
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
@@ -100,9 +99,7 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
 
 
 @dataclass
-class FlashAttnMLAMetadata(
-    MLACommonMetadata[MLACommonPrefillMetadata, FlashAttnMLADecodeMetadata]
-):
+class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
     pass
 
 
