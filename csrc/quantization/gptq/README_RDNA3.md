@@ -35,7 +35,10 @@ branching happens in C++ to keep `apply_weights` torch.compile-friendly:
 gptq_gemm_rdna3(a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format)
 │
 ├── if dtype == bf16 and M >= 16 and N % 16 == 0 and K % 16 == 0
-│       → gptq_gemm_rdna3_wmma  (v_wmma_f32_16x16x16_bf16_w32, prefill)
+│       → gptq_gemm_rdna3_wmma()   ── WMMA path (see below)
+│             ├─ if M <  32 → v1 kernel (1 wave/block, 16M × 16N tile)
+│             └─ if M >= 32 → v2 kernel (2 waves/block, 32M × 16N tile,
+│                              double-buffered LDS B-tile)
 │
 └── else
         → scalar dot-product kernel
@@ -44,6 +47,12 @@ gptq_gemm_rdna3(a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format)
               M = 4-7 → M_COUNT=4
               M = 8+  → M_COUNT=8
 ```
+
+The v1 → v2 split inside the WMMA path is purely a tile-size choice. v2
+amortises the dequant work over a 32-row tile and uses a second wave to
+fill the SIMD's WMMA pipeline; below M=32 the second wave would process
+out-of-range rows and waste SIMD cycles, so v1 stays as the fallback.
+See Lesson 12.
 
 The bf16-only WMMA gating is set by both microbench and end-to-end
 serving:
@@ -85,55 +94,64 @@ serving:
                 └────────┬─────────────────────────┬────────┘
                          │ FALSE                   │ TRUE
                          ▼                         ▼
+                                       gptq_gemm_rdna3_wmma()
+                                       launch_gemm_q4_wmma_v2<T>()
+                                              │
+                                  ┌───────────┴───────────┐
+                                  │ size_m < 32 │ size_m >= 32
+                                  ▼             ▼
 ================================================================================
-        SCALAR PATH                       WMMA PATH
-        gemm_q4_kernel_rdna3<T,M_COUNT>   gemm_q4_wmma_kernel<T>
-        (decode + fp16 always             (bf16 prefill / batched,
-         + small M < 16)                   M >= 16, compute-bound win)
+   SCALAR PATH                  WMMA v1                  WMMA v2 (default)
+   gemm_q4_kernel_rdna3<T,      gemm_q4_wmma_kernel<T>   gemm_q4_wmma_kernel
+   M_COUNT>                                              _v2<T>
+   (decode + fp16 always        (M ∈ [16, 32),           (M >= 32 prefill /
+    + small M < 16)              fallback)                batched, default)
 ================================================================================
 
- BLOCK STRUCTURE                          BLOCK STRUCTURE
-  - 256 threads (8 waves x 32 lanes)       - 32 threads = 1 wave-group
-  - all 256 lanes active                   - lanes 0..15 unique inputs
-                                           - lanes 16..31 hold COPIES
-                                             (RDNA3 doubled wave32 conv.)
+ BLOCK STRUCTURE              BLOCK STRUCTURE         BLOCK STRUCTURE
+  256 threads = 8 waves        32 threads = 1 wave     64 threads = 2 waves
+  all 256 lanes active         lanes 0..15 unique      wave 0 + wave 1
+                                + 16..31 duplicates     cooperate on shared
+                                                        B-tile
 
- TILE PER BLOCK                           TILE PER BLOCK
-  M_COUNT rows x 1024 N x 256 K            16 M rows x 16 N x K/K_SPLIT
-  ┌─────────────────────────────┐          ┌──────────┐
-M │      1024 N columns         │ K=256  M │ 16 N     │ K = full / K_SPLIT
-  │   (4 N cols per thread)     │ (1/16    │  cols    │ (gridDim.z splits
-  └─────────────────────────────┘  of K)   └──────────┘  K, atomic acc)
+ TILE PER BLOCK               TILE PER BLOCK          TILE PER BLOCK
+  M_COUNT × 1024N × 256K       16M × 16N × K/K_SPLIT   32M × 16N × K/K_SPLIT
+  (4 N cols per thread)                                wave 0: rows 0..15
+                                                       wave 1: rows 16..31
 
- GRID                                     GRID
-  (N/1024, M/M_COUNT, K/256)               (N/16, M/16, K_SPLIT)
-   gridDim.z splits K, atomic acc          K_SPLIT = 4 if K>=1024,
-                                                      2 if K>=512,
-                                                      1 otherwise
+ GRID                         GRID                    GRID
+  (N/1024,M/M_COUNT,K/256)     (N/16, M/16, K_SPLIT)   (N/16,(M+31)/32,
+   gridDim.z splits K          K_SPLIT = 4/2/1                K_SPLIT)
+                                  by K threshold       same K_SPLIT rule;
+                                                        gridDim.y halves
+                                                        vs v1
 
- CORE EXECUTION  (per outer K=32 iter)    CORE EXECUTION  (per K=16 step)
-  for k in 0..256 step 32:                  for k_tile in K-segment step 16:
-   ┌─────────────────────────────┐           ┌─────────────────────────────┐
-   │ uint4 weight load (4 ints)  │           │ Cooperative dequant:        │
-   │ bit-trick dequant 32 weights│           │   32 lanes do 32 dequants   │
-   │   fp16: 0x6400 + half2 FMA  │           │     fp16: precise           │
-   │   bf16: 0x4300 + fp32 FMA   │           │       (sub then mul, no     │
-   │                             │           │        fp16 ULP amplif.)    │
-   │ 4 dot22_8 vs LDS A          │           │     bf16: precise (same)    │
-   │   fp16: v_dot2_f32_f16      │           │   -> 16 N x 16 K B-tile     │
-   │   bf16: 8 fp32 FMAs         │           │      in LDS                 │
-   │                             │           │ a_frag, b_frag (A row,      │
-   │                             │           │   B col, mode 1)            │
-   │                             │           │ v_wmma_f32_16x16x16         │
-   └─────────────────────────────┘           └─────────────────────────────┘
+ CORE EXECUTION (per K=32     CORE EXECUTION          CORE EXECUTION
+   iter)                       (per K-tile=16)         (per K-tile=16)
+  for k in 0..256 step 32:     for k in K-segment      for k in K-segment
+   uint4 weight load (4 ints)   cooperative dequant     wave 0 dequants the
+   bit-trick dequant 32         32 lanes -> b_lds       NEXT K-tile into
+   weights                      [16][16]                b_lds[next] (overlap
+    fp16: 0x6400 + half2 FMA    a_frag = memcpy(A,32B)  with WMMA below)
+    bf16: 0x4300 + fp32 FMA     b_frag = b_lds[..]      both waves load own
+   4 dot22_8 vs LDS A           v_wmma_f32_16x16x16     A slice from global
+    fp16: v_dot2_f32_f16                                both waves read same
+    bf16: 8 fp32 FMAs                                   b_lds[cur]
+                                                        each wave issues its
+                                                        own v_wmma
+                                                        1× __syncthreads()
 
- OUTPUT WRITE                             OUTPUT WRITE
-  K/BLOCK_KN_SIZE blocks contend per        K_SPLIT == 1 → direct store
-  output position                           K_SPLIT  > 1 → shfl_xor pair
-   atomic_add_pk4 on a 64-bit                + packed CAS-32 (halves
-   word (4 fp16/bf16 lanes per CAS)          atomic count, no intra-block
-                                             contention; inter-block only)
+ OUTPUT WRITE                 OUTPUT WRITE            OUTPUT WRITE
+  K/BLOCK_KN_SIZE blocks       K_SPLIT == 1 → direct   same as v1, but each
+  contend per output           K_SPLIT  > 1 → shfl_xor wave writes its own
+  atomic_add_pk4 on a 64-bit    pair + CAS-32          16-row sub-tile
+  word (4 fp16/bf16 lanes
+  per CAS)
 ```
+
+LDS footprint per block: v1 = 512 B (`b_lds[16][16]` × 2 B), v2 = 1024 B
+(`b_lds[2][16][16]` × 2 B for the double buffer). gfx1100 has 64 KB LDS
+per CU, so neither limits occupancy.
 
 ### RDNA3 wave32 fragment layout (lane × slot mapping)
 
@@ -419,6 +437,54 @@ scheduler param) with `M` (matmul batch dim). All benches were
 re-run end-to-end via `evalscope perf` with the full optimisation
 stack applied. The Performance table above is from this re-run.
 The "Note on M vs max-num-seqs" subsection records the distinction.
+
+### Round 6 — WMMA v2: 2 waves per block + double-buffered LDS (lesson 12)
+
+Driven by an M-sweep microbench that revealed bf16 WMMA at high M was
+running at ~24 % of WMMA peak (29.6 / 122 TFLOPs at M=2048, K=N=4096).
+The bottleneck wasn't K-split atomic contention (Round 5's hypothesis
+turned out wrong — see Lesson 10 caveat) but the single-wave-per-block
+layout: each wave was doing one v_wmma every ~30-40 cycles because
+dequant + LDS + global A load all happened serially within the only
+resident wave.
+
+The v2 kernel adds two structural changes:
+
+* **2 waves per block, 32M × 16N tile.** Wave 0 owns rows 0..15,
+  wave 1 owns rows 16..31. Both waves cooperate on a shared B-tile
+  in LDS — only wave 0 does the dequant; both read the result. The
+  dequant cost is amortised over 2 wmmas instead of 1.
+* **Double-buffered LDS B-tile** (`b_lds[2][16][16]`). Wave 0
+  dequants the K+1 tile into the alternate buffer while both waves
+  consume the K tile. One `__syncthreads()` per K-iter is enough.
+
+For `M < 32` the v2 launcher falls back to the v1 kernel — bench
+showed v2 at M=16 regressed +47 % vs v1 because wave 1 processed
+out-of-range M rows (zero-padded a_frag → wmma produced nothing
+useful but still cost SIMD cycles).
+
+Kernel microbench (bf16, K=N=4096):
+
+| M    | v1 μs/call | v2 μs/call | Δ        |
+|---:  |---:        |---:        |---:      |
+| 16   | 51.9       | (v1 fallback) | n/a   |
+| 32   | 80.8       | 85.4       | +5.7 %   |
+| 64   | 145.8      | 140.6      | −3.6 %   |
+| 128  | 277.4      | 258.0      | −7.0 %   |
+| 256  | 537.0      | 502.5      | −6.4 %   |
+| 512  | 1021.6     | 950.7      | −6.9 %   |
+| 1024 | 1907.7     | 1807.1     | −5.3 %   |
+| 2048 | 3492.9     | 3306.8     | −5.3 %   |
+
+Same pattern (5-7 % at M ≥ 64) on the other 4 Qwen-class shapes
+(`gate/up`, `down`, `qwen-14B-qkv`, `qwen-14B-up`).
+
+The improvement is smaller than the +30-50 % originally projected
+because the GPU already had thousands of blocks in flight (gridDim
+huge at high M) — the SIMD's WMMA pipeline wasn't actually starved
+of waves to schedule. The win comes mostly from amortising dequant
+work over 2 wmmas, which only saves the dequant fraction of K-tile
+time (~5-10 %).
 
 ### End-to-end serving deltas attributable to each round
 
@@ -734,6 +800,70 @@ back to scalar regardless of the dispatch guard) so the WMMA
 compute-density advantage doesn't translate to TPS. The dispatch
 stays bf16-only; the standalone op `gptq_gemm_rdna3_wmma` remains
 callable for fp16 in case a future workload makes it worthwhile.
+
+### 12. WMMA v2: 2 waves per block + double-buffered LDS
+
+The Round 5 hypothesis ("K_SPLIT=4 atomic CAS contention is the
+bf16-prefill bottleneck") was wrong — making `compute_wmma_k_split`
+M-aware and dropping K_SPLIT to 1 at high M turned out to be within
+run-to-run variance (±2-3 % across shapes). The actual bottleneck
+sat one level deeper.
+
+**Diagnosis.** Microbench at M=2048, K=N=4096, bf16 measured
+3.5 ms / call which is **24 % of the gfx1100 WMMA peak**
+(29.6 TFLOPs / 122 TFLOPs). With one wave per block and the K-loop
+chain of `dequant → LDS-write → A-load → LDS-read → v_wmma` all
+serial within the only resident wave, each wave does roughly one
+v_wmma every ~30-40 cycles instead of the back-to-back 16-cycle
+WMMA throughput the SIMD can sustain when fed.
+
+**Fix shape.** Two changes layered on top of the Lesson 9/10
+single-wave-friendly kernel:
+
+* **2 waves per block, 32M × 16N tile.** Wave 0 produces output
+  rows 0..15, wave 1 rows 16..31. The dequant + LDS write of the
+  16×16 B-tile is done by wave 0 only — both waves consume the
+  same shared b_lds. Each wave loads its own A slice from global
+  in parallel. Each wave issues its own v_wmma.
+* **Double-buffered LDS** (`b_lds[2][16][16]`). Wave 0 overlaps
+  the dequant of K-tile k+1 (writing to the alternate buffer) with
+  both waves' WMMA work on K-tile k. One `__syncthreads()` per
+  K-iter remains and is cheap (~5-10 cycles on a 2-wave block,
+  unlike the single-wave case where it was a pure stall — see
+  Lesson 9).
+
+**Implementation note: `__shfl_xor` is wave-local** in the
+K-split atomic epilogue. With 2 waves per block, each wave does its
+own pair-shuffle independently — the two waves don't interact
+during the store.
+
+**Outcome (kernel microbench, 5 Qwen-class shapes × M ≥ 32 bf16):**
+−5 to −7 % μs/call vs v1, consistent across shapes. See the table
+in Round 6 of the development history for the per-M deltas. The
+expected gain was +30-50 % based on a "WMMA pipeline starved" model;
+reality came in much smaller because gridDim is huge at high M
+(thousands of blocks) and the GPU's wave scheduler already had
+plenty of waves across the device to fill the pipeline. The win
+mostly comes from amortising dequant work over 2 wmmas instead of
+the WMMA-pipeline-fill effect.
+
+**Fallback for M < 32.** v2 launches 64 threads = 2 waves; at
+size_m=16 wave 1's 16 rows are entirely out-of-range (zero-pad
+a_frag → wmma produces nothing). Bench measured +47 % regression
+at M=16 vs v1. The v2 launcher therefore calls v1 directly when
+size_m < 32. The fallback costs nothing — the M < 32 case is rare
+in serving (decode at max-num-seqs ≥ 32 lands at M ≈ 32 steady
+state).
+
+**Why we don't pursue v3 (4 waves, 32M × 32N) right now.** The
+diminishing-returns argument: dequant amortisation over 4 wmmas
+instead of 2 buys ~2-4 % more wall-time, while implementation cost
+is comparable to v2. At ~8-11 % combined kernel improvement vs v1,
+serving impact is likely <3 % TTFT — the kernel isn't the dominant
+cost in long-prompt prefill (attention is). Closing the residual
+gap to WMMA peak would need multi-wave-per-block with LDS-shared
+**A** between waves (not just B), which is a much bigger rewrite.
+Tracked as future work.
 
 ## Diagnostic ops (registered, callable from Python)
 
