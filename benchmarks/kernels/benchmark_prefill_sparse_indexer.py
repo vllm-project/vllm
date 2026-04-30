@@ -583,6 +583,21 @@ def export_sweep_graph(
     results_df: pd.DataFrame, output_path: str, log_axis: bool
 ) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import LogFormatterSciNotation, LogLocator
+
+    def label_log_y_subticks(ax) -> None:
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(5,)))
+        ax.yaxis.set_minor_formatter(
+            LogFormatterSciNotation(
+                base=10,
+                labelOnlyBase=False,
+                minor_thresholds=(float("inf"), float("inf")),
+            )
+        )
+
+    def show_y_grid(ax) -> None:
+        ax.grid(True, axis="y", which="major", alpha=0.25)
+        ax.grid(True, axis="y", which="minor", alpha=0.12)
 
     fig, (latency_ax, memory_ax, chunks_ax) = plt.subplots(
         3, 1, figsize=(9, 9), sharex=True
@@ -607,16 +622,20 @@ def export_sweep_graph(
     latency_ax.tick_params(axis="x", labelbottom=True)
     if log_axis:
         latency_ax.set_xscale("log", base=10)
+        latency_ax.set_yscale("log")
+        label_log_y_subticks(latency_ax)
     latency_ax.set_ylim(bottom=0)
-    latency_ax.grid(True, axis="y", alpha=0.25)
+    show_y_grid(latency_ax)
     latency_ax.legend()
 
     memory_ax.set_title("Peak memory")
     memory_ax.set_ylabel("MiB")
     if log_axis:
         memory_ax.set_xscale("log", base=10)
+        memory_ax.set_yscale("log")
+        label_log_y_subticks(memory_ax)
     memory_ax.set_ylim(bottom=0)
-    memory_ax.grid(True, axis="y", alpha=0.25)
+    show_y_grid(memory_ax)
     memory_ax.legend()
 
     chunks_ax.set_xlabel("max_context_len")
@@ -624,8 +643,10 @@ def export_sweep_graph(
     chunks_ax.set_ylabel("count")
     if log_axis:
         chunks_ax.set_xscale("log", base=10)
+        chunks_ax.set_yscale("log")
+        label_log_y_subticks(chunks_ax)
     chunks_ax.set_ylim(bottom=0)
-    chunks_ax.grid(True, axis="y", alpha=0.25)
+    show_y_grid(chunks_ax)
     chunks_ax.legend()
 
     fig.tight_layout()
