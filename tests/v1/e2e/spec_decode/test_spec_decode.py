@@ -390,6 +390,17 @@ def _run_eagle_correctness(
             "TREE_ATTN is flaky in the test disable for now until it can be "
             "resolved (see https://github.com/vllm-project/vllm/issues/22922)"
         )
+    if (
+        attn_backend == "FLASH_ATTN"
+        and "deepseek" in model_setup[1].lower()
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip(
+            "FLASH_ATTN on Blackwell rejects the non-MLA DeepSeek shape "
+            "(192, 192); FA4 cute only supports (192, 128). "
+            "Use FLASH_ATTN_MLA for DeepSeek on SM100+."
+        )
     if model_impl == "transformers":
         import transformers
         from packaging.version import Version
