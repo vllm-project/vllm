@@ -85,7 +85,6 @@ class VllmInductorPass(InductorPass):
             collect_graph_metadata(
                 None,
                 **self.graph_dump_metadata,
-                pass_name=self.pass_name,
                 stage=stage,
             ),
         )
