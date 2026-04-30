@@ -49,6 +49,9 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    # Has to be here so the partial tensors survive across
+    # chunked prefill steps independently of InputBatch
+    # slot assignments, and cleanup is automatic with the request.
     in_progress_prompt_logprobs_cpu: LogprobsTensors | None = None
 
     # Per-position mask for mixed-mode inputs (e.g chat completion with

@@ -1476,7 +1476,6 @@ class GPUModelRunner(
         """
         self.input_batch.remove_request(req_id)
         req_state = self.requests[req_id]
-        req_state.in_progress_prompt_logprobs_cpu = None
 
         req_state.prompt_token_ids = new_req_data.prompt_token_ids
         req_state.mm_features = new_req_data.mm_features
