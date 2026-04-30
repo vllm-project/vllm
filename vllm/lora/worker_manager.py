@@ -18,7 +18,6 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
-
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
