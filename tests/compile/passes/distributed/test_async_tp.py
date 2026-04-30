@@ -289,7 +289,7 @@ def test_async_tp_pass_replace(
     run_torch_spawn(async_tp_pass_on_test_model, num_processes)
 
 
-def test_async_tp_pass_is_applicable_for_piecewise_compilation():
+def test_async_tp_pass_requires_full_graph_compilation():
     vllm_config = VllmConfig()
     vllm_config.compilation_config.use_inductor_graph_partition = False
     vllm_config.compilation_config.splitting_ops = [
@@ -299,7 +299,10 @@ def test_async_tp_pass_is_applicable_for_piecewise_compilation():
     async_tp_pass = object.__new__(AsyncTPPass)
     async_tp_pass.compilation_config = vllm_config.compilation_config
 
-    assert async_tp_pass.is_applicable_for_range(Range(start=8, end=8))
+    with pytest.raises(
+        AssertionError, match="AsyncTPPass requires full-graph compilation"
+    ):
+        async_tp_pass.is_applicable_for_range(Range(start=8, end=8))
 
 
 def async_tp_pass_on_test_model(

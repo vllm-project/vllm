@@ -6,6 +6,7 @@ from contextlib import suppress
 
 import torch
 import torch._inductor.pattern_matcher as pm
+import torch.distributed.distributed_c10d as c10d
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
@@ -18,6 +19,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
@@ -30,6 +32,182 @@ from ..vllm_inductor_pass import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 logger = init_logger(__name__)
+
+
+def _flashinfer_scaled_mm_out(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    *,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    scale_result: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    use_fast_accum: bool = False,
+) -> None:
+    # Import lazily to avoid a circular import during module initialization
+    # when docs or other tooling import the pass without FlashInfer.
+    from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm_out
+
+    assert bias is None, "FlashInfer symm_mem adapter does not support bias"
+    assert scale_result is None, (
+        "FlashInfer symm_mem adapter does not support result scaling"
+    )
+    assert not use_fast_accum, (
+        "FlashInfer symm_mem adapter does not support use_fast_accum"
+    )
+    assert A.ndim == 2 and B.ndim == 2 and out.ndim == 2, (
+        "FlashInfer symm_mem adapter expects 2D inputs and output"
+    )
+    assert scale_a.numel() == 1 and scale_b.numel() == 1, (
+        "FlashInfer symm_mem adapter only supports tensor-wise FP8 scales"
+    )
+
+    flashinfer_scaled_fp8_mm_out(
+        A,
+        B,
+        scale_a,
+        scale_b,
+        out=out,
+        out_dtype=out_dtype or out.dtype,
+    )
+
+
+def fused_flashinfer_scaled_matmul_reduce_scatter_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    world_size = c10d._resolve_process_group(group_name).size()
+    result_shape = list(output_shape)
+    result_shape[orig_scatter_dim] //= world_size
+    return torch.empty(
+        result_shape,
+        dtype=out_dtype or torch.bfloat16,
+        device=A.device,
+    )
+
+
+def fused_flashinfer_scaled_matmul_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    assert orig_scatter_dim == 0 and scatter_dim_after_maybe_reshape == 0, (
+        "FlashInfer symm_mem adapter currently only supports scatter_dim=0"
+    )
+    world_size = c10d._resolve_process_group(group_name).size()
+    assert A.ndim == 2 and B.ndim == 2, "FlashInfer symm_mem adapter expects 2D inputs"
+    assert A.is_contiguous(), "FlashInfer symm_mem adapter expects contiguous A"
+    assert A_scale.numel() == 1 and B_scale.numel() == 1, (
+        "FlashInfer symm_mem adapter only supports tensor-wise FP8 scales"
+    )
+    assert A.shape[0] % world_size == 0, (
+        "FlashInfer symm_mem adapter expects M divisible by world size"
+    )
+
+    kwargs = {
+        "scale_b": B_scale,
+        "bias": None,
+        "scale_result": None,
+        "out_dtype": out_dtype,
+        "use_fast_accum": False,
+    }
+    return torch.distributed._symmetric_memory._fused_scaled_matmul_reduce_scatter_impl(
+        mm_out_op=_flashinfer_scaled_mm_out,
+        A=A,
+        B=B,
+        A_scale=A_scale,
+        kwargs=kwargs,
+        out_dtype=out_dtype,
+        reduce_op=reduce_op,
+        orig_scatter_dim=orig_scatter_dim,
+        scatter_dim_after_maybe_reshape=scatter_dim_after_maybe_reshape,
+        group_name=group_name,
+        output_shape=output_shape,
+    )
+
+
+def fused_all_gather_flashinfer_scaled_matmul_fake(
+    A_shard: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    gather_dim: int,
+    group_name: str,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    world_size = c10d._resolve_process_group(group_name).size()
+    output_shape = list(A_shard.shape)
+    output_shape[gather_dim] *= world_size
+    output_shape[-1] = B.shape[1]
+    return torch.empty(
+        output_shape,
+        dtype=out_dtype or torch.bfloat16,
+        device=A_shard.device,
+    )
+
+
+def fused_all_gather_flashinfer_scaled_matmul(
+    A_shard: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    gather_dim: int,
+    group_name: str,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    assert gather_dim == 0, (
+        "FlashInfer symm_mem adapter currently only supports gather_dim=0"
+    )
+    _, outputs = torch.distributed._symmetric_memory._fused_all_gather_matmul_impl(
+        mm_out_op=_flashinfer_scaled_mm_out,
+        A_shard=A_shard,
+        Bs=[B],
+        A_scale=A_scale,
+        kwargs_list=[
+            {
+                "scale_b": B_scale,
+                "bias": None,
+                "scale_result": None,
+                "out_dtype": out_dtype,
+                "use_fast_accum": False,
+            }
+        ],
+        out_dtypes=[out_dtype],
+        gather_dim=gather_dim,
+        group_name=group_name,
+        return_A=False,
+    )
+    return outputs[0]
+
+
+direct_register_custom_op(
+    op_name="fused_flashinfer_scaled_matmul_reduce_scatter",
+    op_func=fused_flashinfer_scaled_matmul_reduce_scatter,
+    fake_impl=fused_flashinfer_scaled_matmul_reduce_scatter_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_all_gather_flashinfer_scaled_matmul",
+    op_func=fused_all_gather_flashinfer_scaled_matmul,
+    fake_impl=fused_all_gather_flashinfer_scaled_matmul_fake,
+)
 
 
 class BasePattern:
@@ -544,8 +722,12 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
         self.dump_patterns(config, self.pm_pass)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        # AsyncTP patterns are only created after SP rewrites. If SP did not
-        # run for a range there is naturally nothing here to match.
+        # This pass is applied on top of the sequence parallelism pass,
+        # which is only supported in fullgraph compilation mode.
+        assert (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
+        ), "AsyncTPPass requires full-graph compilation"
         return True
 
     @VllmInductorPass.time_and_log
