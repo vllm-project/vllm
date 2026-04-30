@@ -123,7 +123,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            invalid_token_expert_id=num_experts,
+            invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
             expert_id_payload_index=topk_ids_payload_index,
         )
         if a1q_scale is not None:

@@ -321,7 +321,7 @@ def moe_kernel_quantize_input(
             A_scale,
             per_act_token_quant,
             block_shape,
-            is_sf_swizzled_layout=is_fp4_scale_swizzled,
+            is_sf_swizzled_layout=False,
             mx_alignment=mx_alignment,
         )
     elif quant_dtype == "mxfp6_e3m2":
