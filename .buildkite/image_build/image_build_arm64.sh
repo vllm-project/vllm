@@ -27,6 +27,7 @@ docker build --file docker/Dockerfile \
   --build-arg max_jobs=16 \
   --build-arg nvcc_threads=4 \
   --build-arg torch_cuda_arch_list="9.0" \
+  --build-arg USE_SCCACHE=1 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
   --tag "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-arm64 \
   --target test \
