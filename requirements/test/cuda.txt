@@ -1289,7 +1289,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers==5.5.3
+transformers==5.7.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/cuda.in
