@@ -97,7 +97,7 @@ def _mxfp8_e4m3_quantize_impl(
         x_q, x_scales = flashinfer_mxfp8_quantize(
             x,
             is_sf_swizzled_layout=is_sf_swizzled_layout,
-            alignment=alignment if alignment > 0 else None,
+            alignment=alignment if alignment > 0 else 32,
         )
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)
