@@ -264,7 +264,7 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
 def construct_tool_dicts(
     tools: list[Tool], tool_choice: ToolChoice
 ) -> list[dict[str, Any]] | None:
-    if tools is None or (tool_choice == "none"):
+    if not tools or (tool_choice == "none"):
         tool_dicts = None
     else:
         tool_dicts = [

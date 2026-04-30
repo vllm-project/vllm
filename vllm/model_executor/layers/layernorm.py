@@ -61,10 +61,6 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
-    if envs.VLLM_BATCH_INVARIANT:
-        return rms_norm_batch_invariant(
-            x + residual, weight, variance_epsilon
-        ), x + residual
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -80,7 +76,7 @@ def poly_norm(
     from vllm import _custom_ops as ops
 
     out = torch.empty_like(x)
-    ops.poly_norm(
+    ops.poly_norm(  # type: ignore[attr-defined]
         out,
         x,
         weight,
@@ -478,9 +474,12 @@ class RMSNormGated(CustomOp):
         weight = self.weight.float()
         z = z.float() if z is not None else None
 
+        assert self.activation in ["silu", "sigmoid", "swish"]
+        act_fn = F.sigmoid if self.activation == "sigmoid" else F.silu
+
         # Apply gating before normalization if needed
         if z is not None and not self.norm_before_gate:
-            x = x * F.silu(z)
+            x = x * act_fn(z)
 
         # RMS Normalization
         if self.group_size is None:
@@ -499,7 +498,7 @@ class RMSNormGated(CustomOp):
 
         # Apply gating after normalization if needed
         if z is not None and self.norm_before_gate:
-            out = out * F.silu(z)
+            out = out * act_fn(z)
 
         return out.to(orig_dtype)
 
