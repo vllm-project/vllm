@@ -93,6 +93,19 @@ def is_deep_gemm_supported() -> bool:
 
 
 @functools.cache
+def is_deep_gemm_mega_moe_supported() -> bool:
+    """Return `True` if DeepGEMM mega_moe is available.
+
+    Checks for ``fp8_fp4_mega_moe`` in the installed deep_gemm package,
+    which is only present in builds that include the mega_moe kernel.
+    """
+    if not is_deep_gemm_supported():
+        return False
+    dg = _import_deep_gemm()
+    return dg is not None and hasattr(dg, "fp8_fp4_mega_moe")
+
+
+@functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
     """Return `True` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Hopper or Blackwell-class GPU.
@@ -574,6 +587,7 @@ __all__ = [
     "get_paged_mqa_logits_metadata",
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
+    "is_deep_gemm_mega_moe_supported",
     "is_deep_gemm_supported",
     "get_num_sms",
     "set_num_sms",

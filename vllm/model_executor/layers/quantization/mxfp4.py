@@ -354,6 +354,25 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
+        # DEEPGEMM_MEGA: convert checkpoint weights/scales into the format
+        # expected by deep_gemm.fp8_fp4_mega_moe. Must happen before
+        # get_fused_moe_quant_config which reads scales from the layer.
+        if self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MEGA:
+            from vllm.model_executor.layers.fused_moe.experts.deep_gemm_mega_moe import (  # noqa: E501
+                DeepGemmMegaExperts,
+            )
+
+            w13_w, w13_s, w2_w, w2_s = DeepGemmMegaExperts.convert_weights_for_mega_moe(
+                layer.w13_weight.data,
+                layer.w13_weight_scale.data,
+                layer.w2_weight.data,
+                layer.w2_weight_scale.data,
+            )
+            replace_parameter(layer, "w13_weight", w13_w)
+            replace_parameter(layer, "w13_weight_scale", w13_s)
+            replace_parameter(layer, "w2_weight", w2_w)
+            replace_parameter(layer, "w2_weight_scale", w2_s)
+
         # Build quant config
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
@@ -367,6 +386,9 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 shared_experts=layer.shared_experts,
             )
+
+            # Let experts do backend-specific weight post-processing.
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer):
         w13 = layer.w13_weight
@@ -679,6 +701,25 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
+
+        # DEEPGEMM_MEGA: convert checkpoint weights/scales into the format
+        # expected by deep_gemm.fp8_fp4_mega_moe. Must happen before
+        # get_fused_moe_quant_config which reads scales from the layer.
+        if self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MEGA:
+            from vllm.model_executor.layers.fused_moe.experts.deep_gemm_mega_moe import (  # noqa: E501
+                DeepGemmMegaExperts,
+            )
+
+            w13_w, w13_s, w2_w, w2_s = DeepGemmMegaExperts.convert_weights_for_mega_moe(
+                layer.w13_weight.data,
+                layer.w13_weight_scale.data,
+                layer.w2_weight.data,
+                layer.w2_weight_scale.data,
+            )
+            replace_parameter(layer, "w13_weight", w13_w)
+            replace_parameter(layer, "w13_weight_scale", w13_s)
+            replace_parameter(layer, "w2_weight", w2_w)
+            replace_parameter(layer, "w2_weight_scale", w2_s)
 
         # Build quant config
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)

@@ -66,6 +66,8 @@ class Mxfp4MoeBackend(Enum):
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
+    # DeepGemm mega_moe
+    DEEPGEMM_MEGA = "DEEPGEMM_MEGA"
     # Emulation
     EMULATION = "EMULATION"
 
@@ -156,6 +158,13 @@ def backend_to_kernel_cls(
 
         return [XPUExpertsMXFp4]
 
+    elif backend == Mxfp4MoeBackend.DEEPGEMM_MEGA:
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_mega_moe import (
+            DeepGemmMegaExperts,
+        )
+
+        return [DeepGemmMegaExperts]
+
     elif backend == Mxfp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
             OCP_MXQuantizationEmulationTritonExperts,
@@ -179,6 +188,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         "triton_unfused": Mxfp4MoeBackend.TRITON_UNFUSED,
         "marlin": Mxfp4MoeBackend.MARLIN,
         "aiter": Mxfp4MoeBackend.AITER,
+        "deepgemm_mega": Mxfp4MoeBackend.DEEPGEMM_MEGA,
         "xpu": Mxfp4MoeBackend.XPU,
         "emulation": Mxfp4MoeBackend.EMULATION,
     }
@@ -197,6 +207,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        Mxfp4MoeBackend.DEEPGEMM_MEGA,
         Mxfp4MoeBackend.AITER,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
@@ -219,6 +230,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+        Mxfp4MoeBackend.DEEPGEMM_MEGA,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
@@ -525,7 +537,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     ):
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
-    elif current_platform.is_rocm():
+    elif backend == Mxfp4MoeBackend.DEEPGEMM_MEGA or current_platform.is_rocm():
         intermediate_size = round_up(intermediate_size, 256)
         hidden_size = round_up(hidden_size, 256)
     else:
@@ -903,6 +915,18 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MEGA:
+        # Weight transformation is handled by
+        # DeepGemmMegaExperts.process_weights_after_loading().
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+
     elif mxfp4_backend == Mxfp4MoeBackend.XPU:
         # No additional transformation needed for XPU backend
         return (
@@ -966,6 +990,18 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_weight.data,
             _upcast_e8m0_to_fp32(w13_weight_scale.data),
             _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_bias,
+            w2_bias,
+        )
+
+    if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MEGA:
+        # Weights stay as uint8 packed FP4 — no layout change needed.
+        # Convert E8M0 uint8 scales to float32.
+        return (
+            w13_weight.data,
+            w2_weight.data,
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
@@ -1216,6 +1252,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER,
+        Mxfp4MoeBackend.DEEPGEMM_MEGA,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
@@ -1251,13 +1288,27 @@ def make_mxfp4_moe_kernel(
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
     # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
+    prepare_finalize: mk.FusedMoEPrepareAndFinalize | None
+    if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MEGA:
+        # Mega_moe handles all-to-all communication internally via symmetric
+        # memory. Do NOT use maybe_make_prepare_finalize() here — it would
+        # select an external all-to-all backend (DeepEP, etc.) that conflicts
+        # with mega_moe's built-in dispatch/combine.
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+            make_moe_prepare_and_finalize_no_dp_ep,
+        )
+
+        prepare_finalize = make_moe_prepare_and_finalize_no_dp_ep(
+            use_monolithic=False,
+        )
+    else:
+        prepare_finalize = maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=moe_quant_config,
+            routing_tables=routing_tables,
+            allow_new_interface=True,
+            use_monolithic=is_monolithic,
+        )
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
