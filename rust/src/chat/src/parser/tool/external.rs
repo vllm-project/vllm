@@ -155,7 +155,6 @@ def_external_tool_parser!(Glm47MoeToolParser, Glm4MoeParser, glm47);
 def_external_tool_parser!(JsonToolParser, JsonParser);
 def_external_tool_parser!(KimiK2ToolParser, KimiK2Parser);
 def_external_tool_parser!(Llama3JsonToolParser, LlamaParser);
-def_external_tool_parser!(MinimaxM2ToolParser, MinimaxM2Parser);
 def_external_tool_parser!(MistralToolParser, MistralParser);
 def_external_tool_parser!(PythonicToolParser, PythonicParser);
 def_external_tool_parser!(Qwen3XmlToolParser, QwenParser);

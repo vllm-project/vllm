@@ -15,6 +15,7 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
   - Prefer tuple-based parser composition over calling `parse_next` one parser at a time.
   - Prefer built-in combinators and token parsers before adding local helpers.
   - Add short documentation comments like `Parse a ..` to all local parser/combinator functions.
+  - Reuse existing utilities from `utils` module as much as possible, and add new ones there if needed.
 - Rust error handling:
   - Never call `to_string()` directly on an error value.
   - Use `ToReportString` or `AsReport` by `thiserror-ext` instead.
