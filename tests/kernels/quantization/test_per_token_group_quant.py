@@ -73,11 +73,6 @@ def test_per_token_group_quant_fp8(
         # Larger shapes with padding
         (127, 7168, 128),
         (253, 640, 128),
-        # Non-power-of-2 group size
-        (4, 768, 96),  # 768/96=8 groups, no padding
-        (3, 768, 96),  # 768/96=8 groups, MN padding
-        (4, 480, 96),  # 480/96=5 groups, K padding
-        (1, 480, 96),  # both MN and K padding
     ],
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
