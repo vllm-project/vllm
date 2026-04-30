@@ -160,6 +160,15 @@ class NixlConnectorScheduler:
                 "recompute threshold is set to %d tokens",
                 self.kv_recompute_threshold,
             )
+        elif self.is_bidirectional_kv_xfer_enabled and self._initial_kv_lease < 480:
+            logger.info(
+                "Bidirectional KV transfer is enabled but KV blocks lease renewal is "
+                "not supported to extend TTL of blocks on D.Extending initial kv lease"
+                " from %d seconds to %d seconds.",
+                self._initial_kv_lease,
+                480,
+            )
+            self._initial_kv_lease = 480
 
     def shutdown(self):
         self._stop_event.set()
@@ -189,6 +198,8 @@ class NixlConnectorScheduler:
     def _on_waiting_add(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
+        # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
+        # effectively disabled for Bidirectional KV transfer.
         if params is None or not params.get("do_remote_prefill"):
             return
         # Only track if all required remote fields are present.
