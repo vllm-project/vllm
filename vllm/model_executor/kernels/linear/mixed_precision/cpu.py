@@ -141,45 +141,77 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         packed_zp.data = blocked_zp
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        if (not self.config.zero_points) and (self.w_zp_name is not None):
-            setattr(layer, self.w_zp_name, None)
+        if current_platform.is_zen_cpu() and not (
+            hasattr(layer, "weight_g_idx") or getattr(self.config, "has_g_idx", False)
+        ):
+            try:
+                from compressed_tensors.compressors.pack_quantized.helpers import (
+                    unpack_from_int32,
+                )
+            except ImportError:
+                from compressed_tensors.compressors.quantized_compressors.pack_quantized import (  # type: ignore[import-not-found]
+                    unpack_from_int32,
+                )
+            repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
+            weight_packed = layer.weight_packed  # (out, in/8) compressed_tensors format
+            weight_scale = layer.weight_scale    # (out, num_groups)
+            out_features, num_groups = weight_scale.shape[0], weight_scale.shape[1]
+            in_features = weight_packed.shape[1] * 8
+            original_shape = torch.Size([out_features, in_features])
 
-        if (not self.config.has_g_idx) and (self.w_gidx_name is not None):
-            setattr(layer, self.w_gidx_name, None)
+            # Unpack with compressed_tensors behavior: (out, in/8) -> (out, in) int8
+            weight_unpacked = unpack_from_int32(weight_packed, 4, original_shape, packed_dim=1)
+            zp_param = getattr(layer, "weight_zero_point", None)
+            if zp_param is None:
+                repacked = repack_op(weight_unpacked.to(torch.int8).contiguous())
+                zp_tc = None
+            else:
+                # Match zentorch u4 behavior: unsigned nibble [0, 15].
+                w_u = (weight_unpacked.to(torch.int32) + 8).clamp(0, 15)
+                repacked = repack_op(w_u.to(torch.int8).contiguous())
+                zp_s = unpack_from_int32(zp_param, 4, (out_features, num_groups), packed_dim=0)
+                zp_u = (zp_s.to(torch.int32) + 8).clamp(0, 15).to(torch.int8)
+                zp_tc = zp_u.t().contiguous()
 
-        weights = getattr(layer, self.w_q_name)
-        # Require GPTQ pack format
-        assert weights.input_dim == weights.packed_dim
-
-        # Weights in CT format is [output_size, input_size]
-        if weights.input_dim == 1:
-            weights.data = weights.t()
-
-        # Scales in CT format is [output_size, group_num]
-        scales = getattr(layer, self.w_s_name)
-        if scales.output_dim == 0:
-            scales.data = scales.t().contiguous()
-
-        # Zero points in CT format is [output_size, group_num]
-        # Zero points in awq_marlin format is [output_size, group_num]
-        if self.config.zero_points:
-            assert self.w_zp_name
-            zp = getattr(layer, self.w_zp_name)
-            if zp.output_dim == 0:
-                zp.data = zp.t().contiguous()
-
-        layer.use_w4a8 = (
-            envs.VLLM_CPU_INT4_W4A8
-            and not self.config.has_g_idx
-            and self.config.act_type == torch.bfloat16
-            and torch.cpu._is_amx_tile_supported()
-        )
-        # layer.use_w4a8 = False
-        # AWQ format will be converted to GPTQ format in `AWQMarlinLinearMethod`
-        if layer.use_w4a8:
-            self._process_gptq_weights_w4a8(layer)
+            layer.weight_packed.data = repacked.t()  # Don’t make it contiguous; it’s packed
+            layer.weight_scale.data = weight_scale.t().contiguous()
+            if zp_param is not None:
+                layer.weight_zero_point.data = zp_tc
+            layer._zentorch_processed_weights = True
         else:
-            self._process_gptq_weights_w4a16(layer)
+            weights = getattr(layer, self.w_q_name)
+            # Require GPTQ pack format
+            assert weights.input_dim == weights.packed_dim
+
+            # Weights in CT format is [output_size, input_size]
+            if weights.input_dim == 1:
+                weights.data = weights.t()
+
+            # Scales in CT format is [output_size, group_num]
+            scales = getattr(layer, self.w_s_name)
+            if scales.output_dim == 0:
+                scales.data = scales.t().contiguous()
+
+            # Zero points in CT format is [output_size, group_num]
+            # Zero points in awq_marlin format is [output_size, group_num]
+            if self.config.zero_points:
+                assert self.w_zp_name
+                zp = getattr(layer, self.w_zp_name)
+                if zp.output_dim == 0:
+                    zp.data = zp.t().contiguous()
+
+            layer.use_w4a8 = (
+                envs.VLLM_CPU_INT4_W4A8
+                and not self.config.has_g_idx
+                and self.config.act_type == torch.bfloat16
+                and torch.cpu._is_amx_tile_supported()
+            )
+            # layer.use_w4a8 = False
+            # AWQ format will be converted to GPTQ format in `AWQMarlinLinearMethod`
+            if layer.use_w4a8:
+                self._process_gptq_weights_w4a8(layer)
+            else:
+                self._process_gptq_weights_w4a16(layer)
 
     def apply_weights(
         self,
@@ -187,6 +219,14 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if current_platform.is_zen_cpu() and getattr(layer, "_zentorch_processed_weights", False):
+            return torch.ops.zentorch.zentorch_woq_linear.default(
+                x,
+                layer.weight_packed,
+                layer.weight_scale,
+                getattr(layer, "weight_zero_point", None),
+                bias,
+            )
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
         if layer.use_w4a8:
             x = ops.int4_scaled_mm_cpu(
