@@ -640,6 +640,17 @@ class ModelConfig:
             )
 
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+        if (
+            self.max_model_len_cap is not None
+            and self.max_model_len > self.max_model_len_cap
+        ):
+            logger.info(
+                "Capping auto-derived max_model_len from %d to %d "
+                "because max_model_len_cap is set.",
+                self.max_model_len,
+                self.max_model_len_cap,
+            )
+            self.max_model_len = self.max_model_len_cap
 
         if self.is_encoder_decoder:
             mm_processor_cache_gb = 0

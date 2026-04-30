@@ -2039,10 +2039,8 @@ def test_auto_fit_max_model_len():
 
 
 def test_auto_fit_max_model_len_cap():
-    """Test that max_model_len_cap caps the auto-fit result."""
-    model_config = ModelConfig(max_model_len=1024)
-    model_config.original_max_model_len = -1
-    model_config.max_model_len_cap = 256
+    """Test that max_model_len_cap caps the auto-fit upper bound."""
+    model_config = ModelConfig(max_model_len=-1, max_model_len_cap=256)
     vllm_config = VllmConfig(model_config=model_config)
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
@@ -2056,14 +2054,13 @@ def test_auto_fit_max_model_len_cap():
         vllm_config, [kv_cache_specs], [large_available_memory]
     )
 
+    assert vllm_config.model_config.original_max_model_len == -1
     assert vllm_config.model_config.max_model_len == 256
 
 
 def test_auto_fit_max_model_len_cap_above_fit():
     """Test that the cap does not raise an auto-fit result that is lower."""
-    model_config = ModelConfig(max_model_len=1024)
-    model_config.original_max_model_len = -1
-    model_config.max_model_len_cap = 768
+    model_config = ModelConfig(max_model_len=-1, max_model_len_cap=768)
     vllm_config = VllmConfig(model_config=model_config)
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
@@ -2077,7 +2074,17 @@ def test_auto_fit_max_model_len_cap_above_fit():
         vllm_config, [kv_cache_specs], [limited_memory]
     )
 
+    assert vllm_config.model_config.original_max_model_len == -1
     assert vllm_config.model_config.max_model_len == 512
+
+
+def test_max_model_len_cap_requires_auto():
+    """Test that max_model_len_cap is only valid with auto max_model_len."""
+    with pytest.raises(ValueError, match="max_model_len_cap"):
+        ModelConfig(max_model_len=1024, max_model_len_cap=256)
+
+    with pytest.raises(ValueError, match="max_model_len_cap"):
+        ModelConfig(max_model_len=None, max_model_len_cap=256)
 
 
 def test_auto_fit_max_model_len_with_hybrid():

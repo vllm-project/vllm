@@ -1813,24 +1813,6 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = original_max
 
 
-def _maybe_cap_auto_fit_max_model_len(
-    vllm_config: VllmConfig,
-    auto_fit_max: int,
-) -> bool:
-    max_model_len_cap = vllm_config.model_config.max_model_len_cap
-    if max_model_len_cap is None or auto_fit_max <= max_model_len_cap:
-        return False
-
-    vllm_config.model_config.max_model_len = max_model_len_cap
-    logger.info_once(
-        "Auto-fit max_model_len: capped fitted max_model_len "
-        "from %d to %d by max_model_len_cap",
-        auto_fit_max,
-        max_model_len_cap,
-    )
-    return True
-
-
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
@@ -1852,8 +1834,6 @@ def _auto_fit_max_model_len(
 
     if all(not groups for groups in projected_groups_per_worker):
         # All workers have empty specs (attention-free model)
-        if _maybe_cap_auto_fit_max_model_len(vllm_config, original_max):
-            return
         logger.info_once(
             "Auto-fit max_model_len: attention-free model, "
             "using derived max_model_len=%d",
@@ -1877,9 +1857,6 @@ def _auto_fit_max_model_len(
             "Cannot auto-fit max_model_len: not enough GPU memory available "
             "to serve even a single token. Try increasing `gpu_memory_utilization`."
         )
-
-    if _maybe_cap_auto_fit_max_model_len(vllm_config, auto_fit_max):
-        return
 
     if auto_fit_max >= original_max:
         # The model's full context length fits in memory
