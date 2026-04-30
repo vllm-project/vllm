@@ -119,6 +119,30 @@ class NixlConnectorScheduler:
             for n_tokens, block_size in sw_sizes_tokens
         ]
 
+        # Threshold to decide whether to compute kv cache locally
+        # or pull from a remote node: minimum number of remote
+        # tokens to amortize the xfer latencies
+        self.kv_recompute_threshold: int = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "kv_recompute_threshold", 64
+            )
+        )
+
+        # Bi-directional KV transfer feature supports KV block
+        # transfers from D node to P node
+        self.is_bidirectional_kv_xfer_enabled = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+        )
+
+        if self.is_bidirectional_kv_xfer_enabled and self.kv_recompute_threshold > 0:
+            logger.info(
+                "Bidirectional KV transfer is enabled and the kv "
+                "recompute threshold is set to %d tokens",
+                self.kv_recompute_threshold,
+            )
+
     def shutdown(self):
         self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
@@ -298,6 +322,44 @@ class NixlConnectorScheduler:
         if params is not None and params.get("do_remote_decode") and self._has_mamba:
             self._truncate_mamba_request_for_prefill(request)
 
+        if (
+            params is not None
+            and params.get("do_remote_decode")
+            and params.get("remote_block_ids")
+            and all(
+                p in params
+                for p in (
+                    "remote_engine_id",
+                    "remote_request_id",
+                    "remote_host",
+                    "remote_port",
+                )
+            )
+        ):
+            # Decode node has kv blocks for part of prefill request, so, provide them
+            # as an external token count to scheduler.
+            # The tokens will be loaded if not already present
+            # in the prefill node local cache
+            remote_num_tokens = params.get("remote_num_tokens") or 0
+            count = (
+                min(remote_num_tokens, request.num_prompt_tokens) - num_computed_tokens
+            )
+            if count > 0:
+                # Check kv_recompute_threshold: skip pull if
+                # remote tokens are below the threshold.
+                if (
+                    self.kv_recompute_threshold > 0
+                    and count < self.kv_recompute_threshold
+                ):
+                    logger.debug(
+                        "Skipping remote pull for %s: %d remote tokens < threshold %d",
+                        request.request_id,
+                        count,
+                        self.kv_recompute_threshold,
+                    )
+                    return 0, False
+                return count, True
+
         # No remote prefill for this request.
         return 0, False
 
@@ -315,13 +377,19 @@ class NixlConnectorScheduler:
         if not params:
             return
 
-        if params.get("do_remote_decode"):
+        if params.get("do_remote_decode") or (
+            params.get("do_remote_prefill") and self.is_bidirectional_kv_xfer_enabled
+        ):
             self._reqs_in_batch.add(request.request_id)
         if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
             self._reqs_need_save[request.request_id] = request
-        elif params.get("do_remote_prefill"):
+        elif params.get("do_remote_prefill") or (
+            params.get("do_remote_decode")
+            and self.is_bidirectional_kv_xfer_enabled
+            and not params.get("_remote_blocks_processed")
+        ):
             if params.get("remote_block_ids"):
                 if all(
                     p in params
@@ -333,8 +401,8 @@ class NixlConnectorScheduler:
                     )
                 ):
                     # If remote_blocks and num_external_tokens = 0, we have
-                    # a full prefix cache hit on the D worker. We need to call
-                    # send_notif in _read_blocks to free the memory on the P.
+                    # a full prefix cache hit on the local node. We need to call
+                    # send_notif in _read_blocks to free the memory on the remote node.
 
                     unhashed_local_block_ids: BlockIds = (
                         blocks.get_unhashed_block_ids_all_groups()
@@ -362,6 +430,7 @@ class NixlConnectorScheduler:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
+            params["_remote_blocks_processed"] = True
 
     def _build_save_meta(
         self,
@@ -450,6 +519,9 @@ class NixlConnectorScheduler:
         if not params:
             return False, None
 
+        is_p_node = bool(params.get("do_remote_decode"))
+        is_d_node = not is_p_node
+
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
             # update_state_after_alloc must not have been called (the request
@@ -461,9 +533,13 @@ class NixlConnectorScheduler:
             params["do_remote_prefill"] = False
             return False, None
 
-        if not params.get("do_remote_decode"):
+        if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
             return False, None
-        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+
+        if request.status not in (
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_STOPPED,
+        ):
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(request.request_id)
@@ -474,7 +550,7 @@ class NixlConnectorScheduler:
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
-
+        remote_num_tokens = 0
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
             logger.debug(
@@ -492,13 +568,16 @@ class NixlConnectorScheduler:
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_sw_clipped_blocks(block_ids)
 
+            remote_num_tokens = request.num_computed_tokens
+
         return delay_free_blocks, dict(
-            do_remote_prefill=True,
-            do_remote_decode=False,
+            do_remote_prefill=is_p_node,
+            do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            remote_num_tokens=remote_num_tokens,
         )
