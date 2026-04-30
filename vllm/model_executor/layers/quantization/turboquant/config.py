@@ -5,6 +5,8 @@
 import math
 from dataclasses import dataclass
 
+from vllm.utils.math_utils import next_power_of_2
+
 # Named TQ presets: each maps to frozen config parameters.
 # key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
 # value_quant_bits: 3-4 = uniform quantized values.
@@ -82,6 +84,22 @@ class TurboQuantConfig:
         return self.key_quant_bits == 8
 
     @property
+    def padded_head_dim(self) -> int:
+        """Head dimension used for the WHT rotation.
+
+        Sylvester Hadamard construction requires a power-of-2 dimension.
+        Models with non-power-of-2 head_dim (e.g. Qwen3-4B at 80) are padded
+        to the next power of 2 for the WHT and sliced back at the I/O
+        boundary. Pow-2 head_dims pass through unchanged.
+        """
+        return next_power_of_2(self.head_dim)
+
+    @property
+    def needs_padding(self) -> bool:
+        """Whether head_dim requires zero-padding for the WHT."""
+        return self.padded_head_dim != self.head_dim
+
+    @property
     def mse_bits(self) -> int:
         """MSE quantizer bit-width (determines centroid count: 2^mse_bits).
 
@@ -114,15 +132,19 @@ class TurboQuantConfig:
         """Packed bytes for a single KEY vector.
 
         FP8 mode (key_quant_bits=8):
-          head_dim bytes (1 byte per element, no overhead).
+          head_dim bytes (1 byte per element, no overhead). FP8 keys are not
+          rotated, so storage tracks the model's real head_dim.
 
-        TQ mode:
-          - MSE indices: ceil(head_dim * key_mse_bits / 8) bytes
+        TQ mode (MSE keys with WHT rotation):
+          - MSE indices: ceil(padded_head_dim * key_mse_bits / 8) bytes
           - vec_norm:     2 bytes (float16)
+
+          MSE indices live in WHT space, so the byte count is sized to the
+          padded dimension when head_dim is not a power of 2.
         """
         if self.key_fp8:
-            return self.head_dim  # 1 byte per element
-        mse_bytes = math.ceil(self.head_dim * self.key_mse_bits / 8)
+            return self.head_dim  # 1 byte per element, no rotation
+        mse_bytes = math.ceil(self.padded_head_dim * self.key_mse_bits / 8)
         norm_bytes = 2  # vec_norm fp16
         return mse_bytes + norm_bytes
 
@@ -135,9 +157,17 @@ class TurboQuantConfig:
     def value_packed_size(self) -> int:
         """Packed bytes for a single VALUE vector.
 
-        Uniform quantization: ceil(head_dim * bits / 8) + 4 bytes (scale + zero fp16).
+        Uniform quantization: ceil(D * bits / 8) + 4 bytes (scale + zero fp16).
+
+        On the FP8 K path the kernel operates on raw head_dim (no WHT), so
+        D = head_dim. On the MSE K path the kernel iterates a unified D for
+        both K and V; when head_dim is not a power of 2 the K-side requires
+        padded_head_dim for the WHT, so V is sized to padded_head_dim too
+        (zero-padded at store time, sliced at decode time). Pow-2 head_dims
+        pass through unchanged.
         """
-        data_bytes = math.ceil(self.head_dim * self.value_quant_bits / 8)
+        d = self.head_dim if self.key_fp8 else self.padded_head_dim
+        data_bytes = math.ceil(d * self.value_quant_bits / 8)
         return data_bytes + 4  # +2 scale(fp16) +2 zero(fp16)
 
     @property
