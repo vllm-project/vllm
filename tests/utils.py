@@ -19,6 +19,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager, suppress
+import multiprocessing
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Literal
@@ -1413,7 +1414,7 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     return wrapper
 
 
-def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
+
     """Decorator to spawn a new process for each test function."""
 
     @functools.wraps(f)
@@ -1460,6 +1461,64 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 raise RuntimeError(
                     f"Error raised in subprocess:\n{returned.stderr.decode()}"
                 ) from e
+
+    return wrapper
+
+def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function.
+
+    Uses subprocess with cloudpickle to serialize the test function and
+    propagates exceptions back to the parent, so test failures are never
+    silently swallowed (fixes https://github.com/vllm-project/vllm/issues/41415).
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=".tb", mode="wb"
+        ) as tmp:
+            tb_file = tmp.name
+
+        try:
+            # Serialize the function + args with cloudpickle so closures work
+            payload = cloudpickle.dumps((f, args, kwargs, tb_file))
+
+            child_script = (
+                "import sys, cloudpickle, traceback\n"
+                "f, args, kwargs, tb_file = cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "try:\n"
+                "    f(*args, **kwargs)\n"
+                "except BaseException:\n"
+                "    open(tb_file, 'w').write(traceback.format_exc())\n"
+                "    sys.exit(1)\n"
+            )
+
+            repo_root = str(VLLM_PATH.resolve())
+            env = os.environ.copy()
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
+            result = subprocess.run(
+                [sys.executable, "-c", child_script],
+                input=payload,
+                capture_output=True,
+                env=env,
+            )
+
+            if result.returncode != 0:
+                # Read traceback written by child, fall back to stderr
+                tb = ""
+                if os.path.exists(tb_file) and os.path.getsize(tb_file) > 0:
+                    with open(tb_file) as fp:
+                        tb = fp.read()
+                else:
+                    tb = result.stderr.decode()
+                raise RuntimeError(
+                    f"Test subprocess '{f.__name__}' failed "
+                    f"(exit code {result.returncode}):\n{tb}"
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tb_file)
 
     return wrapper
 
