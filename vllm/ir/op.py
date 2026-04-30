@@ -4,7 +4,7 @@ import contextlib
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar, overload
+from typing import Any, ClassVar, Literal, overload
 
 import torch
 from torch.library import Library, infer_schema
@@ -46,19 +46,29 @@ def enable_torch_wrap(enable: bool = True):
         _ENABLE_TORCH_WRAP = old
 
 
-# 0-param decorator overload
+# 0-param decorator overload (no inplace)
 @overload
 def register_op(f: Callable[..., Any]) -> "IrOp": ...
 
 
-# parametrized decorator overload
+# parametrized decorator with allow_inplace=False (default)
 @overload
 def register_op(
     *,
     name: str | None = None,
     activations: list[str] | None = None,
-    allow_inplace: bool = False,
+    allow_inplace: Literal[False] = False,
 ) -> Callable[[Callable[..., Any]], "IrOp"]: ...
+
+
+# parametrized decorator with allow_inplace=True
+@overload
+def register_op(
+    *,
+    name: str | None = None,
+    activations: list[str] | None = None,
+    allow_inplace: Literal[True],
+) -> Callable[[Callable[..., Any]], "IrOpInplace"]: ...
 
 
 def register_op(
@@ -91,7 +101,10 @@ def register_op(
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
         assert op_name not in IrOp.registry
-        op = IrOp(op_name, _f, activations, allow_inplace)
+        if allow_inplace:
+            op: IrOp = IrOpInplace(op_name, _f, activations)
+        else:
+            op = IrOp(op_name, _f, activations)
         IrOp.registry[op_name] = op
         return op
 
@@ -106,14 +119,13 @@ class IrOp:
 
     name: str
     impls: dict[str, "IrOpImpl"]
-    maybe_inplace: "IrOpInplaceOverload | None"
+    allow_inplace: bool = False
 
     def __init__(
         self,
         name: str,
         native_impl: Callable,
         activations: list[str] | None = None,
-        allow_inplace: bool = False,
     ):
         self._py_signature = inspect.signature(native_impl)
         if any(
@@ -145,7 +157,6 @@ class IrOp:
         self._schema_str = infer_schema(native_impl, mutates_args=[])
         self._input_generator: InputGenerator | None = None
         self._tolerance_overrides: ToleranceSpec = {}
-        self.allow_inplace = allow_inplace
 
         # native implementation
         self.impls["native"] = IrOpImpl(
@@ -171,11 +182,6 @@ class IrOp:
         vllm_ir_lib._register_fake(self.name, self._fake_call)
         assert hasattr(torch.ops.vllm_ir, name)
         self.torch_op: torch._ops.OpOverload = getattr(torch.ops.vllm_ir, name).default
-
-        if self.allow_inplace:
-            self.maybe_inplace = IrOpInplaceOverload(self)
-        else:
-            self.maybe_inplace = None
 
     def register_fake(self, fn: Callable) -> Callable:
         """
@@ -400,6 +406,24 @@ class IrOp:
             f"Use op.override_tolerance({dtype}, atol=..., rtol=...) "
             f"or add {dtype} to DEFAULT_TOLERANCES."
         )
+
+
+class IrOpInplace(IrOp):
+    """IR op with inplace support via maybe_inplace."""
+
+    maybe_inplace: "IrOpInplaceOverload"
+    allow_inplace: bool = True
+
+    def __init__(
+        self,
+        name: str,
+        native_impl: Callable,
+        activations: list[str] | None = None,
+    ):
+        super().__init__(name, native_impl, activations)
+
+        # Create the inplace overload
+        self.maybe_inplace = IrOpInplaceOverload(self)
 
 
 class IrOpInplaceOverload:
