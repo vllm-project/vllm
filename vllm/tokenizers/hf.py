@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
+import threading
 from pathlib import Path
 from typing import TypeAlias
 
@@ -12,6 +13,38 @@ from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_co
 from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+
+
+def make_backend_thread_local(tokenizer: HfTokenizer) -> HfTokenizer:
+    """Route operations through a per-thread deep-copied backend tokenizer."""
+    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        return tokenizer
+
+    thread_safe_tokenizer = copy.copy(tokenizer)
+
+    backend_tokenizer = thread_safe_tokenizer._tokenizer
+
+    # Concurrent dict insertion is safe here thanks to the GIL.
+    thread_local = {threading.get_ident(): copy.deepcopy(backend_tokenizer)}
+
+    class ThreadLocalTokenizer(tokenizer.__class__):  # type: ignore
+        @property
+        def _tokenizer(self):
+            current_thread_id = threading.get_ident()
+            try:
+                return thread_local[current_thread_id]
+            except KeyError:
+                backend_copy = copy.deepcopy(backend_tokenizer)
+                thread_local[current_thread_id] = backend_copy
+                return backend_copy
+
+        def __reduce__(self):
+            return make_backend_thread_local, (tokenizer,)
+
+    ThreadLocalTokenizer.__name__ = f"ThreadLocal{tokenizer.__class__.__name__}"
+
+    thread_safe_tokenizer.__class__ = ThreadLocalTokenizer
+    return thread_safe_tokenizer
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
@@ -122,4 +155,4 @@ class CachedHfTokenizer(TokenizerLike):
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        return get_cached_tokenizer(tokenizer)
+        return get_cached_tokenizer(make_backend_thread_local(tokenizer))
