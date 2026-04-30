@@ -344,6 +344,10 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
+        if request.pre_admission_aborted:
+            # Immediately abort so the connector's request_finished hook runs
+            # to free any pre-admission KV-transfer resources.
+            self.abort_requests([request.request_id])
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -352,17 +356,6 @@ class EngineCore:
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
-
-    def notify_kv_transfer_request_rejected(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-    ) -> bool:
-        """Enqueue connector cleanup for a rejected pre-admission request."""
-        return self.scheduler.request_rejected_before_admission(
-            request_id, kv_transfer_params, reason
-        )
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):

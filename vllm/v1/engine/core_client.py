@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import queue
-import random
 import sys
 import uuid
 import weakref
@@ -174,16 +173,6 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
-    def notify_kv_transfer_request_rejected(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        raise NotImplementedError
-
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -255,16 +244,6 @@ class EngineCoreClient(ABC):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
-    async def notify_kv_transfer_request_rejected_async(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        raise NotImplementedError
-
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -320,33 +299,6 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
-
-    def notify_kv_transfer_request_rejected(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        return self.engine_core.notify_kv_transfer_request_rejected(
-            request_id, kv_transfer_params, reason
-        )
-
-    async def notify_kv_transfer_request_rejected_async(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        return self.notify_kv_transfer_request_rejected(
-            request_id,
-            kv_transfer_params,
-            reason,
-            data_parallel_rank=data_parallel_rank,
-        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         self.engine_core.shutdown()
@@ -877,21 +829,6 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def notify_kv_transfer_request_rejected(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        return self.call_utility(
-            "notify_kv_transfer_request_rejected",
-            request_id,
-            kv_transfer_params,
-            reason,
-        )
-
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.call_utility("profile", is_start, profile_prefix)
 
@@ -1126,21 +1063,6 @@ class AsyncMPClient(MPClient):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
-
-    async def notify_kv_transfer_request_rejected_async(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        return await self.call_utility_async(
-            "notify_kv_transfer_request_rejected",
-            request_id,
-            kv_transfer_params,
-            reason,
-        )
 
     async def pause_scheduler_async(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -1465,44 +1387,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
-
-    async def notify_kv_transfer_request_rejected_async(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-        *,
-        data_parallel_rank: int | None = None,
-    ) -> bool:
-        method = "notify_kv_transfer_request_rejected"
-        if data_parallel_rank is not None:
-            if data_parallel_rank < 0 or data_parallel_rank >= len(self.core_engines):
-                logger.debug(
-                    "Ignoring rejected KV-transfer request %s with invalid "
-                    "data_parallel_rank=%s",
-                    request_id,
-                    data_parallel_rank,
-                )
-                return False
-            return await self._call_utility_async(
-                method,
-                request_id,
-                kv_transfer_params,
-                reason,
-                engine=self.core_engines[data_parallel_rank],
-            )
-
-        # Pre-admission requests are not tracked in reqs_in_flight. Without
-        # an explicit rank, send the cleanup through one local DP engine; the
-        # empty NIXL recv only needs one D-side worker to notify the P side.
-        engine = random.choice(self.core_engines)
-        return await self._call_utility_async(
-            method,
-            request_id,
-            kv_transfer_params,
-            reason,
-            engine=engine,
-        )
 
     @staticmethod
     async def process_engine_outputs(

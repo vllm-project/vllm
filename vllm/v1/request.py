@@ -74,6 +74,7 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        pre_admission_aborted: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -173,6 +174,10 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # If True, request should be aborted immediately after being added to
+        # the scheduler so the connector's request_finished hook runs.
+        self.pre_admission_aborted = pre_admission_aborted
+
     @classmethod
     def from_engine_core_request(
         cls,
@@ -195,6 +200,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            pre_admission_aborted=request.pre_admission_aborted,
         )
 
     def append_output_token_ids(

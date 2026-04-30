@@ -463,19 +463,6 @@ class MultiConnector(KVConnectorBase_V1):
 
         return async_saves > 0, kv_txfer_params
 
-    def request_rejected_before_admission(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-    ) -> bool:
-        for c in self._connectors:
-            if c.request_rejected_before_admission(
-                request_id, kv_transfer_params, reason
-            ):
-                return True
-        return False
-
     def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()

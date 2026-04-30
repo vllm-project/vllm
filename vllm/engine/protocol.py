@@ -115,9 +115,10 @@ class EngineClient(ABC):
         reason: str,
         *,
         data_parallel_rank: int | None = None,
-    ) -> bool:
+    ) -> None:
         """Notify the engine that a KV-transfer request was rejected before
-        engine admission.
+        engine admission, so connector-side cleanup can run (e.g. free
+        prefill blocks pinned on the P node).
         """
         ...
 

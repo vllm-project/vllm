@@ -548,21 +548,6 @@ class KVConnectorBase_V1(ABC):
         """
         return False, None
 
-    def request_rejected_before_admission(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-    ) -> bool:
-        """
-        Called when a request carrying KV transfer params is rejected before it
-        is admitted to the engine scheduler.
-
-        Returns:
-            True if the connector recognized the params and enqueued cleanup.
-        """
-        return False
-
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.

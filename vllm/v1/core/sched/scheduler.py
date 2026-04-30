@@ -136,7 +136,6 @@ class Scheduler(SchedulerInterface):
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
-        self._has_pending_connector_metadata = False
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -946,7 +945,6 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
-            self._has_pending_connector_metadata = False
 
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
@@ -1762,21 +1760,6 @@ class Scheduler(SchedulerInterface):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
-    def request_rejected_before_admission(
-        self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any],
-        reason: str,
-    ) -> bool:
-        if self.connector is None:
-            return False
-        handled = self.connector.request_rejected_before_admission(
-            request_id, kv_transfer_params, reason
-        )
-        if handled:
-            self._has_pending_connector_metadata = True
-        return handled
-
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[tuple[str, int]]:
@@ -1884,14 +1867,6 @@ class Scheduler(SchedulerInterface):
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
-
-    def has_requests(self) -> bool:
-        """Returns True if scheduler state needs to be flushed to workers."""
-        return (
-            self.has_unfinished_requests()
-            or self.has_finished_requests()
-            or self._has_pending_connector_metadata
-        )
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

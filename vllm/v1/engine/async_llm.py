@@ -722,14 +722,32 @@ class AsyncLLM(EngineClient):
         reason: str,
         *,
         data_parallel_rank: int | None = None,
-    ) -> bool:
-        """Notify EngineCore of a pre-admission rejection for KV cleanup."""
-        return await self.engine_core.notify_kv_transfer_request_rejected_async(
-            request_id,
-            kv_transfer_params,
-            reason,
-            data_parallel_rank=data_parallel_rank,
+    ) -> None:
+        """Submit a pre-aborted request so the connector's request_finished
+        hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
+        prefill blocks pinned on the P node)."""
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            extra_args={"kv_transfer_params": dict(kv_transfer_params)},
         )
+        request = EngineCoreRequest(
+            request_id=request_id,
+            prompt_token_ids=[0],
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=time.time(),
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=data_parallel_rank,
+            pre_admission_aborted=True,
+        )
+        logger.debug(
+            "Notifying KV connector of pre-admission rejection for %s: %s",
+            request_id,
+            reason,
+        )
+        await self.engine_core.add_request_async(request)
 
     async def pause_generation(
         self,
