@@ -48,15 +48,6 @@ class MLAPrefillBackend(ABC):
         """Return the implementation class for this prefill backend."""
         raise NotImplementedError
 
-    @staticmethod
-    def get_chunked_context_metadata_cls() -> type:
-        """Return the ChunkedContextMetadata class for this backend."""
-        from vllm.model_executor.layers.attention.mla_attention import (
-            MLACommonPrefillMetadata,
-        )
-
-        return MLACommonPrefillMetadata.ChunkedContextMetadata
-
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         return True
@@ -134,13 +125,12 @@ class MLAPrefillImpl(ABC):
         """Prepare backend-specific metadata before the forward pass.
 
         Called by the metadata builder after constructing the prefill metadata.
-        Backends can override this to allocate workspaces, build wrappers, etc.
         """
+        self._prefill_metadata = prefill_metadata
 
     @abstractmethod
     def run_prefill_new_tokens(
         self,
-        prefill_metadata: "MLACommonPrefillMetadata",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -151,7 +141,6 @@ class MLAPrefillImpl(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        prefill_metadata: "MLACommonPrefillMetadata",
         chunk_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,

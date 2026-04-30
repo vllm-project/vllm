@@ -41,9 +41,6 @@ def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
     - qk_nope_head_dim = 128
     - qk_rope_head_dim = 64
     - v_head_dim = 128
-
-    These dimensions are required for optimized backends like TRTLLM_RAGGED,
-    FLASHINFER, and CUDNN on Blackwell.
     """
     if vllm_config.model_config is None:
         return False

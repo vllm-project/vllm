@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer backend for MLA prefill."""
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -30,31 +29,11 @@ try:
 except ImportError:
     BatchPrefillWithRaggedKVCacheWrapper = object  # type: ignore[misc,assignment]
 
-
-# Import base class for metadata - runtime import to avoid circular dependency
-def _get_base_metadata_cls():
-    from vllm.model_executor.layers.attention.mla_attention import (
-        MLACommonPrefillMetadata,
-    )
-
-    return MLACommonPrefillMetadata
-
-
-@dataclass
-class FlashInferPrefillMetadata(_get_base_metadata_cls()):  # type: ignore[misc]
-    """FlashInfer-specific prefill metadata."""
-
-    prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
-    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = field(
-        default_factory=list
-    )
+_DEFAULT_NUM_CHUNKS = 32
 
 
 class FlashInferPrefillBackend(MLAPrefillBackend):
-    """FlashInfer backend for MLA prefill.
-
-    This backend is optimized for Blackwell (SM100) architecture.
-    """
+    """FlashInfer backend for MLA prefill."""
 
     requires_r1_mla_dimensions = True
 
@@ -125,12 +104,23 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
             get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
         )
 
+    def _ensure_chunks(
+        self,
+        num_chunks: int,
+        workspace_buffer: torch.Tensor,
+    ) -> None:
+        if len(self._prefill_chunks) < num_chunks:
+            for _ in range(len(self._prefill_chunks), num_chunks):
+                self._prefill_chunks.append(
+                    BatchPrefillWithRaggedKVCacheWrapper(
+                        workspace_buffer, "NHD", backend="cutlass"
+                    )
+                )
+
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
-        assert isinstance(prefill_metadata, FlashInferPrefillMetadata)
-
         qo_indptr = prefill_metadata.query_start_loc
         has_context = prefill_metadata.chunked_context is not None
         (workspace_buffer,) = current_workspace_manager().get_simultaneous(
@@ -141,18 +131,13 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
             self._prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
                 workspace_buffer, "NHD", backend="cutlass"
             )
+            self._ensure_chunks(_DEFAULT_NUM_CHUNKS, workspace_buffer)
 
         if has_context:
             chunked_context = prefill_metadata.chunked_context
+            assert chunked_context is not None
             num_chunks = chunked_context.cu_seq_lens.shape[0]
-            if len(self._prefill_chunks) < num_chunks:
-                for _ in range(len(self._prefill_chunks), num_chunks):
-                    self._prefill_chunks.append(
-                        BatchPrefillWithRaggedKVCacheWrapper(
-                            workspace_buffer, "NHD", backend="cutlass"
-                        )
-                    )
-            assert num_chunks <= len(self._prefill_chunks)
+            self._ensure_chunks(num_chunks, workspace_buffer)
 
         num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
@@ -178,6 +163,8 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
         )
 
         if has_context:
+            chunked_context = prefill_metadata.chunked_context
+            assert chunked_context is not None
             for i in range(num_chunks):
                 kv_indptr_chunk = chunked_context.cu_seq_lens[i]
 
@@ -196,21 +183,16 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
                     o_data_type=prefill_metadata.output_dtype,
                 )
 
-        prefill_metadata.prefill_main = self._prefill_main
-        prefill_metadata.prefill_chunks = self._prefill_chunks
-
     def run_prefill_new_tokens(
         self,
-        prefill_metadata: "MLACommonPrefillMetadata",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(prefill_metadata, FlashInferPrefillMetadata)
-        assert prefill_metadata.prefill_main is not None
+        assert self._prefill_main is not None
 
-        ret = prefill_metadata.prefill_main.run(
+        ret = self._prefill_main.run(
             q=q,
             k=k,
             v=v,
@@ -224,15 +206,12 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
 
     def run_prefill_context_chunk(
         self,
-        prefill_metadata: "MLACommonPrefillMetadata",
         chunk_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(prefill_metadata, FlashInferPrefillMetadata)
-
-        attn_out, lse = prefill_metadata.prefill_chunks[chunk_idx].run(
+        attn_out, lse = self._prefill_chunks[chunk_idx].run(
             q=q,
             k=k,
             v=v,

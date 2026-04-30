@@ -37,7 +37,7 @@ class AttentionConfig:
     and buffers can be pre-allocated to avoid inflating the memory estimate."""
 
     use_cudnn_prefill: bool = False
-    """Whether to use cudnn prefill."""
+    """Deprecated: cuDNN prefill backend has been removed."""
 
     use_trtllm_ragged_deepseek_prefill: bool = False
     """Whether to use TRTLLM ragged deepseek prefill."""
@@ -54,8 +54,8 @@ class AttentionConfig:
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN, FLASHINFER, CUDNN, TRTLLM_RAGGED.
-    This option supersedes use_cudnn_prefill, use_trtllm_ragged_deepseek_prefill,
+    Valid options: FLASH_ATTN, FLASHINFER, TRTLLM_RAGGED.
+    This option supersedes use_trtllm_ragged_deepseek_prefill
     and disable_flashinfer_prefill which are deprecated."""
 
     use_prefill_query_quantization: bool = False
@@ -115,12 +115,10 @@ class AttentionConfig:
         # Check for deprecated flags and migrate them.
         # Only the first flag encountered sets the backend.
         if self.use_cudnn_prefill:
-            if self.mla_prefill_backend is None:
-                self.mla_prefill_backend = MLAPrefillBackendEnum.CUDNN
-            logger.warning_once(
-                "use_cudnn_prefill is deprecated and will be removed in "
-                "v0.22. Use --attention-config.mla_prefill_backend="
-                "CUDNN instead."
+            raise ValueError(
+                "The cuDNN MLA prefill backend has been removed. "
+                "Use --attention-config.mla_prefill_backend=FLASH_ATTN or "
+                "FLASHINFER or TRTLLM_RAGGED instead."
             )
 
         if self.use_trtllm_ragged_deepseek_prefill:

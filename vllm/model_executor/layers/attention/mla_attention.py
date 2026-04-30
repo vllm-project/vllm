@@ -1229,8 +1229,6 @@ class MLACommonPrefillMetadata:
     query_start_loc: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
-    query_seq_lens: torch.Tensor | None = None
-    workspace_buffer: torch.Tensor | None = None
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
 
@@ -1337,7 +1335,6 @@ def backend_supports_prefill_query_quantization() -> bool:
     - TRT-LLM ragged DeepSeek prefill
 
     Not supported:
-    - cuDNN Prefill
     - FlashAttention
     - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
@@ -1757,16 +1754,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         dtype=torch.int32,
                     )
 
-                chunked_context_metadata_cls = (
-                    self._prefill_backend.get_chunked_context_metadata_cls()
-                )
                 prefill_tokens_with_context = None
                 if num_prefills_with_context_cpu > 0:
                     prefill_tokens_with_context = prefill_query_start_loc_cpu[
                         num_prefills_with_context_cpu
                     ].item()
+                _ChunkedMetadata = MLACommonPrefillMetadata.ChunkedContextMetadata
                 if self.dcp_world_size > 1:
-                    chunked_context_metadata = chunked_context_metadata_cls(
+                    chunked_context_metadata = _ChunkedMetadata(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                         starts=local_chunk_starts.to(device, non_blocking=True),
                         seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
@@ -1787,7 +1782,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         prefill_tokens_with_context=prefill_tokens_with_context,
                     )
                 else:
-                    chunked_context_metadata = chunked_context_metadata_cls(
+                    chunked_context_metadata = _ChunkedMetadata(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                         starts=chunk_starts.to(device, non_blocking=True),
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
@@ -1806,7 +1801,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     <= self.chunked_prefill_workspace_size
                 )
 
-            prefill_metadata = self.prefill_metadata_cls(
+            prefill_metadata = MLACommonPrefillMetadata(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
@@ -2138,7 +2133,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             attn_output, attn_softmax_lse = (
                 self._prefill_impl.run_prefill_context_chunk(
-                    prefill_metadata=prefill_metadata,
                     chunk_idx=i,
                     q=q,
                     k=k,
@@ -2244,7 +2238,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             attn_output, attn_softmax_lse = (
                 self._prefill_impl.run_prefill_context_chunk(
-                    prefill_metadata=prefill_metadata,
                     chunk_idx=i,
                     q=q,
                     k=k,
@@ -2305,7 +2298,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             v = v.to(prefill_metadata.q_data_type)
 
         output_prefill = self._prefill_impl.run_prefill_new_tokens(
-            prefill_metadata=attn_metadata.prefill,
             q=q,
             k=k,
             v=v,

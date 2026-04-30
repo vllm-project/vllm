@@ -81,59 +81,57 @@ class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
             layer_names=layer_names,
         )
 
+    def _get_workspace_buffer(self) -> torch.Tensor:
+        (workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            (
+                (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
+                torch.uint8,
+            ),
+        )
+        return workspace_buffer
+
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
-        prefill_metadata.query_seq_lens = (
+        super().prepare_metadata(prefill_metadata)
+        self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
-        )
-        (prefill_metadata.workspace_buffer,) = (
-            current_workspace_manager().get_simultaneous(
-                (
-                    (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
-                    torch.uint8,
-                ),
-            )
         )
 
     def run_prefill_new_tokens(
         self,
-        prefill_metadata: "MLACommonPrefillMetadata",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        assert prefill_metadata.query_seq_lens is not None
-        assert prefill_metadata.workspace_buffer is not None
-        # allocate BF16 / FP16 output tensor for TRT-LLM ragged attention
+        workspace_buffer = self._get_workspace_buffer()
         out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
             device=q.device,
-            dtype=prefill_metadata.output_dtype,
+            dtype=self._prefill_metadata.output_dtype,
         )
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
-            workspace_buffer=prefill_metadata.workspace_buffer,
-            seq_lens=prefill_metadata.query_seq_lens,
-            max_q_len=prefill_metadata.max_query_len,
-            max_kv_len=prefill_metadata.max_query_len,
+            workspace_buffer=workspace_buffer,
+            seq_lens=self._query_seq_lens,
+            max_q_len=self._prefill_metadata.max_query_len,
+            max_kv_len=self._prefill_metadata.max_query_len,
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
             o_sf_scale=1.0,
-            batch_size=prefill_metadata.query_seq_lens.shape[0],
+            batch_size=self._query_seq_lens.shape[0],
             window_left=-1,
-            cum_seq_lens_q=prefill_metadata.query_start_loc,
-            cum_seq_lens_kv=prefill_metadata.query_start_loc,
+            cum_seq_lens_q=self._prefill_metadata.query_start_loc,
+            cum_seq_lens_kv=self._prefill_metadata.query_start_loc,
             enable_pdl=False,
             is_causal=True,
             return_lse=return_softmax_lse,
@@ -147,42 +145,44 @@ class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
 
     def run_prefill_context_chunk(
         self,
-        prefill_metadata: "MLACommonPrefillMetadata",
         chunk_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """TRT-LLM ragged attention for context chunks (non-causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        assert prefill_metadata.chunked_context is not None
-        assert prefill_metadata.chunked_context.seq_lens[chunk_idx] is not None
-        assert prefill_metadata.workspace_buffer is not None
+        assert self._prefill_metadata.chunked_context is not None
+        assert self._prefill_metadata.chunked_context.seq_lens[chunk_idx] is not None
+        workspace_buffer = self._get_workspace_buffer()
 
         out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
             device=q.device,
-            dtype=prefill_metadata.output_dtype,
+            dtype=self._prefill_metadata.output_dtype,
         )
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
-            workspace_buffer=prefill_metadata.workspace_buffer,
-            seq_lens=prefill_metadata.chunked_context.seq_lens[chunk_idx],
-            max_q_len=prefill_metadata.max_query_len,
-            max_kv_len=prefill_metadata.chunked_context.max_seq_lens[chunk_idx],
+            workspace_buffer=workspace_buffer,
+            seq_lens=self._prefill_metadata.chunked_context.seq_lens[chunk_idx],
+            max_q_len=self._prefill_metadata.max_query_len,
+            max_kv_len=self._prefill_metadata.chunked_context.max_seq_lens[chunk_idx],
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
             o_sf_scale=1.0,
-            batch_size=prefill_metadata.chunked_context.seq_lens[chunk_idx].shape[0],
+            batch_size=self._prefill_metadata.chunked_context.seq_lens[chunk_idx].shape[
+                0
+            ],
             window_left=-1,
-            cum_seq_lens_q=prefill_metadata.query_start_loc,
-            cum_seq_lens_kv=prefill_metadata.chunked_context.cu_seq_lens[chunk_idx],
+            cum_seq_lens_q=self._prefill_metadata.query_start_loc,
+            cum_seq_lens_kv=self._prefill_metadata.chunked_context.cu_seq_lens[
+                chunk_idx
+            ],
             enable_pdl=False,
             is_causal=False,
             return_lse=True,
