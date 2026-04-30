@@ -1204,6 +1204,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
                    " (requires SM90+ and CUDA >= 12.0)")
   endif()
+
+  # Gemma4 MoE decode GEMV kernels - requires SM90+ (Hopper bf16 GEMV)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(GEMMA4_DECODE_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(GEMMA4_DECODE_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND GEMMA4_DECODE_ARCHS)
+    set(GEMMA4_DECODE_SRC
+      "csrc/moe/gemma4_decode/gemma4_moe_decode.cu"
+      "csrc/moe/gemma4_decode/gemma4_routing.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${GEMMA4_DECODE_SRC}"
+      CUDA_ARCHS "${GEMMA4_DECODE_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${GEMMA4_DECODE_SRC}")
+    message(STATUS "Building Gemma4 decode GEMV kernels for archs: ${GEMMA4_DECODE_ARCHS}")
+  else()
+    message(STATUS "Not building Gemma4 decode GEMV kernels as no compatible archs found"
+                   " (requires SM90+ and CUDA >= 12.0)")
+  endif()
 endif()
 
 message(STATUS "Enabling moe extension.")

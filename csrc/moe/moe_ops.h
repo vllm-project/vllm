@@ -58,6 +58,16 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     torch::Tensor const& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
     torch::Tensor const& bias, int64_t scoring_func);
+
+// Gemma4 MoE decode GEMV kernels (SM90+ only)
+torch::Tensor gemma4_moe_decode_forward(torch::Tensor hidden_states,
+                                        torch::Tensor w13, torch::Tensor w2,
+                                        torch::Tensor topk_ids,
+                                        torch::Tensor topk_weights,
+                                        int intermediate_size);
+
+std::tuple<torch::Tensor, torch::Tensor> gemma4_routing(
+    torch::Tensor router_logits, torch::Tensor per_expert_scale, int top_k);
 #endif
 
 bool moe_permute_unpermute_supported();

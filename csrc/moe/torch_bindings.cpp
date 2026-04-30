@@ -133,6 +133,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 
+  // Gemma4 MoE decode GEMV kernels (SM90+ only)
+  m.def(
+      "gemma4_moe_decode_forward(Tensor hidden_states, Tensor w13, Tensor w2,"
+      " Tensor topk_ids, Tensor topk_weights,"
+      " int intermediate_size) -> Tensor");
+  m.impl("gemma4_moe_decode_forward", torch::kCUDA, &gemma4_moe_decode_forward);
+
+  m.def(
+      "gemma4_routing(Tensor router_logits, Tensor per_expert_scale,"
+      " int top_k) -> (Tensor, Tensor)");
+  m.impl("gemma4_routing", torch::kCUDA, &gemma4_routing);
+
   // cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
   m.def("router_gemm_bf16_fp32(Tensor input, Tensor weight) -> Tensor");
   m.impl("router_gemm_bf16_fp32", torch::kCUDA, &router_gemm_bf16_fp32);
