@@ -39,7 +39,6 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
     FLASHINFER = (
         "vllm.v1.attention.backends.mla.prefill.flashinfer.FlashInferPrefillBackend"
     )
-    CUDNN = "vllm.v1.attention.backends.mla.prefill.cudnn.CudnnPrefillBackend"
     TRTLLM_RAGGED = (
         "vllm.v1.attention.backends.mla.prefill.trtllm_ragged."
         "TrtllmRaggedPrefillBackend"

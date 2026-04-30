@@ -70,7 +70,6 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.FLASH_ATTN,
             MLAPrefillBackendEnum.TRTLLM_RAGGED,
             MLAPrefillBackendEnum.FLASHINFER,
-            MLAPrefillBackendEnum.CUDNN,
         ]
     else:  # Hopper (SM90) and older
         return [
