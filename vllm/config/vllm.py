@@ -768,6 +768,8 @@ class VllmConfig:
             self.kv_transfer_config.kv_connector_extra_config.update(
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
+        elif kv_offloading_backend == "explicit":
+            self.kv_transfer_config.kv_connector = "ExOffloadingConnector"
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
             kv_gb_per_rank = kv_offloading_size / num_kv_ranks

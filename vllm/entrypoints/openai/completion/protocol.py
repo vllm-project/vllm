@@ -538,6 +538,12 @@ class CompletionStreamResponse(OpenAIBaseModel):
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
+
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
     # Set only on the final chunk of a stream to mirror non-streaming responses
