@@ -191,6 +191,10 @@ from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunne
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.kv_cache_shape_utils import (
+    get_padded_attention_kv_cache_shape,
+    scale_padded_page_size,
+)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
@@ -6638,25 +6642,30 @@ class GPUModelRunner(
 
                     raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
                     if kv_cache_spec.page_size_padded is not None:
-                        # Use strided view to handle page_size_bytes that
-                        # include padding. This follows
-                        # the same pattern as MambaSpec handling below.
-                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                        # (i.e. the first physical dimension is the block
-                        # index), which holds for MLA backends but NOT for
-                        # standard attention backends whose shape starts with
-                        # a K/V dimension of size 2.
-                        dtype_size = get_dtype_size(dtype)
-                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
-                        strides = list(torch.empty(kv_cache_shape).stride())
-                        strides[inv_order[0]] = page_stride
-                        kv_cache = torch.as_strided(
-                            raw_tensor,
-                            size=kv_cache_shape,
-                            stride=tuple(strides),
-                        )
+                        if attn_backend.is_mla():
+                            dtype_size = get_dtype_size(dtype)
+                            page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                            strides = list(torch.empty(kv_cache_shape).stride())
+                            strides[inv_order[0]] = page_stride
+                            kv_cache = torch.as_strided(
+                                raw_tensor,
+                                size=kv_cache_shape,
+                                stride=tuple(strides),
+                            )
+                        else:
+                            padded_page_size = scale_padded_page_size(
+                                kv_cache_spec.page_size_padded,
+                                block_size=kv_cache_spec.block_size,
+                                target_block_size=kernel_block_size,
+                            )
+                            kv_cache_shape = get_padded_attention_kv_cache_shape(
+                                kv_cache_shape,
+                                num_blocks=kernel_num_blocks,
+                                padded_page_size_bytes=padded_page_size,
+                                dtype=dtype,
+                            )
+                            kv_cache = raw_tensor.view(kv_cache_shape)
                     else:
-                        # No padding — safe to use a contiguous view.
                         kv_cache = raw_tensor.view(kv_cache_shape)
                     kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
