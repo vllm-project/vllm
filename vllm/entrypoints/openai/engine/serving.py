@@ -887,6 +887,8 @@ class OpenAIServing:
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
         if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            if content is None:
+                return function_calls, content
             assert content is not None
             # Forced Function Call
             function_calls.append(
@@ -896,7 +898,8 @@ class OpenAIServing:
         elif request.tool_choice and isinstance(
             request.tool_choice, ChatCompletionNamedToolChoiceParam
         ):
-            assert content is not None
+            if content is None:
+                return function_calls, content
             # Forced Function Call
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
