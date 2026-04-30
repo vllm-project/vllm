@@ -40,4 +40,4 @@ steps:
   - vllm/compilation/
   - tests/distributed/
   commands:
-  - pytest -v -s distributed/test_elastic_ep.py
+  - VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 pytest -v -s distributed/test_elastic_ep.py
