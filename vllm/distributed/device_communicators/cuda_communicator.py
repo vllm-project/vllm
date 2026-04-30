@@ -46,16 +46,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
+            use_mscclpp_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            use_mscclpp_allreduce = envs.VLLM_ALLREDUCE_USE_MSCCLPP
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        self.use_mscclpp_allreduce = use_mscclpp_allreduce
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -63,6 +66,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
+        )
+        from vllm.distributed.device_communicators.mscclpp_all_reduce import (
+            MscclppAllReduce,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -83,6 +89,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.mscclpp_comm: MscclppAllReduce | None = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -92,6 +99,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        if self.use_mscclpp_allreduce and self.world_size > 1:
+            self.mscclpp_comm = MscclppAllReduce(
                 group=self.cpu_group,
                 device=self.device,
             )
@@ -198,6 +211,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and fi_ar_comm.should_use_fi_ar(input_)
         ):
             out = fi_ar_comm.all_reduce(input_)
+            assert out is not None
+            return out
+        mscclpp_comm = self.mscclpp_comm
+        if (
+            mscclpp_comm is not None
+            and not mscclpp_comm.disabled
+            and mscclpp_comm.should_mscclpp_allreduce(input_)
+        ):
+            out = mscclpp_comm.all_reduce(input_)
             assert out is not None
             return out
         ca_comm = self.ca_comm
@@ -339,6 +361,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
+        if self.mscclpp_comm is not None:
+            self.mscclpp_comm.destroy()
+            self.mscclpp_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
