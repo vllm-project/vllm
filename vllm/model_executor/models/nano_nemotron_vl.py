@@ -1124,7 +1124,9 @@ class NemotronH_Nano_VL_V2(
             )
         else:
             return NanoNemotronVLImagePixelInputs(
-                num_patches=kwargs.pop("image_num_patches"), **kwargs
+                pixel_values_flat=pixel_values_flat,
+                num_patches=kwargs.pop("image_num_patches"),
+                **kwargs,
             )
 
     def _process_image_input_dynamic(
