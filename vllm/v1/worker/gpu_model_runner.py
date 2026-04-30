@@ -884,6 +884,9 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
+    def post_kv_cache_wake_up(self) -> None:
+        self.init_fp8_kv_scales()
+
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
         """
