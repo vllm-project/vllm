@@ -345,16 +345,20 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                     pass
 
                 # Lookahead returned False or <function=…> not yet arrived.
-                if tc_in_delta:
+                if tc_in_delta and self.end_token_id not in previous_token_ids:
                     # Buffer <tool_call> (and any text that follows it in this
                     # delta) rather than emitting it as reasoning.  This lets
                     # the *next* delta's lookahead confirm or deny the call.
+                    # Only buffer while still in reasoning mode: once </think>
+                    # has passed the existing content-mode fallthrough below
+                    # handles the chunk correctly without buffering.
                     tool_index = delta_text.find(self._tool_call_tag)
                     if tool_index >= 0:
                         pre = delta_text[:tool_index]
                         self._tool_call_pending = delta_text[tool_index:]
                         return DeltaMessage(reasoning=pre) if pre else None
-                # tc_in_prev=True but lookahead failed: still in reasoning.
+                # tc_in_prev=True but lookahead failed, or in content mode:
+                # fall through to content-mode emit below.
 
         # No end token in this delta.
         if not delta_text:
