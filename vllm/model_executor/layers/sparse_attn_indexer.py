@@ -129,7 +129,10 @@ def sparse_attn_indexer(
         if use_paged_prefill:
             if envs.VLLM_SPARSE_INDEXER_DISABLE_PAGED_PREFILL_CHUNKING:
                 # The experimental full-paged path materializes one logits
-                # tensor for all query tokens.
+                # tensor for all query tokens. max_model_len is already the
+                # indexer context length after any KV compression.
+                # Example: 8192 prefill tokens at 1M context with compression
+                # ratio 4 gives 8192 * (1048576 / 4) * 4 bytes = 8 GiB.
                 max_logits_bytes = hidden_states.shape[0] * max_model_len * 4
             else:
                 # Chunked paged prefill is bounded by both the metadata safety
@@ -218,6 +221,8 @@ def sparse_attn_indexer(
             else:
                 q_scale_slice = None
 
+            # Example: 8192 prefill tokens at 1M context with compression
+            # ratio 4 gives 8192 * (1048576 / 4) * 4 bytes = 8 GiB.
             logits = fp8_fp4_paged_mqa_logits(
                 (q_slice, q_scale_slice),
                 paged_kv_cache,
