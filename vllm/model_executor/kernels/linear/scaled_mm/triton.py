@@ -13,7 +13,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
+from .BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearLayerConfig,
@@ -150,3 +154,67 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                 out -= (x_s * w_s_row * azp_adj).to(x.dtype)
 
         return out
+
+
+class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not current_platform.is_cuda_alike():
+            return False, "only cuda like devices are supported."
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
+            A,
+            B,
+            As,
+            Bs,
+            list(self.weight_group_shape),
+            self.config.out_dtype,
+        )
+
+
+# TODO we should be able to change the type of block_size to GroupShape
+# after we resolve GroupShape compilation issue
+# https://github.com/vllm-project/vllm/issues/25270
+def _w8a8_triton_block_scaled_mm_func(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        w8a8_triton_block_scaled_mm,
+    )
+
+    return w8a8_triton_block_scaled_mm(
+        qx, weight, x_scale, weight_scale, block_size, output_dtype
+    )
+
+
+def _w8a8_triton_block_scaled_mm_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(0)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "w8a8_triton_block_scaled_mm_func",
+    _w8a8_triton_block_scaled_mm_func,
+    fake_impl=_w8a8_triton_block_scaled_mm_fake,
+)

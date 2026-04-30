@@ -31,6 +31,19 @@ Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 logger = init_logger(__name__)
 
 
+def partial_tag_overlap(text: str, tag: str) -> int:
+    """Length of the longest prefix of *tag* that matches a suffix of *text*.
+
+    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
+    Returns 0 when there is no overlap.
+    """
+    max_check = min(len(tag) - 1, len(text))
+    for k in range(max_check, 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
+
+
 def find_common_prefix(s1: str, s2: str) -> str:
     """
     Finds a common prefix that is shared between two strings, if there is one.
@@ -140,6 +153,20 @@ def _extract_tool_info(
         return tool.function.name, tool.function.parameters
     else:
         raise TypeError(f"Unsupported tool type: {type(tool)}")
+
+
+def find_tool_properties(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> dict[str, Any]:
+    """Find a tool by name and return its properties dict, or {}."""
+    if not tools:
+        return {}
+    for tool in tools:
+        name, params = _extract_tool_info(tool)
+        if name == tool_name:
+            return (params or {}).get("properties", {})
+    return {}
 
 
 def _get_tool_schema_from_tool(tool: Tool) -> dict:

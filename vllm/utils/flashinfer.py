@@ -305,10 +305,10 @@ def supports_trtllm_attention() -> bool:
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # TRTLLM attention is currently only validated on SM100 (CC 10.0).
-    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
-    # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -748,8 +748,9 @@ def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
 def should_use_flashinfer_for_blockscale_fp8_gemm(
     is_flashinfer_supported: bool,
     output_dtype: torch.dtype,
-    input: torch.Tensor,
-    weight: torch.Tensor,
+    input_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    weight_shape: tuple[int, int],
 ):
     if not is_flashinfer_supported:
         return False
@@ -760,18 +761,49 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
-    weight_dtype = weight.dtype
-    input_dtype = input.dtype
-
     should_use_flashinfer = (
         output_dtype == torch.bfloat16
         and input_dtype == torch.bfloat16
         and weight_dtype == torch.float8_e4m3fn
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_shape[0] % N_MULTIPLE == 0
+        and weight_shape[1] % K_MULTIPLE == 0
     )
 
     return should_use_flashinfer
+
+
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+
+
+@functools.cache
+def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
+    """Check if FP8 ViT attention is supported on this platform.
+
+    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    and cuDNN >= 9.17.1.
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
+    if not current_platform.has_device_capability(90):
+        return False
+
+    try:
+        supported = current_platform.get_supported_vit_attn_backends()
+        if AttentionBackendEnum.FLASHINFER not in supported:
+            return False
+    except (ImportError, AttributeError):
+        return False
+
+    try:
+        import torch.backends.cudnn as cudnn
+
+        if cudnn.is_available() and cudnn.version() < _MIN_CUDNN_FP8:
+            return False
+    except (ImportError, AttributeError):
+        pass
+
+    return True
 
 
 __all__ = [
@@ -805,4 +837,5 @@ __all__ = [
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
+    "is_flashinfer_cudnn_fp8_prefill_attn_supported",
 ]

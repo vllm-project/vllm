@@ -7,7 +7,6 @@ import io
 import json
 
 import httpx
-import librosa
 import numpy as np
 import openai
 import pytest
@@ -17,6 +16,7 @@ import soundfile as sf
 from tests.entrypoints.openai.conftest import add_attention_backend
 from tests.utils import RemoteOpenAIServer
 from vllm.logger import init_logger
+from vllm.multimodal.media.audio import load_audio
 
 logger = init_logger(__name__)
 
@@ -264,7 +264,7 @@ async def test_long_audio_request(foscolo, client_and_model):
     if model_name == "google/gemma-3n-E2B-it":
         pytest.skip("Gemma3n does not support long audio requests")
     foscolo.seek(0)
-    audio, sr = librosa.load(foscolo)
+    audio, sr = load_audio(foscolo)
     repeated_audio = np.tile(audio, 2)
     # Repeated audio to buffer
     buffer = io.BytesIO()

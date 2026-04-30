@@ -61,10 +61,6 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
-    if envs.VLLM_BATCH_INVARIANT:
-        return rms_norm_batch_invariant(
-            x + residual, weight, variance_epsilon
-        ), x + residual
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -80,7 +76,7 @@ def poly_norm(
     from vllm import _custom_ops as ops
 
     out = torch.empty_like(x)
-    ops.poly_norm(
+    ops.poly_norm(  # type: ignore[attr-defined]
         out,
         x,
         weight,
@@ -376,77 +372,32 @@ class GemmaRMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    @staticmethod
-    def _forward_static_no_residual(
-        weight: torch.Tensor,
-        variance_epsilon: float,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward() without residual."""
-        orig_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x
-
-    @staticmethod
-    def _forward_static_with_residual(
-        weight: torch.Tensor,
-        variance_epsilon: float,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward() with residual."""
-        orig_dtype = x.dtype
-        x = (
-            x.float() + residual.float()
-            if orig_dtype == torch.float16
-            else x + residual
-        )
-        residual = x
-
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x, residual
-
     def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        if residual is None:
-            return self._forward_static_no_residual(
-                self.weight.data, self.variance_epsilon, x
+        orig_dtype = x.dtype
+        weight = self.weight.data.float() + 1.0
+        if residual is not None:
+            x = (
+                x.float() + residual.float()
+                if orig_dtype == torch.float16
+                else x + residual
             )
-        else:
-            return self._forward_static_with_residual(
-                self.weight.data, self.variance_epsilon, x, residual
-            )
+            residual = x
+        # ir.ops.rms_norm handles fp32 upcast internally
+        out = ir.ops.rms_norm(x, weight, self.variance_epsilon)
+        return (
+            out.to(orig_dtype) if residual is None else (out.to(orig_dtype), residual)
+        )
 
     def forward_cuda(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
-
-        if not getattr(self, "_is_compiled", False):
-            self._forward_static_no_residual = torch.compile(  # type: ignore
-                self._forward_static_no_residual
-            )
-            self._forward_static_with_residual = torch.compile(  # type: ignore
-                self._forward_static_with_residual
-            )
-            self._is_compiled = True
         return self.forward_native(x, residual)
 
 
@@ -523,9 +474,12 @@ class RMSNormGated(CustomOp):
         weight = self.weight.float()
         z = z.float() if z is not None else None
 
+        assert self.activation in ["silu", "sigmoid", "swish"]
+        act_fn = F.sigmoid if self.activation == "sigmoid" else F.silu
+
         # Apply gating before normalization if needed
         if z is not None and not self.norm_before_gate:
-            x = x * F.silu(z)
+            x = x * act_fn(z)
 
         # RMS Normalization
         if self.group_size is None:
@@ -544,7 +498,7 @@ class RMSNormGated(CustomOp):
 
         # Apply gating after normalization if needed
         if z is not None and self.norm_before_gate:
-            out = out * F.silu(z)
+            out = out * act_fn(z)
 
         return out.to(orig_dtype)
 
