@@ -3,20 +3,33 @@
 //
 // W4A16 GPTQ kernel for RDNA3 (gfx1100 / RX 7900 XTX class), templated on the
 // activation dtype (half or __hip_bfloat16). Adapted from exllamav2's 4-bit
-// kernel (csrc/quantization/gptq/q_gemm.cu) with three changes:
+// kernel (csrc/quantization/gptq/q_gemm.cu) with the following changes:
 //
-//   1. Output accumulator is FP32 (atomicAdd to a zeroed FP32 tile, then
-//      cast back to T at the end). RDNA3 has a native v_global_atomic_add_f32
-//      and lacks reliable hardware atomic-add for half2/bfloat162 in global
-//      memory, so accumulating in FP32 is both simpler and faster.
+//   1. Direct write to the T-typed output via packed CAS-loop on a 64-bit
+//      word (atomic_add_pk4_{f16,bf16}). gfx11 has no native
+//      v_global_atomic_pk_add_{f16,bf16}, so the kernel emulates one with
+//      global_atomic_cmpswap_b64. This avoids the M*N*4-byte FP32 scratch
+//      buffer + memset + cast-pass that an fp32-accumulator design would
+//      need; the caller passes a zero-initialised T-typed output tensor
+//      and every block atomically adds its partial sum into it.
 //
 //   2. The bf16 path uses a dedicated bit-trick that avoids the fp16-only
 //      "upper nibble * 16" trick, which would overflow the 7-bit bf16
 //      mantissa. See qdq_4_rdna3.cuh for details.
 //
-//   3. Wave32-friendly geometry: 32 threads per block, 1 wave per CU per
-//      block, BLOCK_KN_SIZE=128 (4 N output cols per thread, exactly one
-//      cache-line-sized int4 load per K iteration).
+//   3. Wave32 geometry sized for high CU saturation: THREADS_X=256
+//      (8 waves per block) and BLOCK_KN_SIZE=256, with each thread
+//      computing 4 N output columns. gridDim.z = K / BLOCK_KN_SIZE
+//      splits K and the output is atomically accumulated. fp16 uses
+//      v_dot2_f32_f16 (__builtin_amdgcn_fdot2) for the inner dot;
+//      bf16 widens to fp32 (no v_pk_fma_bf16 on gfx11) and accumulates
+//      with v_fma_f32. M_COUNT ∈ {1,2,4,8} is selected at launch
+//      based on size_m.
+//
+//   4. The bf16 dispatch with M >= 16 forwards to the WMMA kernel in
+//      q_gemm_rdna3_wmma.cu (separate translation unit) where
+//      v_wmma_f32_16x16x16_bf16_w32 wins. The fp16 path always stays
+//      scalar — see README_RDNA3.md for the dispatch decision rationale.
 
 #include <cstdint>
 #include <cstdio>
@@ -46,13 +59,13 @@ namespace gptq_rdna3 {
 // output position vs the exllama default. THREADS_X=256 = 8 waves on RDNA3
 // wave32; with ~32 wave slots per CU we still fit 4 blocks per CU at peak.
 //
-// We tried BLOCK_KN_SIZE=512 (microbench bc.log on Qwen3.6-27B): bf16
-// improved 5-10% extra at large M (atomic CAS halved), but fp16 decode
-// regressed up to +40% on qkv-square (32 → 45 μs at M=1). Cause: 16
-// waves/block × 16 total blocks for [M=1, K=N=4096] only saturates ~8 of
-// the 96 CUs, breaking memory-latency hiding for the fp16 path that was
-// already at ~26% HBM peak. Reverted to 256; bf16 keeps most of its gains
-// from the fp32 dequant rewrite alone.
+// We tried BLOCK_KN_SIZE=512 (microbench on Qwen3.6-27B): bf16 improved
+// 5-10% at large M (atomic CAS halved), but fp16 decode regressed up to
+// +40% on qkv-square (32 → 45 μs at M=1). Cause: 16 waves/block × 16
+// total blocks for [M=1, K=N=4096] only saturates ~8 of the 96 CUs,
+// breaking memory-latency hiding for the fp16 path which is already
+// memory-bound. Reverted to 256; bf16 keeps most of its gains from the
+// fp32 dequant rewrite alone.
 #define BLOCK_KN_SIZE 256
 #define THREADS_X 256
 
@@ -164,8 +177,8 @@ __forceinline__ __device__ float dot22_8_f(float (&dq)[8],
 // atomic instruction count and half the contention vs two 32-bit CAS calls.
 //
 // Writing directly to fp16/bf16 (instead of through an FP32 scratch buffer +
-// cast pass) saves M*N*4 bytes of allocation, the memset, and a kernel launch
-// per matmul (~5-10 μs/call → 11-22% of decode budget at 50 tk/s).
+// cast pass) saves M*N*4 bytes of allocation, the memset, and the epilogue
+// cast pass that an fp32-accumulator design would need.
 //
 // 64-bit alignment: the kernel writes at `out + n` where n = offset_n + t*4
 // (always multiple of 4), and partition_weight_shape[1] is required to be a
@@ -289,9 +302,9 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
 
   // Threads beyond the right edge of N have nothing to do. Note: we must NOT
   // return before __syncthreads() if any thread in the block participates in
-  // the LDS load above — but here all 128 threads always do, regardless of
-  // whether their `n` is in bounds. The early return below is safe because
-  // the LDS load doesn't depend on `n`, only on `t`/`offset_k`.
+  // the LDS load above — but here all THREADS_X (=256) threads always do,
+  // regardless of whether their `n` is in bounds. The early return below is
+  // safe because the LDS load doesn't depend on `n`, only on `t`/`offset_k`.
   __syncthreads();
   if (n >= size_n) return;
 
@@ -612,14 +625,14 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // bf16-only gating rationale: a microbench sweep (M ∈ {1..256} × 5
   // Qwen-class shapes) showed the scalar fp16 kernel beats the current WMMA
   // implementation at every M because the fp16 dequant bit-trick keeps the
-  // scalar path memory-bound (already saturating ~25% of HBM2 BW). bf16
-  // scalar is compute-bound (extra shifts in dequant), so WMMA wins from
-  // M=16 onward. The fp16 WMMA path stays available via the standalone op
-  // gptq_gemm_rdna3_wmma for direct callers / future kernel tuning, but is
-  // not auto-dispatched here — at end-to-end serving the WMMA path matched
-  // (within run-to-run variance) the fp16 scalar+fdot2 path despite a
-  // 47% kernel-microbench advantage; the scalar path's lower complexity
-  // wins.
+  // scalar path memory-bound. bf16 scalar pays a tax for the missing
+  // v_pk_fma_bf16 on gfx11, so WMMA wins from M=16 onward. The fp16 WMMA
+  // path stays available via the standalone op gptq_gemm_rdna3_wmma for
+  // direct callers / future kernel tuning, but is not auto-dispatched
+  // here — end-to-end serving showed the WMMA path matched the fp16
+  // scalar+fdot2 path within run-to-run variance (440.7 vs 445.7 tk/s at
+  // max-num-seqs=32) despite a 47% kernel-microbench advantage; the
+  // scalar path's lower complexity wins.
   if (a.scalar_type() == torch::kBFloat16 &&
       a.dim() == 2 && b_q_weight.dim() == 2 && a.size(0) >= 16 &&
       a.size(1) % 16 == 0 && b_q_weight.size(1) % 16 == 0) {

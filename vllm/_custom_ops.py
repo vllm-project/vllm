@@ -792,10 +792,10 @@ if hasattr(torch.ops._C, "gptq_gemm_rdna3"):
         )
 
 
-# WMMA prefill op (M >= 16 path on RDNA3). Registered for completeness so the
-# op can be invoked under torch.compile by future dispatch logic. NOT yet
-# called from any apply_weights path — this is bisect step 2 isolating the
-# fake registration from the dispatch logic that was reverted in d8b142a84.
+# WMMA prefill op for RDNA3. Auto-dispatched from gptq_gemm_rdna3 in C++
+# for bf16 with M >= 16; remains directly callable for fp16 (e.g. for kernel
+# microbenches or future dispatch tuning). The fake registration here is
+# what lets it be traced under torch.compile.
 if hasattr(torch.ops._C, "gptq_gemm_rdna3_wmma"):
 
     @register_fake("_C::gptq_gemm_rdna3_wmma")

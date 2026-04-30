@@ -18,10 +18,12 @@
 //     are fp16 or bf16. There is NO 16x16x16 with fp16/bf16 accumulator on
 //     gfx11 that we'd want here (we always need fp32 accum to avoid loss
 //     across many K iterations).
-//   * Wave32 fragment storage is "doubled" — lanes 16..31 hold a copy of
-//     lanes 0..15 for the input fragments. The output C fragment splits
-//     across the wave: lanes 0..15 hold columns 0..7 of one row each,
-//     lanes 16..31 hold columns 8..15.
+//   * Wave32 input fragment storage is "doubled" — lanes 16..31 hold a
+//     copy of lanes 0..15 for the A and B fragments. The output C
+//     fragment uses a different mapping: lane t holds COLUMN n=lane_lo
+//     of the 16x16 output, with 8 elements alternating M rows by lane_hi
+//     (lanes 0..15 = even rows, lanes 16..31 = odd rows). See the layout
+//     diagram on `gemm_q4_wmma_kernel` below for the full mapping.
 //   * No native v_global_atomic_pk_add_{f16,bf16} on gfx11; the K-split
 //     epilogue (gridDim.z > 1) emulates packed atomic add via a CAS-32
 //     retry loop on a uint32 word covering 2 fp16/bf16 lanes. Within a

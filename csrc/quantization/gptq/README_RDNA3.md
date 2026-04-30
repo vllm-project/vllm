@@ -49,10 +49,10 @@ The bf16-only WMMA gating is set by both microbench and end-to-end
 serving:
 
 * **fp16 scalar already wins kernel-microbench** at every M tested. The
-  fp16 dequant bit-trick (`0x6400`) keeps the path memory-bound at ~26%
-  HBM peak, and `v_pk_fma_f16` is full rate on gfx11 — WMMA can't
-  improve on that without a structural rewrite (multi-wave-per-block,
-  LDS-shared A across waves).
+  fp16 dequant bit-trick (`0x6400`) keeps the path memory-bound, and
+  `v_pk_fma_f16` is full rate on gfx11 — WMMA can't improve on that
+  without a structural rewrite (multi-wave-per-block, LDS-shared A
+  across waves).
 * **fp16 WMMA dispatch was tested end-to-end** and came out a wash with
   fp16 scalar (`445.7` vs `440.7` tk/s at max-num-seqs=32, within
   run-to-run variance) despite a 47% kernel microbench advantage. See
@@ -116,11 +116,15 @@ M │      1024 N columns         │ K=256  M │ 16 N     │ K = full / K_SPL
    ┌─────────────────────────────┐           ┌─────────────────────────────┐
    │ uint4 weight load (4 ints)  │           │ Cooperative dequant:        │
    │ bit-trick dequant 32 weights│           │   32 lanes do 32 dequants   │
-   │   fp16: 0x6400 + sub*scale  │           │   -> 16 N x 16 K B-tile in  │
-   │   bf16: 0x4300 + fp32 widen │           │      LDS                    │
-   │ 4 dot22_8 vs LDS A          │           │ build a_frag, b_frag        │
-   │   fp16: v_dot2_f32_f16      │           │   (A row, B col, mode 1)    │
-   │   bf16: 8 fp32 FMAs         │           │ v_wmma_f32_16x16x16         │
+   │   fp16: 0x6400 + half2 FMA  │           │     fp16: precise           │
+   │   bf16: 0x4300 + fp32 FMA   │           │       (sub then mul, no     │
+   │                             │           │        fp16 ULP amplif.)    │
+   │ 4 dot22_8 vs LDS A          │           │     bf16: precise (same)    │
+   │   fp16: v_dot2_f32_f16      │           │   -> 16 N x 16 K B-tile     │
+   │   bf16: 8 fp32 FMAs         │           │      in LDS                 │
+   │                             │           │ a_frag, b_frag (A row,      │
+   │                             │           │   B col, mode 1)            │
+   │                             │           │ v_wmma_f32_16x16x16         │
    └─────────────────────────────┘           └─────────────────────────────┘
 
  OUTPUT WRITE                             OUTPUT WRITE
@@ -617,23 +621,11 @@ For kernel correctness debugging only — not used in production paths:
   with fp32 atomic-add + epilogue cast might save 5-15 % on fp16
   decode if CAS retries are dominant. Untested.
 
-* **`rocprof` on gfx1100 returns 0 for most useful counters.**
-  Attempted: `rocprof v1` (unsupported on RDNA3), `rocprofv2` (works
-  but writes CSVs to unpredictable paths and silently drops some
-  counters), `rocprofv3` (cleanest, but only `SQ_BUSY_CYCLES` and
-  `SQ_WAVES` return non-zero values on the GPTQ kernel — the
-  instruction-mix and cycle-accounting counters listed in
-  `--list-counters` register but report 0). Without compute-vs-memory
-  telemetry, optimisation decisions are blind. The remaining gap to
-  HBM peak (fp16 scalar at ~26 % HBM peak) could be atomic CAS
-  contention, LDS bank conflicts, instruction-issue stalls, or
-  occupancy — but we can't tell which without working counters.
-
 * **fp16 decode CU saturation.** At `K=N=4096, M=1` the scalar fp16
   kernel launches 64 blocks against 96 CUs — only ~17 % of wave slots
-  utilized. The kernel is memory-bound at ~26 % HBM peak, and
-  increasing block count would give the load/store scheduler more
-  outstanding requests in flight. Reducing `THREADS_X` from 256 to
-  128 (with `BLOCK_KN_SIZE=256` unchanged, each thread loading 2 K
-  elements) would double `gridDim.x`. Not yet implemented because the
-  M_COUNT={1,2,4,8} templates would need re-tuning together.
+  utilized (512 of 96×32 = 3072 slots). Increasing block count would
+  give the load/store scheduler more outstanding requests in flight.
+  Reducing `THREADS_X` from 256 to 128 (with `BLOCK_KN_SIZE=256`
+  unchanged, each thread loading 2 K elements) would double
+  `gridDim.x`. Not yet implemented because the M_COUNT={1,2,4,8}
+  templates would need re-tuning together.
