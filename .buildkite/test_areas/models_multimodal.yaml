@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2"
+  key: multi-modal-models-standard-1-qwen2
   timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies:
@@ -19,6 +20,7 @@ steps:
       - image-build-amd
 
 - label: "Multi-Modal Models (Standard) 2: qwen3 + gemma"
+  key: multi-modal-models-standard-2-qwen3-gemma
   timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies:
@@ -36,6 +38,7 @@ steps:
       - image-build-amd
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
+  key: multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
@@ -51,6 +54,7 @@ steps:
       - image-build-amd
 
 - label: "Multi-Modal Models (Standard) 4: other + whisper"
+  key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
@@ -67,7 +71,8 @@ steps:
       - image-build-amd
 
 - label: Multi-Modal Processor (CPU)
-  depends_on: 
+  key: multi-modal-processor-cpu
+  depends_on:
   - image-build-cpu
   timeout_in_minutes: 60
   source_file_dependencies:
@@ -80,6 +85,7 @@ steps:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Processor # 44min
+  key: multi-modal-processor
   timeout_in_minutes: 60
   device: h200_18gb
   source_file_dependencies:
@@ -91,6 +97,7 @@ steps:
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
+  key: multi-modal-accuracy-eval-small-models
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -101,6 +108,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: Multi-Modal Models (Extended Generation 1)
+  key: multi-modal-models-extended-generation-1
   optional: true
   source_file_dependencies:
   - vllm/
@@ -117,6 +125,7 @@ steps:
       - image-build-amd
 
 - label: Multi-Modal Models (Extended Generation 2)
+  key: multi-modal-models-extended-generation-2
   optional: true
   source_file_dependencies:
   - vllm/
@@ -126,6 +135,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 - label: Multi-Modal Models (Extended Generation 3)
+  key: multi-modal-models-extended-generation-3
   optional: true
   source_file_dependencies:
   - vllm/
@@ -135,6 +145,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: Multi-Modal Models (Extended Pooling)
+  key: multi-modal-models-extended-pooling
   optional: true
   device: h200_18gb
   source_file_dependencies:
