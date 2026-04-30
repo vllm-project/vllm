@@ -5664,6 +5664,14 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
+            # Also warm forward_native (taken when generators dict is non-empty).
+            self.sampler(
+                logits=logits,
+                sampling_metadata=replace(
+                    dummy_metadata,
+                    generators={0: torch.Generator(device=self.device).manual_seed(0)},
+                ),
+            )
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(
