@@ -42,7 +42,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 logger.info("Using AgRs manager on XPU device.")
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        output = input_.clone() if torch.compiler.is_compiling() else input_
+        output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
 
