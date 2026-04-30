@@ -298,7 +298,8 @@ def moe_kernel_quantize_input(
                 A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled
             )
         else:
-            return ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
+            A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
+            return A, None
     elif quant_dtype == "mxfp4":
         if not quantization_emulation:
             raise NotImplementedError(
