@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from vllm.utils.collection_utils import full_groupby
 from vllm.utils.import_utils import PlaceholderModule
@@ -14,20 +14,8 @@ from vllm.utils.import_utils import PlaceholderModule
 from .plot import DummyExecutor, _json_load_bytes
 from .utils import sanitize_filename
 
-try:
-    import matplotlib.pyplot as plt
-except ImportError:
-    plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
-
-try:
+if TYPE_CHECKING:
     import pandas as pd
-except ImportError:
-    pd = PlaceholderModule("pandas")
-
-try:
-    import seaborn as sns
-except ImportError:
-    seaborn = PlaceholderModule("seaborn")
 
 
 def _first_present(run_data: dict[str, object], keys: list[str]):
@@ -194,6 +182,20 @@ def _plot_fig(
     if dry_run:
         print("[END FIGURE]")
         return
+
+    # Lazy-import matplotlib/pandas/seaborn
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
+    try:
+        import pandas as pd
+    except ImportError:
+        pd = PlaceholderModule("pandas")
+    try:
+        import seaborn as sns
+    except ImportError:
+        sns = PlaceholderModule("seaborn")
 
     df = pd.DataFrame.from_records(fig_data)
     df = df.dropna(subset=["tokens_per_user", "tokens_per_gpu"])
