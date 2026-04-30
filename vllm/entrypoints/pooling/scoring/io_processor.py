@@ -10,6 +10,7 @@ from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
+from vllm.renderers.inputs.preprocess import extract_target_prompt
 from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -431,7 +432,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_doc: int = 0,
         prompt_extras: dict[str, Any] | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
-        # todo: support prompt_extras
         arrival_time = time.time()
 
         data_1 = scoring_data.data_1
@@ -464,6 +464,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 pooling_params_list.append(pooling_params)
 
             tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+            if prompt_extras:
+                target_prompt = extract_target_prompt(self.model_config, engine_prompt)
+                target_prompt.update(prompt_extras)
             engine_inputs.append(
                 self.renderer.process_for_engine(engine_prompt, arrival_time)
             )
