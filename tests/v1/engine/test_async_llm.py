@@ -256,8 +256,10 @@ async def test_multi_abort(output_kind: RequestOutputKind):
                 )
             )
 
-        # Let requests start
-        await asyncio.sleep(0.5)
+        # Let requests start generating, use a longer sleep to ensure all
+        # requests have exited prefill and produced at least one
+        # decode token before we abort.
+        await asyncio.sleep(1.0)
 
         # Use multi-abort to abort multiple requests at once
         abort_request_ids = [request_ids[i] for i in REQUEST_IDS_TO_ABORT]
