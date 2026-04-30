@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-
-import math
 
 import regex as re
 import torch
@@ -1444,7 +1443,6 @@ class DeepseekV4Model(nn.Module):
             layer.ffn.finalize_mega_moe_weights()
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
 def hc_head(
     hidden_states: torch.Tensor,
     hc_fn: torch.Tensor,
@@ -1459,10 +1457,20 @@ def hc_head(
     hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
     num_tokens = hs_flat.shape[0]
     h_block = math.gcd(512, hidden_size)
-    out = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device)
+    out = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+    )
     torch.ops.vllm.hc_head_fused_kernel(
-        hs_flat, hc_fn, hc_scale, hc_base, out,
-        hidden_size, rms_norm_eps, hc_eps, h_block, hc_mult,
+        hs_flat,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_norm_eps,
+        hc_eps,
+        h_block,
+        hc_mult,
     )
     return out.view(*outer_shape, hidden_size)
 

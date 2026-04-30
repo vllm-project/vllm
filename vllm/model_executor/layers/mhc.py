@@ -564,29 +564,21 @@ def _hc_head_fused_kernel(
     """Fill pre-allocated `out` (T, H) in-place with the hc_head result."""
     if hs_flat.shape[0] > 0:
         hc_head_fuse_tilelang(
-            hs_flat, fn, hc_scale, hc_base, out,
-            hidden_size, rms_eps, hc_eps, h_block, hc_mult,
+            hs_flat,
+            fn,
+            hc_scale,
+            hc_base,
+            out,
+            hidden_size,
+            rms_eps,
+            hc_eps,
+            h_block,
+            hc_mult,
         )
-
-
-def _hc_head_fused_kernel_fake(
-    hs_flat: torch.Tensor,
-    fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    out: torch.Tensor,
-    hidden_size: int,
-    rms_eps: float,
-    hc_eps: float,
-    h_block: int,
-    hc_mult: int,
-) -> None:
-    pass
 
 
 direct_register_custom_op(
     op_name="hc_head_fused_kernel",
     op_func=_hc_head_fused_kernel,
     mutates_args=["out"],
-    fake_impl=_hc_head_fused_kernel_fake,
 )
