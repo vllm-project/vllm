@@ -14,9 +14,10 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
@@ -62,8 +63,6 @@ from vllm.utils.torch_utils import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
-    import threading
-
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -247,6 +246,16 @@ class RemoteVLLMServer:
         (when the server fails to start). Must be safe to call even if
         the process is already dead.
         """
+        self._terminate_process_tree()
+        self._wait_for_gpu_memory_release()
+
+    def _terminate_process_tree(self) -> None:
+        """Kill the server process tree without waiting for GPU memory release.
+
+        Split out from ``_shutdown`` so that ``shutdown_many`` can run this
+        phase in parallel for sibling servers and then wait for GPU memory
+        release once at the end.
+        """
         pid = self.proc.pid
 
         # Get the process group ID. Because we used
@@ -288,9 +297,49 @@ class RemoteVLLMServer:
         # prevent VRAM from being reclaimed by the driver.
         self._kill_process_group_survivors(pgid)
 
-        # Wait for GPU memory to actually be freed, not just
-        # "stabilized at whatever level it's at".
-        self._wait_for_gpu_memory_release()
+    @classmethod
+    def shutdown_many(cls, servers: Sequence["RemoteVLLMServer"]) -> None:
+        """Shut down multiple sibling servers and wait for GPU memory once.
+
+        Test fixtures that hold several ``RemoteVLLMServer`` instances at
+        once must NOT shut them down by calling each server's ``__exit__``
+        sequentially: every server measures total GPU memory across all
+        visible devices in ``_wait_for_gpu_memory_release``, so the first
+        server's wait blocks the full timeout because later sibling
+        servers are still holding GPU memory.
+
+        Instead, this method terminates every server's process tree in
+        parallel, then runs the GPU-memory-release wait once against the
+        earliest recorded baseline (memory before any server started).
+        """
+        if not servers:
+            return
+
+        threads = [
+            threading.Thread(
+                target=s._terminate_process_tree,
+                name=f"shutdown-{s.proc.pid}",
+                daemon=True,
+            )
+            for s in servers
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Use the smallest pre-server baseline so the wait targets memory
+        # usage before *any* of these sibling servers started, not after
+        # earlier siblings had already allocated.
+        earliest = min(
+            servers,
+            key=lambda s: (
+                float("inf")
+                if s._pre_server_gpu_memory is None
+                else s._pre_server_gpu_memory
+            ),
+        )
+        earliest._wait_for_gpu_memory_release()
 
     def _kill_process_group_survivors(
         self, pgid: int | None, timeout: float = 15.0
@@ -1261,9 +1310,6 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
 
     @functools.wraps(func)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Make the process the leader of its own process group
-        # to avoid sending SIGTERM to the parent process
-        os.setpgrp()
         from _pytest.outcomes import Skipped
 
         # Create a unique temporary file to store exception info from child
@@ -1283,6 +1329,9 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
             pid = os.fork()
             print(f"Fork a new process to run a test {pid}")
             if pid == 0:
+                # Make the child process the leader of its own process group
+                # to avoid sending SIGTERM to the parent process
+                os.setpgrp()
                 # Parent process responsible for deleting, don't delete
                 # in child.
                 delete_after.pop_all()
@@ -1322,14 +1371,12 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                 else:
                     os._exit(0)
             else:
-                pgid = os.getpgid(pid)
+                # After setpgrp(), the child's pgid equals its pid
+                pgid = pid
                 _pid, _exitcode = os.waitpid(pid, 0)
-                # ignore SIGTERM signal itself
-                old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                # kill all child processes
-                os.killpg(pgid, signal.SIGTERM)
-                # restore the signal handler
-                signal.signal(signal.SIGTERM, old_signal_handler)
+                # kill all child processes - but they may already have exited cleanly
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGTERM)
                 if _exitcode != 0:
                     # Try to read the exception from the child process
                     exc_info = {}
@@ -1828,6 +1875,7 @@ class TestFP8Layer(torch.nn.Module):
             self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
             self.input_scale = None
             self.weight_scale = None
+            self.weight_block_size = [block_size, block_size]
             if transpose_weights:
                 self.weight = self.weight.t()
         else:
@@ -1858,6 +1906,7 @@ class TestFP8Layer(torch.nn.Module):
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )
+        self.kernel.process_weights_after_loading(self)
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()
