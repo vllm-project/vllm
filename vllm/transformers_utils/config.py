@@ -158,7 +158,7 @@ def _maybe_register_hf_config(config: PretrainedConfig | None) -> None:
 
     model_type = getattr(config, "model_type", None)
     if isinstance(model_type, str) and model_type in _CONFIG_REGISTRY:
-        _register_config_class(model_type, type(config))
+        _register_config_class(model_type, _CONFIG_REGISTRY[model_type])
 
 
 def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
