@@ -518,7 +518,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         num_tokens = q.shape[0]
         mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
+            [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
             device=q.device,
         )
@@ -577,6 +577,8 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
             q = q.view(original_q_shape)
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        attn_out = self._forward_mla(layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata)
+        attn_out = self._forward_mla(
+            layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
+        )
 
         return attn_out, None
