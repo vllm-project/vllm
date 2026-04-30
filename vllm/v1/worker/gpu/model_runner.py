@@ -365,12 +365,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
-            max_model_len=block_table_max_model_len,
+            max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
-            max_num_blocks_per_group=max_num_blocks_per_group,
         )
 
         self.attn_backends, self.attn_groups, attn_cg_support = init_attn_backend(
@@ -730,6 +729,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_draft_tokens_per_req = None
         if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
@@ -743,15 +743,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            num_draft_tokens = np.fromiter(
+            num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
                 count=num_reqs,
             )
-            total_num_draft_tokens = int(num_draft_tokens.sum())
+            total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
 
-            num_logits = num_draft_tokens + 1
+            num_logits = num_draft_tokens_per_req + 1
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
@@ -774,9 +774,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
+        is_prefilling_np = (
+            self.req_states.num_computed_prefill_tokens[idx_mapping_np]
+            < self.req_states.prefill_len.np[idx_mapping_np]
+        )
 
         # Get prefill tokens if any.
-        if self.req_states.any_prefills(idx_mapping_np):
+        if np.any(is_prefilling_np):
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,
@@ -844,11 +848,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
+            num_draft_tokens_per_req=num_draft_tokens_per_req,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            is_prefilling_np=is_prefilling_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             logits_indices=logits_indices,
@@ -1064,8 +1070,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
-                self.req_states,
-                scheduler_output.scheduled_spec_decode_tokens,
             )
 
         inputs_embeds = None

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -12,7 +13,6 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
-from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -39,8 +39,6 @@ class MambaHybridModelState(DefaultModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        req_states: RequestState | None = None,
-        scheduled_spec_decode_tokens: dict[str, list[int]] | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
@@ -52,44 +50,36 @@ class MambaHybridModelState(DefaultModelState):
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
 
+        is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
+        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
+            input_batch.is_prefilling_np
+        )
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
-        is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
-        num_decode_draft_tokens_cpu = None
         num_accepted_tokens = None
+        num_decode_draft_tokens_cpu = None
         if not for_capture:
-            assert req_states is not None
-            assert scheduled_spec_decode_tokens is not None
-            is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
-                req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np]
-                < req_states.prefill_len.np[input_batch.idx_mapping_np]
-            )
-            num_decode_draft_tokens_cpu = torch.full(
-                (num_reqs,),
-                -1,
-                dtype=torch.int32,
-                device="cpu",
-            )
-            for batch_idx, req_id in enumerate(input_batch.req_ids):
-                draft_ids = scheduled_spec_decode_tokens.get(req_id)
-                if draft_ids is None:
-                    continue
-                req_state_idx = req_states.req_id_to_index[req_id]
-                if (
-                    req_states.num_computed_prefill_tokens[req_state_idx]
-                    >= req_states.prefill_len.np[req_state_idx]
-                ):
-                    num_decode_draft_tokens_cpu[batch_idx] = len(draft_ids)
-
-            num_accepted_tokens = torch.ones(
-                num_reqs,
-                dtype=self.num_accepted_tokens_gpu.dtype,
-                device=self.num_accepted_tokens_gpu.device,
-            )
+            num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
             ]
+
+            # GDN uses >= 0 to select spec-decode rows, so non-decode rows
+            # need the -1 sentinel rather than a raw zero draft count.
+            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
+            if input_batch.num_draft_tokens_per_req is not None:
+                spec_decode_mask = (
+                    input_batch.num_draft_tokens_per_req > 0
+                ) & ~input_batch.is_prefilling_np
+                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+                    spec_decode_mask,
+                    input_batch.num_draft_tokens_per_req,
+                    -1,
+                )
+            num_decode_draft_tokens_cpu = torch.from_numpy(
+                num_decode_draft_tokens_np
+            )
 
         return build_attn_metadata(
             attn_groups=attn_groups,

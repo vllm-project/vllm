@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
@@ -16,17 +15,15 @@ class BlockTables:
         block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
-        max_model_len: int,
+        max_num_blocks_per_group: list[int],
         device: torch.device,
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
-        max_num_blocks_per_group: list[int] | None = None,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.max_model_len = max_model_len
         self.device = device
 
         self.cp_size = cp_size
@@ -34,17 +31,11 @@ class BlockTables:
         self.cp_interleave = cp_interleave
 
         self.num_kv_cache_groups = len(self.block_sizes)
+        assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            if max_num_blocks_per_group is not None:
-                max_num_blocks = max_num_blocks_per_group[i]
-            else:
-                block_size = self.block_sizes[i]
-                max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
+            max_num_blocks = max_num_blocks_per_group[i]
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,

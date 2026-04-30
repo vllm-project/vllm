@@ -53,7 +53,10 @@ class InputBatch:
     # sum(num_scheduled_tokens)
     num_tokens: int
     num_tokens_after_padding: int
+    # Sum of draft tokens scheduled across requests.
     num_draft_tokens: int
+    # [num_reqs] number of draft tokens scheduled for each request, if any.
+    num_draft_tokens_per_req: np.ndarray | None
 
     # [num_reqs + 1]
     query_start_loc: torch.Tensor
@@ -64,6 +67,8 @@ class InputBatch:
     seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
+    # [num_reqs] CPU bool array.
+    is_prefilling_np: np.ndarray
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -137,11 +142,13 @@ class InputBatch:
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
             num_draft_tokens=0,
+            num_draft_tokens_per_req=None,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
+            is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,
