@@ -206,6 +206,7 @@ class IrOp:
         :param provider: The name of the provider, must be unique.
         :param supported: Static support check, use this to check platform support.
         :param supports_args: Dynamic arg support check, used for types and shapes.
+        :param inplace: Does this op reuse activation input memory for outputs
         :return: A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
