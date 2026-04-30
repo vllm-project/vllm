@@ -31,7 +31,7 @@ ROCm devices via `can_implement()` gating on
 `torch.ops._C.gptq_gemm_rdna3` is the **single Python entry point**. All
 branching happens in C++ to keep `apply_weights` torch.compile-friendly:
 
-```
+```text
 gptq_gemm_rdna3(a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format)
 │
 ├── if dtype == bf16 and M >= 16 and N % 16 == 0 and K % 16 == 0
@@ -79,7 +79,7 @@ serving:
 
 ### Compute paths overview
 
-```
+```text
 ================================================================================
                     RDNA3 GPTQ W4A16 COMPUTE PATHS (gfx1100)
 ================================================================================
@@ -162,7 +162,7 @@ below) — diagonal-A tests pass for both row/col B because A=I makes the
 K-axis sum collapse, masking the bug; only random-A tests reveal mode 1
 as the unique correct choice.
 
-```
+```text
 A frag input (16 fp16/bf16 elements per lane):
 ═══════════════════════════════════════════════
   lane t holds:   a_frag[i] = A[lane_lo][k = i]
@@ -195,7 +195,7 @@ C frag output after WMMA (8 fp32 values per lane):
 
 ### Concrete scaling — qkv-square (K = N = 4096) on a 96-CU GPU
 
-```
+```text
 Decode (M=1):
   Scalar: gridDim = (4, 1, 16) = 64 blocks × 8 waves = 512 waves
           → ~512/3072 wave slots used = 17 % of peak wave-slot occupancy
@@ -220,7 +220,7 @@ endpoint, openqa dataset, 50 requests, concurrency 100. Avg input tokens
 ~30, avg output tokens ~1800, so output dominates wall-time ~60:1 and
 the steady-state decode regime determines TPS.
 
-```
+```bash
 evalscope perf \
   --url "http://127.0.0.1/v1/chat/completions" \
   --parallel 100 --number 50 \
@@ -271,7 +271,7 @@ vllm serve … --max-num-seqs {8|32} --dtype float16      # RDNA3 fp16
 
 The full server flags used in the benches:
 
-```
+```text
 --gpu-memory-utilization 0.95 --max_model_len 262144 -tp 2
 --attention-backend TRITON_ATTN --kv-cache-dtype fp8
 --enable-prefix-caching --language-model-only
@@ -393,10 +393,10 @@ ops were the dominant cost on the initial path:
 Kernel microbench (direct call to `gptq_gemm_rdna3_wmma`, M=32,
 K=N=4096, bf16):
 
-| Stage                                | bf16 WMMA |
-| ---                                  | ---       |
-| Initial branch                       | 187 tk/s  |
-| **+ Round 2 (single-wave latency)**  | **365 tk/s (+95%)** |
+| Stage                               | bf16 WMMA           |
+| ---                                 | ---                 |
+| Initial branch                      | 187 tk/s            |
+| **+ Round 2 (single-wave latency)** | **365 tk/s (+95%)** |
 
 ### Round 3 — WMMA K-split with packed atomic (lesson 10)
 
@@ -465,16 +465,16 @@ useful but still cost SIMD cycles).
 
 Kernel microbench (bf16, K=N=4096):
 
-| M    | v1 μs/call | v2 μs/call | Δ        |
-|---:  |---:        |---:        |---:      |
-| 16   | 51.9       | (v1 fallback) | n/a   |
-| 32   | 80.8       | 85.4       | +5.7 %   |
-| 64   | 145.8      | 140.6      | −3.6 %   |
-| 128  | 277.4      | 258.0      | −7.0 %   |
-| 256  | 537.0      | 502.5      | −6.4 %   |
-| 512  | 1021.6     | 950.7      | −6.9 %   |
-| 1024 | 1907.7     | 1807.1     | −5.3 %   |
-| 2048 | 3492.9     | 3306.8     | −5.3 %   |
+| M    | v1 μs/call | v2 μs/call    | Δ      |
+| ---: | ---:       | ---:          | ---:   |
+| 16   | 51.9       | (v1 fallback) | n/a    |
+| 32   | 80.8       | 85.4          | +5.7 % |
+| 64   | 145.8      | 140.6         | −3.6 % |
+| 128  | 277.4      | 258.0         | −7.0 % |
+| 256  | 537.0      | 502.5         | −6.4 % |
+| 512  | 1021.6     | 950.7         | −6.9 % |
+| 1024 | 1907.7     | 1807.1        | −5.3 % |
+| 2048 | 3492.9     | 3306.8        | −5.3 % |
 
 Same pattern (5-7 % at M ≥ 64) on the other 4 Qwen-class shapes
 (`gate/up`, `down`, `qwen-14B-qkv`, `qwen-14B-up`).
@@ -602,7 +602,7 @@ The default per-col dequant computes `dq[i] = q_f32[i] * scale + zb`
 (8 fp32 FMAs per int32 weight × 4 N cols = 32 dequant FMAs), then dot
 adds 8 fp32 FMAs per (m, n_col). At M_COUNT=1 this reduces algebraically:
 
-```
+```text
 accum = sum_i (q_f32[i] * scale + zb) * a[i]
       = scale * sum_i (q_f32[i] * a[i]) + zb * sum_i a[i]
 ```
