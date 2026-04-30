@@ -28,6 +28,7 @@
 #   BFCL_MAX_MODEL_LEN  - Max model length (default: 4096)
 #   BFCL_PORT           - Server port (default: 8000)
 #   BFCL_REASONING_PARSER - Reasoning parser name (default: disabled)
+#   BFCL_TEMPERATURE    - Temperature (default: 0.0)
 #   BFCL_EXTRA_ARGS     - Additional vLLM server args
 
 set -euo pipefail
@@ -43,6 +44,7 @@ TP_SIZE="${BFCL_TP_SIZE:-1}"
 MAX_MODEL_LEN="${BFCL_MAX_MODEL_LEN:-4096}"
 PORT="${BFCL_PORT:-8000}"
 REASONING_PARSER="${BFCL_REASONING_PARSER:-}"
+TEMPERATURE="${BFCL_TEMPERATURE:-0.0}"
 EXTRA_ARGS="${BFCL_EXTRA_ARGS:-}"
 
 # Set up output directory
@@ -139,7 +141,7 @@ echo "vLLM server is ready. (started in ${SECONDS_WAITED}s)"
 # be patched in-process so BFCL knows to use the OpenAI-compatible handler
 # against our local vLLM server.
 bfcl_exit_code=0
-python3 - "$MODEL" "$TEST_CATEGORY" "$NUM_THREADS" "$PORT" "$API_TYPE" "$OUTPUT_DIR" << 'PYEOF' || bfcl_exit_code=$?
+python3 - "$MODEL" "$TEST_CATEGORY" "$NUM_THREADS" "$PORT" "$API_TYPE" "$TEMPERATURE" "$OUTPUT_DIR" << 'PYEOF' || bfcl_exit_code=$?
 import os
 import sys
 
@@ -148,7 +150,8 @@ test_category = sys.argv[2]
 num_threads = int(sys.argv[3])
 port = sys.argv[4]
 api_type = sys.argv[5]
-output_dir = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else os.getcwd()
+temperature = float(sys.argv[6])
+output_dir = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] else os.getcwd()
 
 os.environ["OPENAI_BASE_URL"] = f"http://localhost:{port}/v1"
 os.environ["OPENAI_API_KEY"] = "dummy"
@@ -204,6 +207,7 @@ gen_kwargs["model"] = [model]
 gen_kwargs["test_category"] = [c.strip() for c in test_category.split(",")]
 gen_kwargs["skip_server_setup"] = True
 gen_kwargs["num_threads"] = num_threads
+gen_kwargs["temperature"] = temperature
 generate(**gen_kwargs)
 
 # ---- evaluate ----
