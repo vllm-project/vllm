@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: LM Eval Small Models
+  key: lm-eval-small-models
   timeout_in_minutes: 75
   source_file_dependencies:
   - csrc/
@@ -24,6 +25,7 @@ steps:
 #   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: LM Eval Large Models (4 GPUs)(H100)
+  key: lm-eval-large-models-4-gpus-h100
   device: h100
   optional: true
   num_devices: 4
@@ -36,6 +38,7 @@ steps:
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 - label: LM Eval Small Models (B200)
+  key: lm-eval-small-models-b200
   timeout_in_minutes: 120
   device: b200
   optional: true
@@ -46,6 +49,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
 
 - label: LM Eval Qwen3.5 Models (B200)
+  key: lm-eval-qwen3-5-models-b200
   timeout_in_minutes: 120
   device: b200
   optional: true
@@ -62,6 +66,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
 
 - label: LM Eval Large Models (H200)
+  key: lm-eval-large-models-h200
   timeout_in_minutes: 60
   device: h200
   optional: true
@@ -70,6 +75,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
 
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
+  key: moe-refactor-integration-test-h100-temporary
   device: h100
   optional: true
   num_devices: 2
@@ -77,6 +83,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
   
 - label: MoE Refactor Integration Test (B200 - TEMPORARY)
+  key: moe-refactor-integration-test-b200-temporary
   device: b200
   optional: true
   num_devices: 2
@@ -84,6 +91,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
 
 - label: MoE Refactor Integration Test (B200 DP - TEMPORARY)
+  key: moe-refactor-integration-test-b200-dp-temporary
   device: b200
   optional: true
   num_devices: 2
@@ -92,6 +100,7 @@ steps:
 
 
 - label: LM Eval TurboQuant KV Cache
+  key: lm-eval-turboquant-kv-cache
   timeout_in_minutes: 75
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/turboquant/
@@ -102,6 +111,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
 
 - label: GPQA Eval (GPT-OSS) (H100)
+  key: gpqa-eval-gpt-oss-h100
   timeout_in_minutes: 120
   device: h100
   optional: true
@@ -115,6 +125,7 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
 
 - label: GPQA Eval (GPT-OSS) (B200)
+  key: gpqa-eval-gpt-oss-b200
   timeout_in_minutes: 120
   device: b200
   optional: true
