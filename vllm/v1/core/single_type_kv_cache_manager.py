@@ -92,6 +92,7 @@ class SingleTypeKVCacheManager(ABC):
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
         num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -107,13 +108,16 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
+            apply_admission_cap: If True, clamp by `num_required_blocks` by
+                `_max_admission_blocks_per_request`for recycling-aware specs
+                (SWA, chunked-local).
 
         Returns:
             The number of blocks to allocate.
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if self._max_admission_blocks_per_request is not None:
+        if apply_admission_cap and self._max_admission_blocks_per_request is not None:
             # Recycling-aware specs (SWA, chunked-local) cap the per-request
             # reservation here so admission matches the startup pool sizer
             # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
@@ -893,6 +897,7 @@ class MambaManager(SingleTypeKVCacheManager):
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
         num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
@@ -917,6 +922,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 new_computed_blocks,
                 total_computed_tokens,
                 num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
             )
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
