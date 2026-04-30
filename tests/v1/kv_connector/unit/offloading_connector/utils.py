@@ -37,15 +37,15 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
+    OffloadingSpec,
     OffloadKey,
     PrepareStoreOutput,
     make_offload_key,
 )
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
-from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
