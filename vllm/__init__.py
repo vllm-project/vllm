@@ -14,6 +14,7 @@ import typing
 import vllm.env_override  # noqa: F401
 
 MODULE_ATTRS = {
+    "compile_model": ".compile_only:compile_model",
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
     "EngineArgs": ".engine.arg_utils:EngineArgs",
     "AsyncLLMEngine": ".engine.async_llm_engine:AsyncLLMEngine",
@@ -39,6 +40,7 @@ MODULE_ATTRS = {
 }
 
 if typing.TYPE_CHECKING:
+    from vllm.compile_only import compile_model as compile_model
     from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.engine.llm_engine import LLMEngine
