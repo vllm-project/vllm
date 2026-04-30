@@ -272,6 +272,71 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     assert torch.equal(actual, expected), "Scale bytes mismatch"
 
 
+@pytest.mark.parametrize(
+    "num_tokens,hidden_dim",
+    [
+        (1, 7168),  # mn padded 1 -> 4
+        (2, 7168),  # mn padded 2 -> 4
+        (3, 7168),  # mn padded 3 -> 4
+        (5, 7168),  # mn padded 5 -> 8
+        (127, 7168),  # mn padded 127 -> 128
+        (253, 640),  # both mn and groups padded
+        (1, 384),  # extreme: 1 group, 1 mn row -> both axes padded
+    ],
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+)
+def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
+    num_tokens, hidden_dim
+):
+    """When output_q is allocated with shape (tma_aligned_mn, k) instead of
+    (mn, k), the kernel must overwrite the padded mn rows with zeros so
+    callers can use ``torch.empty`` instead of ``torch.zeros``."""
+
+    device = "cuda"
+    group_size = 128
+    torch.manual_seed(42)
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+
+    mn = num_tokens
+    groups_per_row = hidden_dim // group_size
+    k_num_packed = (groups_per_row + 3) // 4
+    tma_aligned_mn = ((mn + 3) // 4) * 4
+
+    fp8_dtype = torch.float8_e4m3fn
+    finfo = torch.finfo(fp8_dtype)
+    # Allocate output_q with the padded mn extent and pre-fill with 0xFF
+    # so the kernel cannot rely on a clean buffer.
+    out_q = torch.empty((tma_aligned_mn, hidden_dim), device=device, dtype=fp8_dtype)
+    out_q.view(torch.uint8).fill_(0xFF)
+
+    out_s_packed = torch.empty_strided(
+        (mn, k_num_packed),
+        (1, tma_aligned_mn),
+        device=device,
+        dtype=torch.int32,
+    )
+
+    torch.ops._C.per_token_group_fp8_quant_packed(
+        x, out_q, out_s_packed, group_size, 1e-10, finfo.min, finfo.max
+    )
+
+    # Live rows must match the Triton reference.
+    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+        ref_q, _ = fp8_utils.per_token_group_quant_fp8(x, group_size, use_ue8m0=True)
+    assert torch.equal(out_q[:mn], ref_q), "Live region mismatch"
+
+    # Padded rows must be all-zero; without this, downstream TMA loads would
+    # see uninitialised data.
+    if tma_aligned_mn > mn:
+        padded_bytes = out_q[mn:tma_aligned_mn].view(torch.uint8)
+        assert padded_bytes.eq(0).all(), (
+            f"Padded rows [{mn}, {tma_aligned_mn}) not zeroed; "
+            f"{padded_bytes.ne(0).sum().item()} non-zero bytes"
+        )
+
+
 @pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

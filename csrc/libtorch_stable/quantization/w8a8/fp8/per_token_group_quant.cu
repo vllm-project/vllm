@@ -252,9 +252,9 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
     unsigned int* __restrict__ output_s_packed, const int num_groups_padded,
     const int groups_per_block, const int padded_groups_per_row,
-    const int groups_per_row, const int mn, const int tma_aligned_mn,
-    const int num_scale_elems, const float eps, const float min_8bit,
-    const float max_8bit) {
+    const int groups_per_row, const int mn, const int output_q_mn_extent,
+    const int tma_aligned_mn, const int num_scale_elems, const float eps,
+    const float min_8bit, const float max_8bit) {
   static_assert(GROUP_SIZE == 128, "fast path supports GROUP_SIZE==128");
   constexpr int THREADS_PER_GROUP = 8;
   constexpr int VEC_SIZE = 32 / sizeof(T);  // 16 for bf16/fp16
@@ -332,8 +332,18 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
     }
   }
 
-  // Skip quantize+store for padding groups.
+  // For padded mn rows that fall within output_q's allocated extent, write
+  // a uint4 of zeros to keep the buffer clean for downstream TMA loads.
+  // Skip writes for sf_k padding (those positions don't exist in output_q).
   if (!is_valid_group) {
+    if (sf_k_idx < groups_per_row && mn_idx >= mn &&
+        mn_idx < output_q_mn_extent) {
+      DST_DTYPE* group_output =
+          static_cast<DST_DTYPE*>(output_q) +
+          static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+          sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+      *reinterpret_cast<uint4*>(group_output) = make_uint4(0, 0, 0, 0);
+    }
     return;
   }
 
@@ -402,6 +412,17 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
   const int64_t k_num_packed_sfk = (groups_per_row + 3) / 4;
   const int64_t tma_aligned_mn = ((mn + 3) / 4) * 4;
 
+  // output_q may be allocated with extra padded mn rows (e.g.,
+  // (tma_aligned_mn, k)) so the kernel can zero-fill them in-line and the
+  // caller can use torch.empty instead of torch.zeros. The grid only covers
+  // up to tma_aligned_mn, so we cap the extent there.
+  const int64_t output_q_mn_actual = output_q.numel() / k;
+  STD_TORCH_CHECK(output_q_mn_actual >= mn,
+                  "output_q must have at least mn rows; got ",
+                  output_q_mn_actual, " rows for mn=", mn, ".");
+  const int64_t output_q_mn_extent =
+      output_q_mn_actual < tma_aligned_mn ? output_q_mn_actual : tma_aligned_mn;
+
   STD_TORCH_CHECK(output_s_packed.scalar_type() ==
                   torch::headeronly::ScalarType::Int);
   STD_TORCH_CHECK(output_s_packed.size(0) == mn &&
@@ -432,6 +453,7 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
             static_cast<int>(num_groups_padded), groups_per_block,        \
             static_cast<int>(padded_groups_per_row),                      \
             static_cast<int>(groups_per_row), static_cast<int>(mn),       \
+            static_cast<int>(output_q_mn_extent),                         \
             static_cast<int>(tma_aligned_mn),                             \
             static_cast<int>(num_scale_elems), static_cast<float>(eps),   \
             static_cast<float>(min_8bit), static_cast<float>(max_8bit));  \
