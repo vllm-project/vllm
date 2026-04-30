@@ -516,7 +516,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 if "status" not in item:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
-                if "content" in item:
+                if isinstance(item.get("content"), list):
                     new_content = []
                     for c in item["content"]:
                         if (
