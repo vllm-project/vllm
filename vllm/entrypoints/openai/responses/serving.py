@@ -324,18 +324,40 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        request_metadata = RequestResponseMetadata(request_id=request.request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
+            await self._notify_kv_transfer_request_rejected(
+                request.request_id,
+                request.kv_transfer_params,
+                error_check_ret.error.message,
+                raw_request,
+            )
             return error_check_ret
         maybe_validation_error = self._validate_create_responses_input(request)
         if maybe_validation_error is not None:
+            await self._notify_kv_transfer_request_rejected(
+                request.request_id,
+                request.kv_transfer_params,
+                maybe_validation_error.error.message,
+                raw_request,
+            )
             return maybe_validation_error
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
         if self.engine_client.errored:
+            await self._notify_kv_transfer_request_rejected(
+                request.request_id,
+                request.kv_transfer_params,
+                str(self.engine_client.dead_error),
+                raw_request,
+            )
             raise self.engine_client.dead_error
 
         if request.store and not self.enable_store:
@@ -353,23 +375,37 @@ class OpenAIServingResponses(OpenAIServing):
             async with self.response_store_lock:
                 prev_response = self.response_store.get(prev_response_id)
             if prev_response is None:
-                return self._make_not_found_error(prev_response_id)
+                error_response = self._make_not_found_error(prev_response_id)
+                await self._notify_kv_transfer_request_rejected(
+                    request.request_id,
+                    request.kv_transfer_params,
+                    error_response.error.message,
+                    raw_request,
+                )
+                return error_response
         else:
             prev_response = None
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
 
-        if self.use_harmony:
-            messages, engine_inputs = self._make_request_with_harmony(
-                request, prev_response
+        try:
+            if self.use_harmony:
+                messages, engine_inputs = self._make_request_with_harmony(
+                    request, prev_response
+                )
+            else:
+                messages, engine_inputs = await self._make_request(
+                    request, prev_response
+                )
+        except Exception as e:
+            await self._notify_kv_transfer_request_rejected(
+                request.request_id,
+                request.kv_transfer_params,
+                str(e),
+                raw_request,
             )
-        else:
-            messages, engine_inputs = await self._make_request(request, prev_response)
-
-        request_metadata = RequestResponseMetadata(request_id=request.request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+            raise
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
@@ -408,6 +444,12 @@ class OpenAIServingResponses(OpenAIServing):
         for engine_input in engine_inputs:
             maybe_error = self._validate_generator_input(engine_input)
             if maybe_error is not None:
+                await self._notify_kv_transfer_request_rejected(
+                    request.request_id,
+                    request.kv_transfer_params,
+                    maybe_error.error.message,
+                    raw_request,
+                )
                 return maybe_error
 
             default_max_tokens = get_max_tokens(

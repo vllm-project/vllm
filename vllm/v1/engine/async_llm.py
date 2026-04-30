@@ -715,6 +715,22 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
+    async def notify_kv_transfer_request_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any],
+        reason: str,
+        *,
+        data_parallel_rank: int | None = None,
+    ) -> bool:
+        """Notify EngineCore of a pre-admission rejection for KV cleanup."""
+        return await self.engine_core.notify_kv_transfer_request_rejected_async(
+            request_id,
+            kv_transfer_params,
+            reason,
+            data_parallel_rank=data_parallel_rank,
+        )
+
     async def pause_generation(
         self,
         *,

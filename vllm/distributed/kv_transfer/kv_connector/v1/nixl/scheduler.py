@@ -95,7 +95,7 @@ class NixlConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[dict[str, Any], BlockIds]] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -348,7 +348,7 @@ class NixlConnectorScheduler:
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (
-                        request,
+                        params,
                         local_block_ids,
                     )
 
@@ -405,12 +405,11 @@ class NixlConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
-            assert req.kv_transfer_params is not None
+        for req_id, (kv_transfer_params, block_ids) in self._reqs_need_recv.items():
             meta.add_new_req_to_recv(
                 request_id=req_id,
                 local_block_ids=block_ids,
-                kv_transfer_params=req.kv_transfer_params,
+                kv_transfer_params=kv_transfer_params,
             )
 
         if self.use_host_buffer:
@@ -457,7 +456,7 @@ class NixlConnectorScheduler:
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (params, [])
             params["do_remote_prefill"] = False
             return False, None
 
@@ -502,3 +501,38 @@ class NixlConnectorScheduler:
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
+
+    def request_rejected_before_admission(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        if not kv_transfer_params.get("do_remote_prefill"):
+            return False
+
+        required_params = (
+            "remote_block_ids",
+            "remote_engine_id",
+            "remote_request_id",
+            "remote_host",
+            "remote_port",
+        )
+        if not all(kv_transfer_params.get(param) for param in required_params):
+            logger.warning(
+                "Cannot clean up rejected NIXL remote-prefill request %s; "
+                "missing required KVTransferParams. reason=%s params=%s",
+                request_id,
+                reason,
+                kv_transfer_params,
+            )
+            return False
+
+        logger.debug(
+            "Enqueuing NIXL cleanup for rejected remote-prefill request %s: %s",
+            request_id,
+            reason,
+        )
+        self._reqs_need_recv[request_id] = (kv_transfer_params, [])
+        kv_transfer_params["do_remote_prefill"] = False
+        return True

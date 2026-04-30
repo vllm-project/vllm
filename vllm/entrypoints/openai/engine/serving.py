@@ -616,6 +616,30 @@ class OpenAIServing:
         except ValueError:
             return None
 
+    async def _notify_kv_transfer_request_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any] | None,
+        reason: str,
+        raw_request: Request | None = None,
+    ) -> None:
+        if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
+            return
+
+        try:
+            await self.engine_client.notify_kv_transfer_request_rejected(
+                request_id,
+                kv_transfer_params,
+                reason,
+                data_parallel_rank=self._get_data_parallel_rank(raw_request),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to notify KV connector about rejected request %s",
+                request_id,
+                exc_info=True,
+            )
+
     @staticmethod
     def _parse_tool_calls_from_content(
         request: ResponsesRequest | ChatCompletionRequest,

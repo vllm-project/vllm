@@ -118,23 +118,45 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         if request.stream and request.use_beam_search:
-            return self.create_error_response(
+            error_response = self.create_error_response(
                 "Streaming is not currently supported with beam search"
             )
+            await self._notify_kv_transfer_request_rejected(
+                request_id,
+                request.kv_transfer_params,
+                error_response.error.message,
+                raw_request,
+            )
+            return error_response
 
-        result = await self.render_completion_request(request)
+        try:
+            result = await self.render_completion_request(request)
+        except Exception as e:
+            await self._notify_kv_transfer_request_rejected(
+                request_id,
+                request.kv_transfer_params,
+                str(e),
+                raw_request,
+            )
+            raise
         if isinstance(result, ErrorResponse):
+            await self._notify_kv_transfer_request_rejected(
+                request_id,
+                request.kv_transfer_params,
+                result.error.message,
+                raw_request,
+            )
             return result
 
         engine_inputs = result
 
-        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
 
         lora_request = self._maybe_get_adapters(request)
 

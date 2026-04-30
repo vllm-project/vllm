@@ -321,6 +321,57 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
+def test_rejected_remote_prefill_request_enqueues_empty_recv():
+    scheduler = create_scheduler(create_vllm_config())
+
+    params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "remote_engine_id": "remote-engine",
+        "remote_request_id": "prefill-req",
+        "remote_block_ids": [1, 2, 3],
+        "remote_host": "remote-host",
+        "remote_port": 1234,
+    }
+
+    handled = scheduler.request_rejected_before_admission(
+        "decode-req", params, "prompt too long"
+    )
+
+    assert handled
+    assert scheduler.has_requests()
+    assert params["do_remote_prefill"] is False
+
+    scheduler_output = scheduler.schedule()
+    meta = scheduler_output.kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    assert set(meta.reqs_to_recv) == {"decode-req"}
+    req_meta = meta.reqs_to_recv["decode-req"]
+    assert req_meta.local_block_ids == []
+    assert req_meta.remote.request_id == "prefill-req"
+    assert not scheduler.has_requests()
+
+
+def test_rejected_remote_prefill_request_missing_metadata_is_ignored():
+    scheduler = create_scheduler(create_vllm_config())
+
+    params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "remote_engine_id": "remote-engine",
+        "remote_request_id": "prefill-req",
+        "remote_block_ids": [1, 2, 3],
+    }
+
+    handled = scheduler.request_rejected_before_admission(
+        "decode-req", params, "prompt too long"
+    )
+
+    assert not handled
+    assert params["do_remote_prefill"] is True
+    assert not scheduler.has_requests()
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
     FakeNixlWrapper,
