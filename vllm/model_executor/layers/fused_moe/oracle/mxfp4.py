@@ -241,6 +241,129 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None
 
 
+def _activation_format_for_config(
+    config: FusedMoEConfig,
+) -> mk.FusedMoEActivationFormat:
+    """Pick the fused-MoE activation format implied by the parallel config."""
+    if config.moe_parallel_config.use_batched_activation_format:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+    return mk.FusedMoEActivationFormat.Standard
+
+
+def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
+    return f"Using '{backend.value}' Mxfp4 MoE backend."
+
+
+def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
+    if reason:
+        return (
+            f"Mxfp4 MoE backend '{backend.value}' does not support the "
+            f"deployment configuration since {reason}."
+        )
+    return (
+        f"Mxfp4 MoE backend '{backend.value}' does not support the "
+        "deployment configuration."
+    )
+
+
+def _try_kernel_classes(
+    backend: Mxfp4MoeBackend,
+    config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+    *,
+    log_failures: bool = False,
+) -> tuple[type[mk.FusedMoEExperts] | None, str | None]:
+    """Probe every kernel class registered for ``backend``.
+
+    Returns the first kernel that reports ``is_supported_config`` as True;
+    otherwise ``(None, last_reason)``. When ``log_failures`` is True, each
+    unsupported kernel emits a deduplicated debug log — matching the original
+    priority-loop behavior, which logged once per failed kernel class.
+    """
+    reason: str | None = None
+    for k_cls in backend_to_kernel_cls(backend):
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, weight_key, activation_key, activation_format
+        )
+        if supported:
+            return k_cls, None
+        if log_failures:
+            logger.debug_once(_make_log_unsupported(backend, reason))
+    return None, reason
+
+
+def _return_or_raise(
+    backend: Mxfp4MoeBackend,
+    config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
+    """Resolve ``backend`` to a supported kernel class or raise ``ValueError``."""
+    k_cls, reason = _try_kernel_classes(
+        backend, config, weight_key, activation_key, activation_format
+    )
+    if k_cls is not None:
+        logger.info_once(_make_log_backend(backend))
+        return backend, k_cls
+    raise ValueError(_make_log_unsupported(backend, reason))
+
+
+def _select_explicit_runner_backend(
+    config: FusedMoEConfig,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]] | None:
+    """Honor ``config.moe_backend`` when set explicitly (not ``"auto"``).
+
+    Returns the resolved ``(backend, kernel_cls)`` or raises ``ValueError`` if
+    the requested backend cannot be satisfied. Returns ``None`` when the user
+    left ``moe_backend`` on auto, in which case the caller should fall through
+    to priority-order selection.
+    """
+    runner_backend = config.moe_backend
+    if runner_backend == "auto":
+        return None
+    requested_backend = map_mxfp4_backend(runner_backend)
+    if (
+        activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+        and requested_backend == Mxfp4MoeBackend.MARLIN
+    ):
+        requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
+    return _return_or_raise(
+        requested_backend,
+        config,
+        kMxfp4Static,
+        _backend_activation_key(requested_backend),
+        activation_format,
+    )
+
+
+def _select_first_supported_backend(
+    config: FusedMoEConfig,
+    priority_backends: list[Mxfp4MoeBackend],
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]] | None:
+    """Walk ``priority_backends`` in order and return the first one whose
+    kernel reports the deployment as supported. Returns ``None`` if none match.
+    """
+    for backend in priority_backends:
+        activation_key = _backend_activation_key(backend)
+        k_cls, _ = _try_kernel_classes(
+            backend,
+            config,
+            kMxfp4Static,
+            activation_key,
+            activation_format,
+            log_failures=True,
+        )
+        if k_cls is not None:
+            logger.info_once(_make_log_backend(backend))
+            return backend, k_cls
+    return None
+
+
 def select_gpt_oss_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -271,58 +394,11 @@ def select_gpt_oss_mxfp4_moe_backend(
         logger.info_once("Using Marlin backend for mxfp4 lora")
         return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(Mxfp4MoeBackend.MARLIN)[0]
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = _activation_format_for_config(config)
 
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        requested_backend = map_mxfp4_backend(runner_backend)
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == Mxfp4MoeBackend.MARLIN
-        ):
-            requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
-        return _return_or_raise(
-            requested_backend,
-            config,
-            kMxfp4Static,
-            _backend_activation_key(requested_backend),
-            activation_format,
-        )
+    explicit = _select_explicit_runner_backend(config, activation_format)
+    if explicit is not None:
+        return explicit
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends_for_gpt_oss()
@@ -391,21 +467,13 @@ def select_gpt_oss_mxfp4_moe_backend(
             activation_format,
         )
 
-    for backend in AVAILABLE_BACKENDS:
-        activation_key = _backend_activation_key(backend)
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
+    selected = _select_first_supported_backend(
+        config, AVAILABLE_BACKENDS, activation_format
+    )
+    if selected is not None:
+        return selected
 
     if current_platform.is_xpu():
-        backend = Mxfp4MoeBackend.XPU
-        logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
             Mxfp4MoeBackend.XPU,
             config,
@@ -429,73 +497,20 @@ def select_mxfp4_moe_backend(
     Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    activation_format = _activation_format_for_config(config)
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        requested_backend = map_mxfp4_backend(runner_backend)
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == Mxfp4MoeBackend.MARLIN
-        ):
-            requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
-        return _return_or_raise(
-            requested_backend,
-            config,
-            kMxfp4Static,
-            _backend_activation_key(requested_backend),
-            activation_format,
-        )
+    explicit = _select_explicit_runner_backend(config, activation_format)
+    if explicit is not None:
+        return explicit
 
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
-    for backend in _get_priority_backends():
-        activation_key = _backend_activation_key(backend)
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+    selected = _select_first_supported_backend(
+        config, _get_priority_backends(), activation_format
+    )
+    if selected is not None:
+        return selected
 
     raise NotImplementedError(
         "No MXFP4 MoE backend supports the deployment configuration."
