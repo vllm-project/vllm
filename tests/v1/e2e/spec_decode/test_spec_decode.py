@@ -740,6 +740,7 @@ def test_medusa_correctness(
     spec_llm = LLM(
         model=target_model,
         speculative_config={
+            "method": "medusa",
             "model": medusa_model,
             "num_speculative_tokens": 3,
         },
