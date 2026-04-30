@@ -1,12 +1,11 @@
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, terminated};
-use winnow::error::{ErrMode, Needed};
 use winnow::prelude::*;
-use winnow::stream::{Offset, Partial, Stream};
+use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::partial_prefix_len;
+use super::utils::{parse_buffered_event, safe_text_len};
 use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
 
@@ -53,9 +52,6 @@ enum DsmlEvent {
 
 /// Tool parser for DeepSeek V3.2 models.
 ///
-/// Original Python implementation:
-/// <https://github.com/vllm-project/vllm/blob/bf45e6d0a558da2b8d7b60efb07b4aa394f3b60b/vllm/tool_parsers/deepseekv32_tool_parser.py>
-///
 /// Example tool call content:
 ///
 /// ```text
@@ -71,11 +67,7 @@ enum DsmlEvent {
 /// </｜DSML｜function_calls>
 /// ```
 ///
-/// Streaming strategy: **buffer until one complete invoke closes**
-///
-/// Unlike parsers that stream argument fragments incrementally, DeepSeek V3.2
-/// waits until one full `<｜DSML｜invoke>...</｜DSML｜invoke>` block is available
-/// and then emits one complete tool call with full JSON arguments.
+/// Arguments are emitted only after a full `invoke` block is parsed.
 ///
 /// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are represented
 /// as special tokens in the tokenizer and therefore must be preserved during
@@ -169,20 +161,9 @@ impl ToolParser for DeepSeekV32ToolParser {
         self.buffer.push_str(chunk);
         let mut result = ToolParseResult::default();
 
-        loop {
-            let mut input = Partial::new(self.buffer.as_str());
-            let checkpoint = input.checkpoint();
-            let event = match parse_next_dsml_event(&mut input, self.mode, self.tokens) {
-                Ok(event) => event,
-                Err(ErrMode::Incomplete(_)) => break,
-                Err(error) => {
-                    return Err(parsing_failed!("failed to parse DSML event: {}", error));
-                }
-            };
-            let consumed_len = input.offset_from(&checkpoint);
-            if consumed_len == 0 {
-                break;
-            }
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+            parse_next_dsml_event(input, self.mode, self.tokens)
+        })? {
             self.apply_event(event, &mut result)?;
             self.buffer.drain(..consumed_len);
         }
@@ -253,24 +234,7 @@ fn ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
 
 /// Parse a safe text run before the next DSML marker.
 fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
-    }
-
-    if let Some(start_idx) = text.find(tokens.tool_calls_start) {
-        input.next_slice(start_idx);
-        return Ok(DsmlEvent::Text { len: start_idx });
-    }
-
-    let keep_len = partial_prefix_len(text, tokens.tool_calls_start);
-    let emit_len = text.len().saturating_sub(keep_len);
-    if emit_len == 0 {
-        return incomplete();
-    }
-
-    input.next_slice(emit_len);
-    Ok(DsmlEvent::Text { len: emit_len })
+    safe_text_len(input, tokens.tool_calls_start).map(|len| DsmlEvent::Text { len })
 }
 
 /// Parse a DSML invoke block.
@@ -330,61 +294,12 @@ fn dsml_name_attr<'i>(input: &mut DsmlInput<'i>) -> ModalResult<&'i str> {
     delimited("name=\"", take_until(1.., "\""), "\"").parse_next(input)
 }
 
-/// Parse an incomplete streaming boundary.
-fn incomplete<T>() -> ModalResult<T> {
-    Err(ErrMode::Incomplete(Needed::Unknown))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
     use super::{DeepSeekV32ToolParser, ToolParser};
-    use crate::request::ChatTool;
-
-    fn test_tools() -> Vec<ChatTool> {
-        vec![
-            ChatTool {
-                name: "get_weather".to_string(),
-                description: None,
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "location": { "type": "string" },
-                        "date": { "type": "string" }
-                    }
-                }),
-                strict: None,
-            },
-            ChatTool {
-                name: "add".to_string(),
-                description: None,
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "x": { "type": "integer" },
-                        "y": { "type": "integer" }
-                    }
-                }),
-                strict: None,
-            },
-            ChatTool {
-                name: "convert".to_string(),
-                description: None,
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "whole": { "type": "number" },
-                        "flag": { "type": "boolean" },
-                        "payload": { "type": "object" },
-                        "items": { "type": "array" },
-                        "empty": { "type": "string" }
-                    }
-                }),
-                strict: None,
-            },
-        ]
-    }
+    use crate::parser::tool::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -399,37 +314,6 @@ mod tests {
         format!(
             "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"{function_name}\">\n{params}\n</｜DSML｜invoke>\n</｜DSML｜function_calls>"
         )
-    }
-
-    fn collect_stream(chunks: &[&str], tools: &[ChatTool]) -> crate::parser::tool::ToolParseResult {
-        let mut parser = DeepSeekV32ToolParser::new(tools);
-        let mut result = crate::parser::tool::ToolParseResult::default();
-        for chunk in chunks {
-            result.append(parser.push(chunk).unwrap());
-        }
-        result.append(parser.finish().unwrap());
-        result.coalesce_calls()
-    }
-
-    fn split_by_chars(text: &str, chunk_chars: usize) -> Vec<&str> {
-        let mut chunks = Vec::new();
-        let mut start = 0;
-        let mut count = 0;
-
-        for (index, _) in text.char_indices() {
-            if count == chunk_chars {
-                chunks.push(&text[start..index]);
-                start = index;
-                count = 0;
-            }
-            count += 1;
-        }
-
-        if start < text.len() {
-            chunks.push(&text[start..]);
-        }
-
-        chunks
     }
 
     #[test]
@@ -519,7 +403,9 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_extracts_single_tool_call() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
                 "<｜DSML｜invoke name=\"get_weather\">\n",
@@ -527,7 +413,6 @@ mod tests {
                 "</｜DSML｜invoke>\n",
                 "</｜DSML｜function_calls>",
             ],
-            &test_tools(),
         );
 
         assert!(result.normal_text.is_empty());
@@ -541,7 +426,9 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_preserves_prefix_text() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "Thinking... ",
                 "<｜DSML｜function_calls>\n",
@@ -550,7 +437,6 @@ mod tests {
                 "</｜DSML｜invoke>\n",
                 "</｜DSML｜function_calls>",
             ],
-            &test_tools(),
         );
 
         assert_eq!(result.normal_text, "Thinking... ");
@@ -559,7 +445,8 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_without_tool_call_emits_text_incrementally() {
-        let result = collect_stream(&["Hello, ", "world!"], &test_tools());
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let result = collect_stream(&mut parser, &["Hello, ", "world!"]);
 
         assert_eq!(result.normal_text, "Hello, world!");
         assert!(result.calls.is_empty());
@@ -567,14 +454,15 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_extracts_multiple_tool_calls_in_order() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[&format!(
                 "{}\n{}",
                 build_tool_call("get_weather", &[("location", "SF")])
                     .trim_end_matches("</｜DSML｜function_calls>"),
                 "<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>"
             )],
-            &test_tools(),
         );
 
         assert_eq!(result.calls.len(), 2);
@@ -596,7 +484,8 @@ mod tests {
     fn deepseek_v32_streaming_handles_start_token_split_across_chunks() {
         let text = build_tool_call("get_weather", &[("location", "SF")]);
         let chunks = split_by_chars(&text, 5);
-        let result = collect_stream(&chunks, &test_tools());
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let result = collect_stream(&mut parser, &chunks);
 
         assert_eq!(result.calls.len(), 1);
         assert_eq!(
@@ -607,7 +496,9 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_handles_bpe_chunked_dsml_opener() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "<｜DSML｜",
                 "function",
@@ -631,7 +522,6 @@ mod tests {
                 "</｜DSML｜",
                 "function_calls>",
             ],
-            &test_tools(),
         );
 
         assert!(result.normal_text.is_empty());
@@ -645,14 +535,15 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_truncated_parameter_does_not_leak_eos() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
                 "<｜DSML｜invoke name=\"get_weather\">\n",
                 "<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo",
                 "<｜end▁of▁sentence｜>",
             ],
-            &test_tools(),
         );
 
         assert!(result.calls.is_empty());
@@ -661,7 +552,9 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_drops_eos_after_complete_tool_calls() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
                 "<｜DSML｜invoke name=\"get_weather\">\n",
@@ -669,7 +562,6 @@ mod tests {
                 "</｜DSML｜invoke>\n",
                 "</｜DSML｜function_calls><｜end▁of▁sentence｜>",
             ],
-            &test_tools(),
         );
 
         assert!(result.normal_text.is_empty());
@@ -679,7 +571,9 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_ignores_text_after_complete_tool_calls() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
                 "<｜DSML｜invoke name=\"get_weather\">\n",
@@ -688,7 +582,6 @@ mod tests {
                 "</｜DSML｜function_calls>",
                 "trailing text",
             ],
-            &test_tools(),
         );
 
         assert!(result.normal_text.is_empty());
@@ -697,13 +590,14 @@ mod tests {
 
     #[test]
     fn deepseek_v32_streaming_does_not_emit_incomplete_invoke() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = collect_stream(
+            &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
                 "<｜DSML｜invoke name=\"get_weather\">\n",
                 "<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n",
             ],
-            &test_tools(),
         );
 
         assert!(result.normal_text.is_empty());
@@ -732,7 +626,8 @@ mod tests {
     fn deepseek_v32_streaming_matches_parse_complete() {
         let full_text = build_tool_call("add", &[("x", "3"), ("y", "4")]);
         let chunks = split_by_chars(&full_text, 7);
-        let streamed = collect_stream(&chunks, &test_tools());
+        let mut streaming_parser = DeepSeekV32ToolParser::new(&test_tools());
+        let streamed = collect_stream(&mut streaming_parser, &chunks);
 
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let complete = parser.parse_complete(&full_text).unwrap();

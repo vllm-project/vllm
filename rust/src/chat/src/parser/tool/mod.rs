@@ -12,7 +12,10 @@ mod deepseek_v4;
 mod external;
 mod gemma4;
 mod parameters;
+mod qwen_coder;
 pub(super) mod streaming;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_utils;
 mod utils;
 
 use std::collections::{BTreeMap, btree_map};
@@ -31,6 +34,7 @@ pub use deepseek_v4::DeepSeekV4ToolParser;
 pub use deepseek_v32::DeepSeekV32ToolParser;
 pub use external::*;
 pub use gemma4::Gemma4ToolParser;
+pub use qwen_coder::Qwen3CoderToolParser;
 
 /// Canonical public names for registered tool parsers.
 pub mod names {

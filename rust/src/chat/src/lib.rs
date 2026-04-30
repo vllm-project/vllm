@@ -49,6 +49,13 @@ mod renderer;
 mod request;
 mod stream;
 
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_utils {
+    //! Test and benchmark helpers.
+
+    pub use crate::parser::tool::test_utils as tool_parser;
+}
+
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
 use vllm_text::{TextLlm, TextRequest};

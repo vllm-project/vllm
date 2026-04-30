@@ -48,8 +48,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run tests
-        timeout-minutes: 3
-        run: cargo nextest run --workspace --no-fail-fast
+        timeout-minutes: 5
+        run: cargo nextest run --workspace --all-features --no-fail-fast
 
   clippy:
     runs-on: ubuntu-latest
@@ -62,4 +62,4 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings

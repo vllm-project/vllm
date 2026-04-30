@@ -1,30 +1,16 @@
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use serde_json::json;
+use vllm_chat::test_utils::tool_parser::{split_by_chars, test_tools};
 use vllm_chat::{ChatTool, ToolParser, ToolParserFactory};
+
+mod utils;
+use utils::feed_parser;
 
 const PARSER_NAME: &str = "deepseek_v32";
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_CHUNK_CHARS: usize = 37;
 const LONG_NORMAL_TEXT_REPEATS: usize = 4096;
-
-fn tools() -> Vec<ChatTool> {
-    vec![ChatTool {
-        name: "get_weather".to_string(),
-        description: None,
-        parameters: json!({
-            "type": "object",
-            "properties": {
-                "location": { "type": "string" },
-                "date": { "type": "string" },
-                "unit": { "type": "string" },
-                "days": { "type": "integer" }
-            }
-        }),
-        strict: None,
-    }]
-}
 
 fn mixed_fixture() -> String {
     concat!(
@@ -52,45 +38,10 @@ fn long_normal_text_fixture() -> String {
     line.repeat(LONG_NORMAL_TEXT_REPEATS)
 }
 
-fn split_by_chars(text: &str, chunk_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    let mut count = 0;
-
-    for (index, _) in text.char_indices() {
-        if count == chunk_chars {
-            chunks.push(text[start..index].to_string());
-            start = index;
-            count = 0;
-        }
-        count += 1;
-    }
-
-    if start < text.len() {
-        chunks.push(text[start..].to_string());
-    }
-
-    chunks
-}
-
 fn parser(tools: &[ChatTool]) -> Box<dyn ToolParser> {
     ToolParserFactory::global()
         .create(PARSER_NAME, tools)
         .expect("DeepSeek V3.2 parser should be registered")
-}
-
-fn feed_parser(parser: &mut dyn ToolParser, chunks: &[String]) -> (String, usize) {
-    let mut normal_text = String::new();
-    let mut calls_len = 0;
-    for chunk in chunks {
-        let delta = parser.push(chunk).expect("chunk should parse");
-        normal_text.push_str(&delta.normal_text);
-        calls_len += delta.calls.len();
-    }
-    let delta = parser.finish().expect("stream should finish");
-    normal_text.push_str(&delta.normal_text);
-    calls_len += delta.calls.len();
-    (normal_text, calls_len)
 }
 
 fn run_stream_group(
@@ -137,7 +88,7 @@ fn run_stream_group(
 }
 
 fn bench_deepseek_v32_tool_parser(c: &mut Criterion) {
-    let tools = tools();
+    let tools = test_tools();
     let mixed_text = mixed_fixture();
     let long_normal_text = long_normal_text_fixture();
 

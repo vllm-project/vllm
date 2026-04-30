@@ -3,6 +3,9 @@ name = "vllm-chat"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-util = []
+
 [dependencies]
 anyhow.workspace = true
 easy-ext.workspace = true
@@ -44,6 +47,12 @@ zeromq.workspace = true
 [[bench]]
 name = "deepseek_v32_tool_parser"
 harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "qwen3_coder_tool_parser"
+harness = false
+required-features = ["test-util"]
 
 [lints]
 workspace = true
