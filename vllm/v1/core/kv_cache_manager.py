@@ -10,7 +10,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import CachedBlockEntry, KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
@@ -158,6 +158,11 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        # Prefix cache entries are registered during scheduling, before the
+        # model runner has written the corresponding KV data. The scheduler
+        # drains these physical block entries into SchedulerOutput and marks
+        # them ready only after that output completes.
+        self._new_cached_blocks: list[CachedBlockEntry] = []
 
     @property
     def usage(self) -> float:
@@ -211,6 +216,12 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+        if num_new_computed_tokens > 0:
+            # Pin prefix-cache hits immediately. A cached block with ref_cnt=0
+            # sits in the eviction queue, so waiting until allocate_slots() to
+            # touch it leaves a scheduler-window where another request can
+            # recycle the block and make this hit point at unrelated KV data.
+            self.coordinator.touch_computed_blocks(computed_blocks)
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -221,6 +232,23 @@ class KVCacheManager:
             )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+
+    def release_computed_blocks(self, computed_blocks: KVCacheBlocks) -> None:
+        """Release prefix-cache hits pinned by get_computed_blocks().
+
+        This must be called whenever a request with prefix-cache hits will not
+        call allocate_slots() in the same scheduler pass. Otherwise the
+        pre-touch would leak a reference and keep eviction candidates pinned.
+        """
+        if computed_blocks is self.empty_kv_cache_blocks:
+            return
+        self.coordinator.release_computed_blocks(computed_blocks.blocks)
+
+    def has_pending_computed_blocks(self, computed_blocks: KVCacheBlocks) -> bool:
+        """Return whether any prefix hit is not safe to consume yet."""
+        if computed_blocks is self.empty_kv_cache_blocks:
+            return False
+        return self.coordinator.has_pending_computed_blocks(computed_blocks.blocks)
 
     def can_fit_full_sequence(
         self,
@@ -240,6 +268,12 @@ class KVCacheManager:
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
+
+        if (
+            new_computed_blocks is not None
+            and self.has_pending_computed_blocks(new_computed_blocks)
+        ):
+            return False
 
         num_local_computed_tokens = (
             request.num_computed_tokens + num_new_computed_tokens
@@ -357,6 +391,17 @@ class KVCacheManager:
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
+        if (
+            new_computed_blocks is not None
+            and self.has_pending_computed_blocks(new_computed_blocks)
+        ):
+            # A prefix hit can be found in the cache hash table before the GPU
+            # batch that writes its KV data completes. Do not let direct callers
+            # consume it; the scheduler has a precheck that skips this request
+            # and continues with later waiting requests.
+            self.coordinator.release_computed_blocks(new_computed_block_list)
+            return None
+
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_local_computed_tokens = (
@@ -393,7 +438,10 @@ class KVCacheManager:
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
+            # Cannot allocate new blocks. Release any prefix-cache hits that
+            # were pre-touched by get_computed_blocks() for this request.
+            if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+                self.coordinator.release_computed_blocks(new_computed_block_list)
             return None
 
         if (
@@ -430,7 +478,7 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        self.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
 
@@ -540,7 +588,74 @@ class KVCacheManager:
                 that are already cached and tokens to be cached.
         """
         if self.enable_caching:
-            self.coordinator.cache_blocks(request, num_computed_tokens)
+            self._new_cached_blocks.extend(
+                self.coordinator.cache_blocks(request, num_computed_tokens)
+            )
+
+    def take_new_cached_blocks(
+        self, scheduled_request_ids: Sequence[str] | None = None
+    ) -> list[CachedBlockEntry] | None:
+        """Drain cache entries published by cache_blocks() since the last call.
+
+        If scheduled_request_ids is provided, hashes from work cancelled before
+        the SchedulerOutput is built are discarded instead of later being marked
+        ready without a corresponding GPU write.
+        """
+        if not self._new_cached_blocks:
+            return None
+        cached_blocks = self._new_cached_blocks
+        self._new_cached_blocks = []
+        if scheduled_request_ids is not None:
+            scheduled_request_id_set = set(scheduled_request_ids)
+            cancelled_blocks = [
+                cached_block
+                for cached_block in cached_blocks
+                if cached_block.request_id not in scheduled_request_id_set
+            ]
+            if cancelled_blocks:
+                self.coordinator.discard_pending_blocks(cancelled_blocks)
+            cached_blocks = [
+                cached_block
+                for cached_block in cached_blocks
+                if cached_block.request_id in scheduled_request_id_set
+            ]
+        return cached_blocks
+
+    def mark_blocks_computed(
+        self, cached_blocks: Sequence[CachedBlockEntry] | None
+    ) -> None:
+        """Make pending prefix-cache entries visible after GPU completion."""
+        if cached_blocks:
+            self.coordinator.mark_blocks_computed(cached_blocks)
+
+    def pin_inflight_blocks(self, request_ids: Sequence[str]) -> list[int] | None:
+        """Pin blocks used by an in-flight model runner batch.
+
+        Async scheduling can schedule or preempt another batch before the
+        current GPU work completes. These temporary pins prevent blocks that
+        the model runner may still read or write from being recycled.
+        """
+        block_ids: list[int] = []
+        blocks_to_pin: list[KVCacheBlock] = []
+        for request_id in request_ids:
+            for group_blocks in self.coordinator.get_blocks(request_id):
+                for block in group_blocks:
+                    if block.is_null:
+                        continue
+                    blocks_to_pin.append(block)
+                    block_ids.append(block.block_id)
+        if not blocks_to_pin:
+            return None
+        self.block_pool.touch(blocks_to_pin)
+        return block_ids
+
+    def release_inflight_blocks(self, block_ids: Sequence[int] | None) -> None:
+        """Release temporary pins from pin_inflight_blocks()."""
+        if not block_ids:
+            return
+        self.block_pool.free_blocks(
+            self.block_pool.blocks[block_id] for block_id in block_ids
+        )
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

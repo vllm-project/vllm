@@ -108,6 +108,12 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
+def _finish_scheduler_step(manager: KVCacheManager) -> None:
+    """Simulate model-runner completion for direct KV manager tests."""
+    manager.mark_blocks_computed(manager.take_new_cached_blocks())
+    manager.new_step_starts()
+
+
 def make_kv_cache_config_hybrid_model(
     block_size: int,
     num_blocks: int,
@@ -247,6 +253,8 @@ def test_prefill(hash_fn):
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
+    _finish_scheduler_step(manager)
+
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
@@ -280,6 +288,8 @@ def test_prefill(hash_fn):
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
+
+    _finish_scheduler_step(manager)
 
     # Cache hit in the common prefix when the original block is already free.
     # Incomplete 1 block (6 tokens)
@@ -378,6 +388,8 @@ def test_prefill_hybrid_model():
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
+    _finish_scheduler_step(manager)
+
     # Cache hit in the common prefix
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
@@ -400,6 +412,8 @@ def test_prefill_hybrid_model():
     block_hashes = req1.block_hashes
     manager.free(req0)
     manager.free(req1)
+
+    _finish_scheduler_step(manager)
 
     # Evict the blocks outside sliding window, does not affect the hit length.
     _test_partial_request_hit(
@@ -549,6 +563,8 @@ def test_prefill_hybrid_model_eagle():
         assert manager.block_pool.blocks[partial_block_id].block_hash is None
         assert manager.block_pool.blocks[partial_block_id].ref_cnt == 1
 
+    _finish_scheduler_step(manager)
+
     # Cache hit in the common prefix
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [6] * 5
@@ -579,6 +595,8 @@ def test_prefill_hybrid_model_eagle():
     block_hashes = req1.block_hashes
     manager.free(req0)
     manager.free(req1)
+
+    _finish_scheduler_step(manager)
 
     # Evict the blocks outside sliding window, does not affect the hit length.
     _test_partial_request_hit(
@@ -864,7 +882,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
 
-    manager.new_step_starts()
+    _finish_scheduler_step(manager)
 
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
@@ -941,6 +959,8 @@ def test_prefill_hybrid_model_combinations_eagle(
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
 
+    _finish_scheduler_step(manager)
+
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
@@ -973,7 +993,7 @@ def test_prefill_hybrid_model_mamba_align():
     Regression test for https://github.com/vllm-project/vllm/issues/34361.
     In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
     null blocks. cache_full_blocks() correctly skips them, but
-    MambaManager.cache_blocks() must also skip null blocks when tracking
+    cache_blocks() must also skip null blocks when tracking
     cached_blocks_this_step.
     """
     block_size = 16
@@ -1059,6 +1079,8 @@ def test_prefill_plp():
     for block_id in (4,):
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
+
+    _finish_scheduler_step(manager)
 
     # Request #1 is a non-prompt-logprobs request:
     # Cache hit in the common prefix when the original block is still in use.
@@ -1227,6 +1249,8 @@ def test_evict():
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [10, 6, 5, 4, 3, 2, 1, 9, 8, 7]
 
+    _finish_scheduler_step(manager)
+
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)), block_size, sha256)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
@@ -1321,6 +1345,8 @@ def test_computed_blocks_not_evicted():
     # Free the blocks.
     manager.free(req0)
     manager.free(req1)
+
+    _finish_scheduler_step(manager)
 
     # Now if we have a cache hit on the first block, we should evict the second
     # cached block rather than the first one.
@@ -1597,6 +1623,8 @@ def test_mm_prefix_caching():
     assert blocks.get_block_ids() == ([1, 2, 3, 4],)
     req0.num_computed_tokens = 59
 
+    _finish_scheduler_step(manager)
+
     # Append slots without allocating a new block.
     for _ in range(5):
         req0.append_output_token_ids(8)
@@ -1612,6 +1640,8 @@ def test_mm_prefix_caching():
             (("ccc", 0),),
         )
     )
+
+    _finish_scheduler_step(manager)
 
     # Cache hit.
     unique_token_ids = [-1] * 7 + [200] * 5
@@ -1672,6 +1702,8 @@ def test_cache_key_salting():
     assert blocks.get_block_ids() == ([1, 2, 3, 4],)
     req0.num_computed_tokens = 59
 
+    _finish_scheduler_step(manager)
+
     # Append slots without allocating a new block.
     for _ in range(5):
         req0.append_output_token_ids(8)
@@ -1683,6 +1715,8 @@ def test_cache_key_salting():
     assert block_hashes[3] == sha256(
         (block_hashes[2], tuple(token_ids[3 * block_size :] + [8] * 5), None)
     )
+
+    _finish_scheduler_step(manager)
 
     # Test cache hit with a new request that has the same salt.
     token_ids = common_token_ids + [4] * 11
@@ -1739,6 +1773,8 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
         req0.request_id
     ]
 
+    _finish_scheduler_step(manager)
+
     # | Common-0 | Common-1 | Common-2 | Req1-3 | Req1-4 | Req1-5 | ... |
     req1 = make_request("1", common_token_ids * 2, block_size, sha256)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
@@ -1755,6 +1791,8 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     manager.free(req1)
     assert {block.ref_cnt for block in block_part1[:3]} == {1}
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
+
+    _finish_scheduler_step(manager)
 
     # | Common-0 | Common-1 | Common-2 | Req1-3 (F) | Req1-4 (F) |
     # | Req1-5(F)| Req2-0   | Req2-1   | ... |
@@ -1805,6 +1843,8 @@ def test_reset_prefix_cache():
     req0 = make_request("0", all_token_ids, block_size, sha256)
     blocks = manager.allocate_slots(req0, 55)
     assert blocks is not None and blocks.get_block_ids() == ([1, 2, 3, 4],)
+
+    _finish_scheduler_step(manager)
 
     unique_token_ids = [4] * 7
     all_token_ids = full_block_token_ids + unique_token_ids
@@ -2258,6 +2298,8 @@ def test_eagle_enabled_removes_last_block():
     )
     manager.free(req)
 
+    _finish_scheduler_step(manager)
+
     # New request with same tokens + Eagle enabled
     req_eagle = make_request("eagle_divisible", token_ids, block_size, sha256)
     computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
@@ -2289,6 +2331,8 @@ def test_eagle_with_partial_blocks():
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
     manager.free(req)
+
+    _finish_scheduler_step(manager)
 
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
@@ -2333,6 +2377,8 @@ def test_eagle_with_sliding_window():
     block_hash_first_block = req.block_hashes[0]
     assert block_hash_first_block is not None
     manager.free(req)
+
+    _finish_scheduler_step(manager)
 
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
@@ -2412,6 +2458,9 @@ def test_different_block_size():
         req0, 7 * block_size, len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
     assert blocks.get_block_ids() == ([1, 2, 3, 4], [5, 6, 7, 8, 9, 10, 11])
+
+    _finish_scheduler_step(manager)
+
     req1 = make_request("1", common_token_ids[: 7 * block_size + 1], block_size, sha256)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert len(computed_blocks.blocks[0]) == 3
@@ -2512,6 +2561,481 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_prefix_cache_block_not_stolen_between_get_and_alloc():
+    """Prefix hits are pinned before another request can recycle them."""
+    block_size = 4
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 5),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    prefix_token_ids = list(range(block_size))
+    suffix_token_ids = list(range(block_size, 2 * block_size))
+    req0 = make_request(
+        "0", prefix_token_ids + suffix_token_ids, block_size, sha256
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    assert manager.allocate_slots(
+        req0, 2 * block_size, num_computed_tokens, computed_blocks
+    )
+    prefix_block = manager.block_pool.blocks[1]
+    assert prefix_block.ref_cnt == 1
+    assert prefix_block.block_hash is not None
+    manager.free(req0)
+    assert prefix_block.ref_cnt == 0
+
+    _finish_scheduler_step(manager)
+
+    req_a = make_request("A", prefix_token_ids + [42], block_size, sha256)
+    computed_blocks_a, num_computed_a = manager.get_computed_blocks(req_a)
+    assert num_computed_a == block_size
+    assert computed_blocks_a.blocks[0][0] is prefix_block
+    assert prefix_block.ref_cnt == 1
+
+    req_b = make_request(
+        "B", [10, 11, 12, 13, 20, 21, 22, 23], block_size, sha256
+    )
+    computed_blocks_b, num_computed_b = manager.get_computed_blocks(req_b)
+    assert num_computed_b == 0
+    blocks_b = manager.allocate_slots(
+        req_b, 2 * block_size, num_computed_b, computed_blocks_b
+    )
+    assert blocks_b is not None
+    req_b_block_ids = {b.block_id for b in blocks_b.blocks[0]}
+    assert prefix_block.block_id not in req_b_block_ids
+
+    blocks_a = manager.allocate_slots(
+        req_a, 1, num_computed_a, computed_blocks_a
+    )
+    assert blocks_a is not None
+    assert prefix_block in manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks[req_a.request_id]
+
+    manager.free(req_a)
+    manager.free(req_b)
+
+
+def test_no_intra_step_prefix_reuse():
+    """Blocks cached this scheduler step are not safe prefix hits yet."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 10),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    req0 = make_request(
+        "0", common_token_ids + [99] * 7, block_size, sha256
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    assert manager.allocate_slots(
+        req0,
+        len(req0.prompt_token_ids),
+        num_computed_tokens,
+        computed_blocks,
+    )
+
+    req1 = make_request(
+        "1", common_token_ids + [88] * 5, block_size, sha256
+    )
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+
+    # req0 registered these blocks before the GPU forward pass has written KV
+    # data into them. Defer req1 until the model-runner output completes.
+    assert (
+        manager.allocate_slots(
+            req1, 5, num_computed_tokens1, computed_blocks1
+        )
+        is None
+    )
+
+    # A new scheduler step alone is not sufficient when async scheduling has an
+    # earlier batch in flight.
+    manager.new_step_starts()
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    assert (
+        manager.allocate_slots(
+            req1, 5, num_computed_tokens1, computed_blocks1
+        )
+        is None
+    )
+
+    _finish_scheduler_step(manager)
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    assert manager.allocate_slots(
+        req1, 5, num_computed_tokens1, computed_blocks1
+    )
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_cancelled_duplicate_hash_evicts_exact_physical_block():
+    """Cancelled work with a duplicate hash must not publish stale blocks."""
+    block_size = 4
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = list(range(block_size)) + [99]
+
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed_blocks0, num_computed_tokens0 = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(
+        req0, len(token_ids), num_computed_tokens0, computed_blocks0
+    )
+    req0_block = manager.get_blocks(req0.request_id).blocks[0][0]
+    shared_hash = req0_block.block_hash
+    assert shared_hash is not None
+
+    # Allocate the duplicate block directly to simulate a request that was
+    # scheduled, cached, and then removed before SchedulerOutput was built.
+    req1 = make_request("1", token_ids, block_size, sha256)
+    empty_blocks = manager.empty_kv_cache_blocks
+    assert manager.allocate_slots(req1, len(token_ids), 0, empty_blocks)
+    req1_block = manager.get_blocks(req1.request_id).blocks[0][0]
+    assert req1_block.block_hash == shared_hash
+    assert req1_block is not req0_block
+
+    scheduled_blocks = manager.take_new_cached_blocks([req0.request_id])
+    assert scheduled_blocks is not None
+    assert [block.request_id for block in scheduled_blocks] == [req0.request_id]
+    assert req0_block.block_hash == shared_hash
+    assert req1_block.block_hash is None
+    assert (
+        manager.block_pool.cached_block_hash_to_block.get_one_block(shared_hash)
+        is req0_block
+    )
+
+    req_hit = make_request("hit", token_ids, block_size, sha256)
+    computed_blocks_hit, num_computed_tokens_hit = manager.get_computed_blocks(
+        req_hit
+    )
+    assert num_computed_tokens_hit == block_size
+    assert manager.has_pending_computed_blocks(computed_blocks_hit)
+    manager.release_computed_blocks(computed_blocks_hit)
+
+    manager.mark_blocks_computed(scheduled_blocks)
+    computed_blocks_hit, num_computed_tokens_hit = manager.get_computed_blocks(
+        req_hit
+    )
+    assert num_computed_tokens_hit == block_size
+    assert not manager.has_pending_computed_blocks(computed_blocks_hit)
+    manager.release_computed_blocks(computed_blocks_hit)
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_no_intra_step_prefix_reuse_with_lora():
+    """LoRA cache entries obey the same current-step visibility invariant."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 10),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    lora = LoRARequest(lora_name="adapter_a", lora_int_id=1, lora_path="/a")
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+
+    req0 = make_request(
+        "0",
+        common_token_ids + [99] * 7,
+        block_size,
+        sha256,
+        lora_request=lora,
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(
+        req0,
+        len(req0.prompt_token_ids),
+        num_computed_tokens,
+        computed_blocks,
+    )
+
+    req1 = make_request(
+        "1",
+        common_token_ids + [88] * 5,
+        block_size,
+        sha256,
+        lora_request=lora,
+    )
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    assert (
+        manager.allocate_slots(
+            req1, 5, num_computed_tokens1, computed_blocks1
+        )
+        is None
+    )
+
+    manager.new_step_starts()
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    assert (
+        manager.allocate_slots(
+            req1, 5, num_computed_tokens1, computed_blocks1
+        )
+        is None
+    )
+
+    _finish_scheduler_step(manager)
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    assert manager.allocate_slots(
+        req1, 5, num_computed_tokens1, computed_blocks1
+    )
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_lora_prefix_cache_namespace_and_reuse():
+    """LoRA block hashes isolate adapters while preserving same-adapter hits."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 10),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    lora_a = LoRARequest(lora_name="adapter_a", lora_int_id=1, lora_path="/a")
+    lora_b = LoRARequest(lora_name="adapter_b", lora_int_id=2, lora_path="/b")
+    # Include a trailing partial block so both full blocks are eligible for a
+    # prefix hit; exact-block prompts intentionally recompute the last block.
+    token_ids = [i for i in range(2) for _ in range(block_size)] + [7]
+
+    req_a0 = make_request(
+        "a0", token_ids, block_size, sha256, lora_request=lora_a
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_a0)
+    assert num_computed_tokens == 0
+    assert manager.allocate_slots(
+        req_a0, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    _finish_scheduler_step(manager)
+    manager.free(req_a0)
+
+    req_b = make_request("b", token_ids, block_size, sha256, lora_request=lora_b)
+    computed_blocks_b, num_computed_tokens_b = manager.get_computed_blocks(req_b)
+    assert num_computed_tokens_b == 0
+    assert not computed_blocks_b.blocks[0]
+
+    req_a1 = make_request(
+        "a1", token_ids, block_size, sha256, lora_request=lora_a
+    )
+    computed_blocks_a, num_computed_tokens_a = manager.get_computed_blocks(req_a1)
+    assert num_computed_tokens_a == 2 * block_size
+    assert len(computed_blocks_a.blocks[0]) == 2
+
+    manager.release_computed_blocks(computed_blocks_a)
+
+
+def test_inflight_blocks_not_recycled_before_gpu_completion():
+    """Async scheduling pins in-flight blocks until model-runner completion."""
+    block_size = 4
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    req0 = make_request("0", list(range(2 * block_size)), block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(
+        req0, 2 * block_size, num_computed_tokens, computed_blocks
+    )
+    req0_block_ids = manager.get_block_ids(req0.request_id)[0]
+    inflight_block_ids = manager.pin_inflight_blocks([req0.request_id])
+    assert inflight_block_ids == req0_block_ids
+
+    # Simulate preemption/abort while the GPU batch is still in flight. The
+    # request releases its ownership, but the temporary in-flight pin keeps the
+    # blocks out of the free queue.
+    manager.free(req0)
+    assert all(
+        manager.block_pool.blocks[block_id].ref_cnt == 1
+        for block_id in req0_block_ids
+    )
+
+    req1 = make_request("1", [100 + i for i in range(8)], block_size, sha256)
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert manager.allocate_slots(
+        req1, 2 * block_size, num_computed_tokens1, computed_blocks1
+    )
+    req1_block_ids = manager.get_block_ids(req1.request_id)[0]
+    assert not set(req0_block_ids) & set(req1_block_ids)
+
+    manager.mark_blocks_computed(manager.take_new_cached_blocks())
+    manager.release_inflight_blocks(inflight_block_ids)
+
+    manager.free(req1)
+    assert all(
+        block.is_null or block.ref_cnt == 0 for block in manager.block_pool.blocks
+    )
+
+
+def test_lora_alternation_prefix_cache_lifecycle_stress():
+    """Rapid LoRA alternation preserves prefix-cache ownership invariants.
+
+    This exercises the LoRA alternation traffic shape discussed in issue
+    #38606, but keeps the assertion on the scheduler/KV-cache invariant:
+    blocks must not be visible for unsafe cross-request reuse before the
+    model-runner batch that writes them has completed.
+    """
+    block_size = 8
+    num_prefix_blocks = 6
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 40),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    loras = (
+        LoRARequest(lora_name="adapter_a", lora_int_id=1, lora_path="/a"),
+        LoRARequest(lora_name="adapter_b", lora_int_id=2, lora_path="/b"),
+    )
+    long_prefix = [
+        token for token in range(num_prefix_blocks) for _ in range(block_size)
+    ]
+
+    anchor_reqs = []
+    anchor_prefix_block_ids = []
+    anchor_prefix_blocks = []
+    for idx, lora in enumerate(loras):
+        req = make_request(
+            f"anchor_{idx}",
+            long_prefix + [100 + idx],
+            block_size,
+            sha256,
+            lora_request=lora,
+        )
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+        assert num_computed_tokens == 0
+        assert manager.allocate_slots(
+            req,
+            len(req.prompt_token_ids),
+            num_computed_tokens,
+            computed_blocks,
+        )
+        blocks = manager.get_blocks(req.request_id).blocks[0]
+        anchor_reqs.append(req)
+        anchor_prefix_blocks.append(blocks[:num_prefix_blocks])
+        anchor_prefix_block_ids.append(
+            [block.block_id for block in blocks[:num_prefix_blocks]]
+        )
+
+    # Identical tokens under different LoRA adapters must hash to different
+    # prefix-cache namespaces.
+    assert anchor_reqs[0].block_hashes[:num_prefix_blocks] != anchor_reqs[
+        1
+    ].block_hashes[:num_prefix_blocks]
+
+    # Requests arriving while the anchor batches are in flight can see the newly
+    # registered prefix blocks, but must not consume them until the model runner
+    # has written the KV data. The failed allocation must also undo the
+    # pre-touch.
+    for idx, lora in enumerate(loras):
+        req = make_request(
+            f"same_step_consumer_{idx}",
+            long_prefix + [200 + idx],
+            block_size,
+            sha256,
+            lora_request=lora,
+        )
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+        assert num_computed_tokens == num_prefix_blocks * block_size
+        assert computed_blocks.get_block_ids() == (
+            anchor_prefix_block_ids[idx],
+        )
+        assert all(block.ref_cnt == 2 for block in anchor_prefix_blocks[idx])
+        assert (
+            manager.allocate_slots(
+                req,
+                len(req.prompt_token_ids) - num_computed_tokens,
+                num_computed_tokens,
+                computed_blocks,
+            )
+            is None
+        )
+        assert all(block.ref_cnt == 1 for block in anchor_prefix_blocks[idx])
+
+    manager.new_step_starts()
+    for idx, lora in enumerate(loras):
+        req = make_request(
+            f"next_step_consumer_{idx}",
+            long_prefix + [250 + idx],
+            block_size,
+            sha256,
+            lora_request=lora,
+        )
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+        assert num_computed_tokens == num_prefix_blocks * block_size
+        assert (
+            manager.allocate_slots(
+                req,
+                len(req.prompt_token_ids) - num_computed_tokens,
+                num_computed_tokens,
+                computed_blocks,
+            )
+            is None
+        )
+        assert all(block.ref_cnt == 1 for block in anchor_prefix_blocks[idx])
+
+    _finish_scheduler_step(manager)
+
+    # After the model-runner output completes, same-adapter prefix reuse is valid.
+    # Alternate adapters repeatedly to make sure block ownership stays inside
+    # each adapter namespace and the ref counts return to the anchor-only state.
+    consumer_reqs = []
+    for idx in range(8):
+        adapter_idx = idx % 2
+        req = make_request(
+            f"consumer_{idx}",
+            long_prefix + [300 + idx],
+            block_size,
+            sha256,
+            lora_request=loras[adapter_idx],
+        )
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+        assert num_computed_tokens == num_prefix_blocks * block_size
+        assert computed_blocks.get_block_ids() == (
+            anchor_prefix_block_ids[adapter_idx],
+        )
+        assert manager.allocate_slots(
+            req,
+            len(req.prompt_token_ids) - num_computed_tokens,
+            num_computed_tokens,
+            computed_blocks,
+        )
+        consumer_reqs.append(req)
+
+    for req in consumer_reqs:
+        manager.free(req)
+    for idx in range(2):
+        assert all(block.ref_cnt == 1 for block in anchor_prefix_blocks[idx])
+
+    for req in anchor_reqs:
+        manager.free(req)
+    assert all(
+        block.is_null or block.ref_cnt == 0 for block in manager.block_pool.blocks
+    )
 
 
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():

@@ -10,6 +10,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashWithGroupId,
+    CachedBlockEntry,
     KVCacheBlock,
 )
 from vllm.v1.kv_cache_interface import (
@@ -80,6 +81,11 @@ class SingleTypeKVCacheManager(ABC):
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
+        # Blocks registered in the prefix cache by scheduler allocation, but
+        # whose GPU forward pass has not completed yet. These blocks must not
+        # be consumed as prefix hits: their block hashes are visible before the
+        # model runner has written the corresponding KV data.
+        self.cached_blocks_pending_write: dict[BlockHashWithGroupId, int] = {}
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -204,6 +210,15 @@ class SingleTypeKVCacheManager(ABC):
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
+            # Prefix-cache hits were pre-touched by get_computed_blocks().
+            # Release any skipped hits that will not be tracked in req_to_blocks.
+            if self.enable_caching:
+                num_to_release = min(num_skipped_blocks, len(new_computed_blocks))
+                self.block_pool.free_blocks(
+                    block
+                    for block in new_computed_blocks[:num_to_release]
+                    if not block.is_null
+                )
             # It is possible that all new computed blocks are skipped when
             # num_skipped_blocks > len(new_computed_blocks).
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
@@ -213,10 +228,10 @@ class SingleTypeKVCacheManager(ABC):
                 num_external_computed_tokens,
             )
 
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
-        else:
+        # Prefix-cache hits are pinned by get_computed_blocks(), before another
+        # scheduler allocation can recycle their blocks. Touching again here
+        # would double-count the reference.
+        if not self.enable_caching:
             assert not any(new_computed_blocks), (
                 "Computed blocks should be empty when prefix caching is disabled"
             )
@@ -274,7 +289,9 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_tokens: int
+    ) -> list[CachedBlockEntry]:
         """
         Cache the blocks for the request.
 
@@ -287,9 +304,9 @@ class SingleTypeKVCacheManager(ABC):
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
-            return
+            return []
 
-        self.block_pool.cache_full_blocks(
+        new_cached_blocks = self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
             num_cached_blocks=num_cached_blocks,
@@ -299,6 +316,13 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        if self.enable_caching:
+            for cached_block in new_cached_blocks:
+                self.cached_blocks_pending_write[cached_block.block_hash] = (
+                    self.cached_blocks_pending_write.get(cached_block.block_hash, 0)
+                    + 1
+                )
+        return new_cached_blocks
 
     def free(self, request_id: str) -> None:
         """
@@ -439,8 +463,34 @@ class SingleTypeKVCacheManager(ABC):
         return 0
 
     def new_step_starts(self) -> None:
-        # do nothing by default
+        # Prefix-cache entries are made visible by scheduler allocation, but
+        # remain unsafe until the corresponding model-runner output is returned.
+        # Therefore there is no per-scheduler-step state to clear here.
         return None
+
+    def has_pending_computed_blocks(
+        self, computed_blocks: Sequence[KVCacheBlock]
+    ) -> bool:
+        """Return whether any prefix-hit block is still pending GPU writes."""
+        return any(
+            not block.is_null
+            and block.block_hash is not None
+            and block.block_hash in self.cached_blocks_pending_write
+            for block in computed_blocks
+        )
+
+    def mark_blocks_computed(
+        self, cached_blocks: Sequence[CachedBlockEntry]
+    ) -> None:
+        for cached_block in cached_blocks:
+            block_hash = cached_block.block_hash
+            pending_count = self.cached_blocks_pending_write.get(block_hash)
+            if pending_count is None:
+                continue
+            if pending_count == 1:
+                del self.cached_blocks_pending_write[block_hash]
+            else:
+                self.cached_blocks_pending_write[block_hash] = pending_count - 1
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -796,7 +846,6 @@ class MambaManager(SingleTypeKVCacheManager):
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
@@ -854,7 +903,9 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return computed_blocks
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
+    def remove_skipped_blocks(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
         # NOTE (tdoublep) with async scheduling, the num_computed_tokens can contain
@@ -862,7 +913,9 @@ class MambaManager(SingleTypeKVCacheManager):
         # This can make us think we are further ahead in the sequence than we actually
         # are, so let's assume that all tokens are rejected so we don't free blocks
         # that we might actually need.
-        num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
+        num_computed_tokens = max(
+            0, total_computed_tokens - self.num_speculative_blocks
+        )
 
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
@@ -900,15 +953,6 @@ class MambaManager(SingleTypeKVCacheManager):
         apply_admission_cap: bool = False,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        if (
-            len(new_computed_blocks) > 0
-            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
-        ):
-            # Mamba can't rely on blocks generated by other requests in the current step
-            # To put it in the next step, we return num_gpu_blocks + 1 so
-            # that kv_cache_manager will think there is no enough blocks to allocate now
-            # and don't schedule it in the current step.
-            return self.block_pool.num_gpu_blocks + 1
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -1049,21 +1093,12 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return num_computed_tokens - 1
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens)
-        num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if num_cached_blocks_after > num_cached_blocks_before:
-            for block in self.req_to_blocks[request.request_id][
-                num_cached_blocks_before:num_cached_blocks_after
-            ]:
-                if block.is_null:
-                    continue
-                assert block.block_hash is not None
-                self.cached_blocks_this_step.add(block.block_hash)
-
-    def new_step_starts(self) -> None:
-        self.cached_blocks_this_step.clear()
+    def cache_blocks(
+        self, request: Request, num_tokens: int
+    ) -> list[CachedBlockEntry]:
+        # Tracking newly-cached blocks in cached_blocks_pending_write is handled
+        # by the base cache_blocks implementation.
+        return super().cache_blocks(request, num_tokens)
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
@@ -1080,7 +1115,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_tokens: int
+    ) -> list[CachedBlockEntry]:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")

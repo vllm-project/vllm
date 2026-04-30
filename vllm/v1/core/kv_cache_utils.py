@@ -44,6 +44,16 @@ BlockHash = NewType("BlockHash", bytes)
 # functions below pack/unpack the `BlockHash` and group id into/from the key.
 BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 
+
+@dataclass(frozen=True, slots=True)
+class CachedBlockEntry:
+    """A physical block registered in the prefix-cache hash table."""
+
+    request_id: str
+    block_id: int
+    block_hash: BlockHashWithGroupId
+
+
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
 # It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.

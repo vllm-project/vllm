@@ -616,6 +616,18 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    if self.kv_cache_manager.has_pending_computed_blocks(
+                        new_computed_blocks
+                    ):
+                        # The prefix lookup found blocks registered by an
+                        # in-flight model-runner batch. Skip only this request
+                        # so later waiting requests can still use this step.
+                        self.kv_cache_manager.release_computed_blocks(
+                            new_computed_blocks
+                        )
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -629,6 +641,9 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
+                            self.kv_cache_manager.release_computed_blocks(
+                                new_computed_blocks
+                            )
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
@@ -687,6 +702,9 @@ class Scheduler(SchedulerInterface):
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
+                        self.kv_cache_manager.release_computed_blocks(
+                            new_computed_blocks
+                        )
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
@@ -708,6 +726,9 @@ class Scheduler(SchedulerInterface):
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
+                            self.kv_cache_manager.release_computed_blocks(
+                                new_computed_blocks
+                            )
                             break
 
                 if self.need_mamba_block_aligned_split:
@@ -718,6 +739,9 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens,
                     )
                     if num_new_tokens == 0:
+                        self.kv_cache_manager.release_computed_blocks(
+                            new_computed_blocks
+                        )
                         break
 
                 # Handles an edge case when P/D Disaggregation
@@ -753,6 +777,9 @@ class Scheduler(SchedulerInterface):
                 ):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    self.kv_cache_manager.release_computed_blocks(
+                        new_computed_blocks
+                    )
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -919,6 +946,13 @@ class Scheduler(SchedulerInterface):
             if self.needs_kv_cache_zeroing
             else None
         )
+        scheduled_request_ids = tuple(num_scheduled_tokens)
+        new_cached_blocks = self.kv_cache_manager.take_new_cached_blocks(
+            scheduled_request_ids
+        )
+        inflight_pinned_block_ids = self.kv_cache_manager.pin_inflight_blocks(
+            scheduled_request_ids
+        )
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -936,6 +970,8 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            new_cached_blocks=new_cached_blocks,
+            inflight_pinned_block_ids=inflight_pinned_block_ids,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1305,6 +1341,16 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # Prefix-cache blocks are registered during scheduling, before the GPU
+        # writes their KV data. They become safe to reuse only after the
+        # corresponding model-runner output has completed.
+        self.kv_cache_manager.mark_blocks_computed(
+            scheduler_output.new_cached_blocks
+        )
+        self.kv_cache_manager.release_inflight_blocks(
+            scheduler_output.inflight_pinned_block_ids
+        )
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict

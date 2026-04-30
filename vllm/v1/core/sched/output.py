@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_utils import CachedBlockEntry
     from vllm.v1.request import Request
 else:
     ECConnectorMetadata = object
@@ -25,6 +26,7 @@ else:
     PoolingParams = object
     SamplingParams = object
     Request = object
+    CachedBlockEntry = object
 
 
 @dataclass
@@ -237,6 +239,15 @@ class SchedulerOutput:
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
+
+    # Physical blocks registered in the prefix cache by this scheduling step.
+    # They are not valid prefix hits until this SchedulerOutput has completed.
+    new_cached_blocks: list[CachedBlockEntry] | None = None
+
+    # Blocks touched by this scheduling step's model-runner batch. These pins
+    # prevent async scheduling/preemption from recycling blocks before the GPU
+    # has finished reading or writing them.
+    inflight_pinned_block_ids: list[int] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
