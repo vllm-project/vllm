@@ -8,8 +8,12 @@ import struct
 import numpy as np
 import pybase64 as base64
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.pooling.embed.protocol import (
+    CohereEmbedContent,
+    CohereEmbedInput,
+    CohereEmbedRequest,
     build_typed_embeddings,
 )
 
@@ -127,3 +131,64 @@ class TestBuildTypedEmbeddingsMultiple:
     def test_unknown_type_ignored(self, sample_embeddings: list[list[float]]):
         result = build_typed_embeddings(sample_embeddings, ["float", "unknown_type"])
         assert result.float is not None
+
+
+def _cohere_mixed_text_input(text: str = "hello") -> CohereEmbedInput:
+    return CohereEmbedInput(content=[CohereEmbedContent(type="text", text=text)])
+
+
+class TestCohereEmbedRequestValidation:
+    """Unit tests for CohereEmbedRequest input-field validation."""
+
+    def test_texts_input_is_accepted(self):
+        request = CohereEmbedRequest(model="test", texts=["hello"])
+
+        assert request.texts == ["hello"]
+        assert request.images is None
+        assert request.inputs is None
+
+    def test_images_input_is_accepted(self):
+        request = CohereEmbedRequest(model="test", images=["data:image/png;base64,..."])
+
+        assert request.images == ["data:image/png;base64,..."]
+        assert request.texts is None
+        assert request.inputs is None
+
+    def test_inputs_input_is_accepted(self):
+        input_item = _cohere_mixed_text_input()
+
+        request = CohereEmbedRequest(model="test", inputs=[input_item])
+
+        assert request.inputs == [input_item]
+        assert request.texts is None
+        assert request.images is None
+
+    @pytest.mark.parametrize(
+        "request_kwargs",
+        [
+            {},
+            {"texts": []},
+            {"images": []},
+            {"inputs": []},
+            {"texts": ["hello"], "images": ["data:image/png;base64,..."]},
+            {"texts": ["hello"], "inputs": [_cohere_mixed_text_input("world")]},
+            {
+                "images": ["data:image/png;base64,..."],
+                "inputs": [_cohere_mixed_text_input("world")],
+            },
+            {
+                "texts": ["hello"],
+                "images": ["data:image/png;base64,..."],
+                "inputs": [_cohere_mixed_text_input("world")],
+            },
+        ],
+    )
+    def test_exactly_one_non_empty_input_field_is_required(self, request_kwargs):
+        with pytest.raises(
+            ValidationError,
+            match=(
+                "Exactly one of texts, images, or inputs must be provided "
+                "and non-empty"
+            ),
+        ):
+            CohereEmbedRequest(model="test", **request_kwargs)

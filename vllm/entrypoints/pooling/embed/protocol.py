@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from typing import Literal, TypeAlias
 
 import pybase64 as base64
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
@@ -173,6 +173,20 @@ class CohereEmbedRequest(BaseModel):
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
     priority: int = 0
+
+    @model_validator(mode="after")
+    def validate_single_input_field(self):
+        provided_fields = [
+            field
+            for field in ("texts", "images", "inputs")
+            if getattr(self, field)
+        ]
+        if len(provided_fields) != 1:
+            raise ValueError(
+                "Exactly one of texts, images, or inputs must be provided "
+                "and non-empty"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
