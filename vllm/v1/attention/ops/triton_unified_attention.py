@@ -492,6 +492,8 @@ def _get_tile_size(
     is_prefill: bool,
 ) -> int:
     """Select tile size with Gemma3-specific optimization."""
+    head_size_padded = triton.next_power_of_2(head_size)
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         tile_size = 32
@@ -499,10 +501,10 @@ def _get_tile_size(
         # Note: tile size must be at least 32 for fp8 (element_size == 1).
         tile_size = 32 if is_prefill else 16 if element_size >= 2 else 32
 
-    # Hardware-aware safety check for large head dimensions on older GPUs.
-    # Limit this fallback to non-FP8 element sizes; the selection above
-    # already uses tile_size=32 for fp8 inputs (element_size == 1).
-    if tile_size == 32 and head_size >= 512 and element_size >= 2:
+    # Hardware-aware safety check for padded large-head configurations on
+    # older GPUs. Triton kernels use the padded head size when determining
+    # resource usage, so apply the fallback based on head_size_padded.
+    if tile_size == 32 and head_size_padded >= 512 and element_size >= 2:
         if current_platform.is_cuda():
             max_shared_memory = get_max_shared_memory_bytes()
         else:
