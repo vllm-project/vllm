@@ -719,7 +719,6 @@ def test_eagle_correctness_heavy(
     )
 
 
-@single_gpu_only
 def test_medusa_correctness(
     sampling_config: SamplingParams,
 ):
@@ -757,7 +756,6 @@ def test_medusa_correctness(
         assert ref_output.outputs[0].text == spec_output.outputs[0].text
 
 
-@single_gpu_only
 @large_gpu_mark(min_gb=24)
 def test_medusa_acceptance_rate(
     sampling_config: SamplingParams,
