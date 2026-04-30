@@ -62,6 +62,15 @@ class StreamState:
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
+    # Suppresses buffered end-token text that flushes during phase B; see
+    # DelegatingParser.parse_delta.
+    end_token_skip_buffer: str = ""
+    end_token_skip_armed: bool = False
+    end_token_skip_done: bool = False
+    # Literal that the post-boundary skip is waiting for (`</think>` for the
+    # explicit reasoning end, or e.g. `<|tool_calls_section_begin|>` when
+    # reasoning ended implicitly via the tool-section start token).
+    end_token_skip_literal: str = ""
 
 
 class Parser:
@@ -324,6 +333,43 @@ class Parser:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
         """
+
+
+def _pending_end_token_literal(
+    reasoning_parser: "ReasoningParser | None",
+    delta_text: str,
+    delta_token_ids: list[int],
+) -> str | None:
+    """Return the reasoning-end literal whose rendered text is still buffered.
+
+    Looks at both the explicit ``</think>`` end token and (for parsers that
+    expose it) the implicit tool-section start token. Returns the literal
+    whose id is in ``delta_token_ids`` but whose text has not yet flushed
+    into ``delta_text``, or ``None`` if the boundary text was fully visible.
+    """
+    if reasoning_parser is None:
+        return None
+    end_id = getattr(reasoning_parser, "_end_token_id", None)
+    end_str = reasoning_parser.reasoning_end_str
+    if (
+        end_id is not None
+        and end_id in delta_token_ids
+        and end_str
+        and end_str not in delta_text
+    ):
+        return end_str
+    # Kimi K2 also ends reasoning implicitly via the tool-section start token.
+    # Other parsers don't expose this attribute, so this branch is opt-in.
+    tool_section_id = getattr(reasoning_parser, "_tool_section_start_token_id", None)
+    tool_section_str = getattr(reasoning_parser, "_tool_section_start_token", None)
+    if (
+        tool_section_id is not None
+        and tool_section_id in delta_token_ids
+        and tool_section_str
+        and tool_section_str not in delta_text
+    ):
+        return tool_section_str
+    return None
 
 
 class DelegatingParser(Parser):
@@ -677,6 +723,7 @@ class DelegatingParser(Parser):
         delta_message: DeltaMessage | None = None
 
         # Reasoning extraction
+        boundary_just_handed_off = False
         if self._in_reasoning_phase(state):
             delta_message = self.extract_reasoning_streaming(
                 previous_text=state.previous_text,
@@ -688,6 +735,17 @@ class DelegatingParser(Parser):
             )
             if self.is_reasoning_end_streaming(current_token_ids, delta_token_ids):
                 state.reasoning_ended = True
+                # Arm before reassignment; seed buffer with the pre-reassign
+                # delta_text so a partial literal that already flushed (e.g.
+                # `</th` on the boundary chunk) isn't lost.
+                literal = _pending_end_token_literal(
+                    self._reasoning_parser, delta_text, delta_token_ids
+                )
+                if literal is not None:
+                    state.end_token_skip_buffer = delta_text
+                    state.end_token_skip_armed = True
+                    state.end_token_skip_literal = literal
+                    boundary_just_handed_off = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 current_text = (
                     delta_message.content
@@ -696,6 +754,30 @@ class DelegatingParser(Parser):
                 )
                 delta_text = current_text
                 delta_token_ids = current_token_ids
+
+        if state.end_token_skip_armed and not state.end_token_skip_done:
+            end_str = state.end_token_skip_literal
+            if not boundary_just_handed_off:
+                state.end_token_skip_buffer += delta_text
+            if end_str and end_str in state.end_token_skip_buffer:
+                # Consume `</think>`; keep tool-section literal so the tool
+                # parser can still find the boundary.
+                tool_section = getattr(
+                    self._reasoning_parser,
+                    "_tool_section_start_token",
+                    None,
+                )
+                literal_pos = state.end_token_skip_buffer.find(end_str)
+                content_start = literal_pos + (
+                    0 if end_str == tool_section else len(end_str)
+                )
+                cleaned = state.end_token_skip_buffer[content_start:]
+                state.end_token_skip_buffer = ""
+                state.end_token_skip_done = True
+                delta_text = cleaned
+                current_text = cleaned
+            else:
+                return delta_message
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
