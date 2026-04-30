@@ -181,14 +181,17 @@ class Step3p5MTP(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
+        params_dict = dict(self.named_parameters())
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
 
         expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
+            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
         ]
 
-        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
