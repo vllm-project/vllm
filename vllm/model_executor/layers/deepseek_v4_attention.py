@@ -227,6 +227,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             + 1  # 1B pad
         )
 
+        # Will be None on ROCm for now.
         self.aux_stream_list = mla_modules.aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -367,12 +368,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         return self.wo_b(z.flatten(1))
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
-        assert self.aux_stream_list is not None
-        assert len(self.aux_stream_list) >= 3
+        aux_streams = self.aux_stream_list
+        if aux_streams is not None:
+            assert len(aux_streams) >= 3
+            aux_streams = aux_streams[:3]
 
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
+        # On ROCm, aux_streams is None and execute_in_parallel runs serially.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None:
@@ -411,12 +415,19 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             qr_kv, _ = self.fused_wqa_wkv(hidden_states)
             return qr_kv
 
+        if aux_streams is None:
+            qr_kv = fused_wqa_wkv()
+            kv_score = aux_fns[0]() if aux_fns[0] is not None else None
+            indexer_weights = aux_fns[1]() if aux_fns[1] is not None else None
+            indexer_kv_score = aux_fns[2]() if aux_fns[2] is not None else None
+            return qr_kv, kv_score, indexer_kv_score, indexer_weights
+
         qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
             fused_wqa_wkv,
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:4],
-            self.aux_stream_list[:3],
+            aux_streams,
         )
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
@@ -448,8 +459,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
         if self.indexer is not None:
-            assert self.aux_stream_list is not None
-            aux_stream = self.aux_stream_list[0]
+            aux_stream = (
+                self.aux_stream_list[0]
+                if self.aux_stream_list is not None
+                else None
+            )
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
             assert self.compressor is not None
@@ -477,8 +491,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
-            assert self.aux_stream_list is not None
-            aux_stream = self.aux_stream_list[0]
+            aux_stream = (
+                self.aux_stream_list[0]
+                if self.aux_stream_list is not None
+                else None
+            )
             compressor = self.compressor
 
             def wq_b_kv_insert() -> torch.Tensor:
