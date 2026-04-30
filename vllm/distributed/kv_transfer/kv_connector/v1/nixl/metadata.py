@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -134,6 +134,16 @@ def compute_nixl_compatibility_hash(
 
 
 @dataclass
+class HeartbeatInfo:
+    """Heartbeat data for a single remote engine, sent from D worker to P."""
+
+    req_ids: list[ReqId]
+    host: str
+    port: int
+    tp_size: int
+
+
+@dataclass
 class RemoteMeta:
     block_ids: BlockIds
     host: str
@@ -158,6 +168,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_send: dict[ReqId, float] = {}
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
+        # Heartbeat data grouped by remote engine, sent by D worker to P.
+        self.heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
 
     def _add_new_req(
         self,

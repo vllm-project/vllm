@@ -517,6 +517,29 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_queue_callbacks(
+        self,
+    ) -> tuple[
+        Callable[["Request"], None] | None,
+        Callable[["Request"], None] | None,
+    ]:
+        """Return optional callbacks for queue observation.
+
+        The scheduler calls this during initialization.  If either callback
+        is non-None, the scheduler wraps its waiting queues with
+        ``ObservableRequestQueue`` so the connector receives incremental
+        notifications of queue additions and removals.
+
+        The connector can distinguish which queue triggered the callback by
+        inspecting ``request.status`` (e.g. WAITING vs
+        WAITING_FOR_REMOTE_KVS).
+
+        Returns:
+            A tuple ``(on_add, on_remove)``.  Either or both may be ``None``
+            if the connector does not need queue observation.
+        """
+        return None, None
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.

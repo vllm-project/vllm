@@ -4,6 +4,8 @@
 
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -21,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    HeartbeatInfo,
     NixlConnectorMetadata,
     NixlHandshakePayload,
     ReqId,
@@ -46,6 +49,25 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class _HeartbeatParams:
+    """Per-request info for periodic lease-renewal heartbeats to P-side.
+
+    Tracked from the moment a D-side request with ``do_remote_prefill``
+    enters the WAITING queue until ``request_finished`` is called (which
+    covers the full lifecycle: WAITING → scheduled → transfer in-flight
+    → decoding complete).  Cleanup intentionally does NOT happen when the
+    request leaves the WAITING queue, so heartbeats continue while the
+    NIXL transfer is in progress.
+    """
+
+    remote_engine_id: EngineId
+    remote_request_id: ReqId
+    host: str
+    port: int
+    tp_size: int
+
+
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
@@ -65,6 +87,14 @@ class NixlConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_index
         )
         assert vllm_config.kv_transfer_config is not None
+        self._heartbeat_interval: int = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "heartbeat_interval", 5
+            )
+        )
+        self._initial_kv_lease: int = (
+            vllm_config.kv_transfer_config.get_from_extra_config("initial_kv_lease", 20)
+        )
         if current_platform.device_type == "cpu":
             self.use_host_buffer = False
         else:
@@ -103,6 +133,11 @@ class NixlConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
+
+        # Heartbeat tracking: requests in the WAITING queue that need
+        # periodic lease-renewal heartbeats sent to the P-side.
+        self._reqs_needing_heartbeat: dict[ReqId, _HeartbeatParams] = {}
+        self._last_heartbeat_time: float = 0.0
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
@@ -148,6 +183,54 @@ class NixlConnectorScheduler:
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+
+    # ------------------------------------------------------------------
+    # Queue observation callbacks (scheduler-driven heartbeats)
+    # ------------------------------------------------------------------
+
+    def get_queue_callbacks(
+        self,
+    ) -> tuple[
+        Callable[["Request"], None] | None,
+        Callable[["Request"], None] | None,
+    ]:
+        """Return callbacks to observe scheduler WAITING queues.
+
+        When a D-side request enters the WAITING queue with
+        ``do_remote_prefill=True``, we start tracking it so that
+        ``build_connector_meta`` can package periodic heartbeats to
+        keep the P-side KV blocks alive.
+        """
+        return self._on_waiting_add, self._on_waiting_remove
+
+    def _on_waiting_add(self, request: "Request") -> None:
+        """Track a request that may need heartbeats."""
+        params = request.kv_transfer_params
+        if params is None or not params.get("do_remote_prefill"):
+            return
+        # Only track if all required remote fields are present.
+        remote_engine_id = params.get("remote_engine_id")
+        remote_request_id = params.get("remote_request_id")
+        host = params.get("remote_host")
+        port = params.get("remote_port")
+        tp_size = params.get("tp_size")
+        if all(
+            v is not None
+            for v in (remote_engine_id, remote_request_id, host, port, tp_size)
+        ):
+            self._reqs_needing_heartbeat[request.request_id] = _HeartbeatParams(
+                remote_engine_id=remote_engine_id,
+                remote_request_id=remote_request_id,
+                host=host,
+                port=port,
+                tp_size=tp_size,
+            )
+
+    def _on_waiting_remove(self, request: "Request") -> None:
+        """No-op: we intentionally keep the request in
+        ``_reqs_needing_heartbeat`` so heartbeats continue while the
+        NIXL transfer is in-flight.  Cleanup happens in
+        ``request_finished`` instead."""
 
     def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
@@ -489,6 +572,27 @@ class NixlConnectorScheduler:
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
 
+        # Package heartbeats for requests waiting in the queue, throttled
+        # by heartbeat_interval to avoid flooding the P-side.
+        if self._reqs_needing_heartbeat:
+            now = time.perf_counter()
+            if now - self._last_heartbeat_time >= self._heartbeat_interval:
+                self._last_heartbeat_time = now
+                # Group tracked requests by remote engine.
+                by_engine: dict[EngineId, list[tuple[ReqId, _HeartbeatParams]]] = {}
+                # TODO this needs to be optimized to only keep a single ds by remote
+                for req_id, hb in self._reqs_needing_heartbeat.items():
+                    by_engine.setdefault(hb.remote_engine_id, []).append((req_id, hb))
+                for engine_id, items in by_engine.items():
+                    # Use the remote_request_id (P-side id) for the heartbeat.
+                    _, first = items[0]
+                    meta.heartbeat_by_engine[engine_id] = HeartbeatInfo(
+                        req_ids=[hb.remote_request_id for _, hb in items],
+                        host=first.host,
+                        port=first.port,
+                        tp_size=first.tp_size,
+                    )
+
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
         self._reqs_in_batch = set()
@@ -507,6 +611,10 @@ class NixlConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
         from vllm.v1.request import RequestStatus
+
+        # Stop heartbeating for this request — the transfer is either
+        # complete or the request is being aborted.
+        self._reqs_needing_heartbeat.pop(request.request_id, None)
 
         params = request.kv_transfer_params
         logger.debug(
@@ -557,10 +665,10 @@ class NixlConnectorScheduler:
                 "NIXLConnector request_finished(%s) waiting for %d seconds "
                 "for remote decode to fetch blocks",
                 request.request_id,
-                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
+                self._initial_kv_lease,
             )
             self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+                time.perf_counter() + self._initial_kv_lease
             )
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty

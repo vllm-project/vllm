@@ -46,6 +46,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
+    ObservableRequestQueue,
     RequestQueue,
     SchedulingPolicy,
     create_request_queue,
@@ -164,10 +165,22 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting: RequestQueue = create_request_queue(self.policy)
         # requests skipped in waiting flow due async deps or constraints.
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.skipped_waiting: RequestQueue = create_request_queue(self.policy)
         self.running: list[Request] = []
+
+        # Wrap waiting queues with observation callbacks if the connector
+        # requests them (e.g. for scheduler-driven lease heartbeats).
+        if self.connector is not None:
+            on_add, on_remove = self.connector.get_queue_callbacks()
+            if on_add is not None or on_remove is not None:
+                self.waiting = ObservableRequestQueue(
+                    self.waiting, on_add=on_add, on_remove=on_remove
+                )
+                self.skipped_waiting = ObservableRequestQueue(
+                    self.skipped_waiting, on_add=on_add, on_remove=on_remove
+                )
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -2151,6 +2164,11 @@ class Scheduler(SchedulerInterface):
                 - blocks_to_evict (set[int]): Block IDs to evict from cache,
                 including invalid blocks and downstream dependent blocks.
         """
+        #  Request-level handling
+        # request-fails=>do some policy retry, compute locally
+        #  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        #  [[0, 1, 2, _, 4, 5, 6, 7, 8, 9]]
+        #  SW[ __________[11, 12, 13]]
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
         blocks_to_evict: set[int] = set()

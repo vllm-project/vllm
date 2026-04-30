@@ -4,7 +4,7 @@
 import heapq
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
 
 from vllm.v1.request import Request
@@ -196,6 +196,75 @@ class PriorityRequestQueue(RequestQueue):
         heap_copy = self._heap[:]
         while heap_copy:
             yield heapq.heappop(heap_copy)
+
+
+class ObservableRequestQueue(RequestQueue):
+    """A thin delegation wrapper around RequestQueue that fires callbacks
+    on additions and removals.
+
+    Used by the scheduler to give KV connectors O(1) incremental visibility
+    into queue changes without scanning and without exposing scheduler
+    internals.  Zero overhead when no connector is present (wrapper is
+    never created).
+    """
+
+    def __init__(
+        self,
+        inner: RequestQueue,
+        on_add: Callable[[Request], None] | None = None,
+        on_remove: Callable[[Request], None] | None = None,
+    ) -> None:
+        self._inner = inner
+        self._on_add = on_add
+        self._on_remove = on_remove
+
+    def add_request(self, request: Request) -> None:
+        self._inner.add_request(request)
+        if self._on_add:
+            self._on_add(request)
+
+    def pop_request(self) -> Request:
+        request = self._inner.pop_request()
+        if self._on_remove:
+            self._on_remove(request)
+        return request
+
+    def peek_request(self) -> Request:
+        return self._inner.peek_request()
+
+    def prepend_request(self, request: Request) -> None:
+        self._inner.prepend_request(request)
+        if self._on_add:
+            self._on_add(request)
+
+    def prepend_requests(self, requests: "RequestQueue") -> None:
+        # Collect requests before delegating, since the inner call
+        # may consume the source queue (e.g. extendleft on a deque).
+        added = list(requests) if self._on_add else None
+        self._inner.prepend_requests(requests)
+        if self._on_add and added:
+            for request in added:
+                self._on_add(request)
+
+    def remove_request(self, request: Request) -> None:
+        self._inner.remove_request(request)
+        if self._on_remove:
+            self._on_remove(request)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        self._inner.remove_requests(requests)
+        if self._on_remove:
+            for request in requests:
+                self._on_remove(request)
+
+    def __bool__(self) -> bool:
+        return bool(self._inner)
+
+    def __len__(self) -> int:
+        return len(self._inner)
+
+    def __iter__(self) -> Iterator[Request]:
+        return iter(self._inner)
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:

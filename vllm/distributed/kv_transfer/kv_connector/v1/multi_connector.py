@@ -389,6 +389,39 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 # Call with empty blocks for other connectors.
                 c.update_state_after_alloc(request, empty_blocks, 0)
 
+    def get_queue_callbacks(
+        self,
+    ) -> tuple[
+        Callable[["Request"], None] | None,
+        Callable[["Request"], None] | None,
+    ]:
+        """Aggregate queue callbacks from all inner connectors.
+
+        Returns composite callbacks that fan-out to every inner connector
+        that returned a non-None callback.
+        """
+        add_cbs: list[Callable[[Request], None]] = []
+        remove_cbs: list[Callable[[Request], None]] = []
+        for c in self._connectors:
+            on_add, on_remove = c.get_queue_callbacks()
+            if on_add is not None:
+                add_cbs.append(on_add)
+            if on_remove is not None:
+                remove_cbs.append(on_remove)
+
+        def _fan_out_add(request: "Request") -> None:
+            for cb in add_cbs:
+                cb(request)
+
+        def _fan_out_remove(request: "Request") -> None:
+            for cb in remove_cbs:
+                cb(request)
+
+        return (
+            _fan_out_add if add_cbs else None,
+            _fan_out_remove if remove_cbs else None,
+        )
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:
