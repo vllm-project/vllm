@@ -44,6 +44,9 @@ class TrtLlmMxfp4ExpertsBase:
             moe_config.intermediate_size_per_partition
         )
         self.hidden_dim = moe_config.hidden_dim
+        self.hidden_dim_unpadded = (
+            moe_config.hidden_dim_unpadded or moe_config.hidden_dim
+        )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
@@ -186,7 +189,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             x_scale = None
         output = torch.empty(
             *hidden_states.shape[:-1],
-            self.hidden_dim,
+            self.hidden_dim_unpadded,
             dtype=torch.bfloat16,
             device=hidden_states.device,
         )
@@ -271,7 +274,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
-        output = (M, K)
+        output = (M, self.hidden_dim_unpadded)
         return (workspace1, workspace2, output)
 
     def apply(
