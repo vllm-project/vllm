@@ -43,7 +43,8 @@ class Eagle3ModelConfig:
 
 # Model configurations for EAGLE3 acceptance length tests.
 # Expected acceptance lengths are determined by running baseline benchmarks
-# using examples/offline_inference/spec_decode.py with the MT-Bench dataset.
+# using examples/features/speculative_decoding/spec_decode_offline.py
+# with the MT-Bench dataset.
 EAGLE3_MODEL_CONFIGS = [
     Eagle3ModelConfig(
         verifier="meta-llama/Llama-3.1-8B-Instruct",
