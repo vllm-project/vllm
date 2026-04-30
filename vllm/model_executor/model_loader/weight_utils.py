@@ -893,19 +893,6 @@ def safetensors_weights_iterator(
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
-    # Stagger file reading order per rank to reduce I/O contention when
-    # multiple ranks read the same checkpoint files simultaneously.  Each
-    # rank starts at a different offset in the file list so that at any
-    # given moment the ranks are reading *different* files, distributing
-    # the I/O load across the storage backend.  Since tensors are matched
-    # by name, the reading order does not affect correctness.
-    if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
-        if world_size > 1 and len(sorted_files) > 1:
-            offset = len(sorted_files) * rank // world_size
-            sorted_files = sorted_files[offset:] + sorted_files[:offset]
-
     fs_type = _get_fs_type(sorted_files)
     is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
@@ -965,6 +952,19 @@ def safetensors_weights_iterator(
 
     if should_prefetch:
         _prefetch_all_checkpoints(sorted_files)
+
+    # Stagger file reading order per rank to reduce I/O contention when
+    # multiple ranks read the same checkpoint files simultaneously. Each
+    # rank starts at a different offset in the file list so that at any
+    # given moment the ranks are reading *different* files. This must
+    # happen after prefetch starts so prefetch still slices the original
+    # globally sorted list across ranks.
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        if world_size > 1 and len(sorted_files) > 1:
+            offset = len(sorted_files) * rank // world_size
+            sorted_files = sorted_files[offset:] + sorted_files[:offset]
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(

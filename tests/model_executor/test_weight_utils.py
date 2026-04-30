@@ -5,11 +5,14 @@ import tempfile
 
 import huggingface_hub.constants
 import pytest
+import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
+    _prefetch_all_checkpoints,
     download_weights_from_hf,
     maybe_remap_kv_scale_name,
+    safetensors_weights_iterator,
 )
 
 
@@ -158,6 +161,126 @@ class TestMaybeRemapKvScaleName:
             "model.layers.0.self_attn.qkv_proj.k_scale", empty_params
         )
         assert result is None
+
+
+def test_safetensors_prefetch_uses_global_order_before_rank_rotation(monkeypatch):
+    files = [
+        "model-00001-of-00004.safetensors",
+        "model-00002-of-00004.safetensors",
+        "model-00003-of-00004.safetensors",
+        "model-00004-of-00004.safetensors",
+    ]
+    prefetched_lists: list[list[str]] = []
+    opened_files: list[str] = []
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils._get_fs_type",
+        lambda _: "nfs",
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils._get_checkpoints_size_bytes",
+        lambda _: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils._get_available_ram_bytes",
+        lambda: 1024,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils._prefetch_all_checkpoints",
+        lambda paths: prefetched_lists.append(list(paths)),
+    )
+
+    class FakeSafeOpen:
+        def __init__(self, path: str):
+            self.path = path
+
+        def __enter__(self):
+            opened_files.append(self.path)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def keys(self):
+            return []
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils.safe_open",
+        lambda path, framework="pt": FakeSafeOpen(path),
+    )
+
+    loaded = list(
+        safetensors_weights_iterator(
+            files,
+            False,
+            safetensors_load_strategy="prefetch",
+        )
+    )
+
+    assert loaded == []
+    assert prefetched_lists == [files]
+    assert opened_files == [
+        "model-00003-of-00004.safetensors",
+        "model-00004-of-00004.safetensors",
+        "model-00001-of-00004.safetensors",
+        "model-00002-of-00004.safetensors",
+    ]
+
+
+def test_prefetch_all_checkpoints_slices_files_per_rank(monkeypatch):
+    files = [f"model-{idx:05d}.safetensors" for idx in range(6)]
+    prefetched: list[str] = []
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 3)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils._prefetch_checkpoint",
+        lambda path: prefetched.append(path),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils.asyncio.to_thread",
+        lambda func, *args, **kwargs: _run_inline(func, *args, **kwargs),
+    )
+
+    async def _run_inline(func, *args, **kwargs):
+        func(*args, **kwargs)
+
+    class ImmediateThread:
+        def __init__(
+            self,
+            group=None,
+            target=None,
+            name=None,
+            args=(),
+            kwargs=None,
+            *,
+            daemon=None,
+        ):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils.threading.Thread",
+        ImmediateThread,
+    )
+
+    _prefetch_all_checkpoints(files)
+
+    assert prefetched == files[1::3]
 
 
 if __name__ == "__main__":
