@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
-import threading
+import queue
 from pathlib import Path
 from typing import TypeAlias
 
@@ -16,27 +16,41 @@ HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 
 def make_backend_thread_local(tokenizer: HfTokenizer) -> HfTokenizer:
-    """Route operations through a per-thread deep-copied backend tokenizer."""
+    """Make `PreTrainedTokenizerFast` thread-safe.
+    Make `encode`, `batch_encode`, and `__call__` methods, which may mutably
+    borrow the Rust backend tokenizer, thread-safe by routing them through a
+    deep-copied tokenizer pool.
+    """
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         return tokenizer
 
     thread_safe_tokenizer = copy.copy(tokenizer)
 
-    backend_tokenizer = thread_safe_tokenizer._tokenizer
+    encoder_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
 
-    # Concurrent dict insertion is safe here thanks to the GIL.
-    thread_local = {threading.get_ident(): copy.deepcopy(backend_tokenizer)}
+    @contextlib.contextmanager
+    def _borrow_from_pool():
+        try:
+            tok = encoder_pool.get_nowait()
+            yield tok
+        except queue.Empty:
+            tok = copy.deepcopy(tokenizer)
+            yield tok
+        finally:
+            encoder_pool.put(tok)
 
     class ThreadLocalTokenizer(tokenizer.__class__):  # type: ignore
-        @property
-        def _tokenizer(self):
-            current_thread_id = threading.get_ident()
-            try:
-                return thread_local[current_thread_id]
-            except KeyError:
-                backend_copy = copy.deepcopy(backend_tokenizer)
-                thread_local[current_thread_id] = backend_copy
-                return backend_copy
+        def encode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.encode(*args, **kwargs)
+
+        def batch_encode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.batch_encode(*args, **kwargs)
+
+        def __call__(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok(*args, **kwargs)
 
         def __reduce__(self):
             return make_backend_thread_local, (tokenizer,)
