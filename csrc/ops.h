@@ -250,6 +250,32 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
+// W4A16 GPTQ kernels for AMD RDNA3 (gfx1100). See csrc/quantization/gptq/
+// README_RDNA3.md for kernel architecture and diagnostic op usage.
+torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
+                              torch::Tensor b_qzeros, torch::Tensor b_scales,
+                              torch::Tensor b_g_idx, bool use_v2_format);
+
+torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
+                                   torch::Tensor b_qzeros,
+                                   torch::Tensor b_scales,
+                                   torch::Tensor b_g_idx,
+                                   bool use_v2_format);
+
+torch::Tensor gptq_gemm_rdna3_wmma_probe(torch::Tensor a, torch::Tensor b,
+                                         int64_t mode);
+
+torch::Tensor gptq_gemm_rdna3_wmma_dump(torch::Tensor a,
+                                        torch::Tensor b_q_weight,
+                                        torch::Tensor b_qzeros,
+                                        torch::Tensor b_scales,
+                                        bool use_v2_format);
+
+torch::Tensor gptq_gemm_rdna3_wmma_lds_check(torch::Tensor b_q_weight,
+                                             torch::Tensor b_qzeros,
+                                             torch::Tensor b_scales,
+                                             bool use_v2_format);
+
 void static_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
     std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);

@@ -442,6 +442,35 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
+  // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
+  // See csrc/quantization/gptq/README_RDNA3.md.
+  ops.def(
+      "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+  ops.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
+
+  ops.def(
+      "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+  ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
+
+  ops.def(
+      "gptq_gemm_rdna3_wmma_probe(Tensor a, Tensor b, int mode) -> Tensor");
+  ops.impl("gptq_gemm_rdna3_wmma_probe", torch::kCUDA,
+           &gptq_gemm_rdna3_wmma_probe);
+
+  ops.def(
+      "gptq_gemm_rdna3_wmma_dump(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, bool use_v2_format) -> Tensor");
+  ops.impl("gptq_gemm_rdna3_wmma_dump", torch::kCUDA,
+           &gptq_gemm_rdna3_wmma_dump);
+
+  ops.def(
+      "gptq_gemm_rdna3_wmma_lds_check(Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, bool use_v2_format) -> Tensor");
+  ops.impl("gptq_gemm_rdna3_wmma_lds_check", torch::kCUDA,
+           &gptq_gemm_rdna3_wmma_lds_check);
+
   // Compute FP8 quantized tensor for given scaling factor.
   // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
   // scaling. Optional group_m/group_n specify the group shape explicitly;

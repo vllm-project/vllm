@@ -299,6 +299,8 @@ set(VLLM_EXT_SRC
   "csrc/topk.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
+  "csrc/quantization/gptq/q_gemm_rdna3.cu"
+  "csrc/quantization/gptq/q_gemm_rdna3_wmma.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
   "csrc/quantization/w8a8/fp8/common.cu"
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
