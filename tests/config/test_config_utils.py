@@ -201,3 +201,47 @@ print(hash_factors(envs.compile_factors()))
         "compile_factors hash differs between fresh initializations - "
         "dynamic env vars may not be properly ignored"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for issue #39479
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_compute_hash_stable():
+    """LoadConfig contributes no graph factors; hash must be constant
+    regardless of which load_format, download_dir, or other non-graph
+    field is set."""
+    from vllm.config.load import LoadConfig
+
+    baseline = LoadConfig().compute_hash()
+
+    # Second instantiation must produce the same hash.
+    assert LoadConfig().compute_hash() == baseline
+
+    # Changing a non-graph field must not affect the hash.
+    assert LoadConfig(load_format="pt").compute_hash() == baseline
+    assert LoadConfig(load_format="safetensors").compute_hash() == baseline
+    assert LoadConfig(download_dir="/tmp/weights").compute_hash() == baseline
+
+
+def test_traced_files_accepts_path_objects():
+    """CompilationConfig.traced_files is typed set[Path]; verify Path objects
+    round-trip correctly, set semantics are preserved, and clear() works."""
+    from pathlib import Path
+
+    from vllm.config.compilation import CompilationConfig
+
+    cfg = CompilationConfig()
+    assert len(cfg.traced_files) == 0
+
+    cfg.traced_files.add(Path("/some/model/forward.py"))
+    cfg.traced_files.add(Path("/some/model/attention.py"))
+    # Duplicate add is a no-op (set semantics).
+    cfg.traced_files.add(Path("/some/model/forward.py"))
+
+    assert len(cfg.traced_files) == 2
+    assert all(isinstance(f, Path) for f in cfg.traced_files)
+
+    cfg.traced_files.clear()
+    assert len(cfg.traced_files) == 0
