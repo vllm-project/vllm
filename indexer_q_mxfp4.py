@@ -76,7 +76,8 @@ int fp32x8_to_fp4x8(const float *x) {
   return out;
 }
 
-template <int HEAD_DIM, int ROPE_DIM>
+template <int HEAD_DIM, int ROPE_DIM, int TB_SIZE>
+__block_size__((TB_SIZE, 1, 1))
 __global__
 void fused_indexer_q_rope_mxfp4_kernel(
   const int64_t     *positions_ptr,  // [num_tokens]
@@ -150,8 +151,11 @@ void fused_indexer_q_rope_mxfp4_kernel(
   for (int i = 1; i < 8; i++)
     q_amax = bf16x2_max(q_amax, bf16x2_abs(q[i]));
 
-  // amax between 2 threads -> 1 warp shuffle call
-  q_amax = bf16x2_max(q_amax, __shfl_xor_sync(0xFFFF'FFFF, q_amax, 1));
+  // each thread holds 16 elems -> 2 threads hold 32 elems
+  // warp shuffle among 2 threads
+  constexpr int NUM_THREADS_PER_MX = MX_BLOCK_SIZE / 16;
+  for (int stride = NUM_THREADS_PER_MX / 2; stride > 0; stride /= 2)
+    q_amax = bf16x2_max(q_amax, __shfl_xor_sync(0xFFFF'FFFF, q_amax, stride));
 
   // final amax in FP32
   float q_amax_f32[2];
@@ -193,7 +197,7 @@ void fused_indexer_q_rope_mxfp4_kernel(
   const int q_fp4_offset = token_id * q_fp4_stride0
                          + head_id * q_fp4_stride1
                          + sublane_id * 8;
-  reinterpret_cast<int2 *>(q_fp4_ptr + q_fp4_offset)[0] = packed_fp4;
+  __stcs(reinterpret_cast<int2 *>(q_fp4_ptr + q_fp4_offset), packed_fp4);
 
   // scale weights
   if (global_tid < num_tokens * num_heads) {
@@ -254,8 +258,6 @@ at::Tensor fused_indexer_q_rope_mxfp4(
   TORCH_CHECK(weights_out.sizes() == weights.sizes(),
               "weights_out must have the same shape as weights");
 
-  // The kernel uses a full-warp shuffle mask. For 8-thread subwarps and a
-  // 256-thread block, DeepSeek's 64 heads makes the grid exact.
   TORCH_CHECK(num_heads % 32 == 0,
               "num_heads must be divisible by 32 for this launch wrapper");
 
@@ -267,7 +269,7 @@ at::Tensor fused_indexer_q_rope_mxfp4(
   const int total_threads = num_tokens * num_heads * kSubwarpSize;
   const int grid = (total_threads + kBlockSize - 1) / kBlockSize;
 
-  fused_indexer_q_rope_mxfp4_kernel<kHeadDim, kRopeDim>
+  fused_indexer_q_rope_mxfp4_kernel<kHeadDim, kRopeDim, kBlockSize>
       <<<grid, kBlockSize, 0, at::cuda::getCurrentCUDAStream()>>>(
           positions.data_ptr<int64_t>(),
           reinterpret_cast<const nv_bfloat16*>(q.data_ptr()),

@@ -18,7 +18,7 @@ ROPE_DIM = 64
 MAX_POS = 100_000
 TOKENS = [1, 8, 32, 128, 256, 512, 1024, 2048, 4096, 8192]
 QUANTILES = [0.5, 0.2, 0.8]
-PROVIDERS = {"production": prod_impl, "dev": dev_impl}
+PROVIDERS = {"prod": prod_impl, "dev": dev_impl}
 
 
 def measure(num_tokens, provider):
@@ -38,7 +38,7 @@ def measure(num_tokens, provider):
     )
 
     selected_impl = PROVIDERS[provider]
-    if provider != "production":
+    if provider != "prod":
         prod_q, prod_weights = prod_impl(*kernel_args)
         dev_q, dev_weights = selected_impl(*kernel_args)
         prod_q_packed, prod_q_scale = prod_q
@@ -88,7 +88,7 @@ if __name__ == "__main__":
             )
             bandwidth_gb_s = moved_bytes / (median_ms * 1e-3) * 1e-9
             print(
-                f"[{provider:10s}] T={num_tokens:6d}  "
+                f"[{provider:4s}] T={num_tokens:6d}  "
                 f"{median_ms * 1e3:7.2f} us  "
                 f"BW {bandwidth_gb_s:7.1f} GB/s  "
                 f"(p20={p20_ms * 1e3:.2f} p80={p80_ms * 1e3:.2f} us)"
