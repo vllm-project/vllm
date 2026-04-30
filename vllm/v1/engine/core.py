@@ -72,6 +72,11 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance import (
+    Disposition,
+    FaultToleranceHooks,
+    get_fault_hooks,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -1161,15 +1166,52 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @property
+    def hooks(self) -> FaultToleranceHooks:
+        """Active fault-tolerance hooks. No-op singleton when FT is off."""
+        return get_fault_hooks(self.vllm_config, self)
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-            # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            try:
+                # 1) Poll the input queue until there is work to do.
+                self._process_input_queue()
+                self.hooks.before_step(self)
+                # 2) Step the engine core and return the outputs.
+                self._process_engine_step()
+                self.hooks.after_step(self, self._last_step_output)
+            except BaseException as exc:
+                disp = self.hooks.on_step_error(self, exc)
+                if disp is Disposition.PROPAGATE:
+                    raise
+                if disp is Disposition.PAUSE_LOOP:
+                    self._block_until_resumed()
+                if (
+                    disp is Disposition.SCHEDULE_RETRY
+                    and self.fault_supervisor is not None
+                ):
+                    self.fault_supervisor.run_retry_plan(self)
+                # CONTINUE: swallow; treat as logged-only.
 
         raise SystemExit
+
+    # Set by the supervisor (when FT is enabled) so plans can be dispatched
+    # without an extra lookup. None when FT is off.
+    fault_supervisor: Any = None
+    # Latest output passed to `after_step`. Subclasses populate this in
+    # `_process_engine_step`. None if the most recent step did not execute.
+    _last_step_output: Any = None
+
+    def _block_until_resumed(self) -> None:
+        """Default block when supervisor returns PAUSE_LOOP. Subclasses with
+        a richer pause condition can override; `DefaultFaultSupervisor`
+        signals via its own condition variable."""
+        if self.fault_supervisor is None:
+            return
+        wait_fn = getattr(self.fault_supervisor, "wait_until_resumed", None)
+        if wait_fn is not None:
+            wait_fn()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1792,19 +1834,36 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
+            try:
+                # 1) Poll the input queue until there is work to do.
+                self._process_input_queue()
 
-            if self.eep_scaling_state is not None:
-                _ = self.eep_scaling_state.progress()
-                if self.eep_scaling_state.is_complete():
-                    if self.eep_scaling_state.worker_type == "removing":
-                        raise SystemExit
-                    self.process_input_queue_block = True
-                    self.eep_scaling_state = None
+                if self.eep_scaling_state is not None:
+                    _ = self.eep_scaling_state.progress()
+                    if self.eep_scaling_state.is_complete():
+                        if self.eep_scaling_state.worker_type == "removing":
+                            raise SystemExit
+                        self.process_input_queue_block = True
+                        self.eep_scaling_state = None
 
-            executed = self._process_engine_step()
-            self._maybe_publish_request_counts()
+                self.hooks.before_step(self)
+                executed = self._process_engine_step()
+                self.hooks.after_step(self, self._last_step_output)
+                self._maybe_publish_request_counts()
+            except SystemExit:
+                raise
+            except BaseException as exc:
+                disp = self.hooks.on_step_error(self, exc)
+                if disp is Disposition.PROPAGATE:
+                    raise
+                if disp is Disposition.PAUSE_LOOP:
+                    self._block_until_resumed()
+                if (
+                    disp is Disposition.SCHEDULE_RETRY
+                    and self.fault_supervisor is not None
+                ):
+                    self.fault_supervisor.run_retry_plan(self)
+                continue
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:

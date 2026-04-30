@@ -220,6 +220,12 @@ def build_app(
 
         elastic_ep_attach_router(app)
 
+        from vllm.entrypoints.serve.fault_tolerance.api_router import (
+            attach_router as fault_tolerance_attach_router,
+        )
+
+        fault_tolerance_attach_router(app)
+
         from vllm.entrypoints.openai.generative_scoring.api_router import (
             register_generative_scoring_api_router,
         )

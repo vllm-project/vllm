@@ -17,10 +17,12 @@ if TYPE_CHECKING:
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.v1.fault_tolerance import FaultSignal
 else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    FaultSignal = object
 
 
 class LogprobsLists(NamedTuple):
@@ -200,6 +202,14 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Fault tolerance signal carried on the success path. Workers set this
+    # when execution surfaces a fault that the engine's supervisor needs to
+    # know about (e.g., paused, dp_allreduce_failed). The engine reads it via
+    # the supervisor's `after_step` hook. Replaces the previous pattern of
+    # raising `EngineLoopPausedError` and pattern-matching exception text.
+    # See `vllm.v1.fault_tolerance.FaultSignal`.
+    fault_signal: FaultSignal | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

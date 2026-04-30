@@ -257,10 +257,14 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     """
     All2All communication based on DeepEP Low-Latency kernels.
+
+    Implements the :class:`vllm.v1.fault_tolerance.maskable.FTMaskBuffer`
+    capability for FT-aware backends — see ``query_mask`` / ``clean_mask``.
     """
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self._buffer: Any = None
 
     def _make_all2all_kwargs(
         self,
@@ -317,17 +321,44 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )
+        # Remember the buffer so query_mask / clean_mask can reach it.
+        self._buffer = handle
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
         return 0
 
+    # ---- FTMaskBuffer capability (vllm.v1.fault_tolerance.maskable) --------
+
+    def query_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Read the per-peer fault mask. See FTMaskBuffer protocol."""
+        import deep_ep  # type: ignore[import-not-found]
+
+        if not isinstance(self._buffer, deep_ep.Buffer):
+            raise RuntimeError(
+                "DeepEPLLAll2AllManager.query_mask called before get_handle"
+            )
+        return self._buffer.low_latency_query_mask_buffer(mask)
+
+    def clean_mask(self) -> None:
+        """Reset the per-peer fault mask to zero. See FTMaskBuffer protocol."""
+        import deep_ep  # type: ignore[import-not-found]
+
+        if not isinstance(self._buffer, deep_ep.Buffer):
+            raise RuntimeError(
+                "DeepEPLLAll2AllManager.clean_mask called before get_handle"
+            )
+        self._buffer.low_latency_clean_mask_buffer()
+
 
 class NixlEPAll2AllManager(All2AllManagerBase):
     """
     All2All communication based on NIXL EP kernels.
     This backend supports elastic EP with dynamic rank connection/disconnection.
+
+    Implements the :class:`vllm.v1.fault_tolerance.maskable.FTMaskBuffer`
+    capability for FT-aware backends — see ``query_mask`` / ``clean_mask``.
     """
 
     # (nixl_ep_buffer, ep_size)
@@ -437,6 +468,24 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     # NIXL EP uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
         return 0
+
+    # ---- FTMaskBuffer capability (vllm.v1.fault_tolerance.maskable) --------
+
+    def query_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Read the per-peer fault mask. See FTMaskBuffer protocol."""
+        if NixlEPAll2AllManager._buffer is None:
+            raise RuntimeError(
+                "NixlEPAll2AllManager.query_mask called before buffer init"
+            )
+        return NixlEPAll2AllManager._buffer[0].query_mask_buffer(mask)
+
+    def clean_mask(self) -> None:
+        """Reset the per-peer fault mask to zero. See FTMaskBuffer protocol."""
+        if NixlEPAll2AllManager._buffer is None:
+            raise RuntimeError(
+                "NixlEPAll2AllManager.clean_mask called before buffer init"
+            )
+        NixlEPAll2AllManager._buffer[0].clean_mask_buffer()
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):

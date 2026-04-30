@@ -5,7 +5,7 @@
 import gc
 import os
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
@@ -68,6 +68,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.fault_tolerance import FaultToleranceResult
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -1040,8 +1041,161 @@ class Worker(WorkerBase):
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
 
+        # Stop the FT aux thread (if started). The thread is a daemon so it
+        # will exit on its own when the process exits, but signal it so it
+        # can clean up its socket cleanly.
+        self._ft_shutdown = True
+
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Fault tolerance — main-thread methods (invoked via collective_rpc).
+    # See ``vllm.v1.fault_tolerance.plans.pause`` and ``...plans.retry``.
+    # ------------------------------------------------------------------
+
+    # Class-level defaults so reads work on workers that never enabled FT.
+    _ft_paused: bool = False
+    _ft_shutdown: bool = False
+    _ft_interrupt_thread: Any = None
+
+    def ft_pause(self) -> "FaultToleranceResult":
+        """Pause this worker. Called via collective_rpc between iterations.
+
+        Sets a flag the next ``execute_model`` call observes; it then
+        returns a ``ModelRunnerOutput`` with ``fault_signal=FaultSignal(
+        kind="paused")`` so the engine's supervisor sees the state change
+        on the success path (no exceptions over IPC).
+        """
+        from vllm.v1.fault_tolerance import FaultToleranceResult
+
+        self._ft_paused = True
+        return FaultToleranceResult(success=True)
+
+    def ft_resume_after_retry(self, **params: Any) -> "FaultToleranceResult":
+        """Clean up worker state and resume.
+
+        - Clears any in-flight input batch (KvAction.PREEMPT_LOGICAL_FREE).
+        - Calls ``clean_mask`` on the all2all manager iff the backend
+          implements ``FTMaskBuffer``.
+        - Optionally rebuilds the DP gloo group when ``params`` request it.
+        """
+        from vllm.v1.fault_tolerance import FaultToleranceResult
+        from vllm.v1.fault_tolerance.maskable import FTMaskBuffer
+
+        self._ft_paused = False
+
+        # Clear in-flight input batch — equivalent to today's
+        # ``clear_input_batch_callback`` body.
+        if model_runner := getattr(self, "model_runner", None):
+            input_batch = getattr(model_runner, "input_batch", None)
+            if input_batch is not None:
+                cached = list(input_batch.req_id_to_index.keys())
+                for req_id in cached:
+                    input_batch.remove_request(req_id)
+
+        # Clean FT mask if the backend implements it.
+        try:
+            from vllm.distributed import get_ep_group
+
+            comm = get_ep_group().device_communicator
+            mgr = getattr(comm, "all2all_manager", None) if comm else None
+            if mgr is not None and isinstance(mgr, FTMaskBuffer):
+                mgr.clean_mask()
+        except Exception as e:
+            logger.warning("ft_resume_after_retry: clean_mask failed: %s", e)
+
+        return FaultToleranceResult(success=True)
+
+    # ------------------------------------------------------------------
+    # Fault tolerance — interrupt aux thread.
+    # Runs while the main thread is blocked (e.g. in NCCL); only handles
+    # operations that genuinely need an aux thread (ncclCommAbort).
+    # See ``vllm.v1.fault_tolerance.plans.abort_communicator``.
+    # ------------------------------------------------------------------
+
+    def ensure_ft_interrupt_thread(self, addr: str) -> None:
+        """Start the FT interrupt aux thread (idempotent).
+
+        Called by the engine after construction when FT is enabled.
+        """
+        if self._ft_interrupt_thread is not None:
+            return
+        import threading
+
+        self._ft_interrupt_addr = addr
+        self._ft_shutdown = False
+        self._ft_interrupt_thread = threading.Thread(
+            target=self._ft_interrupt_loop,
+            daemon=True,
+            name=f"FTInterruptThread_{getattr(self, 'local_rank', 0)}",
+        )
+        self._ft_interrupt_thread.start()
+
+    def _ft_interrupt_loop(self) -> None:
+        """Tiny daemon. Handles only operations that must run while the
+        main thread is blocked (e.g. NCCL hang). Pause / retry come
+        through ``collective_rpc`` to the main thread, not here."""
+        try:
+            import zmq
+        except ImportError:
+            logger.debug("zmq unavailable; FT interrupt thread exiting")
+            return
+
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.SUB)
+        try:
+            sock.connect(self._ft_interrupt_addr)
+        except Exception as e:
+            logger.warning("FT interrupt SUB connect failed: %s", e)
+            return
+        topic_self = f"worker_{getattr(self, 'local_rank', 0)}".encode()
+        sock.setsockopt(zmq.SUBSCRIBE, topic_self)
+        sock.setsockopt(zmq.SUBSCRIBE, b"all")
+        sock.setsockopt(zmq.RCVTIMEO, 1000)
+
+        while not self._ft_shutdown:
+            try:
+                _, payload = sock.recv_multipart()
+            except zmq.Again:
+                continue
+            except zmq.ZMQError:
+                break
+            cmd = payload.decode("utf-8", errors="replace")
+            if cmd == "abort_communicator":
+                self._abort_nccl_communicators()
+            else:
+                logger.warning("unknown FT interrupt cmd: %s", cmd)
+
+        with suppress(Exception):
+            sock.close(linger=0)
+
+    def _abort_nccl_communicators(self) -> None:
+        """Abort all FT-aware comm groups so the main thread errors out
+        of NCCL and becomes responsive again. Called from the aux thread."""
+        from vllm.distributed import get_dp_group, get_tp_group
+        from vllm.distributed.parallel_state import get_ep_group
+
+        groups = []
+        for fn in (get_dp_group, get_ep_group, get_tp_group):
+            try:
+                groups.append(fn())
+            except Exception:
+                # Group may not exist on this worker (e.g. EP not in use).
+                continue
+        for group in groups:
+            if group is None:
+                continue
+            comm = getattr(group, "device_communicator", None)
+            if comm is None:
+                continue
+            abort = getattr(comm, "abort", None)
+            if abort is None:
+                continue
+            try:
+                abort()
+            except Exception as e:
+                logger.warning("communicator abort failed: %s", e)
 
 
 def init_worker_distributed_environment(
