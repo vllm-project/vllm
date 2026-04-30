@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import itertools
 import json
 import re
 from pathlib import Path
@@ -13,6 +14,8 @@ from torch._ops import OpOverload, OpOverloadPacket
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+_dump_index = itertools.count()
 
 
 def _json_safe(value: Any) -> Any:
@@ -195,8 +198,8 @@ def _safe_name(name: str) -> str:
 
 def _next_base_path(dump_dir: Path, name: str) -> Path:
     safe = _safe_name(name)
-    index = 0
     while True:
+        index = next(_dump_index)
         base = dump_dir / f"{index:04d}_{safe}"
         paths = [
             base.with_suffix(".structured.txt"),
@@ -205,7 +208,6 @@ def _next_base_path(dump_dir: Path, name: str) -> Path:
         ]
         if not any(path.exists() for path in paths):
             return base
-        index += 1
 
 
 def dump_graph(
