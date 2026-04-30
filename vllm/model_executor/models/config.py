@@ -39,10 +39,11 @@ class AnyModelConfig(VerifyAndUpdateConfig):
 
         block_configs = getattr(text_config, "block_configs", None)
         if block_configs:
-            assert len(block_configs) == text_config.num_hidden_layers, (
-                f"block_configs length ({len(block_configs)}) must match "
-                f"num_hidden_layers ({text_config.num_hidden_layers})"
-            )
+            if len(block_configs) != text_config.num_hidden_layers:
+                raise ValueError(
+                    f"block_configs length ({len(block_configs)}) must match "
+                    f"num_hidden_layers ({text_config.num_hidden_layers})"
+                )
 
             def _to_attrdict(obj):
                 if isinstance(obj, dict):

@@ -82,7 +82,7 @@ def _moe_block_configs(
     reduced = max(2, n_experts // 2)
     moe_override: dict[str, Any] = {"num_local_experts": reduced}
     if exp_isize is not None:
-        moe_override["expert_intermediate_dim"] = max(64, exp_isize // 2)
+        moe_override["expert_intermediate_size"] = max(64, exp_isize // 2)
     return [
         {"attention": {"no_op": False}, "ffn": {"no_op": False}},
         {

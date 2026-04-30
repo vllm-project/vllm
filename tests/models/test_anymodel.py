@@ -245,7 +245,7 @@ class TestCreateLayerConfig:
             moe_num_experts_field="num_experts",
             moe_intermediate_size_field="moe_intermediate_size",
         )
-        moe = {"num_local_experts": 4, "expert_intermediate_dim": 512}
+        moe = {"num_local_experts": 4, "expert_intermediate_size": 512}
         result = _create_layer_config(cfg, _block(moe=moe), info)
         assert result.num_experts == 4
         assert result.moe_intermediate_size == 512
@@ -258,7 +258,7 @@ class TestCreateLayerConfig:
             moe_num_experts_field="num_local_experts",
             moe_intermediate_size_field=None,
         )
-        moe = {"num_local_experts": 4, "expert_intermediate_dim": 512}
+        moe = {"num_local_experts": 4, "expert_intermediate_size": 512}
         result = _create_layer_config(cfg, _block(moe=moe), info)
         assert result.num_local_experts == 4
         assert result.intermediate_size == 512
@@ -266,7 +266,7 @@ class TestCreateLayerConfig:
     def test_nemotronh_moe(self):
         cfg = _base_config(n_routed_experts=8, moe_intermediate_size=2048)
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
-        moe = {"num_local_experts": 4, "expert_intermediate_dim": 1024}
+        moe = {"num_local_experts": 4, "expert_intermediate_size": 1024}
         result = _create_layer_config(cfg, _block(moe=moe), info)
         assert result.n_routed_experts == 4
         assert result.moe_intermediate_size == 1024

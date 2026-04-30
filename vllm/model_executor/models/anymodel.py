@@ -314,7 +314,13 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
             moe_size_field = (
                 info.moe_intermediate_size_field or info.intermediate_size_field
             )
-            s = _get_attr(moe, "expert_intermediate_dim")
+            legacy_size = _get_attr(moe, "expert_intermediate_dim")
+            s = _get_attr(moe, "expert_intermediate_size", legacy_size)
+            if legacy_size is not None:
+                logger.warning_once(
+                    "block_configs MoE field 'expert_intermediate_dim' is "
+                    "deprecated; use 'expert_intermediate_size' instead."
+                )
             if s is not None:
                 setattr(config, moe_size_field, s)
 
@@ -478,7 +484,11 @@ def _overrides_differ(block_config, global_config, info: ArchInfo) -> bool:
         moe_size_field = (
             info.moe_intermediate_size_field or info.intermediate_size_field
         )
-        s = _get_attr(moe, "expert_intermediate_dim")
+        s = _get_attr(
+            moe,
+            "expert_intermediate_size",
+            _get_attr(moe, "expert_intermediate_dim"),
+        )
         if s is not None and s != getattr(global_config, moe_size_field, None):
             return True
 

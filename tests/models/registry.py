@@ -194,7 +194,7 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
-    "AnyModelForCausalLM": _HfExamplesInfo(
+    "AnyModel": _HfExamplesInfo(
         "anymodel-placeholder",
         is_available_online=False,
     ),
