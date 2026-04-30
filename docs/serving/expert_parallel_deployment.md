@@ -150,6 +150,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `log_balancedness_interval` | Cadence (in engine steps) for the balancedness log and the JSONL dump | `1` |
 | `log_balancedness_verbose` | When set with `log_balancedness`, emits a per-layer / per-rank token table to stderr instead of the one-line summary | `false` |
 | `expert_load_dump_dir` | Directory to which JSONL records of per-step expert load are appended (one file per MoE model). Only EP rank 0 writes. Independent of `log_balancedness` and `log_balancedness_verbose` — setting it alone is enough | `null` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
