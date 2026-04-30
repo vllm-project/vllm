@@ -188,9 +188,10 @@ def test_per_token_group_quant_fp8_packed_all_zero():
     ), "All-zero input should produce all-zero FP8 output"
 
     # UE8M0 byte produced by the kernel for all-zero input.
-    # The kernel's inner fmax(y_s, 1e-10) clamps eps/fp8_max back to 1e-10,
-    # yielding exp2(ceil(log2(1e-10))) = exp2(-33) = 1.164e-10.
-    # As float32: biased exponent = 94 = 0x5E, mantissa = 0.
+    # The kernel's inner fmax(y_s, 1e-10) clamps eps/fp8_max back to 1e-10.
+    # 1e-10 as float32 has biased exponent 0x5D and a non-zero mantissa, so
+    # the kernel's bit-twiddle (exp_bits + (mant_bits != 0)) rounds up to
+    # 0x5E. This matches exp2(ceil(log2(1e-10))) = exp2(-33).
     expected_exp_byte = 0x5E
 
     mn = num_tokens

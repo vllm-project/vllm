@@ -250,16 +250,24 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 template <typename T, typename DST_DTYPE, int GROUP_SIZE>
 __global__ void per_token_group_quant_8bit_packed_register_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
-    unsigned int* __restrict__ output_s_packed, const int num_groups_padded,
+    unsigned int* __restrict__ output_s_packed, const int64_t num_groups_padded,
     const int groups_per_block, const int padded_groups_per_row,
     const int groups_per_row, const int mn, const int output_q_mn_extent,
-    const int tma_aligned_mn, const int num_scale_elems, const float eps,
+    const int tma_aligned_mn, const int64_t num_scale_elems, const float eps,
     const float min_8bit, const float max_8bit) {
   static_assert(GROUP_SIZE == 128, "fast path supports GROUP_SIZE==128");
   constexpr int THREADS_PER_GROUP = 8;
   constexpr int VEC_SIZE = 32 / sizeof(T);  // 16 for bf16/fp16
   static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE,
                 "GROUP_SIZE must equal THREADS_PER_GROUP * VEC_SIZE");
+  // Each group's 8 threads must live in a single warp octet so the
+  // 0xffu << (threadIdx.x & 24u) shuffle mask selects exactly the lanes
+  // that share a group. Requires 32 % THREADS_PER_GROUP == 0 and the host
+  // to launch num_threads as a multiple of THREADS_PER_GROUP (which it does
+  // via num_threads = groups_per_block * THREADS_PER_GROUP).
+  static_assert(32 % THREADS_PER_GROUP == 0,
+                "THREADS_PER_GROUP must divide warp size for the shuffle "
+                "mask to be valid");
 
   const int local_group_id = threadIdx.x / THREADS_PER_GROUP;
   const int lane_id = threadIdx.x % THREADS_PER_GROUP;
@@ -279,7 +287,9 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   // loads. nvcc keeps these as 2x LDG.E.128 on sm_100; the per-thread cost
   // is dominated by HBM bandwidth at large MN, so a fused 256-bit load via
   // inline PTX gave no measurable speedup.
-  T regs[VEC_SIZE];
+  // alignas(16) is required so the uint4* reinterpret_cast below is
+  // well-defined for T == bf16/fp16 (default alignof is 2).
+  alignas(16) T regs[VEC_SIZE];
   float local_absmax = eps;
   if (is_valid_group) {
     const T* group_input =
@@ -303,15 +313,6 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
 
-  // Bit-twiddle UE8M0 scale.
-  // Mirrors the existing kernel's ComputeGroupScale exactly:
-  //   local_absmax already == max(eps_param, max_i |x_i|)
-  //   y_s = local_absmax / max_8bit;
-  //   y_s = exp2f(ceilf(log2f(fmaxf(y_s, 1e-10f))));   <-- NOTE: hardcoded
-  //   1e-10f exp_byte = (__float_as_uint(y_s) >> 23) & 0xff;
-  // The inner clamp uses the literal 1e-10f, NOT the eps parameter, to
-  // preserve bit-exact behavior for all-zero inputs (where eps_param/max_8bit
-  // < 1e-10 and would otherwise produce a different exponent).
   float y_s = local_absmax / max_8bit;
   y_s = fmaxf(y_s, 1e-10f);
   uint32_t bits = __float_as_uint(y_s);
@@ -405,7 +406,8 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
   STD_TORCH_CHECK(output_q.is_contiguous());
 
   const int64_t k = input.size(-1);
-  STD_TORCH_CHECK(k % group_size == 0);
+  STD_TORCH_CHECK(k % group_size == 0, "input last dim k=", k,
+                  " is not divisible by group_size=", group_size, ".");
 
   const int64_t mn = input.numel() / k;
   const int64_t groups_per_row = k / group_size;
@@ -423,12 +425,19 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
   const int64_t output_q_mn_extent =
       output_q_mn_actual < tma_aligned_mn ? output_q_mn_actual : tma_aligned_mn;
 
-  STD_TORCH_CHECK(output_s_packed.scalar_type() ==
-                  torch::headeronly::ScalarType::Int);
+  STD_TORCH_CHECK(
+      output_s_packed.scalar_type() == torch::headeronly::ScalarType::Int,
+      "output_s_packed must be int32 for UE8M0-packed scales.");
   STD_TORCH_CHECK(output_s_packed.size(0) == mn &&
-                  output_s_packed.size(1) == k_num_packed_sfk);
+                      output_s_packed.size(1) == k_num_packed_sfk,
+                  "output_s_packed shape must be [", mn, ", ", k_num_packed_sfk,
+                  "]; got [", output_s_packed.size(0), ", ",
+                  output_s_packed.size(1), "].");
   STD_TORCH_CHECK(output_s_packed.stride(0) == 1 &&
-                  output_s_packed.stride(1) == tma_aligned_mn);
+                      output_s_packed.stride(1) == tma_aligned_mn,
+                  "output_s_packed strides must be [1, ", tma_aligned_mn,
+                  "]; got [", output_s_packed.stride(0), ", ",
+                  output_s_packed.stride(1), "].");
 
   cudaStream_t stream = get_current_cuda_stream();
 
@@ -439,24 +448,29 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
   const int groups_per_block = GetGroupsPerBlock(num_groups_padded);
 
   auto dst_type = output_q.scalar_type();
-  const int num_blocks = num_groups_padded / groups_per_block;
+  const int64_t num_blocks = num_groups_padded / groups_per_block;
   const int num_threads = groups_per_block * THREADS_PER_GROUP;
+  // CUDA caps grid.x at 2^31 - 1; this fits any realistic shape but guard
+  // against pathological inputs.
+  STD_TORCH_CHECK(num_blocks <= static_cast<int64_t>(INT32_MAX),
+                  "per_token_group_quant_8bit_packed grid too large: ",
+                  num_blocks, " blocks (max ", INT32_MAX, ").");
 
 #define LAUNCH_REG_KERNEL(T, DST_DTYPE)                                   \
   do {                                                                    \
-    dim3 grid(num_blocks);                                                \
+    dim3 grid(static_cast<unsigned int>(num_blocks));                     \
     dim3 block(num_threads);                                              \
     per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128>  \
         <<<grid, block, 0, stream>>>(                                     \
             static_cast<const T*>(input.data_ptr()), output_q.data_ptr(), \
             reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),  \
-            static_cast<int>(num_groups_padded), groups_per_block,        \
+            num_groups_padded, groups_per_block,                          \
             static_cast<int>(padded_groups_per_row),                      \
             static_cast<int>(groups_per_row), static_cast<int>(mn),       \
             static_cast<int>(output_q_mn_extent),                         \
-            static_cast<int>(tma_aligned_mn),                             \
-            static_cast<int>(num_scale_elems), static_cast<float>(eps),   \
-            static_cast<float>(min_8bit), static_cast<float>(max_8bit));  \
+            static_cast<int>(tma_aligned_mn), num_scale_elems,            \
+            static_cast<float>(eps), static_cast<float>(min_8bit),        \
+            static_cast<float>(max_8bit));                                \
   } while (0)
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
