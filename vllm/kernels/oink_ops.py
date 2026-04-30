@@ -21,8 +21,6 @@ OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
 
 
 def has_oink_op(name: str) -> bool:
-    print(f"{OINK_AVAILABLE=}")
-    print(f"{hasattr(torch.ops.oink, name)=}")
     """Check if a specific oink op is registered."""
     return OINK_AVAILABLE and hasattr(torch.ops.oink, name)
 
@@ -99,7 +97,8 @@ oink_add_rms_supported = (
     and _is_oink_stride_compatible_2d(x.view(-1, x.shape[-1]))
     # residual must have 2d-compatible strides and match x shape/dtype
     and x.dtype == x_residual.dtype
-    and x.shape == x_residual.shape  # implies _can_view_as_2d(x_residual)
+    and x.shape == x_residual.shape
+    and _can_view_as_2d(x_residual)
     and _is_oink_stride_compatible_2d(x_residual.view(-1, x_residual.shape[-1]))
 )
 """

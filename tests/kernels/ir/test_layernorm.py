@@ -156,6 +156,7 @@ def test_fused_add_rms_norm_registration():
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "fused_add_rms_norm"),
+        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {

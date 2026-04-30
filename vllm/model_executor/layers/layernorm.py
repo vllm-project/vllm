@@ -9,6 +9,7 @@ import torch.nn.functional as F
 # Import kernels
 import vllm.kernels  # noqa: F401
 from vllm import envs, ir
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
@@ -64,6 +65,20 @@ class RMSNorm(CustomOp):
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
 
+        # Do not pass identity weight to native implementation (causes issue on TPU).
+        # Other implementations require weight to be passed even if all ones.
+        # Cheat and predict if native will be dispatched to:
+        #  1) if native is first in priority list
+        #  2) if variance_size_override is given (only supported by native impl)
+        # TODO(luka): address weight passing inconsistency:
+        # https://github.com/vllm-project/vllm/issues/39370
+        priority = get_current_vllm_config().kernel_config.ir_op_priority
+        var_override = self.variance_size_override is not None
+        native_rms_norm = priority.rms_norm[0] == "native" or var_override
+        native_add_rms_norm = priority.fused_add_rms_norm[0] == "native" or var_override
+        self.pass_weight = self.has_weight or not native_rms_norm
+        self.pass_weight_add = self.has_weight or not native_add_rms_norm
+
     def forward_native(
         self,
         x: torch.Tensor,
@@ -71,10 +86,9 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
-            # TODO(luka): address the weight=None passing issue more generally
             return ir.ops.rms_norm(
                 x,
-                self.weight.data if self.has_weight else None,
+                self.weight.data if self.pass_weight else None,
                 self.variance_epsilon,
                 self.variance_size_override,
             )
@@ -82,7 +96,7 @@ class RMSNorm(CustomOp):
             return ir.ops.fused_add_rms_norm.maybe_inplace(
                 x,
                 residual,
-                self.weight.data,
+                self.weight.data if self.pass_weight_add else None,
                 self.variance_epsilon,
                 self.variance_size_override,
             )
@@ -92,9 +106,13 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if residual is None and envs.VLLM_BATCH_INVARIANT:
-            assert self.variance_size_override is None
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and residual is None
+            and self.variance_size_override is None
+        ):
             return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
+
         return self.forward_native(x, residual)
 
     def forward_xpu(
