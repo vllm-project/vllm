@@ -179,10 +179,8 @@ class SpecDecodingProm:
         )
 
         assert speculative_config is not None
-        # Per-position acceptance metrics track target-side verification
-        # positions, which may be smaller than the draft length for DFlash.
         num_spec_tokens = (
-            speculative_config.num_target_verify_tokens
+            speculative_config.num_speculative_tokens
             if self.spec_decoding_enabled
             else 0
         )

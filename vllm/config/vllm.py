@@ -484,15 +484,6 @@ class VllmConfig:
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None
-            and self.speculative_config.num_target_verify_tokens is not None
-        ):
-            return self.speculative_config.num_target_verify_tokens
-        return 0
-
-    @property
-    def num_draft_speculative_tokens(self) -> int:
-        if (
-            self.speculative_config is not None
             and self.speculative_config.num_speculative_tokens is not None
         ):
             return self.speculative_config.num_speculative_tokens
@@ -1569,8 +1560,11 @@ class VllmConfig:
             )
             if max_cudagraph_capture_size is None:
                 decode_query_len = 1
-                if self.num_speculative_tokens:
-                    decode_query_len += self.num_speculative_tokens
+                if (
+                    self.speculative_config
+                    and self.speculative_config.num_speculative_tokens
+                ):
+                    decode_query_len += self.speculative_config.num_speculative_tokens
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
                 )

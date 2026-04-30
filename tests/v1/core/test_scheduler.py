@@ -1039,34 +1039,6 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
 
 
-def test_scheduler_clips_draft_tokens_to_target_verify_limit():
-    scheduler = create_scheduler(
-        num_speculative_tokens=4,
-        num_target_verify_tokens=2,
-    )
-    req = create_requests(num_requests=1, num_tokens=1)[0]
-    scheduler.add_request(req)
-
-    output = scheduler.schedule()
-    model_runner_output = ModelRunnerOutput(
-        req_ids=[req.request_id],
-        req_id_to_index={req.request_id: 0},
-        sampled_token_ids=[[100]],
-        logprobs=None,
-        prompt_logprobs_dict={},
-    )
-    scheduler.update_from_output(output, model_runner_output)
-
-    scheduler.update_draft_token_ids(
-        DraftTokenIds([req.request_id], [[1, 2, 3, 4]])
-    )
-    assert req.spec_token_ids == [1, 2]
-
-    output = scheduler.schedule()
-    assert output.num_scheduled_tokens[req.request_id] == 3
-    assert output.scheduled_spec_decode_tokens[req.request_id] == [1, 2]
-
-
 def test_scheduler_stats_waiting_queues():
     """Test that scheduler stats correctly report waiting and skipped_waiting queues."""
     # Create scheduler with limited capacity so we can have waiting requests

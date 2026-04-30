@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -77,21 +76,6 @@ def _create_vllm_config(
 
 
 class TestCudagraphDispatcher:
-    def test_uses_target_verify_tokens_for_uniform_decode_query_len(self):
-        comp_config = CompilationConfig(
-            cudagraph_mode="FULL_DECODE_ONLY",
-            cudagraph_capture_sizes=[1, 8],
-        )
-        config = _create_vllm_config(comp_config)
-        config.speculative_config = SimpleNamespace(
-            num_speculative_tokens=4,
-            num_target_verify_tokens=2,
-        )
-
-        dispatcher = CudagraphDispatcher(config)
-
-        assert dispatcher.uniform_decode_query_len == 3
-
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,lora_config",
         [

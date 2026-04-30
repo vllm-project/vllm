@@ -593,11 +593,9 @@ class GPUModelRunner(
             )
 
         self.num_spec_tokens = 0
-        self.num_draft_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
         if self.speculative_config:
-            self.num_spec_tokens = self.speculative_config.num_target_verify_tokens
-            self.num_draft_spec_tokens = self.speculative_config.num_speculative_tokens
+            self.num_spec_tokens = self.speculative_config.num_speculative_tokens
             draft_config = self.speculative_config.draft_model_config
             if draft_config is not None and draft_config.max_model_len is not None:
                 self.effective_drafter_max_model_len = draft_config.max_model_len
@@ -843,12 +841,12 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
-        if self.num_draft_spec_tokens:
+        if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
             self.num_accepted_tokens_event = torch.Event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
-                (self.max_num_reqs, self.num_draft_spec_tokens),
+                (self.max_num_reqs, self.num_spec_tokens),
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory,
@@ -1702,7 +1700,7 @@ class GPUModelRunner(
             spec_flattened_indices.extend(
                 range(flattened_index - draft_len + 1, flattened_index + 1)
             )
-            start = prev_index * self.num_draft_spec_tokens
+            start = prev_index * self.num_spec_tokens
             # prev_draft_token_indices is used to find which draft_tokens_id
             # should be copied to input_ids
             # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
@@ -4308,8 +4306,7 @@ class GPUModelRunner(
         if spec_config is not None:
             # Decide whether to run the drafter or zero out draft tokens.
             input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len
-                + self.num_draft_spec_tokens
+                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
             use_gpu_toks = (
@@ -4377,7 +4374,7 @@ class GPUModelRunner(
                 # state and logprobs for sequences near max_model_len.
                 self._draft_token_ids = torch.zeros(
                     1, device=self.device, dtype=torch.int32
-                ).expand(len(self.input_batch.req_ids), self.num_draft_spec_tokens)
+                ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
                 self._draft_probs = None
                 self._draft_prob_req_ids = None
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
@@ -4510,7 +4507,7 @@ class GPUModelRunner(
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if not self.num_draft_spec_tokens or not self._draft_token_req_ids:
+        if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
         return DraftTokenIds(req_ids, draft_token_ids)

@@ -116,12 +116,7 @@ class SpecDecodeBaseProposer:
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        # Use int32 to match GPU `self.arange` (created below with
-        # dtype=torch.int32). Indptr buffers consumed by FlashInfer plan()
-        # are read as int32 host memory; passing an int64 view of this
-        # array via `torch.from_numpy(...)` made flashinfer's scheduler
-        # reinterpret the bytes and trip
-        # `qo_indptr[i+1] - qo_indptr[i] should be non-negative`.
+        # FlashInfer plan() needs int32 indptr buffers.
         self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
         # Can be specialized by methods like DFlash to reduce the limit

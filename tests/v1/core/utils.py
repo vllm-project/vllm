@@ -52,7 +52,6 @@ def create_scheduler(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
-    num_target_verify_tokens: int | None = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
@@ -122,22 +121,9 @@ def create_scheduler(
 
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
-        if (
-            num_target_verify_tokens is not None
-            and num_target_verify_tokens != num_speculative_tokens
-        ):
-            # Mismatched draft/verify tokens are only valid for DFlash.
-            speculative_config = SpeculativeConfig.model_construct(
-                method="dflash",
-                num_speculative_tokens=num_speculative_tokens,
-                num_target_verify_tokens=num_target_verify_tokens,
-            )
-        else:
-            speculative_config = SpeculativeConfig(
-                model="ngram",
-                num_speculative_tokens=num_speculative_tokens,
-                num_target_verify_tokens=num_target_verify_tokens,
-            )
+        speculative_config = SpeculativeConfig(
+            model="ngram", num_speculative_tokens=num_speculative_tokens
+        )
 
     ec_transfer_config = (
         ECTransferConfig(
