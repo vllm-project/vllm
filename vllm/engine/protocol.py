@@ -112,7 +112,6 @@ class EngineClient(ABC):
         self,
         request_id: str,
         kv_transfer_params: dict[str, Any],
-        reason: str,
         *,
         data_parallel_rank: int | None = None,
     ) -> None:

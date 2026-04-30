@@ -235,6 +235,15 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_chat_completion(request, raw_request), request, raw_request
+        )
+
+    async def _create_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -245,34 +254,19 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
             )
+        result = await self.render_chat_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        conversation, engine_inputs = result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
         )
+
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
-
-        try:
-            result = await self.render_chat_request(request)
-        except Exception as e:
-            await self._notify_kv_transfer_request_rejected(
-                request_id,
-                request.kv_transfer_params,
-                str(e),
-                raw_request,
-            )
-            raise
-        if isinstance(result, ErrorResponse):
-            await self._notify_kv_transfer_request_rejected(
-                request_id,
-                request.kv_transfer_params,
-                result.error.message,
-                raw_request,
-            )
-            return result
-
-        conversation, engine_inputs = result
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 

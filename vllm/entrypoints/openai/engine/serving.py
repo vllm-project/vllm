@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
@@ -118,6 +118,7 @@ AnyResponse: TypeAlias = (
 )
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
+_T = TypeVar("_T")
 
 
 @dataclass(kw_only=True)
@@ -616,29 +617,39 @@ class OpenAIServing:
         except ValueError:
             return None
 
-    async def _notify_kv_transfer_request_rejected(
+    async def _with_kv_transfer_rejection_cleanup(
         self,
-        request_id: str,
-        kv_transfer_params: dict[str, Any] | None,
-        reason: str,
-        raw_request: Request | None = None,
-    ) -> None:
+        awaitable: Awaitable[_T],
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> _T:
+        """Wrap a `create_*` coroutine so that, if it raises or returns an
+        ErrorResponse (i.e. the request never reached the engine), the KV
+        connector is notified to free any pinned remote-prefill blocks."""
+        kv_transfer_params = request.kv_transfer_params
         if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
-            return
+            return await awaitable
 
+        notify = True
         try:
-            await self.engine_client.notify_kv_transfer_request_rejected(
-                request_id,
-                kv_transfer_params,
-                reason,
-                data_parallel_rank=self._get_data_parallel_rank(raw_request),
-            )
-        except Exception:
-            logger.warning(
-                "Failed to notify KV connector about rejected request %s",
-                request_id,
-                exc_info=True,
-            )
+            result = await awaitable
+            if not isinstance(result, ErrorResponse):
+                notify = False
+            return result
+        finally:
+            if notify:
+                try:
+                    await self.engine_client.notify_kv_transfer_request_rejected(
+                        request.request_id,
+                        kv_transfer_params,
+                        data_parallel_rank=self._get_data_parallel_rank(raw_request),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to notify KV connector about rejected request %s",
+                        request.request_id,
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _parse_tool_calls_from_content(
