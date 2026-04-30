@@ -5,9 +5,6 @@ WORKDIR /workspace/
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
 
-RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list
-
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl \
@@ -26,8 +23,20 @@ RUN apt clean && apt-get update -y && \
     python3.12-dev \
     python3-pip
 
-RUN apt update && apt upgrade -y && \
-    apt install -y intel-oneapi-compiler-dpcpp-cpp-2025.3
+# Add oneAPI repo, pin oneAPI to 2025.3, then install pinned packages in one layer.
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    printf '%s\n' \
+    'Package: intel-oneapi-* intel-deep-learning-essentials* intel-pti*' \
+    'Pin: version 2025.3*' \
+    'Pin-Priority: 1001' \
+    > /etc/apt/preferences.d/oneapi-2025.3.pref && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    intel-oneapi-compiler-dpcpp-cpp-2025.3 \
+    intel-oneapi-mkl-devel-2025.3 \
+    intel-oneapi-dnnl-devel-2025.3 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install UMD
 RUN mkdir neo && \
