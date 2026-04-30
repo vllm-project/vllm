@@ -95,7 +95,7 @@ def backend_to_kernel_cls(
         return TrtLlmBf16Experts
 
     elif backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
