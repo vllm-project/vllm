@@ -1563,9 +1563,10 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
-        if self.pending_outputs:
-            for client_index, pending_outputs in self.pending_outputs.items():
-                outputs[client_index].extend(pending_outputs)
+        pending_outputs = getattr(self, "pending_outputs", None)
+        if pending_outputs:
+            for client_index, pending in pending_outputs.items():
+                outputs[client_index].extend(pending)
             self.pending_outputs = defaultdict(list)
 
         # KV Connector: update state for finished KV Transfers.
