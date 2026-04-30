@@ -217,6 +217,7 @@ async def send_request(
     min_tokens: int | None = None,
     max_tokens: int | None = None,
     timeout_sec: int = 120,
+    conversation_id: str | None = None,
 ) -> ServerResponse:
     payload = {
         "model": model,
@@ -224,6 +225,9 @@ async def send_request(
         "seed": 0,
         "temperature": 0.0,
     }
+
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
 
     if stream:
         payload["stream"] = True
@@ -419,6 +423,7 @@ async def send_turn(
         min_tokens,
         max_tokens,
         req_args.timeout_sec,
+        conversation_id=conv_id,
     )
 
     if response.valid is False:

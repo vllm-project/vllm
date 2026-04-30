@@ -851,7 +851,7 @@ def _rocm_aiter_per_token_quant_impl(
     assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     out_shape = x.shape
-    out = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
     if scale is None:
         scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     dynamic_per_token_scaled_quant(
@@ -871,7 +871,7 @@ def _rocm_aiter_per_token_quant_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_shape = x.shape
     return (
-        torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(x.shape, dtype=quant_dtype, device=x.device),
         torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
     )
 
@@ -1433,6 +1433,12 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_tgemm_enabled(cls) -> bool:
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls.is_linear_enabled() and on_gfx950()
+
+    @classmethod
     def initialize_aiter_allreduce(
         cls, group: ProcessGroup, device: torch.device
     ) -> None:
