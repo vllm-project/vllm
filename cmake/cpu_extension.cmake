@@ -333,7 +333,11 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
     target_link_libraries(dnnl_ext dnnl torch)
-    target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
+    if (ENABLE_X86_ISA)
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
+    else()
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
+    endif()
     list(APPEND LIBS dnnl_ext)
 
 
