@@ -25,7 +25,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRTLLM_RAGGED_PREFILL"
+        return "TRTLLM_RAGGED"
 
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:

@@ -54,7 +54,7 @@ class AttentionConfig:
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN, FLASHINFER, TRTLLM_RAGGED.
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED.
     This option supersedes use_trtllm_ragged_deepseek_prefill
     and disable_flashinfer_prefill which are deprecated."""
 

@@ -29,7 +29,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_PREFILL"
+        return "FLASH_ATTN"
 
     @classmethod
     def is_available(cls) -> bool:

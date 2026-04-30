@@ -491,11 +491,8 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
         "FLASHINFER": {
             "description": "FlashInfer CUTLASS backend",
         },
-        "CUDNN": {
-            "description": "cuDNN-based attention",
-        },
         "FLASH_ATTN": {
-            "description": "FlashAttention varlen (FA2/FA3)",
+            "description": "FlashAttention varlen (FA2/FA3/FA4)",
         },
     }
 
@@ -520,7 +517,7 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
         if backend_info.get("requires_r1_dims"):
             notes = "DeepSeek R1 dims only"
         elif backend_name == "FLASH_ATTN":
-            notes = "FA3 on SM90, FA2 otherwise"
+            notes = "FA4 on SM100+, FA3 on SM90, FA2 otherwise"
 
         prefill_backends.append(
             {

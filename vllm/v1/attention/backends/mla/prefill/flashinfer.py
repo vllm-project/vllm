@@ -36,7 +36,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_PREFILL"
+        return "FLASHINFER"
 
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:

@@ -1328,14 +1328,14 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
 
 @functools.cache
 def backend_supports_prefill_query_quantization() -> bool:
-    """Check if the selected MLA backend supports prefill query quantization.
+    """Check if the selected MLA prefill backend supports query quantization.
 
     Currently supported backends:
-    - FlashInfer prefill
-    - TRT-LLM ragged DeepSeek prefill
+    - FlashInfer
+    - TRT-LLM Ragged
 
     Not supported:
-    - FlashAttention
+    - FlashAttention (FA3/FA4)
     - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
     # FP8 prefill query quantization requires GB200 (device capability 100)
@@ -1349,8 +1349,8 @@ def backend_supports_prefill_query_quantization() -> bool:
     vllm_config = get_current_vllm_config()
     backend_cls = get_mla_prefill_backend(vllm_config)
     return backend_cls.get_name() in (
-        "FLASHINFER_PREFILL",
-        "TRTLLM_RAGGED_PREFILL",
+        "FLASHINFER",
+        "TRTLLM_RAGGED",
     )
 
 

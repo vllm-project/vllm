@@ -199,9 +199,9 @@ hardware and configuration.
 
 | Backend | Description | Dtypes | Compute Cap. | Notes |
 | ------- | ----------- | ------ | ------------ | ----- |
-| `FLASH_ATTN_PREFILL`‡ | FlashAttention varlen (FA2/FA3) | fp16, bf16 | Any | FA3 on SM90, FA2 otherwise |
-| `TRTLLM_RAGGED_PREFILL` | TensorRT-LLM ragged attention | fp16, bf16 | 10.x | DeepSeek R1 dims only |
-| `FLASHINFER_PREFILL` | FlashInfer CUTLASS backend | fp16, bf16 | 10.x | DeepSeek R1 dims only |
+| `FLASH_ATTN`‡ | FlashAttention varlen (FA2/FA3/FA4) | fp16, bf16 | Any | FA4 on SM100+, FA3 on SM90, FA2 otherwise |
+| `TRTLLM_RAGGED` | TensorRT-LLM ragged attention | fp16, bf16 | 10.x | DeepSeek R1 dims only |
+| `FLASHINFER` | FlashInfer CUTLASS backend | fp16, bf16 | 10.x | DeepSeek R1 dims only |
 
 > **‡** TRT-LLM Ragged is the default on Blackwell (SM100).
 > On other GPUs, FlashAttention is used as the default.
