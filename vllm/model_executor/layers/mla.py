@@ -64,6 +64,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -87,6 +88,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
+        # Whether to skip top-k token selection computation in this layer.
+        # When True, the indexer will not be called, and the layer will reuse
+        # the topk_tokens buffer written by a previous layer in the same pass.
+        # Refer: https://arxiv.org/abs/2603.12201 for more details.
+        self.skip_topk = skip_topk
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -159,10 +165,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(
-                hidden_states, q_c, positions, self.indexer_rope_emb
-            )
+        if self.indexer and self.is_sparse and not self.skip_topk:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling

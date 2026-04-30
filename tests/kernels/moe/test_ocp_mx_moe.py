@@ -548,7 +548,9 @@ def test_trtllm_gen_mxfp4_fused_moe(
         hidden_states, hidden_states_scale = mxfp8_quantize(
             hidden_states, is_sf_swizzled_layout=False
         )
-        hidden_states_scale = hidden_states_scale.view(torch.float8_e4m3fn).reshape(-1)
+        hidden_states_scale = hidden_states_scale.view(torch.float8_e4m3fn).reshape(
+            *hidden_states.shape[:-1], -1
+        )
     else:
         hidden_states_scale = None
 
@@ -595,20 +597,20 @@ def test_trtllm_gen_mxfp4_fused_moe(
     if beta is not None:
         beta = torch.full((num_experts,), beta, device=hidden_states.device)
     tg_result = tg_mxfp4_moe(
-        router_logits,
-        topk,
-        num_experts,
-        intermediate_size,
-        hidden_size,
-        hidden_states,
-        hidden_states_scale,
-        w13,
-        w13_scale,
-        bias13,
-        w2,
-        w2_scale,
-        bias2,
-        act_type,
+        router_logits=router_logits,
+        topk=topk,
+        num_experts=num_experts,
+        intermediate_size=intermediate_size,
+        hidden_size=hidden_size,
+        hidden_states=hidden_states,
+        hidden_states_scale=hidden_states_scale,
+        w13_weight=w13,
+        w13_weight_scale=w13_scale,
+        w13_bias=bias13,
+        w2_weight=w2,
+        w2_weight_scale=w2_scale,
+        w2_bias=bias2,
+        act_type=act_type,
         alpha=alpha,
         beta=beta,
         limit=limit,
