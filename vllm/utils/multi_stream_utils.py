@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
+
 
 class AuxStreamType(Enum):
     Attention = 1
@@ -33,6 +35,12 @@ def maybe_execute_in_parallel(
     This design follows TensorRT-LLM's maybe_execute_in_parallel pattern
     (tensorrt_llm/_torch/modules/multi_stream_utils.py).
 
+    Setting ``VLLM_DETERMINISTIC_AUX_STREAM=1`` forces sequential execution
+    even when an ``aux_stream`` is supplied. Cross-node TP runs (e.g. multi-node
+    TP=16 for DeepSeek V4) observed bit-level non-determinism caused by
+    aux-stream completion order; the env-var lets operators trade a small
+    concurrent-throughput cost for reproducible logits.
+
     Args:
         fn0: Callable for the default stream.
         fn1: Callable for the auxiliary stream.
@@ -44,6 +52,8 @@ def maybe_execute_in_parallel(
     Returns:
         Tuple of (fn0_result, fn1_result).
     """
+    if envs.VLLM_DETERMINISTIC_AUX_STREAM:
+        aux_stream = None
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
@@ -87,10 +97,15 @@ def execute_in_parallel(
         aux_streams: Per-aux CUDA streams. Length must match aux_fns.
             Multi-stream is disabled when None.
 
+    Setting ``VLLM_DETERMINISTIC_AUX_STREAM=1`` forces sequential execution
+    even when ``aux_streams`` is supplied (see ``maybe_execute_in_parallel``).
+
     Returns:
         Tuple of (default_result, aux_results) where aux_results[i] is the
         result of aux_fns[i] (or None when skipped).
     """
+    if envs.VLLM_DETERMINISTIC_AUX_STREAM:
+        aux_streams = None
     aux_results: list[Any]
     if aux_streams is None:
         default_result = default_fn()

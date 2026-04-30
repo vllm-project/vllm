@@ -40,6 +40,8 @@ from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
+    _maybe_pad_deepseek_v4_routed_experts_weight,
+    _maybe_pad_deepseek_v4_shared_experts_weight,
     hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
@@ -274,6 +276,28 @@ class DeepSeekV4MTP(nn.Module):
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
+    def _maybe_pad_shared_experts_weight(
+        self, name: str, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        return _maybe_pad_deepseek_v4_shared_experts_weight(
+            self.config,
+            self.quant_config,
+            name,
+            loaded_weight,
+            get_tensor_model_parallel_world_size(),
+        )
+
+    def _maybe_pad_routed_experts_weight(
+        self, name: str, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        return _maybe_pad_deepseek_v4_routed_experts_weight(
+            self.config,
+            self.quant_config,
+            name,
+            loaded_weight,
+            get_tensor_model_parallel_world_size(),
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Weight name remapping for checkpoint compatibility.
         # Maps checkpoint weight paths to model parameter paths.
@@ -375,6 +399,9 @@ class DeepSeekV4MTP(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                loaded_weight = self._maybe_pad_shared_experts_weight(
+                    name, loaded_weight
+                )
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -396,6 +423,9 @@ class DeepSeekV4MTP(nn.Module):
                         if weight_name not in name:
                             continue
                         name_mapped = name.replace(weight_name, param_name)
+                        loaded_weight = self._maybe_pad_routed_experts_weight(
+                            name, loaded_weight
+                        )
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or not
                         # here since otherwise we may skip experts with other
@@ -427,6 +457,9 @@ class DeepSeekV4MTP(nn.Module):
                         name = name.replace(
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
+                    loaded_weight = self._maybe_pad_shared_experts_weight(
+                        name, loaded_weight
+                    )
                     if name.endswith(".ffn.gate.bias"):
                         name = name.replace(".bias", ".e_score_correction_bias")
                     param = params_dict[name]

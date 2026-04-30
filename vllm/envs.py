@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
+    VLLM_DETERMINISTIC_AUX_STREAM: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -1250,6 +1251,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
+    ),
+    # When set to 1, force `multi_stream_utils.maybe_execute_in_parallel` and
+    # `execute_in_parallel` to run on a single stream. Removes a non-determinism
+    # source observed under cross-node TP (e.g. DeepSeek V4 attn_gemm parallel
+    # path on multi-node TP=16) at a small concurrent-throughput cost.
+    "VLLM_DETERMINISTIC_AUX_STREAM": lambda: bool(
+        int(os.getenv("VLLM_DETERMINISTIC_AUX_STREAM", "0"))
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
