@@ -148,6 +148,10 @@ class RequestTracker:
     allocated_block_ids: list[int]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
+    # Snapshot of the prefill range length at tracker creation time.
+    # For a fresh request this is len(prompt). For a resumed-from-preemption
+    # request it includes previously-generated tokens, which are re-prefilled.
+    prefill_end_tokens: int = 0
 
     def update(
         self,
