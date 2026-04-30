@@ -8,7 +8,7 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,6 +32,11 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
+from vllm.v1.attention.ops.rocm_split_k_decode import (
+    MIN_LAUNCH_GRID_SIZE_2D,
+    NUM_PAR_SOFTMAX_SEGMENTS,
+    paged_decode_split_k,
+)
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
@@ -71,6 +77,15 @@ class RocmAttentionMetadata:
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
+    # Split-K decode workspaces (RDNA3 / small-batch decode acceleration).
+    # Pre-allocated by the builder; consumed by ``paged_decode_split_k``.
+    # ``None`` disables the 3-D path (fall back to 2-D in
+    # ``chunked_prefill_paged_decode``).
+    seq_threshold_3D: int = 0
+    softmax_segm_output: torch.Tensor | None = None
+    softmax_segm_max: torch.Tensor | None = None
+    softmax_segm_expsum: torch.Tensor | None = None
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
@@ -92,6 +107,50 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        # Split-K decode workspace.  Profitable when num_seqs * num_kv_heads
+        # is below the GPU's CU count -- the 3-D kernel adds a K-direction
+        # parallelism dim so small-batch decode saturates the device on
+        # RDNA3 (96 CUs).  Threshold mirrors TRITON_ATTN.
+        self.seq_threshold_3D = max(
+            1, MIN_LAUNCH_GRID_SIZE_2D // max(self.num_heads_kv, 1)
+        )
+
+        self.decode_cudagraph_enabled = (
+            vllm_config.compilation_config.cudagraph_mode
+            in (
+                CUDAGraphMode.FULL_AND_PIECEWISE,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+                CUDAGraphMode.FULL,
+            )
+        )
+        if self.decode_cudagraph_enabled:
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+            if capture_sizes:
+                # Snap to the nearest captured batch size so a single graph
+                # covers the 3-D path without re-capture.
+                self.seq_threshold_3D = min(
+                    capture_sizes,
+                    key=lambda x: abs(x - self.seq_threshold_3D),
+                )
+
+        headdim_padded = next_power_of_2(self.headdim)
+        ns = NUM_PAR_SOFTMAX_SEGMENTS
+        self.softmax_segm_output = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, ns, headdim_padded),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_max = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, ns),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_expsum = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, ns),
+            dtype=torch.float32,
+            device=device,
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -157,6 +216,10 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
+            seq_threshold_3D=self.seq_threshold_3D,
+            softmax_segm_output=self.softmax_segm_output,
+            softmax_segm_max=self.softmax_segm_max,
+            softmax_segm_expsum=self.softmax_segm_expsum,
         )
         return attn_metadata
 
@@ -423,6 +486,37 @@ class RocmAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
+
+        # Split-K decode fast path: when batch is small enough that the
+        # default 2-D grid under-utilizes the GPU, use the 3-D paged kernel
+        # which adds a K-segment dim and finishes with an online-softmax
+        # merge.  Decode-only (qlen==1), causal, no quant/alibi/SW/sinks/FP8.
+        num_seqs = seqused_k.shape[0]
+        if (
+            max_seqlen_q == 1
+            and attn_metadata.causal
+            and num_seqs <= attn_metadata.seq_threshold_3D
+            and attn_metadata.softmax_segm_output is not None
+            and not is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.alibi_slopes is None
+            and self.sliding_window == (-1, -1)
+            and self.sinks is None
+            and output_scale is None
+            and self.logits_soft_cap == 0
+        ):
+            paged_decode_split_k(
+                output=output[:num_actual_tokens],
+                query=query[:num_actual_tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_table=block_table,
+                seq_lens=seqused_k,
+                scale=self.scale,
+                softmax_segm_output=attn_metadata.softmax_segm_output,
+                softmax_segm_max=attn_metadata.softmax_segm_max,
+                softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+            )
+            return output
 
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(
