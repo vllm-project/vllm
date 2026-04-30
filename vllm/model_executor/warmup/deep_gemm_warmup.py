@@ -170,7 +170,7 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     ):
         return False
 
-    moe_kernel = getattr(module.quant_method, "moe_kernel", None)
+    moe_kernel = getattr(quant_method, "moe_kernel", None)
     if moe_kernel is None:
         return False
 

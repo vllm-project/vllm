@@ -386,7 +386,7 @@ class MoERunner(MoERunnerInterface):
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
-            states = tensor_model_parallel_all_reduce(states)
+            states = tensor_model_parallel_all_reduce(states.contiguous())
 
         return states
 
@@ -575,12 +575,11 @@ class MoERunner(MoERunnerInterface):
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
-        routed_hidden_dim = hidden_states.shape[-1]
+
         hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
             shared_experts_input,
             hidden_states,
         )
-        hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
 
         result = self._forward_entry(
             hidden_states,
@@ -601,10 +600,6 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
-        if (
-            shared_output is not None or self.routed_output_transform is not None
-        ) and hidden_dim_was_padded:
-            fused_output = fused_output[..., :routed_hidden_dim]
 
         # Remember 40794. Double check tests/lora/test_gpt_oss.py::test_gpt_oss_tp2
         fused_output = fused_output[:, :og_hidden_dim]
