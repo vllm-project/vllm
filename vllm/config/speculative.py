@@ -473,9 +473,7 @@ class SpeculativeConfig:
             text_cfg = getattr(hf_config, "text_config", hf_config)
             n_predict = getattr(text_cfg, "mtp_num_hidden_layers", None)
             hf_config.model_type = "qwen3_5_mtp"
-            hf_config.update(
-                {"n_predict": n_predict, "architectures": ["Qwen3_5MTP"]}
-            )
+            hf_config.update({"n_predict": n_predict, "architectures": ["Qwen3_5MTP"]})
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)

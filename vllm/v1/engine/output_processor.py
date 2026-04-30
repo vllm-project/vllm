@@ -281,8 +281,7 @@ class RequestState:
     ) -> RequestOutput | PoolingRequestOutput | None:
         if spec_decode_active or self._spec_token_mask:
             if not self._spec_token_mask and self.detokenizer is not None:
-                prior = (self.detokenizer.num_output_tokens()
-                         - len(new_token_ids))
+                prior = self.detokenizer.num_output_tokens() - len(new_token_ids)
                 if prior > 0:
                     self._spec_token_mask.extend([False] * prior)
             for i in range(len(new_token_ids)):
@@ -328,7 +327,10 @@ class RequestState:
             )
 
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts,
+            new_token_ids,
+            finish_reason,
+            stop_reason,
+            routed_experts,
             num_spec_accepted,
         )
 
@@ -413,9 +415,9 @@ class RequestState:
         spec_token_mask = None
         if self._spec_token_mask:
             if delta:
-                spec_token_mask = self._spec_token_mask[-len(token_ids):]
+                spec_token_mask = self._spec_token_mask[-len(token_ids) :]
             else:
-                spec_token_mask = list(self._spec_token_mask[:len(token_ids)])
+                spec_token_mask = list(self._spec_token_mask[: len(token_ids)])
 
         return CompletionOutput(
             index=self.request_index,
