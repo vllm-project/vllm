@@ -476,9 +476,14 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
+        from vllm.distributed.device_communicators.xpu_communicator import (
+            XpuCommunicator,
+        )
 
         if self.device_communicator is not None:
-            assert isinstance(self.device_communicator, CudaCommunicator)
+            assert isinstance(self.device_communicator, CudaCommunicator) or isinstance(
+                self.device_communicator, XpuCommunicator
+            )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
