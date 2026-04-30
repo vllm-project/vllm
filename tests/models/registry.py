@@ -1265,7 +1265,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     "QianfanOCRForConditionalGeneration": _HfExamplesInfo(
-        "baidu/QianfanOCR",
+        "baidu/Qianfan-OCR",
     ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
