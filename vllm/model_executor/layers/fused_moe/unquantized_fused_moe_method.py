@@ -48,7 +48,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
         )
-        self.moe_kernel = None
 
     @property
     def is_monolithic(self) -> bool:
@@ -161,13 +160,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_weight=w13,
             w2_weight=w2,
         )
+        # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
         # calls (e.g. RL weight updates that re-trigger
         # process_weights_after_loading) the moe kernel has already been set
         # up and CUDA graphs may have captured the parameter addresses, so
         # we copy the shuffled data into the existing storage instead of
         # re-registering a new Parameter.
-        is_weight_update = self.moe_kernel is not None
+        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
         replace_parameter(layer, "w13_weight", w13_new, prefer_copy=is_weight_update)
         replace_parameter(layer, "w2_weight", w2_new, prefer_copy=is_weight_update)
 
