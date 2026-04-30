@@ -1438,50 +1438,21 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # AITER path
         # TODO: Refactor this to use modular MOE kernel as well.
-        if not self.emulate:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                rocm_aiter_fused_experts,
-            )
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            rocm_aiter_fused_experts,
+        )
 
-            try:
-                return rocm_aiter_fused_experts(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    activation=layer.activation,
-                    quant_config=self.moe_quant_config,
-                    moe_config=layer.moe_config,
-                    expert_map=layer.expert_map,
-                )
-            except RuntimeError as exc:
-                if "Unsupported kernel config for moe heuristic dispatch" not in str(
-                    exc
-                ):
-                    raise
-                logger.warning_once(
-                    "ROCm AITER fused MoE raised "
-                    f"'{exc}' for {self.ocp_mx_scheme}; "
-                    "falling back to emulated fused_experts."
-                )
-                self.use_rocm_aiter_moe = False
-                self.emulate = True
-
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
-        return fused_experts(
+        return rocm_aiter_fused_experts(
             x,
             layer.w13_weight,
             layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
+            moe_config=layer.moe_config,
+            expert_map=layer.expert_map,
         )
 
     def apply_monolithic(
