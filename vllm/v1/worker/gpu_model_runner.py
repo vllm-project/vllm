@@ -4229,6 +4229,16 @@ class GPUModelRunner(
                 spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
+
+            # Skip speculative decoding for DeepSeek-V4 MTP models with batch size > 1
+            # to avoid shared memory broadcast deadlock (issue #41402)
+            mtp_deadlock_avoidance = (
+                hasattr(self.model, "get_mtp_target_hidden_states")
+                and self.input_batch.num_reqs > 1
+                and self.vllm_config.parallel_config.tensor_parallel_size > 1
+            )
+            if mtp_deadlock_avoidance:
+                input_fits_in_drafter = False
             use_gpu_toks = (
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
