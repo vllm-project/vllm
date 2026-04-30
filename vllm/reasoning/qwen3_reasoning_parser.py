@@ -51,6 +51,12 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         self._tool_call_end_tag = "</tool_call>"
         self._tool_call_end_token_id = self.vocab.get(self._tool_call_end_tag)
 
+        # Buffer used by extract_reasoning_streaming to hold back a tentative
+        # <tool_call> until <function=…> lookahead can confirm it is genuine.
+        # None when not buffering; a str (starting with "<tool_call>") when
+        # we are waiting for the next delta to confirm.
+        self._tool_call_pending: str | None = None
+
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
@@ -260,10 +266,63 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         # We use current_token_ids (which already includes the delta) so the
         # check works whether <function=…> arrives in the same delta or the
         # next one.
+        #
+        # The challenge: <tool_call> often lands at the very end of a streaming
+        # chunk, with <function=…> arriving only in the *next* chunk.  A
+        # lookahead at that moment finds no tokens after <tool_call> and returns
+        # False, causing the tag to be emitted as reasoning.  The *following*
+        # chunk then confirms the lookahead, but the tool parser never sees the
+        # required <tool_call> prefix, so it treats <function=…> as plain text.
+        #
+        # Solution: when the lookahead fails while <tool_call> is in the delta,
+        # buffer the tag (and any trailing whitespace in that same delta) instead
+        # of emitting it as reasoning.  Subsequent deltas are appended to the
+        # buffer until lookahead confirms (→ emit as content) or non-whitespace
+        # arrives that cannot lead to <function=…> (→ flush as reasoning).
         if self._tool_call_token_id is not None:
             tc_id = self._tool_call_token_id
             tc_in_delta = tc_id in delta_token_ids
             tc_in_prev = tc_id in previous_token_ids
+
+            # --- Pending-buffer path: a previous delta left <tool_call>
+            # buffered; re-evaluate lookahead with the new token context. ---
+            if self._tool_call_pending is not None:
+                ids = list(current_token_ids)
+                try:
+                    pos = len(ids) - 1 - ids[::-1].index(tc_id)
+                    if self._tool_call_is_genuine_end(ids, pos):
+                        # Lookahead confirmed: emit the full buffered text
+                        # plus the current delta as content so the downstream
+                        # tool parser receives the complete "<tool_call>\n
+                        # <function=…>" sequence it needs.
+                        content = self._tool_call_pending + delta_text
+                        self._tool_call_pending = None
+                        return DeltaMessage(content=content)
+                except ValueError:
+                    pass
+
+                # Lookahead still unconfirmed.  Keep buffering only if the
+                # text accumulated after <tool_call> is still a plausible
+                # prefix of "<function" (the only valid tag that can follow
+                # <tool_call>).  Anything else means it was not a genuine
+                # tool-call opener, so flush immediately as reasoning.
+                after_tc = self._tool_call_pending[len(self._tool_call_tag):]
+                candidate = (after_tc + delta_text).lstrip()
+                func_prefix = "<function"
+                still_viable = (
+                    not candidate                        # still pure whitespace
+                    or func_prefix.startswith(candidate) # candidate is a prefix of "<function"
+                    or candidate.startswith(func_prefix) # candidate already has the full prefix
+                )
+                if still_viable:
+                    self._tool_call_pending += delta_text
+                    return None
+                # Accumulated text diverged from "<function": flush as reasoning.
+                reasoning_buf = self._tool_call_pending + delta_text
+                self._tool_call_pending = None
+                return DeltaMessage(reasoning=reasoning_buf)
+
+            # --- Normal path: <tool_call> arrives in this or a prior delta. ---
             if tc_in_delta or tc_in_prev:
                 ids = list(current_token_ids)
                 try:
@@ -279,13 +338,23 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                                     content=content if content else None,
                                 )
                         else:
-                            # <tool_call> was in previous delta; current delta
-                            # is all content.
+                            # <tool_call> was confirmed in a prior delta;
+                            # current delta is all content.
                             return DeltaMessage(content=delta_text)
                 except ValueError:
                     pass
-                # Lookahead returned False or <function=…> not yet arrived:
-                # treat as reasoning — fall through.
+
+                # Lookahead returned False or <function=…> not yet arrived.
+                if tc_in_delta:
+                    # Buffer <tool_call> (and any text that follows it in this
+                    # delta) rather than emitting it as reasoning.  This lets
+                    # the *next* delta's lookahead confirm or deny the call.
+                    tool_index = delta_text.find(self._tool_call_tag)
+                    if tool_index >= 0:
+                        pre = delta_text[:tool_index]
+                        self._tool_call_pending = delta_text[tool_index:]
+                        return DeltaMessage(reasoning=pre) if pre else None
+                # tc_in_prev=True but lookahead failed: still in reasoning.
 
         # No end token in this delta.
         if not delta_text:
