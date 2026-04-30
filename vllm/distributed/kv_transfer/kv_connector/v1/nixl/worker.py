@@ -1354,6 +1354,7 @@ class NixlConnectorWorker:
         ### (Optional) Register local agent memory regions.
         if (
             plan.local_page_size > plan.remote_page_size
+            and plan.remote_blocks_per_local_block
             and engine_id not in self._gather_read_handles
         ):
             # Gather-read: local page > remote page.  Register local
@@ -2158,16 +2159,22 @@ class NixlConnectorWorker:
         # Get descs ids.  Both calls use the same plan since region counts
         # (len(fa_regions), len(ssm_regions)) are model-determined and
         # identical across engines.
-        if plan.remote_page_size > plan.local_page_size:
-            # Split-read: each remote block → multiple descriptors.
+        if (
+            plan.remote_page_size > plan.local_page_size
+            and plan.local_blocks_per_remote_block
+        ):
+            # Split-read (Gemma4): each remote block → multiple descriptors.
             remote_desc_blocks = (
                 self.dst_num_blocks[dst_engine_id]
                 * plan.remote_page_size
                 // plan.local_page_size
             )
             local_desc_blocks = self.dst_num_blocks[self.engine_id]
-        elif plan.local_page_size > plan.remote_page_size:
-            # Gather-read: each local block → multiple descriptors.
+        elif (
+            plan.local_page_size > plan.remote_page_size
+            and plan.remote_blocks_per_local_block
+        ):
+            # Gather-read (Gemma4): each local block → multiple descriptors.
             remote_desc_blocks = self.dst_num_blocks[dst_engine_id]
             local_desc_blocks = (
                 self.dst_num_blocks[self.engine_id]
