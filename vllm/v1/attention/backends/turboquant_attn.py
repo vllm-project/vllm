@@ -860,8 +860,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Acquire shared decode scratch buffers from WorkspaceManager.
         # Layers execute sequentially so one set of buffers is sufficient.
         # Falls back to kernel-internal allocation if workspace unavailable.
+        # On the MSE-K path with non-pow-2 head_dim, mid_o and output operate
+        # in WHT space at padded_head_dim; sizing the workspace to head_dim
+        # would fail the buffer-fits checks in the launcher every decode and
+        # trigger a fresh torch.empty() per call. Use padded_head_dim except
+        # on the FP8-K path, which never enters WHT space.
         B = query.shape[0]
         D = self.head_size
+        D_buf = D if self.tq_config.key_fp8 else self.tq_config.padded_head_dim
         S = self.max_num_kv_splits
         Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
@@ -869,8 +875,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
             mid_o_buf, output_buf, lse_buf = (
                 current_workspace_manager().get_simultaneous(
-                    ((B, Hq, S, D + 1), torch.float32),
-                    ((B, Hq, D), query.dtype),
+                    ((B, Hq, S, D_buf + 1), torch.float32),
+                    ((B, Hq, D_buf), query.dtype),
                     ((B, Hq), torch.float32),
                 )
             )
