@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import functools
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+
+if TYPE_CHECKING:
+    from vllm.config import AITERConfig
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -1114,37 +1120,26 @@ class rocm_aiter_ops:
     Operations are only available on supported gfx9
     architectures when aiter is installed.
 
-    The class uses environment variables to control which features are enabled,
-    allowing fine-grained control over which AITER optimizations are used.
+    Configuration:
+        AITER operations can be configured via:
+        1. AITERConfig (preferred): Pass via --aiter-config CLI or VllmConfig.aiter_config
+        2. Environment variables (deprecated, kept for backward compatibility):
+           VLLM_ROCM_USE_AITER, VLLM_ROCM_USE_AITER_LINEAR, etc.
 
-    Environment Variables:
-        VLLM_ROCM_USE_AITER: Main toggle for all AITER operations.
-        VLLM_ROCM_USE_AITER_LINEAR: Controls GEMM and quantization ops.
-        VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
-        VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
-        VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
-        VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
-        VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
-        VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
-        VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
-        VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
-        VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
+        The config is initialized from environment variables by default. When
+        VllmConfig is created, call init_from_config() to use config values.
 
     Note:
-        The environment variables are assigned when the module is imported,
-        so you can't change the environment variables after the module is imported.
-        This is done out of performance consideration. Accessing environment variables
-        is expensive as described in issue https://github.com/vllm-project/vllm/issues/17067
-        so we don't want to do it repeatedly, especially in the hot path (the forward pass).
-        You can call the refresh_env_variables() function to reload the env variables
-        after monkey patching the env variables in the unit test.
+        The class variables are initialized once at module import time from
+        environment variables for performance. Call init_from_config() after
+        VllmConfig is available to use config values, or refresh_from_envs()
+        to reload from environment variables (useful for testing).
 
     Check Functions:
         All check functions (is_*_enabled) are decorated with @if_aiter_supported,
         which verifies: (1) platform is ROCm, (2) device arch is gfx9, and
         (3) aiter library is installed. The check function then also verifies
-        the corresponding environment variable is enabled.
+        the corresponding config value is enabled.
         i.e.                                             ___
         is_enabled() == current_platform.is_rocm() and      |     checked by
                         current_platform.is_on_gfx9() and   | @if_aiter_supported
@@ -1168,7 +1163,8 @@ class rocm_aiter_ops:
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
 
-    # Check if the env variable is set
+    # Initialize from environment variables at module import time.
+    # These will be overwritten by init_from_config() when VllmConfig is available.
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
@@ -1177,25 +1173,53 @@ class rocm_aiter_ops:
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
-    # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
-    # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
-    # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
+    # Track whether config has been initialized
+    _config_initialized = False
+
     @classmethod
-    def refresh_env_variables(cls):
+    def init_from_config(cls, aiter_config: AITERConfig) -> None:
+        """Initialize AITER settings from AITERConfig.
+
+        This should be called when VllmConfig is created to use config values
+        instead of environment variables. The config values take precedence
+        over environment variables.
+
+        Args:
+            aiter_config: The AITERConfig from VllmConfig.aiter_config
         """
-        Since the environment variables are assigned when the module is imported,
-        This is a helper function to reload all the env variables from
-        the environment variables.
-        for example, after monkey patching the env variables in the unit test,
-        you can call this function to reload the env variables.
+        from vllm.config import AITERConfig
+
+        if not isinstance(aiter_config, AITERConfig):
+            raise TypeError(f"Expected AITERConfig, got {type(aiter_config).__name__}")
+
+        cls._AITER_ENABLED = aiter_config.enabled
+        cls._LINEAR_ENABLED = aiter_config.linear
+        cls._RMSNORM_ENABLED = aiter_config.rmsnorm
+        cls._FMOE_ENABLED = aiter_config.moe
+        cls._MLA_ENABLED = aiter_config.mla
+        cls._MHA_ENABLED = aiter_config.mha
+        cls._TRITON_UNIFIED_ATTN_ENABLED = aiter_config.unified_attention
+        cls._FP8BMM_ENABLED = aiter_config.fp8bmm
+        cls._FP4BMM_ENABLED = aiter_config.fp4bmm
+        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = aiter_config.fp4_asm_gemm
+        cls._TRITON_ROTARY_EMBED = aiter_config.triton_rope
+        cls._MOE_SHARED_EXPERTS_ENABLED = aiter_config.fusion_shared_experts
+        cls._TRITON_UNQUANT_GEMM = aiter_config.triton_gemm
+        cls._config_initialized = True
+
+    @classmethod
+    def refresh_from_envs(cls) -> None:
+        """Reload all settings from environment variables.
+
+        This is useful for testing when environment variables are monkey-patched.
+        Note: This will override any settings from init_from_config().
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
@@ -1211,6 +1235,12 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._config_initialized = False
+
+    @classmethod
+    def refresh_env_variables(cls) -> None:
+        """Deprecated: Use refresh_from_envs() instead."""
+        cls.refresh_from_envs()
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str):
@@ -1277,13 +1307,34 @@ class rocm_aiter_ops:
         return mapping.get(name)
 
     @classmethod
+    def _get_aiter_config(cls) -> AITERConfig | None:
+        """Get the AITERConfig from the current VllmConfig context if available.
+
+        Returns the aiter_config from the current vllm_config context, or None
+        if no context is active. This allows is_*_enabled() methods to check
+        the config dynamically at runtime.
+        """
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            return vllm_config.aiter_config
+        return None
+
+    @classmethod
     @if_aiter_supported
     def is_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled
         return cls._AITER_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.linear
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
 
     @classmethod
@@ -1294,26 +1345,41 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_rmsnorm_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.rmsnorm
         return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.moe
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.moe and config.fusion_shared_experts
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.mla
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.mha
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
     @classmethod
@@ -1324,11 +1390,17 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.unified_attention
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.fp8bmm
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
 
     @classmethod
@@ -1336,6 +1408,9 @@ class rocm_aiter_ops:
     def is_fp4bmm_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.fp4bmm and on_gfx950()
         return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
 
     @classmethod
@@ -1343,16 +1418,25 @@ class rocm_aiter_ops:
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.fp4_asm_gemm and on_gfx950()
         return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
 
     @classmethod
     @if_aiter_supported
     def is_triton_rotary_embed_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.triton_rope
         return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
 
     @classmethod
     @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
+        config = cls._get_aiter_config()
+        if config is not None:
+            return config.enabled and config.triton_gemm
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
 
     @classmethod
@@ -2097,10 +2181,10 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_weight_a16w4(
-        tensor: "torch.Tensor",
+        tensor: torch.Tensor,
         nLane: int,
         gate_up: bool,
-    ) -> "torch.Tensor":
+    ) -> torch.Tensor:
         """
         Shuffles the weight tensor into (A16W4) layout for AITER kernels.
 
@@ -2117,10 +2201,10 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_scale_a16w4(
-        tensor: "torch.Tensor",
+        tensor: torch.Tensor,
         num_experts: int,
         gate_up: bool,
-    ) -> "torch.Tensor":
+    ) -> torch.Tensor:
         """
         Shuffles the scale tensor into (A16W4) layout for AITER kernels.
 
