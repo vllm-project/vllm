@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
@@ -27,6 +28,8 @@ from .flash_attn import (
     FlashAttentionMetadata,
     cascade_attention,
 )
+
+logger = init_logger(__name__)
 
 
 class FlashAttentionDiffKVBackend(FlashAttentionBackend):
