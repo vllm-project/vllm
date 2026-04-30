@@ -67,10 +67,10 @@ def _get_mla_prefill_backend_priorities(
     """
     if device_capability.major == 10:  # Blackwell
         return [
+            MLAPrefillBackendEnum.FLASH_ATTN,
             MLAPrefillBackendEnum.TRTLLM_RAGGED,
             MLAPrefillBackendEnum.FLASHINFER,
             MLAPrefillBackendEnum.CUDNN,
-            MLAPrefillBackendEnum.FLASH_ATTN,
         ]
     else:  # Hopper (SM90) and older
         return [
