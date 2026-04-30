@@ -11,10 +11,9 @@ import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 from tqdm import tqdm
 
+import vllm.kernels  # noqa: F401
 import vllm._custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+from vllm import ir
 
 
 @dataclass
@@ -77,8 +76,8 @@ def unfused_groupwise_fp8_impl(
     silu_out = F.silu(gate) * up
 
     # Group quantize - use group_size directly
-    silu_out, _ = per_token_group_quant_fp8(
-        silu_out, group_size=group_size, use_ue8m0=False
+    silu_out, _ = ir.ops.dynamic_group_quant_fp8(
+        silu_out, group_size, 1e-10, None, False, False, False, None
     )
 
 

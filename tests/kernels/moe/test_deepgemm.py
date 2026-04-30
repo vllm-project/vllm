@@ -29,9 +29,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.utils.deep_gemm import (
     calc_diff,
     is_deep_gemm_supported,
@@ -98,7 +97,9 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         .clamp_min_(-1)
         .clamp_max_(1)
     )
-    _, a1_scale = per_token_group_quant_fp8(tokens_bf16, block_size[1])
+    _, a1_scale = ir.ops.dynamic_group_quant_fp8(
+        tokens_bf16, block_size[1]
+    )
 
     # expert weight tensors
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(num_experts, n, k, block_size)

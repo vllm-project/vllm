@@ -48,7 +48,7 @@ def _triton_per_token_group_quant_fp8_impl(
     x: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return per_token_group_quant_fp8(
+    return _execute_per_token_group_quant_fp8(
         x, group_size, column_major_scales=False, use_ue8m0=False
     )
 
@@ -492,7 +492,7 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
-def per_token_group_quant_fp8(
+def _execute_per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
     eps: float = 1e-10,
@@ -502,21 +502,9 @@ def per_token_group_quant_fp8(
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Function to perform per-token-group quantization on an input tensor `x`.
-    It converts the tensor values into signed float8 values and returns the
-    quantized tensor along with the scaling factor used for quantization.
-    Args:
-        x: The input tensor with ndim >= 2.
-        group_size: The group size used for quantization.
-        eps: The minimum to avoid dividing zero.
-        dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
-        is supported for now.
-        column_major_scales: Outputs scales in column major.
-        tma_aligned_scales: Outputs scales in TMA-aligned layout.
-        out_q: Optional output tensor. If not provided, function will create.
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
-        scaling factor.
+    """Per-token-group FP8 quantization (implementation shared by IR op).
+
+    Prefer :func:`vllm.ir.ops.dynamic_group_quant_fp8` for model code.
     """
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()

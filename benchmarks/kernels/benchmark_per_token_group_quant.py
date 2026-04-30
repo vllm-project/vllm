@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import torch
 
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
 from vllm.platforms import current_platform
 
@@ -61,20 +63,28 @@ def _run_single(
     if dtype == "fp8":
 
         def cuda_impl():
-            return fp8_utils.per_token_group_quant_fp8(
+            return ir.ops.dynamic_group_quant_fp8(
                 x,
                 group_size,
-                column_major_scales=column_major,
-                use_ue8m0=scale_ue8m0,
+                1e-10,
+                None,
+                column_major,
+                False,
+                scale_ue8m0,
+                None,
             )
 
         def triton_impl():
             with _triton_mode():
-                return fp8_utils.per_token_group_quant_fp8(
+                return ir.ops.dynamic_group_quant_fp8(
                     x,
                     group_size,
-                    column_major_scales=column_major,
-                    use_ue8m0=scale_ue8m0,
+                    1e-10,
+                    None,
+                    column_major,
+                    False,
+                    scale_ue8m0,
+                    None,
                 )
     elif dtype == "int8":
 

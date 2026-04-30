@@ -5,9 +5,9 @@ import time
 
 import torch
 
-from vllm import _custom_ops as ops
+import vllm.kernels  # noqa: F401
+from vllm import _custom_ops as ops, ir
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
 from vllm.triton_utils import triton
@@ -48,13 +48,15 @@ def benchmark_shape(
     block_size = [128, 128]
 
     # Pre-quantize A for all implementations
-    A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
-        A, block_size[1], column_major_scales=True, tma_aligned_scales=True
+    A_deepgemm, A_scale_deepgemm = ir.ops.dynamic_group_quant_fp8(
+        A, block_size[1], 1e-10, None, True, True, None, None
     )
     C_deepgemm = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
-    A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
-    A_vllm_cutlass, A_scale_vllm_cutlass = per_token_group_quant_fp8(
-        A, block_size[1], column_major_scales=True
+    A_vllm, A_scale_vllm = ir.ops.dynamic_group_quant_fp8(
+        A, block_size[1], 1e-10, None, False, False, None, None
+    )
+    A_vllm_cutlass, A_scale_vllm_cutlass = ir.ops.dynamic_group_quant_fp8(
+        A, block_size[1], 1e-10, None, True, False, None, None
     )
 
     # === DeepGEMM Implementation ===

@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import ir
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -21,7 +22,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
@@ -235,8 +235,11 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
         self.activation(activation, act_out, input)
-        return per_token_group_quant_fp8(
-            act_out, block_k, column_major_scales=True, out_q=output
+        return ir.ops.dynamic_group_quant_fp8(
+            act_out,
+            block_k,
+            column_major_scales=True,
+            out=output,
         )
 
     def apply(

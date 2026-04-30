@@ -5,6 +5,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
 from vllm.platforms import current_platform
 
@@ -28,7 +30,7 @@ def test_per_token_group_quant_fp8(
     x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
 
     # cuda path
-    out_q, scale = fp8_utils.per_token_group_quant_fp8(
+    out_q, scale = ir.ops.dynamic_group_quant_fp8(
         x,
         group_size,
         column_major_scales=column_major,
@@ -38,7 +40,7 @@ def test_per_token_group_quant_fp8(
 
     # triton ref
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
-        ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
+        ref_q, ref_s = ir.ops.dynamic_group_quant_fp8(
             x,
             group_size,
             column_major_scales=column_major,
@@ -132,7 +134,7 @@ def test_per_token_group_quant_fp8_packed(
 
     # Triton reference (row-major float32 scales, UE8M0)
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
-        ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
+        ref_q, ref_s = ir.ops.dynamic_group_quant_fp8(
             x,
             group_size,
             use_ue8m0=True,
