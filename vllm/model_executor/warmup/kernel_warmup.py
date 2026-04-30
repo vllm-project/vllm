@@ -91,19 +91,19 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     import vllm.utils.flashinfer as fi_utils
 
     with torch.inference_mode(), fi_utils.autotune():
-        # Certain FlashInfer kernels (e.g. nvfp4 routed moe) are
-        # incompatible with autotuning. This state is used to skip
-        # those kernels during the autotuning process.
+        # Certain FlashInfer kernels (e.g. trtllm_fp4_block_scale_moe) are
+        # incompatible with autotuning and check this flag to skip themselves
+        # during the autotuning dummy run.
         fi_utils._is_fi_autotuning = True
-
-        # We skip EPLB here since we don't want to record dummy metrics
-        # When autotuning with number of tokens m, flashinfer will autotune
-        # operations for all number of tokens up to m.
-        # So we only need to run with the max number of tokens.
-        runner._dummy_run(
-            runner.scheduler_config.max_num_batched_tokens,
-            skip_eplb=True,
-            is_profile=True,
-        )
-
-        fi_utils._is_fi_autotuning = False
+        try:
+            # We skip EPLB here since we don't want to record dummy metrics
+            # When autotuning with number of tokens m, flashinfer will autotune
+            # operations for all number of tokens up to m.
+            # So we only need to run with the max number of tokens.
+            runner._dummy_run(
+                runner.scheduler_config.max_num_batched_tokens,
+                skip_eplb=True,
+                is_profile=True,
+            )
+        finally:
+            fi_utils._is_fi_autotuning = False
