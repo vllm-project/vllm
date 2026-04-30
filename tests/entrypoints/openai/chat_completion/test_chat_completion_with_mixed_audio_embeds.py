@@ -77,6 +77,7 @@ def qwen2audio_prompt_embeds_b64(qwen2audio_hidden_size: int) -> str:
 @pytest.fixture(scope="module")
 def qwen2audio_audio_embeds_b64(qwen2audio_hidden_size: int) -> str:
     # Shape matches the `audio_embeds` unit-test fixture.
+    torch.manual_seed(0)
     tensor = torch.randn(1, 128, qwen2audio_hidden_size, dtype=QWEN2AUDIO_DTYPE)
     return tensor2base64(tensor)
 
