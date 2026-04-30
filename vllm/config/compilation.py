@@ -1449,10 +1449,10 @@ class CompilationConfig:
                     f"{num_blocks} or increase gpu_memory_utilization."
                 )
             logger.warning(
-                "max_num_seqs (%d) exceeds available Mamba cache blocks "
-                "(%d); auto-adjusting max_num_seqs to %d so CUDA graph "
-                "capture can proceed. Pass --max-num-seqs explicitly or "
-                "increase --gpu-memory-utilization to override.",
+                "Default max_num_seqs (%d) exceeds available Mamba cache "
+                "blocks (%d); auto-adjusting max_num_seqs to %d so CUDA "
+                "graph capture can proceed. Pass --max-num-seqs explicitly "
+                "or increase --gpu-memory-utilization to override.",
                 max_num_reqs,
                 num_blocks,
                 num_blocks,
