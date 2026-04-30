@@ -84,6 +84,19 @@ class EPLBConfig:
     and a per-layer / per-rank token table.
     Off by default to avoid large logs and extra CPU work on rank 0.
     """
+    expert_load_dump_dir: str | None = None
+    """
+    Directory to which JSONL records of per-step expert load are appended
+    on every ``log_balancedness_interval`` step (one file per MoE model,
+    named ``{model_name}_expert_load.jsonl``). Only EP rank 0 writes.
+    Independent of ``log_balancedness`` and ``log_balancedness_verbose``;
+    setting it alone is enough to start writing — the on-screen log and
+    the JSONL dump can be toggled separately or together.
+
+    Example::
+
+        --eplb-config '{"expert_load_dump_dir":"./eplb_stats"}'
+    """
     use_async: bool = False
     """
     Whether to use non-blocking EPLB.
