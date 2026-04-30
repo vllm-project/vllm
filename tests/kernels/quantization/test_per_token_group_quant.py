@@ -161,6 +161,122 @@ def test_per_token_group_quant_fp8_packed(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+)
+def test_per_token_group_quant_fp8_packed_all_zero():
+    """All-zero input must produce well-defined UE8M0 scale bytes via the eps
+    floor in the kernel's UE8M0 path. Locks down the all-zero behavior before
+    optimization.
+
+    The CUDA kernel computes:
+        y_s = eps / fp8_max
+        y_s = exp2(ceil(log2(fmax(y_s, 1e-10))))
+    For all-zero input, eps/fp8_max < 1e-10, so the inner fmax clamps back to
+    1e-10, giving exp2(ceil(log2(1e-10))) = exp2(-33) => UE8M0 byte 0x5E (94).
+    """
+
+    device = "cuda"
+    num_tokens, hidden_dim, group_size = 4, 7168, 128
+    x = torch.zeros((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16)
+
+    out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
+        x,
+        group_size=group_size,
+        use_ue8m0=True,
+    )
+
+    # Quantized values must be all zero.
+    assert torch.equal(
+        out_q.view(torch.uint8),
+        torch.zeros_like(out_q, dtype=torch.uint8),
+    ), "All-zero input should produce all-zero FP8 output"
+
+    # UE8M0 byte produced by the kernel for all-zero input.
+    # The kernel's inner fmax(y_s, 1e-10) clamps eps/fp8_max back to 1e-10,
+    # yielding exp2(ceil(log2(1e-10))) = exp2(-33) = 1.164e-10.
+    # As float32: biased exponent = 94 = 0x5E, mantissa = 0.
+    expected_exp_byte = 0x5E
+
+    mn = num_tokens
+    groups_per_row = hidden_dim // group_size
+    k_num_packed = (groups_per_row + 3) // 4
+    tma_aligned_mn = ((mn + 3) // 4) * 4
+    num_scale_elems = mn + (k_num_packed - 1) * tma_aligned_mn
+
+    # All valid scale slots must contain the expected packed value.
+    # Padding slots must be zero.
+    actual = torch.as_strided(out_s_packed, (num_scale_elems,), (1,)).cpu()
+
+    expected = torch.zeros(num_scale_elems, dtype=torch.int32, device="cpu")
+    for row in range(mn):
+        for g in range(groups_per_row):
+            pack_col = g // 4
+            pos = g % 4
+            idx = pack_col * tma_aligned_mn + row
+            expected[idx] |= expected_exp_byte << (pos * 8)
+
+    assert torch.equal(actual, expected), "All-zero scale bytes mismatch"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+)
+def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
+    """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
+    mantissa-rounding-up branch (exp_byte += 1). Locks down this behavior
+    before optimization."""
+
+    device = "cuda"
+    num_tokens, hidden_dim, group_size = 4, 7168, 128
+
+    # Build a tensor whose per-group absmax = 1.5 * fp8_max * 2^k for various k.
+    # fp8_max = torch.finfo(torch.float8_e4m3fn).max = 448.0.
+    # Then absmax/fp8_max = 1.5 * 2^k -> non-zero mantissa, triggers ceil
+    # rounding to 2^(k+1). Use k=0 for simplicity; the bf16 representation of
+    # 1.5*448=672.0 is exact.
+    x = torch.full(
+        (num_tokens, hidden_dim),
+        672.0,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+
+    out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
+        x,
+        group_size=group_size,
+        use_ue8m0=True,
+    )
+
+    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+        ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
+            x,
+            group_size,
+            use_ue8m0=True,
+        )
+
+    assert torch.equal(out_q, ref_q), "Quantized output mismatch"
+
+    mn = num_tokens
+    groups_per_row = hidden_dim // group_size
+    k_num_packed = (groups_per_row + 3) // 4
+    tma_aligned_mn = ((mn + 3) // 4) * 4
+    num_scale_elems = mn + (k_num_packed - 1) * tma_aligned_mn
+
+    ref_s_flat = ref_s.reshape(mn, groups_per_row)
+    ref_exponents = (ref_s_flat.view(torch.int32) >> 23) & 0xFF
+    expected = torch.zeros(num_scale_elems, dtype=torch.int32, device="cpu")
+    for row in range(mn):
+        for g in range(groups_per_row):
+            pack_col = g // 4
+            pos = g % 4
+            idx = pack_col * tma_aligned_mn + row
+            expected[idx] |= int(ref_exponents[row, g].item()) << (pos * 8)
+
+    actual = torch.as_strided(out_s_packed, (num_scale_elems,), (1,)).cpu()
+    assert torch.equal(actual, expected), "Scale bytes mismatch"
+
+
 @pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

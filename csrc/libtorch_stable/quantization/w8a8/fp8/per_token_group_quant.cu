@@ -308,11 +308,125 @@ __global__ void per_token_group_quant_8bit_packed_kernel(
   }
 }
 
-void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
-                                       torch::stable::Tensor& output_q,
-                                       torch::stable::Tensor& output_s_packed,
-                                       int64_t group_size, double eps,
-                                       double min_8bit, double max_8bit) {
+// Register-resident fast path for group_size==128.
+//
+// Each thread holds 8 source elements (16 B = uint4) in registers across
+// the absmax reduce -> scale compute -> quantize pipeline. No shared memory.
+// UE8M0 scale extracted via bit math (bit-exact with exp2f(ceilf(log2f))).
+//
+// Constraints: GROUP_SIZE % (THREADS_PER_GROUP * VEC_SIZE) == 0; for
+// THREADS_PER_GROUP=16 and bf16/fp16 (VEC_SIZE=8), this means GROUP_SIZE=128.
+template <typename T, typename DST_DTYPE, int GROUP_SIZE>
+__global__ void per_token_group_quant_8bit_packed_register_kernel(
+    const T* __restrict__ input, void* __restrict__ output_q,
+    unsigned int* __restrict__ output_s_packed, const int num_groups_padded,
+    const int groups_per_block, const int padded_groups_per_row,
+    const int groups_per_row, const int mn, const int tma_aligned_mn,
+    const int num_scale_elems, const float eps, const float min_8bit,
+    const float max_8bit) {
+  static_assert(GROUP_SIZE == 128, "fast path supports GROUP_SIZE==128");
+  constexpr int THREADS_PER_GROUP = 16;
+  constexpr int VEC_SIZE = 16 / sizeof(T);  // 8 for bf16/fp16
+  static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE,
+                "GROUP_SIZE must equal THREADS_PER_GROUP * VEC_SIZE");
+
+  const int local_group_id = threadIdx.x / THREADS_PER_GROUP;
+  const int lane_id = threadIdx.x % THREADS_PER_GROUP;
+
+  const int64_t block_group_id = blockIdx.x * groups_per_block;
+  const int64_t global_group_id = block_group_id + local_group_id;
+  if (global_group_id >= num_groups_padded) {
+    return;
+  }
+
+  const int sf_k_idx =
+      static_cast<int>(global_group_id % padded_groups_per_row);
+  const int mn_idx = static_cast<int>(global_group_id / padded_groups_per_row);
+  const bool is_valid_group = (mn_idx < mn) && (sf_k_idx < groups_per_row);
+
+  // Load 8 input elements into registers (skip for invalid groups).
+  T regs[VEC_SIZE];
+  float local_absmax = eps;
+  if (is_valid_group) {
+    const T* group_input =
+        input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+        sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+    *reinterpret_cast<uint4*>(&regs[0]) =
+        *reinterpret_cast<const uint4*>(group_input);
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      float v = fabsf(static_cast<float>(regs[i]));
+      local_absmax = fmaxf(local_absmax, v);
+    }
+  }
+
+  // Half-warp shuffle reduce (same as GroupReduceMax).
+  unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 8));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
+
+  // Bit-twiddle UE8M0 scale.
+  // Mirrors the existing kernel's ComputeGroupScale exactly:
+  //   local_absmax already == max(eps_param, max_i |x_i|)
+  //   y_s = local_absmax / max_8bit;
+  //   y_s = exp2f(ceilf(log2f(fmaxf(y_s, 1e-10f))));   <-- NOTE: hardcoded
+  //   1e-10f exp_byte = (__float_as_uint(y_s) >> 23) & 0xff;
+  // The inner clamp uses the literal 1e-10f, NOT the eps parameter, to
+  // preserve bit-exact behavior for all-zero inputs (where eps_param/max_8bit
+  // < 1e-10 and would otherwise produce a different exponent).
+  float y_s = local_absmax / max_8bit;
+  y_s = fmaxf(y_s, 1e-10f);
+  uint32_t bits = __float_as_uint(y_s);
+  uint32_t exp_bits = (bits >> 23) & 0xffu;
+  uint32_t mant_bits = bits & 0x7fffffu;
+  uint8_t exp_byte =
+      static_cast<uint8_t>(exp_bits + (mant_bits != 0u ? 1u : 0u));
+
+  // Lane 0 writes the packed scale byte.
+  if (lane_id == 0) {
+    const int sf_k_pack_idx = sf_k_idx / 4;
+    const int pos = sf_k_idx % 4;
+    const int out_idx = sf_k_pack_idx * tma_aligned_mn + mn_idx;
+    if (is_valid_group) {
+      reinterpret_cast<uint8_t*>(output_s_packed)[out_idx * 4 + pos] = exp_byte;
+    } else if (out_idx < num_scale_elems) {
+      reinterpret_cast<uint8_t*>(output_s_packed)[out_idx * 4 + pos] = 0;
+    }
+  }
+
+  // Skip quantize+store for padding groups.
+  if (!is_valid_group) {
+    return;
+  }
+
+  // Reconstruct y_s as a power-of-2 float and use its reciprocal.
+  float y_s_q = __uint_as_float(static_cast<uint32_t>(exp_byte) << 23);
+  float inv_y = 1.0f / y_s_q;
+
+  // Quantize and pack into 8 fp8/int8 bytes (= uint64).
+  uint64_t packed = 0;
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    float q =
+        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+    DST_DTYPE qb = DST_DTYPE(q);
+    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
+    packed |= static_cast<uint64_t>(byte) << (i * 8);
+  }
+
+  DST_DTYPE* group_output =
+      static_cast<DST_DTYPE*>(output_q) +
+      static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+      sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+  *reinterpret_cast<uint64_t*>(group_output) = packed;
+}
+
+static void per_token_group_quant_8bit_packed_smem_impl(
+    const torch::stable::Tensor& input, torch::stable::Tensor& output_q,
+    torch::stable::Tensor& output_s_packed, int64_t group_size, double eps,
+    double min_8bit, double max_8bit) {
   STD_TORCH_CHECK(input.is_contiguous());
   STD_TORCH_CHECK(output_q.is_contiguous());
 
@@ -333,15 +447,11 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
   STD_TORCH_CHECK(
       output_s_packed.scalar_type() == torch::headeronly::ScalarType::Int,
       "output_s_packed must have dtype int32 for UE8M0-packed scales.");
-  // DeepGEMM expects SFA scales in MN-major form with shape
-  // [mn, ceil_div(K, 128 * 4)] and TMA-aligned stride on the last
-  // dimension.
   STD_TORCH_CHECK(output_s_packed.size(0) == mn &&
                       output_s_packed.size(1) == k_num_packed_sfk,
                   "output_s_packed shape must be [", mn, ", ", k_num_packed_sfk,
                   "], but got [", output_s_packed.size(0), ", ",
                   output_s_packed.size(1), "].");
-  // Verify column-major TMA-aligned layout
   STD_TORCH_CHECK(output_s_packed.stride(0) == 1 &&
                       output_s_packed.stride(1) == tma_aligned_mn,
                   "output_s_packed must have strides [1, ", tma_aligned_mn,
@@ -352,11 +462,8 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   constexpr int THREADS_PER_GROUP = 16;
 
-  // Expand the grid to cover MN and K padding so every byte in
-  // output_s_packed is written (padding bytes get zeroed by the kernel).
   const int64_t padded_groups_per_row = k_num_packed_sfk * 4;
   const int64_t num_groups_padded = tma_aligned_mn * padded_groups_per_row;
-  // Number of elements in output_s_packed.
   const int64_t num_scale_elems = mn + (k_num_packed_sfk - 1) * tma_aligned_mn;
 
   const int groups_per_block = GetGroupsPerBlock(num_groups_padded);
@@ -398,6 +505,88 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
       }));
 
 #undef LAUNCH_PACKED_KERNEL
+}
+
+// Public entry point: register-resident fast path for group_size==128, smem
+// fallback otherwise.
+void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
+                                       torch::stable::Tensor& output_q,
+                                       torch::stable::Tensor& output_s_packed,
+                                       int64_t group_size, double eps,
+                                       double min_8bit, double max_8bit) {
+  // Fast path requires group_size == 128 and a 16B-aligned input dtype
+  // (bf16/fp16, where VEC_SIZE=8). Float inputs fall back to smem.
+  const auto in_dtype = input.scalar_type();
+  const bool is_half_dtype =
+      in_dtype == torch::headeronly::ScalarType::Half ||
+      in_dtype == torch::headeronly::ScalarType::BFloat16;
+  if (group_size != 128 || !is_half_dtype) {
+    per_token_group_quant_8bit_packed_smem_impl(
+        input, output_q, output_s_packed, group_size, eps, min_8bit, max_8bit);
+    return;
+  }
+
+  STD_TORCH_CHECK(input.is_contiguous());
+  STD_TORCH_CHECK(output_q.is_contiguous());
+
+  const int64_t k = input.size(-1);
+  STD_TORCH_CHECK(k % group_size == 0);
+
+  const int64_t mn = input.numel() / k;
+  const int64_t groups_per_row = k / group_size;
+  const int64_t k_num_packed_sfk = (groups_per_row + 3) / 4;
+  const int64_t tma_aligned_mn = ((mn + 3) / 4) * 4;
+
+  STD_TORCH_CHECK(output_s_packed.scalar_type() ==
+                  torch::headeronly::ScalarType::Int);
+  STD_TORCH_CHECK(output_s_packed.size(0) == mn &&
+                  output_s_packed.size(1) == k_num_packed_sfk);
+  STD_TORCH_CHECK(output_s_packed.stride(0) == 1 &&
+                  output_s_packed.stride(1) == tma_aligned_mn);
+
+  cudaStream_t stream = get_current_cuda_stream();
+
+  constexpr int THREADS_PER_GROUP = 16;
+  const int64_t padded_groups_per_row = k_num_packed_sfk * 4;
+  const int64_t num_groups_padded = tma_aligned_mn * padded_groups_per_row;
+  const int64_t num_scale_elems = mn + (k_num_packed_sfk - 1) * tma_aligned_mn;
+  const int groups_per_block = GetGroupsPerBlock(num_groups_padded);
+
+  auto dst_type = output_q.scalar_type();
+  const int num_blocks = num_groups_padded / groups_per_block;
+  const int num_threads = groups_per_block * THREADS_PER_GROUP;
+
+#define LAUNCH_REG_KERNEL(T, DST_DTYPE)                                   \
+  do {                                                                    \
+    dim3 grid(num_blocks);                                                \
+    dim3 block(num_threads);                                              \
+    per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128>  \
+        <<<grid, block, 0, stream>>>(                                     \
+            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(), \
+            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),  \
+            static_cast<int>(num_groups_padded), groups_per_block,        \
+            static_cast<int>(padded_groups_per_row),                      \
+            static_cast<int>(groups_per_row), static_cast<int>(mn),       \
+            static_cast<int>(tma_aligned_mn),                             \
+            static_cast<int>(num_scale_elems), static_cast<float>(eps),   \
+            static_cast<float>(min_8bit), static_cast<float>(max_8bit));  \
+  } while (0)
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      input.scalar_type(), "per_token_group_quant_8bit_packed_register", ([&] {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+          LAUNCH_REG_KERNEL(scalar_t, __nv_fp8_e4m3);
+        } else if (dst_type == torch::headeronly::ScalarType::Char) {
+          LAUNCH_REG_KERNEL(scalar_t, int8_t);
+        } else {
+          STD_TORCH_CHECK(
+              false,
+              "per_token_group_quant_8bit_packed only supports FP8/INT8 "
+              "outputs.");
+        }
+      }));
+
+#undef LAUNCH_REG_KERNEL
 }
 
 void per_token_group_quant_fp8(const torch::stable::Tensor& input,
