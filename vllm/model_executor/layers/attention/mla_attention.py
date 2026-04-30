@@ -1523,10 +1523,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
-        self._prefill_backend = get_mla_prefill_backend(vllm_config)
-
-        prefill_impl_cls = self._prefill_backend.get_prefill_impl_cls()
-        self._prefill_impl = prefill_impl_cls(
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        self._prefill_backend = prefill_backend_cls(
             num_heads=self.num_heads,
             scale=self.model_config.get_head_size() ** -0.5,
             kv_lora_rank=self.mla_dims.kv_lora_rank,
@@ -1810,7 +1808,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 q_data_type=self.q_data_type,
             )
 
-            self._prefill_impl.prepare_metadata(prefill_metadata)
+            self._prefill_backend.prepare_metadata(prefill_metadata)
 
         decode_metadata = None
         if num_decodes > 0:
@@ -2004,10 +2002,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         vllm_config = get_current_vllm_config()
         prefill_backend = get_mla_prefill_backend(vllm_config)
-
-        # Create the prefill implementation
-        prefill_impl_cls = prefill_backend.get_prefill_impl_cls()
-        self._prefill_impl = prefill_impl_cls(
+        self._prefill_backend = prefill_backend(
             num_heads=self.num_heads,
             scale=self.scale,
             kv_lora_rank=self.kv_lora_rank,
@@ -2132,7 +2127,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
-                self._prefill_impl.run_prefill_context_chunk(
+                self._prefill_backend.run_prefill_context_chunk(
                     chunk_idx=i,
                     q=q,
                     k=k,
@@ -2237,7 +2232,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
-                self._prefill_impl.run_prefill_context_chunk(
+                self._prefill_backend.run_prefill_context_chunk(
                     chunk_idx=i,
                     q=q,
                     k=k,
@@ -2297,7 +2292,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = k.to(prefill_metadata.q_data_type)
             v = v.to(prefill_metadata.q_data_type)
 
-        output_prefill = self._prefill_impl.run_prefill_new_tokens(
+        output_prefill = self._prefill_backend.run_prefill_new_tokens(
             q=q,
             k=k,
             v=v,

@@ -7,10 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.v1.attention.backends.mla.prefill.base import (
-    MLAPrefillBackend,
-    MLAPrefillImpl,
-)
+from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -22,21 +19,13 @@ if TYPE_CHECKING:
 
 
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
-    """TRT-LLM Ragged backend for MLA prefill.
-
-    This backend is optimized for Blackwell (SM100) architecture and
-    uses TRT-LLM's ragged attention kernel for DeepSeek models.
-    """
+    """TRT-LLM Ragged backend for MLA prefill."""
 
     requires_r1_mla_dimensions = True
 
     @staticmethod
     def get_name() -> str:
         return "TRTLLM_RAGGED_PREFILL"
-
-    @staticmethod
-    def get_prefill_impl_cls() -> type["TrtllmRaggedPrefillImpl"]:
-        return TrtllmRaggedPrefillImpl
 
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
@@ -52,10 +41,6 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             return True
         except ImportError:
             return False
-
-
-class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
-    """TRT-LLM Ragged implementation for MLA prefill."""
 
     def __init__(
         self,

@@ -13,10 +13,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.backends.mla.prefill.base import (
-    MLAPrefillBackend,
-    MLAPrefillImpl,
-)
+from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -28,26 +25,15 @@ else:
 
 
 class FlashAttnPrefillBackend(MLAPrefillBackend):
-    """FlashAttention backend for MLA prefill.
-
-    This is the default/fallback backend that works on most hardware.
-    """
+    """FlashAttention backend for MLA prefill."""
 
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_PREFILL"
 
-    @staticmethod
-    def get_prefill_impl_cls() -> type["FlashAttnPrefillImpl"]:
-        return FlashAttnPrefillImpl
-
     @classmethod
     def is_available(cls) -> bool:
         return is_flash_attn_varlen_func_available()
-
-
-class FlashAttnPrefillImpl(MLAPrefillImpl):
-    """FlashAttention implementation for MLA prefill."""
 
     def __init__(
         self,
@@ -76,7 +62,7 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
         # Handle the differences between the flash_attn_varlen from
         # flash_attn and the one from vllm_flash_attn
         assert flash_attn_varlen_func is not None, (
-            "FlashAttnPrefillImpl requires flash_attn_varlen_func. "
+            "FlashAttnPrefillBackend requires flash_attn_varlen_func. "
             "Ensure FlashAttnPrefillBackend.is_available() is checked first."
         )
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -114,7 +100,6 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
         softmax_scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Run flash attention with potentially different Q/K and V head dims."""
         maybe_padded_v = v
         if self.requires_v_padding:
             maybe_padded_v = torch.nn.functional.pad(

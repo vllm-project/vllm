@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Abstract base classes for MLA prefill backends.
-
-This module defines the interface for MLA prefill backends, enabling
-priority-based selection similar to how MLA decode backends work.
-"""
+"""Abstract base class for MLA prefill backends."""
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar
@@ -23,12 +19,7 @@ if TYPE_CHECKING:
 
 
 class MLAPrefillBackend(ABC):
-    """Abstract base class for MLA prefill backends.
-
-    Each prefill backend declares its capabilities (supported dtypes,
-    compute capabilities, etc.) and provides a factory method for
-    creating the implementation class.
-    """
+    """Abstract base class for MLA prefill backends."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -39,13 +30,6 @@ class MLAPrefillBackend(ABC):
     @staticmethod
     @abstractmethod
     def get_name() -> str:
-        """Return the name of this prefill backend."""
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_prefill_impl_cls() -> type["MLAPrefillImpl"]:
-        """Return the implementation class for this prefill backend."""
         raise NotImplementedError
 
     @classmethod
@@ -87,14 +71,6 @@ class MLAPrefillBackend(ABC):
             )
 
         return invalid_reasons
-
-
-class MLAPrefillImpl(ABC):
-    """Abstract base class for MLA prefill implementations.
-
-    Each implementation provides the actual prefill attention computation
-    for new tokens (causal) and context chunks (non-causal).
-    """
 
     def __init__(
         self,

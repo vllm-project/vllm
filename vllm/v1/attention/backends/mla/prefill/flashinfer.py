@@ -7,10 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.v1.attention.backends.mla.prefill.base import (
-    MLAPrefillBackend,
-    MLAPrefillImpl,
-)
+from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 from vllm.v1.attention.backends.utils import (
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -41,10 +38,6 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
     def get_name() -> str:
         return "FLASHINFER_PREFILL"
 
-    @staticmethod
-    def get_prefill_impl_cls() -> type["FlashInferPrefillImpl"]:
-        return FlashInferPrefillImpl
-
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         return device_capability.major == 10
@@ -59,10 +52,6 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             return True
         except ImportError:
             return False
-
-
-class FlashInferPrefillImpl(MLAPrefillImpl):
-    """FlashInfer implementation for MLA prefill."""
 
     def __init__(
         self,
@@ -92,7 +81,7 @@ class FlashInferPrefillImpl(MLAPrefillImpl):
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
         if layer_names is None:
             raise ValueError(
-                "FlashInferPrefillImpl requires layer_names to "
+                "FlashInferPrefillBackend requires layer_names to "
                 "initialize global hyperparameters."
             )
 
