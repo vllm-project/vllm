@@ -52,17 +52,37 @@ impl ToolSchemas {
         function_name: &str,
         params: Vec<(String, String)>,
     ) -> serde_json::Map<String, Value> {
-        let tool_schema = self.tools.get(function_name).cloned().unwrap_or_default();
-        let mut converted = serde_json::Map::new();
+        let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
+        let mut converted = serde_json::Map::with_capacity(params.len());
         for (name, value) in params {
             let value = tool_schema.convert(&name, &value);
             converted.insert(name, value);
         }
         converted
     }
+
+    /// Convert one raw string parameter value for one named tool.
+    pub(super) fn convert_param_with_schema(
+        &self,
+        function_name: &str,
+        name: &str,
+        value: &str,
+    ) -> Value {
+        let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
+        tool_schema.convert(name, value)
+    }
 }
 
 impl ToolSchema {
+    /// Return an empty schema with no parameter information, which causes all parameters to be
+    /// treated as strings.
+    const fn empty() -> &'static Self {
+        static EMPTY: ToolSchema = ToolSchema {
+            params: BTreeMap::new(),
+        };
+        &EMPTY
+    }
+
     /// Normalize an OpenAI-style tool parameters JSON schema.
     fn from_schema(parameters: &Value) -> Self {
         let Some(properties) = parameters.get("properties").and_then(Value::as_object) else {

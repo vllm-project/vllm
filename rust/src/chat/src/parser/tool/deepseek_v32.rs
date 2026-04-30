@@ -44,10 +44,17 @@ enum DsmlEvent {
     ToolCallsStart,
     Invoke {
         name: String,
-        raw_params: Vec<(String, String)>,
+        raw_params: Vec<DsmlParameter>,
     },
     ToolCallsEnd,
     IgnoredRest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DsmlParameter {
+    name: String,
+    value: String,
+    is_string: bool,
 }
 
 /// Tool parser for DeepSeek V3.2 models.
@@ -106,9 +113,19 @@ impl DeepSeekV32ToolParser {
             }
             DsmlEvent::ToolCallsStart => self.mode = DsmlMode::ToolBlock,
             DsmlEvent::Invoke { name, raw_params } => {
-                let arguments = self
-                    .tool_parameters
-                    .convert_params_with_schema(&name, raw_params);
+                let mut arguments = serde_json::Map::with_capacity(raw_params.len());
+                for param in raw_params {
+                    let value = if param.is_string {
+                        serde_json::Value::String(param.value)
+                    } else {
+                        self.tool_parameters.convert_param_with_schema(
+                            &name,
+                            &param.name,
+                            &param.value,
+                        )
+                    };
+                    arguments.insert(param.name, value);
+                }
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
@@ -257,14 +274,14 @@ fn invoke_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
 }
 
 /// Parse a DSML invoke body.
-fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<(String, String)>> {
+fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<DsmlParameter>> {
     let mut input = invoke_body;
     delimited(ws0, repeat(0.., terminated(parse_parameter, ws0)), eof).parse_next(&mut input)
 }
 
 /// Parse a DSML parameter block.
-fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
-    let (_, _, name, _, _, _, _, value, _) = (
+fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
+    let (_, _, name, _, is_string, _, _, value, _) = (
         literal(PARAMETER_START),
         ws1,
         name_attr,
@@ -276,7 +293,11 @@ fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
         literal(PARAMETER_END),
     )
         .parse_next(input)?;
-    Ok((name.to_string(), value.to_string()))
+    Ok(DsmlParameter {
+        name: name.to_string(),
+        value: value.to_string(),
+        is_string: is_string == "true",
+    })
 }
 
 /// Parse a name attribute.
@@ -376,16 +397,17 @@ mod tests {
     fn deepseek_v32_parse_complete_converts_schema_types() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let result = parser
-            .parse_complete(&build_tool_call(
-                "convert",
-                &[
-                    ("whole", "5.0"),
-                    ("flag", "1"),
-                    ("payload", r#"{"nested":true}"#),
-                    ("items", "[1,2]"),
-                    ("empty", "NULL"),
-                ],
-            ))
+            .parse_complete(
+                "<｜DSML｜function_calls>\n\
+                 <｜DSML｜invoke name=\"convert\">\n\
+                 <｜DSML｜parameter name=\"whole\" string=\"false\">5.0</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"flag\" string=\"false\">true</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"payload\" string=\"false\">{\"nested\":true}</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"items\" string=\"false\">[1,2]</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"empty\" string=\"false\">null</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n\
+                 </｜DSML｜function_calls>",
+            )
             .unwrap();
 
         assert_eq!(result.calls.len(), 1);
@@ -397,6 +419,36 @@ mod tests {
                 "payload": { "nested": true },
                 "items": [1, 2],
                 "empty": null,
+            })
+        );
+    }
+
+    #[test]
+    fn deepseek_v32_parse_complete_string_attr_overrides_schema_types() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let result = parser
+            .parse_complete(
+                "<｜DSML｜function_calls>\n\
+                 <｜DSML｜invoke name=\"convert\">\n\
+                 <｜DSML｜parameter name=\"whole\" string=\"true\">5.0</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"flag\" string=\"true\">true</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"payload\" string=\"true\">{\"nested\":true}</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"items\" string=\"true\">[1,2]</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"empty\" string=\"true\">null</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n\
+                 </｜DSML｜function_calls>",
+            )
+            .unwrap();
+
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            json!({
+                "whole": "5.0",
+                "flag": "true",
+                "payload": "{\"nested\":true}",
+                "items": "[1,2]",
+                "empty": "null",
             })
         );
     }
