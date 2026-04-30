@@ -518,9 +518,7 @@ def test_human_readable_model_len():
     args = parser.parse_args(["--max-model-len-cap", "131072"])
     assert args.max_model_len_cap == 131072
 
-    args = parser.parse_args(
-        ["--max-model-len", "auto", "--max-model-len-cap", "128K"]
-    )
+    args = parser.parse_args(["--max-model-len", "auto", "--max-model-len-cap", "128K"])
     assert args.max_model_len == -1
     assert args.max_model_len_cap == 128 * 2**10
 
