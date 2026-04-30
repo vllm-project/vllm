@@ -11,6 +11,11 @@ from PIL import Image
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 
+pytest.importorskip(
+    "terratorch",
+    reason="terratorch unavailable while PyPI has `lightning` quarantined; see #41376",
+)
+
 models_config = {
     "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
         "image_url": "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff",  # noqa: E501

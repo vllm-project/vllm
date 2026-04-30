@@ -200,9 +200,9 @@ RUN cd /opt/rixl && \
 
 # DeepEP build stage
 FROM base AS build_deep
-ARG ROCSHMEM_BRANCH="ba0bf0f3"
+ARG ROCSHMEM_BRANCH="f0acb0c6"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG DEEPEP_BRANCH="5d90af8b"
+ARG DEEPEP_BRANCH="a9ea9774"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
 ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
@@ -213,18 +213,15 @@ RUN git clone ${ROCSHMEM_REPO} \
  && git checkout ${ROCSHMEM_BRANCH} \
  && mkdir -p projects/rocshmem/build \
  && cd projects/rocshmem/build \
- && bash ../scripts/build_configs/all_backends \
-      -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
-      -DROCM_PATH=/opt/rocm \
-      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
-      -DUSE_EXTERNAL_MPI=OFF
+ && INSTALL_PREFIX=${ROCSHMEM_DIR} \
+    ../scripts/build_configs/all_backends -DUSE_EXTERNAL_MPI=OFF
 
 # Build DeepEP wheel.
 # DeepEP looks for rocshmem at ROCSHMEM_DIR.
 RUN git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
- && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+ && python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # MoRI runtime dependencies live in Dockerfile.rocm so NIC backend changes do
 # not force users to rebuild the long-lived Dockerfile.rocm_base image.
@@ -387,6 +384,16 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 # reinstall it after removing compilers. The bind-mounted /install contents
 # above are not available once that RUN step completes.
 COPY --from=export_vllm /*.whl /opt/vllm-wheels/
+
+# Update rdma-core to support latest rocshmem
+ARG DEEPEP_NIC
+RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
+    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
+    cd /tmp/rdma-core && \
+    mkdir -p build && cd build && \
+    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
+    ninja &&     ninja install &&     ldconfig &&     rm -rf /tmp/rdma-core; \
+fi
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \

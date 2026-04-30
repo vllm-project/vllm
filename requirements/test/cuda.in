@@ -61,7 +61,11 @@ fastsafetensors>=0.2.2 # 0.2.2 contains important fixes for multi-GPU mem usage
 instanttensor>=0.1.5
 pydantic>=2.12 # 2.11 leads to error on python 3.13
 decord==0.6.0; platform_machine == "x86_64"
-terratorch >= 1.2.2 # Required for Prithvi tests
+# terratorch is temporarily disabled while PyPI has the `lightning` package
+# in `quarantined` status (every published terratorch version transitively
+# requires `lightning`, so the resolver fails with "no versions of lightning").
+# Re-enable once PyPI lifts the quarantine. Tracked in #41376.
+# terratorch >= 1.2.2 # Required for Prithvi tests
 imagehash # Required for Prithvi tests
 segmentation-models-pytorch > 0.4.0 # Required for Prithvi tests
 
