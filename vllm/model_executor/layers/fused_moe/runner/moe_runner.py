@@ -220,7 +220,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
-        self.quant_method = quant_method
+        self._quant_method = quant_method
         self.enable_dbo = enable_dbo
 
         self._shared_experts: SharedExperts | None = None
@@ -263,7 +263,7 @@ class MoERunner(MoERunnerInterface):
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
-        self.quant_method = quant_method
+        self._quant_method = quant_method
 
     def is_internal_router(self) -> bool:
         return self.gate is not None
@@ -330,8 +330,8 @@ class MoERunner(MoERunnerInterface):
     @property
     def _fused_output_is_reduced(self) -> bool:
         return (
-            self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
+            self._quant_method.moe_kernel is not None
+            and self._quant_method.moe_kernel.output_is_reduced()
         )
 
     def _maybe_reduce_shared_expert_output(
@@ -407,7 +407,7 @@ class MoERunner(MoERunnerInterface):
         )
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
-            not self.quant_method.skip_forward_padding
+            not self._quant_method.skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
             hidden_states = F.pad(
@@ -451,8 +451,8 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.quant_method.is_monolithic:
-            fused_out = self.quant_method.apply_monolithic(
+        if self._quant_method.is_monolithic:
+            fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
                 router_logits=router_logits,
@@ -467,7 +467,7 @@ class MoERunner(MoERunnerInterface):
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
-            fused_out = self.quant_method.apply(
+            fused_out = self._quant_method.apply(
                 layer=layer,
                 x=hidden_states,
                 topk_weights=topk_weights,
@@ -618,7 +618,7 @@ class MoERunner(MoERunnerInterface):
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
+            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
         )
 
     def _maybe_dispatch(
