@@ -257,6 +257,7 @@ class KVCacheManager:
             num_encoder_tokens=num_encoder_tokens,
             total_computed_tokens=total_computed_tokens,
             num_tokens_main_model=full_num_tokens,
+            apply_admission_cap=True,
         )
 
         return num_blocks_to_allocate <= self.block_pool.get_num_free_blocks()
