@@ -45,6 +45,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -165,6 +166,10 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     ]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_queue_callbacks()
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
 
     def request_finished(
         self,

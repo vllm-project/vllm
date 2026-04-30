@@ -137,7 +137,7 @@ def compute_nixl_compatibility_hash(
 class HeartbeatInfo:
     """Heartbeat data for a single remote engine, sent from D worker to P."""
 
-    req_ids: list[ReqId]
+    req_ids: set[ReqId]
     host: str
     port: int
     tp_size: int

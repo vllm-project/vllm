@@ -689,23 +689,37 @@ class NixlConnectorWorker:
             stacklevel=2,
         )
 
-    def _background_nixl_handshake(
-        self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta
-    ):
-        # Do NIXL handshake in background and add to _ready_requests when done.
-        fut = self._handshake_futures.get(remote_engine_id)
-        if fut is None:
-            assert meta.remote is not None
+    def _ensure_handshake(
+        self,
+        engine_id: EngineId,
+        host: str,
+        port: int,
+        tp_size: int,
+    ) -> Future[dict[int, str]] | None:
+        """
+        Ensure a handshake is in-flight (or already done) for *engine_id*.
+
+        Returns the ``Future`` if a handshake is pending (or was just
+        started), or ``None`` if the handshake already completed
+        successfully.  Callers can attach per-request callbacks to the
+        returned future.
+        """
+        with self._handshake_lock:
+            if engine_id in self._remote_agents:
+                return None
+            fut = self._handshake_futures.get(engine_id)
+            if fut is not None:
+                return fut
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake,
-                meta.remote.host,
-                meta.remote.port,
-                meta.tp_size,
-                remote_engine_id,
+                host,
+                port,
+                tp_size,
+                engine_id,
             )
-            self._handshake_futures[remote_engine_id] = fut
+            self._handshake_futures[engine_id] = fut
 
-            def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
+            def done_cb(f: Future[dict[int, str]], eid=engine_id):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
@@ -718,16 +732,32 @@ class NixlConnectorWorker:
                             remote_engine_id=eid,
                         )
 
-            fut.add_done_callback(done_callback)
+            fut.add_done_callback(done_cb)
+            return fut
 
-        # check handshake success before proceeding with request
+    def _background_nixl_handshake(
+        self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta
+    ):
+        # Do NIXL handshake in background and add to _ready_requests when done.
+        assert meta.remote is not None
+        fut = self._ensure_handshake(
+            remote_engine_id,
+            meta.remote.host,
+            meta.remote.port,
+            meta.tp_size,
+        )
+        if fut is None:
+            # Already handshaked — should not happen (caller checks), but
+            # handle gracefully.
+            self._ready_requests.put((req_id, meta))
+            return
+
+        # Check handshake success before proceeding with request.
         def request_ready(f: Future[Any], entry=(req_id, meta)):
             try:
-                # check if handshake succeeded
                 f.result()
                 self._ready_requests.put(entry)
             except Exception as e:
-                # handshake failed - mark blocks as invalid
                 self._log_failure(
                     failure_type="handshake_failed",
                     req_id=req_id,
@@ -1923,41 +1953,17 @@ class NixlConnectorWorker:
         self._send_heartbeats(metadata)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
-        """Send heartbeat notifications to remote P-side engines."""
+        """
+        Send heartbeat notifications to remote engines, extending lease on KV blocks.
+        """
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             remote_agents = self._remote_agents.get(engine_id)
             if remote_agents is None:
-                # Handshake not yet done — try a proactive one so the next
-                # heartbeat round can send the notification.
-                # TODO refactor this bit?
-                with self._handshake_lock:
-                    if (
-                        engine_id not in self._remote_agents
-                        and engine_id not in self._handshake_futures
-                    ):
-                        fut = self._handshake_initiation_executor.submit(
-                            self._nixl_handshake,
-                            hb_info.host,
-                            hb_info.port,
-                            hb_info.tp_size,
-                            engine_id,
-                        )
-                        self._handshake_futures[engine_id] = fut
-
-                        def done_cb(f: Future[dict[int, str]], eid=engine_id):
-                            with self._handshake_lock:
-                                del self._handshake_futures[eid]
-                                try:
-                                    self._remote_agents[eid] = f.result()
-                                except Exception as e:
-                                    self._log_failure(
-                                        failure_type=("heartbeat_handshake_failed"),
-                                        req_id=None,
-                                        error=e,
-                                        remote_engine_id=eid,
-                                    )
-
-                        fut.add_done_callback(done_cb)
+                # Proactive handshake (this request may still be in waiting queue) so
+                # the next heartbeat can go through.
+                self._ensure_handshake(
+                    engine_id, hb_info.host, hb_info.port, hb_info.tp_size
+                )
                 continue
 
             # Build the heartbeat message: "HB:req1,req2,..."
