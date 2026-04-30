@@ -965,6 +965,8 @@ def get_requirements() -> list[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
+            if cuda_major == "13" and req.startswith("flashinfer-python=="):
+                req = req.replace("flashinfer-python==", "flashinfer-python[cu13]==", 1)
             if "vllm-flash-attn" in req and cuda_major != "12":
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.

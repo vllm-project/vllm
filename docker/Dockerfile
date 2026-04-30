@@ -163,6 +163,9 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
+        sed -i 's/^flashinfer-python==/flashinfer-python[cu13]==/' requirements/cuda.txt; \
+    fi; \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
@@ -573,6 +576,9 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
+        sed -i 's/^flashinfer-python==/flashinfer-python[cu13]==/' /tmp/requirements-cuda.txt; \
+    fi; \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
