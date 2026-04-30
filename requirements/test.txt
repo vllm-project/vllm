@@ -45,7 +45,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.45.3
+bitsandbytes==0.45.3; platform_system != "Darwin"
     # via -r requirements/test.in
 black==24.10.0
     # via datamodel-code-generator
@@ -286,7 +286,7 @@ lxml==5.3.0
     # via
     #   blobfile
     #   sacrebleu
-mamba-ssm==2.2.4
+mamba-ssm==2.2.4; platform_system != "Darwin"
     # via -r requirements/test.in
 markdown-it-py==3.0.0
     # via rich
@@ -644,9 +644,9 @@ rpds-py==0.20.1
     #   referencing
 rsa==4.9.1
     # via google-auth
-runai-model-streamer==0.11.0
+runai-model-streamer==0.11.0; platform_system != "Darwin"
     # via -r requirements/test.in
-runai-model-streamer-s3==0.11.0
+runai-model-streamer-s3==0.11.0; platform_system != "Darwin"
     # via -r requirements/test.in
 s3transfer==0.10.3
     # via boto3
