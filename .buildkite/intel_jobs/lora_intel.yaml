@@ -1,0 +1,130 @@
+group: LoRA Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: LoRA Runtime + Utils
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s lora/test_layers.py &&
+      pytest -v -s lora/test_lora_checkpoints.py &&
+      pytest -v -s lora/test_lora_functions.py &&
+      pytest -v -s lora/test_lora_huggingface.py &&
+      pytest -v -s lora/test_lora_manager.py &&
+      pytest -v -s lora/test_lora_utils.py &&
+      pytest -v -s lora/test_peft_helper.py &&
+      pytest -v -s lora/test_resolver.py &&
+      pytest -v -s lora/test_utils.py &&
+      (pytest -v -s lora/test_add_lora.py --deselect="tests/lora/test_add_lora.py::test_add_lora" || true) &&
+      (pytest -v -s lora/test_worker.py --deselect="tests/lora/test_worker.py::test_worker_apply_lora" || true)'
+
+- label: LoRA Fused/MoE Kernels
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s lora/test_fused_moe_lora_kernel.py && 
+      pytest -v -s lora/test_moe_lora_align_sum.py'
+
+- label: LoRA Punica Kernels
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      set -o pipefail &&
+      pytest -v -s lora/test_punica_ops.py --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-2-2049-64-32-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype1-2-64000-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-128-1-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-256-1-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-256-8-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[expand-0-xpu:0-dtype0-3-2049-128-8-16]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-128-8-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels[expand-0-xpu:0-dtype1-1-2049-256-128-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype0-3-64256-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype1-2-29696-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype1-3-49408-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype0-2-16384-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype0-2-51328-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype1-1-102656-32-4-4]"'
+
+- label: LoRA Punica FP8/XPU Ops
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s lora/test_punica_ops_fp8.py &&
+      pytest -v -s lora/test_punica_xpu_ops.py'
+
+- label: LoRA Models
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      (pytest -v -s lora/test_mixtral.py --deselect="tests/lora/test_mixtral.py::test_mixtral_lora[4]" || true) &&
+      pytest -v -s lora/test_quant_model.py --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
+      pytest -v -s lora/test_qwen35_densemodel_lora.py &&
+      pytest -v -s lora/test_transformers_model.py'
+
+- label: LoRA Multimodal
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s lora/test_default_mm_loras.py && 
+      pytest -v -s lora/test_qwen3_unembed.py &&
+      pytest -v -s lora/test_qwenvl.py &&
+      pytest -v -s lora/test_whisper.py'

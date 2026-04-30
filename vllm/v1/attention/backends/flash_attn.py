@@ -255,11 +255,16 @@ class FlashAttentionMetadata:
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
 ) -> set[tuple[int, int] | None]:
-    """Get the set of all sliding window configs used in the model."""
+    """Get the set of all sliding window configs used in the model.
+
+    Only inspects FlashAttentionImpl layers. Other backends (e.g.
+    TurboQuant, MLA) use their own metadata builders and are skipped.
+    """
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        assert isinstance(layer.impl, FlashAttentionImpl)
+        if not isinstance(layer.impl, FlashAttentionImpl):
+            continue
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
 
@@ -637,7 +642,6 @@ class FlashAttentionImpl(AttentionImpl):
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
-            scope="local",
         )
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT

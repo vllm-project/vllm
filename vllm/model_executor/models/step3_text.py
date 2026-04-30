@@ -14,7 +14,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -71,7 +70,6 @@ class FusedMoEBlock(nn.Module):
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -94,8 +92,6 @@ class FusedMoEBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -467,11 +463,14 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
 
         expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
+            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
         ]
 
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]

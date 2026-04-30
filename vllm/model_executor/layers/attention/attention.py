@@ -33,6 +33,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionMetadata,
     AttentionType,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -209,6 +210,7 @@ class Attention(nn.Module, AttentionLayerBase):
         `self.kv_cache`.
         """
         super().__init__()
+        sliding_window: int | None
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
@@ -259,7 +261,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if skip:
                 kv_cache_dtype = "auto"
                 calculate_kv_scales = False
-            logger.info(
+            logger.debug(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
                 prefix,
                 kv_cache_dtype,
@@ -330,12 +332,17 @@ class Attention(nn.Module, AttentionLayerBase):
             logger.warning_once(
                 "Disabling prefix caching for FLASHINFER/TRITON_MLA "
                 "with batch invariance, as it is not yet supported.",
-                scope="local",
             )
             cache_config.enable_prefix_caching = False
 
+        if extra_impl_args.get("chunk_lookback", -1) > -1:
+            assert self.attn_backend.get_name() == "TRITON_ATTN", (
+                f"Chunked attention with lookback requires the Triton backend, "
+                f"but got {self.attn_backend.get_name()}."
+            )
+
         impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
             head_size,
             scale,
@@ -387,7 +394,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.impl.supports_quant_query_input
-            and self.kv_cache_dtype.startswith("fp8")
+            and (
+                self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
+            )
             and not self.kv_cache_dtype.endswith("per_token_head")
         ):
             is_per_head = (
@@ -404,33 +413,16 @@ class Attention(nn.Module, AttentionLayerBase):
     def _init_turboquant_buffers(
         self, cache_dtype: str, head_size: int, prefix: str
     ) -> None:
-        """Initialize TurboQuant rotation/projection matrices and centroids."""
+        """Initialize TurboQuant centroids for Lloyd-Max quantization."""
         from vllm.model_executor.layers.quantization.turboquant.centroids import (
             get_centroids,
         )
         from vllm.model_executor.layers.quantization.turboquant.config import (
             TurboQuantConfig,
         )
-        from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-            generate_wht_signs,
-        )
 
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
-        # Each layer needs a unique rotation matrix so quantization errors
-        # don't correlate across layers. Stride must exceed max head_dim to
-        # ensure non-overlapping RNG streams between adjacent layers.
-        _TQ_LAYER_SEED_STRIDE = 1337
-
-        from vllm.model_executor.models.utils import extract_layer_index
-
-        layer_idx = extract_layer_index(prefix)
-        seed = tq_config.seed + layer_idx * _TQ_LAYER_SEED_STRIDE
-
-        self.register_buffer(
-            "_tq_signs",
-            generate_wht_signs(head_size, seed=seed),
-        )
         self.register_buffer(
             "_tq_centroids",
             get_centroids(head_size, tq_config.centroid_bits),
@@ -492,7 +484,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # which reduces overheads during decoding.
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
-            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
+            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3", "nvfp4"}
 
             # check if query quantization is supported
             if self.impl.supports_quant_query_input:
@@ -591,7 +583,7 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
@@ -695,9 +687,16 @@ def get_attention_context(
         extracted from the forward context.
     """
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
+    attn_metadata_raw = forward_context.attn_metadata
+    attn_metadata: AttentionMetadata
+    if isinstance(attn_metadata_raw, dict):
+        attn_metadata = attn_metadata_raw[layer_name]
+    elif isinstance(attn_metadata_raw, list):
+        # list[dict[str, AttentionMetadata]]: used in speculative decoding
+        # where [0] is the base-model (non-speculative) metadata dict.
+        attn_metadata = attn_metadata_raw[0][layer_name]
+    else:
+        attn_metadata = attn_metadata_raw
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
     slot_mapping = forward_context.slot_mapping
@@ -723,7 +722,7 @@ def unified_kv_cache_update(
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
-        attn_layer.impl.do_kv_cache_update(
+        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             attn_layer,
             key,
             value,

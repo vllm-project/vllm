@@ -37,7 +37,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
 
 # ROCm installation prefix. Default to /opt/rocm but allow override via
 # -DROCM_PATH=/your/rocm/path when invoking cmake.
@@ -94,12 +94,15 @@ find_package(Torch REQUIRED)
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1")
+   # starting from CUDA 12.9 and Blackwell (10.0), we use family-specific targets (10.0f, 12.0f, etc)
+   # to support the whole generation without specifying all sub-architectures
+   # see: https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
 elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0;12.1")
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1")
 else()
-  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
+  set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.7;8.9;9.0")
 endif()
 
 #
@@ -923,6 +926,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    # nvfp4_kv_cache_kernels uses non-stable torch API and is called directly
+    # from cache_kernels.cu, so it belongs in _C rather than _C_stable.
+    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${NVFP4_KV_SRC}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
@@ -944,11 +955,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${NVFP4_KV_SRC}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")

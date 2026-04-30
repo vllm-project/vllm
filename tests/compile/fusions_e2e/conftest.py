@@ -116,6 +116,22 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
 
+        # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
+        # decompose_auto_functionalized when +rotary_embedding is forced into
+        # the compile graph. Disable qk_norm+rope fusion (which auto-enables
+        # +rotary_embedding) for this combo to avoid the known torch bug.
+        # TODO: remove once upstream torch fix lands.
+        if requires_sparse:
+            if "pass_config" in compilation_config:
+                compilation_config["pass_config"].enable_qk_norm_rope_fusion = False
+                matches_check = [m for m in matches_check if m != "norm_rope_fusion"]
+            # DSv3.2 sparse indexer uses persistent_topk with k=config.index_topk
+            # (2048 for the default config). max_model_len must be >= index_topk
+            # or the topk kernel raises "k out of range" at runtime.
+            model_kwargs["max_model_len"] = max(
+                model_kwargs.get("max_model_len", 0), 2048
+            )
+
         # Always compile the full graph instead of piecewise
         if not compilation_config["use_inductor_graph_partition"]:
             compilation_config["splitting_ops"] = []

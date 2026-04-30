@@ -44,9 +44,9 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/pooling_params.py @noooop @DarkLight1337
 /vllm/tokenizers @DarkLight1337 @njhill
 /vllm/renderers @DarkLight1337 @njhill
-/vllm/reasoning @aarnphm @chaunceyjiang @sfeng33
-/vllm/tool_parsers @aarnphm @chaunceyjiang @sfeng33
-/vllm/parser @aarnphm @chaunceyjiang @sfeng33
+/vllm/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/vllm/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/vllm/parser @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson @MatthewBonanni
@@ -93,9 +93,9 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/kv_connector @ApostaC @orozery
 /tests/v1/kv_offload @ApostaC @orozery
 /tests/v1/determinism @yewentao256
-/tests/reasoning @aarnphm @chaunceyjiang @sfeng33
-/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33
-/tests/tool_use @aarnphm @chaunceyjiang @sfeng33
+/tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor

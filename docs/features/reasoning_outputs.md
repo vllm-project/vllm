@@ -283,9 +283,7 @@ curl http://localhost:8000/v1/chat/completions \
     "messages": [
       { "role": "user", "content": "9.11 and 9.8, which is greater?" }
     ],
-    "extra_body": {
-      "thinking_token_budget": 10
-    }
+    "thinking_token_budget": 10
   }'
 ```
 

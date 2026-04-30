@@ -39,6 +39,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -271,6 +272,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
         self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
+        # Detect flash-attn version (FA2/3/4) for prefill paths.
+        self.fa_version = get_flash_attn_version(head_size=head_size)
+
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
         vllm_config = get_current_vllm_config()
@@ -278,30 +282,63 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
-    def _ensure_on_device(self, layer, device):
-        """One-time derivation of TQ buffers (rotation matrices, midpoints).
+    def _flash_attn_varlen(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        # fa_utils.get_flash_attn_version() returns None on backends that
+        # should not pass an explicit fa_version kwarg.
+        if self.fa_version is None:
+            return flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=True,
+            )
+        return flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,
+            fa_version=self.fa_version,
+        )
 
-        Registered buffers (_tq_signs, _tq_centroids) are already on the
-        correct device via register_buffer + model.to(device).
+    def _ensure_on_device(self, layer, device):
+        """One-time derivation of TQ buffers (rotation matrix, midpoints).
+
+        The Hadamard rotation is shared across all layers: random sign
+        flips do not improve Lloyd-Max quantization quality because the
+        quantizer is symmetric around zero (sign-flipping a coordinate
+        maps it to the mirror centroid with identical distortion).
         """
         if not hasattr(layer, "_tq_cached"):
-            D = layer._tq_signs.shape[0]
-            signs = layer._tq_signs.to(device=device, dtype=torch.float32)
+            D = self.head_size
 
-            # WHT rotation: orthonormal + self-inverse, enabling future
+            # Pure Hadamard: orthonormal + symmetric (H = H^T), enabling
             # in-kernel butterfly fusion and trivial inverse for continuation.
             H = _build_hadamard(D, str(device))
-            layer._tq_PiT = (signs.unsqueeze(1) * H).contiguous()
-            layer._tq_Pi = layer._tq_PiT.T.contiguous()
+            layer._tq_PiT = H
+            layer._tq_Pi = H
 
             c = layer._tq_centroids.to(device=device, dtype=torch.float32)
-            # Precompute midpoints for threshold-based quantization
             c_sorted, _ = c.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
-            # Decode buffers (_tq_mid_o_buf, _tq_output_buf, _tq_lse_buf)
-            # are pre-allocated via register_buffer in Attention.__init__
-            # and moved to GPU by model.to(device) — no allocation needed
-            # here.  The memory profiler sees them before KV cache sizing.
             layer._tq_cached = True
 
     def do_kv_cache_update(
@@ -507,8 +544,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # max_query_len == max_seq_len means no request has prior cached KV.
         # Both are Python ints — no GPU sync.
         if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
-            output = torch.empty(N, Hq, D, device=query.device, dtype=query.dtype)
-            flash_attn_varlen_func(
+            return self._flash_attn_varlen(
                 q=query,
                 k=key,
                 v=value,
@@ -516,11 +552,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 cu_seqlens_k=attn_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.max_query_len,
                 max_seqlen_k=attn_metadata.max_query_len,
-                softmax_scale=self.scale,
-                causal=True,
-                out=output,
             )
-            return output
 
         # Continuation or no flash_attn: per-request attention.
         # For continuation chunks (seq_len > q_len), we must attend to
@@ -557,10 +589,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
                 if _HAS_FLASH_ATTN:
-                    out = torch.empty_like(q_seq)
                     _cu_2[1] = q_len
                     cu = _cu_2
-                    flash_attn_varlen_func(
+                    out = self._flash_attn_varlen(
                         q=q_seq,
                         k=k_seq,
                         v=v_seq,
@@ -568,9 +599,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         cu_seqlens_k=cu,
                         max_seqlen_q=q_len,
                         max_seqlen_k=q_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        out=out,
                     )
                 else:
                     q_t = q_seq.transpose(0, 1).contiguous()
@@ -733,10 +761,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
         if _HAS_FLASH_ATTN:
-            output = torch.empty(q_len, Hq, D, device=device, dtype=query.dtype)
             cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
             cu_seqlens_k = torch.tensor([0, seq_len], device=device, dtype=torch.int32)
-            flash_attn_varlen_func(
+            return self._flash_attn_varlen(
                 q=query,
                 k=k_full,
                 v=v_full,
@@ -744,11 +771,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=q_len,
                 max_seqlen_k=seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                out=output,
             )
-            return output
         else:
             # SDPA fallback: expand KV for GQA, build causal mask
             q_t = query.transpose(0, 1).unsqueeze(0)  # (1, Hq, q_len, D)
