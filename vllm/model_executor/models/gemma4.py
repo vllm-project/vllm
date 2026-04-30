@@ -84,6 +84,10 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _remap_gemma4_expert_weight_name(name: str) -> str:
+    return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+
+
 @triton.jit
 def _gemma4_routing_kernel(
     gating_ptr,
@@ -1144,11 +1148,6 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     dtype=dtype,
                     device=device,
                 ),
-                "residual": torch.zeros(
-                    (batch_size, hidden_size),
-                    dtype=dtype,
-                    device=device,
-                ),
             }
             if ple_dim and ple_dim > 0:
                 tensors["per_layer_inputs"] = torch.zeros(
@@ -1312,13 +1311,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 per_layer_inputs = self.project_per_layer_inputs(
                     hidden_states, per_layer_embeds
                 )
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-            per_layer_inputs = intermediate_tensors.get("per_layer_inputs")
-
+            if per_layer_inputs is not None:
+                per_layer_inputs = intermediate_tensors["per_layer_inputs"]
+        residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
@@ -1342,13 +1340,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                    "per_layer_inputs": per_layer_inputs,
-                }
-            )
+            tensors: dict[str, torch.Tensor] = {
+                "hidden_states": hidden_states,
+            }
+            if per_layer_inputs is not None:
+                tensors["per_layer_inputs"] = per_layer_inputs
+            return IntermediateTensors(tensors)
         # Gemma4 incorporates residual into hidden_states directly
         # Apply norm without residual fusion when possible.
         if residual is None:
@@ -1657,7 +1654,7 @@ class Gemma4ForCausalLM(
                 # Remap individual 2D expert weights:
                 # .experts.{id}.{proj} → .moe.experts.{id}.{proj}
                 # (This handles per-expert 2D quantized weights)
-                name = re.sub(r"\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+                name = _remap_gemma4_expert_weight_name(name)
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for

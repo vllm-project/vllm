@@ -105,7 +105,8 @@ plugins:
           - https://docs.aiohttp.org/en/stable/objects.inv
           - https://pillow.readthedocs.io/en/stable/objects.inv
           - https://numpy.org/doc/stable/objects.inv
-          - https://pytorch.org/docs/stable/objects.inv
+          # TODO revert to stable once https://github.com/pytorch/pytorch/issues/182007 is fixed
+          - https://pytorch.org/docs/2.11/objects.inv
   - redirects:
       redirect_maps:
         features/spec_decode/README.md: features/speculative_decoding/README.md

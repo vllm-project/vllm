@@ -54,7 +54,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
-from vllm.utils.multi_stream_utils import AuxStreamType
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import (
@@ -926,7 +925,7 @@ class DeepseekV4Attention(nn.Module):
         vllm_config: VllmConfig,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream: torch.cuda.Stream | None = None,
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1028,7 +1027,6 @@ class DeepseekV4Attention(nn.Module):
             max_position=self.max_position_embeddings,
             rope_parameters=rope_parameters,
             is_neox_style=False,
-            dtype=config.torch_dtype,
         )
 
         self.indexer = None
@@ -1059,7 +1057,7 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             indexer_rotary_emb=self.rotary_emb,
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream=aux_stream,
+            aux_stream_list=aux_stream_list,
         )
         self.mla_attn = DeepseekV4MultiHeadLatentAttentionWrapper(
             hidden_size=self.hidden_size,
@@ -1095,9 +1093,14 @@ class DeepseekV4DecoderLayer(nn.Module):
         vllm_config,
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_dict: dict[AuxStreamType, torch.cuda.Stream] | None = None,
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
+
+        # Lazy import to avoid top-level tilelang dependency.
+        # Registers both torch.ops.vllm.mhc_pre and mhc_post
+        import vllm.model_executor.layers.mhc  # noqa: F401
+
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
 
@@ -1106,9 +1109,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream=aux_stream_dict.get(AuxStreamType.Attention)
-            if aux_stream_dict is not None
-            else None,
+            aux_stream_list=aux_stream_list,
         )
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
@@ -1170,11 +1171,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        # Lazy import to avoid top-level tilelang dependency.
-        # Registers both torch.ops.vllm.mhc_pre and mhc_post,
-        # so hc_post() doesn't need its own import.
-        import vllm.model_executor.layers.mhc  # noqa: F401
-
         post_mix, res_mix, layer_input = torch.ops.vllm.mhc_pre(
             residual=x,
             fn=hc_fn,
@@ -1236,10 +1232,11 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        aux_stream_list = [torch.cuda.Stream() for _ in range(1)]
-        self.aux_stream_dict = {
-            AuxStreamType.Attention: aux_stream_list[0],
-        }
+        # Three aux streams: one per non-default input GEMM in
+        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
+        # (compressor kv_score, indexer.weights_proj, indexer.compressor
+        # kv_score). fused_wqa_wkv stays on the default stream.
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
@@ -1263,7 +1260,7 @@ class DeepseekV4Model(nn.Module):
                 vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
-                aux_stream_dict=self.aux_stream_dict,
+                aux_stream_list=aux_stream_list,
             ),
             prefix=f"{prefix}.layers",
         )
