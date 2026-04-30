@@ -686,9 +686,11 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.triton_utils.jit_monitor import activate as activate_jit_monitor
+        from vllm.triton_utils.jit_monitor import (
+            activate as activate_triton_jit_monitor,
+        )
 
-        activate_jit_monitor()
+        activate_triton_jit_monitor()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
