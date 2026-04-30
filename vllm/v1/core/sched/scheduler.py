@@ -1367,28 +1367,43 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and generated_token_ids:
+            if scheduled_spec_token_ids and (
+                generated_token_ids or request.num_output_placeholders == 0
+            ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
-                num_rejected = num_draft_tokens - num_accepted
+                num_generated_tokens = len(generated_token_ids)
+                num_accepted = max(num_generated_tokens - 1, 0)
+                if request.num_output_placeholders == 0:
+                    # Sync spec decode advances num_computed_tokens optimistically
+                    # before we know how many scheduled tokens survive. If the worker
+                    # returns no materialized tokens, roll back the full optimistic
+                    # advance here so the next draft update keeps the usual decode gap.
+                    num_rejected = max(
+                        scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                        - num_generated_tokens,
+                        0,
+                    )
+                else:
+                    num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
-                if request.num_computed_tokens > 0:
+                if num_rejected > 0 and request.num_computed_tokens > 0:
                     request.num_computed_tokens -= num_rejected
                 # If async scheduling, num_output_placeholders also includes
                 # the scheduled spec tokens count and so is similarly adjusted.
-                if request.num_output_placeholders > 0:
+                if num_rejected > 0 and request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
-                )
+                if generated_token_ids:
+                    spec_decoding_stats = self.make_spec_decoding_stats(
+                        spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                        request_id=req_id,
+                    )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:

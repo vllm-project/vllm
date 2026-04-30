@@ -889,8 +889,9 @@ def test_spec_decoding_stats_empty_output():
     """Test that spec decoding stats handle empty output tokens gracefully.
 
     This is a regression test for a bug where empty sampled_token_ids
-    would cause num_accepted = len([]) - 1 = -1, leading to a
-    ValueError when incrementing a Prometheus counter with a negative value.
+    would both skip sync-spec rollback and make num_accepted negative.
+    The rollback bug parked the request on the next draft update, while
+    the negative num_accepted value crashed the Prometheus stats path.
     """
     num_spec_tokens = 3
     scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
@@ -943,6 +944,19 @@ def test_spec_decoding_stats_empty_output():
         engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
     )
     assert scheduler_stats is None or scheduler_stats.spec_decoding_stats is None
+
+    running_req = scheduler.running[0]
+    assert running_req.num_computed_tokens == running_req.num_tokens - 1
+
+    # A fresh draft update should restore the normal sync-spec gap instead of
+    # parking the request with zero schedulable tokens.
+    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[4, 5, 6]]))
+    running_req = scheduler.running[0]
+    assert running_req.num_tokens_with_spec - running_req.num_computed_tokens == 4
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] == 4
+    assert output.scheduled_spec_decode_tokens[req_id] == [4, 5, 6]
 
 
 def test_no_spec_tokens_scheduled_for_prefill_chunks():
