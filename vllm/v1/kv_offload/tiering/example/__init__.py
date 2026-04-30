@@ -13,7 +13,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from vllm.v1.kv_offload.abstract import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,

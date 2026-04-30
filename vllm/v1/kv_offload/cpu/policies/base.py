@@ -4,7 +4,7 @@ import ctypes
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
-from vllm.v1.kv_offload.abstract import OffloadKey
+from vllm.v1.kv_offload.base import OffloadKey
 
 
 class BlockStatus(ctypes.Structure):

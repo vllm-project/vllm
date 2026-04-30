@@ -23,7 +23,7 @@ Key Design Principles:
 from collections.abc import Iterable, Sequence
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,

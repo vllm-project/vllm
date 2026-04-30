@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from vllm.v1.kv_offload.abstract import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int

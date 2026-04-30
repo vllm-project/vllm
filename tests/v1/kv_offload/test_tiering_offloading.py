@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     make_offload_key,
