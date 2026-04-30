@@ -414,17 +414,39 @@ class CoreEngineActorManager:
             "Number of placement groups must match data parallel size"
         )
 
+        # Store state needed by launch().
+        self._vllm_config = vllm_config
+        self._dp_size = dp_size
+        self._local_engine_count = local_engine_count
+        self._world_size = world_size
+        self._actor_class = actor_class
+        self._placement_groups = placement_groups
+        self._local_dp_ranks = local_dp_ranks
+        self._runtime_env = runtime_env
+        self._copy = copy
+        self._ray = ray
+        self._RuntimeEnv = RuntimeEnv
+        self._PlacementGroupSchedulingStrategy = PlacementGroupSchedulingStrategy
+
+    def launch(self):
+        """Create Ray actors and start engine busy loops.
+
+        Separated from ``__init__`` so that callers can resolve
+        ``tcp://host:0`` placeholder addresses (via
+        ``APIServerProcessManager``) before actors attempt to connect.
+        """
         self.placement_group_is_local = []
         refs = []
         for index, local_index, pg in zip(
-            range(dp_size), local_dp_ranks, placement_groups
+            range(self._dp_size), self._local_dp_ranks, self._placement_groups
         ):
-            dp_vllm_config = copy.deepcopy(vllm_config)
-            if dp_size > 1:
+            dp_vllm_config = self._copy.deepcopy(self._vllm_config)
+            if self._dp_size > 1:
                 _apply_dp_identity_suffix(dp_vllm_config, index)
             dp_vllm_config.parallel_config.placement_group = pg
-            local_client = index < local_engine_count
+            local_client = index < self._local_engine_count
 
+            runtime_env = self._runtime_env
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:
@@ -432,27 +454,27 @@ class CoreEngineActorManager:
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
                 device_indices = get_device_indices(
-                    device_evar, local_index, world_size
+                    device_evar, local_index, self._world_size
                 )
                 actor_env_vars = self.env_vars_dict.copy()
                 actor_env_vars[device_evar] = device_indices
-                runtime_env = RuntimeEnv(env_vars=actor_env_vars)
+                runtime_env = self._RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (
-                ray.remote(actor_class)
+                self._ray.remote(self._actor_class)
                 .options(
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    scheduling_strategy=self._PlacementGroupSchedulingStrategy(
                         placement_group=pg,
-                        placement_group_bundle_index=world_size,
+                        placement_group_bundle_index=self._world_size,
                     ),
                     runtime_env=runtime_env,
                 )
                 .remote(
                     vllm_config=dp_vllm_config,
-                    executor_class=executor_class,
-                    log_stats=log_stats,
+                    executor_class=self.executor_class,
+                    log_stats=self.log_stats,
                     local_client=local_client,
-                    addresses=addresses,
+                    addresses=self.addresses,
                     dp_rank=index,
                     local_dp_rank=local_index,
                 )
@@ -464,7 +486,7 @@ class CoreEngineActorManager:
             self.placement_group_is_local.append(local_client)
             refs.append(actor.wait_for_init.remote())
 
-        ray.get(refs)
+        self._ray.get(refs)
         self.run_refs = []
         self.actor_run_ref_dict = dict()
         for actor in self.local_engine_actors + self.remote_engine_actors:
@@ -960,9 +982,7 @@ def get_engine_zmq_addresses(
 
     TCP path returns ``tcp://host:0`` placeholders so each owning process
     atomically binds its port (kernel-assigned), eliminating the bind(0)/
-    close/rebind race (vllm-project/vllm#40443). Ray keeps the legacy
-    pre-allocate path since actors are spawned before real endpoints can
-    be collected.
+    close/rebind race (vllm-project/vllm#40443).
     """
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
@@ -985,7 +1005,7 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
-    if not client_local_only and parallel_config.data_parallel_backend != "ray":
+    if not client_local_only:
         placeholder = get_tcp_uri(host, 0)
         return EngineZmqAddresses(
             inputs=[placeholder] * num_api_servers,

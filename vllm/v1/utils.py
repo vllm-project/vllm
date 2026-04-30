@@ -160,7 +160,7 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
     )
 
 
-_ZMQ_ADDR_REPORT_TIMEOUT_S = 30
+_ZMQ_ADDR_REPORT_TIMEOUT_S = 120
 
 
 class APIServerProcessManager:
@@ -206,7 +206,7 @@ class APIServerProcessManager:
         # TCP placeholders -> children bind wildcard and pipe-back real
         # endpoints (#40443, mirrors DPCoordinator).
         defer_bind = any(
-            addr.startswith("tcp://")
+            addr.endswith(":0")
             for addr in (*input_addresses, *output_addresses)
         )
         parent_conns: list[connection.Connection] = []
