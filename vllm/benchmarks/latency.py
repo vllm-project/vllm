@@ -23,7 +23,7 @@ def save_to_pytorch_benchmark_format(
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={"latency": results["latencies"]},
-        extra_info={k: results[k] for k in ["avg_latency", "percentiles"]},
+        extra_info={k: results[k] for k in ["avg_latency", "std_latency", "percentiles"]},
     )
     if pt_records:
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
@@ -156,6 +156,7 @@ def main(args: argparse.Namespace):
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
     print(f"Avg latency: {np.mean(latencies)} seconds")
+    print(f"Std latency: {np.std(latencies)} seconds")
     for percentage, percentile in zip(percentages, percentiles):
         print(f"{percentage}% percentile latency: {percentile} seconds")
 
@@ -163,6 +164,7 @@ def main(args: argparse.Namespace):
     if args.output_json:
         results = {
             "avg_latency": np.mean(latencies),
+            "std_latency": np.std(latencies),
             "latencies": latencies.tolist(),
             "percentiles": dict(zip(percentages, percentiles.tolist())),
         }
