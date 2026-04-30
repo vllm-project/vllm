@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import regex as re
@@ -14,6 +15,11 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.config.model import ModelConfig
+from vllm.model_executor.layers.attention.attention import (
+    Attention,
+    _is_qwen_vl_model_config,
+    _validate_qwen_vl_fp8_e5m2_kv_cache_scales,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
@@ -35,6 +41,111 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+def _attention_layer_for_kv_cache_scale_validation() -> Attention:
+    layer = object.__new__(Attention)
+    layer.impl = SimpleNamespace(process_weights_after_loading=lambda _dtype: None)
+    layer.quant_config = None
+    layer.layer_name = "language_model.model.layers.0.self_attn.attn"
+    layer._is_qwen_vl_model = True
+    layer.kv_cache_dtype = "fp8_e5m2"
+    layer.calculate_kv_scales = False
+    layer._k_scale = torch.tensor(0.0, dtype=torch.float32)
+    layer._v_scale = torch.tensor(0.0, dtype=torch.float32)
+    layer._q_scale = torch.tensor(0.0, dtype=torch.float32)
+    layer._prob_scale = torch.tensor(0.0, dtype=torch.float32)
+    return layer
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        SimpleNamespace(architecture="Qwen2VLForConditionalGeneration"),
+        SimpleNamespace(architecture="Qwen2_5_VLForConditionalGeneration"),
+        SimpleNamespace(
+            architecture="Qwen2ForCausalLM",
+            hf_config=SimpleNamespace(
+                model_type="qwen2_vl",
+                architectures=["Qwen2ForCausalLM"],
+            ),
+        ),
+        SimpleNamespace(
+            architecture="Qwen2ForCausalLM",
+            hf_config=SimpleNamespace(
+                model_type="qwen2_5_vl",
+                architectures=["Qwen2ForCausalLM"],
+            ),
+        ),
+    ],
+)
+def test_qwen_vl_model_config_detected_for_kv_cache_guard(model_config):
+    assert _is_qwen_vl_model_config(model_config)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        None,
+        SimpleNamespace(architecture="Qwen2ForCausalLM"),
+        SimpleNamespace(architecture="Qwen2ForCausalLM", hf_config=None),
+        SimpleNamespace(
+            architecture="Qwen2ForCausalLM",
+            hf_config=SimpleNamespace(
+                model_type="qwen2",
+                architectures=["Qwen2ForCausalLM"],
+            ),
+        ),
+    ],
+)
+def test_non_qwen_vl_model_config_is_not_qwen_vl_for_kv_cache_guard(
+    model_config,
+):
+    assert not _is_qwen_vl_model_config(model_config)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen_vl_rejects_fp8_e5m2_default_kv_cache_scales_after_loading():
+    layer = _attention_layer_for_kv_cache_scale_validation()
+
+    with pytest.raises(ValueError, match="fp8_e5m2.*default KV cache scales"):
+        layer.process_weights_after_loading(torch.float16)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    (
+        "is_qwen_vl_model",
+        "kv_cache_dtype",
+        "calculate_kv_scales",
+        "k_scale",
+        "v_scale",
+    ),
+    [
+        (False, "fp8_e5m2", False, 1.0, 1.0),
+        (True, "fp8_e4m3", False, 1.0, 1.0),
+        (True, "fp8_e5m2", True, 1.0, 1.0),
+        (True, "fp8_e5m2", False, 0.5, 0.5),
+    ],
+)
+def test_qwen_vl_fp8_e5m2_kv_cache_guard_allows_safe_states(
+    is_qwen_vl_model: bool,
+    kv_cache_dtype: str,
+    calculate_kv_scales: bool,
+    k_scale: float,
+    v_scale: float,
+):
+    layer = SimpleNamespace(
+        _is_qwen_vl_model=is_qwen_vl_model,
+        kv_cache_dtype=kv_cache_dtype,
+        calculate_kv_scales=calculate_kv_scales,
+        _k_scale_float=k_scale,
+        _v_scale_float=v_scale,
+    )
+
+    _validate_qwen_vl_fp8_e5m2_kv_cache_scales(layer)
 
 
 @pytest.mark.skipif(
