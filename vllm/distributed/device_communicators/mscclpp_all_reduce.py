@@ -187,8 +187,8 @@ class MscclppAllReduce:
             for nthreads in nthreads_to_try:
                 for nblocks in nblocks_to_try:
                     cur_cost = _bench_time(
-                        lambda nt=nthreads, nb=nblocks: self._ops.mscclpp_allreduce(
-                            self._context, mock_inp, mock_outp, nt, nb
+                        lambda: self._ops.mscclpp_allreduce(
+                            self._context, mock_inp, mock_outp, nthreads, nblocks
                         )
                     )
                     if best_time is None or cur_cost < best_time:
