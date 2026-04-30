@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingManager,
     ReqContext,
