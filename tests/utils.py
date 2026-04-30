@@ -1414,56 +1414,6 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     return wrapper
 
 
-
-    """Decorator to spawn a new process for each test function."""
-
-    @functools.wraps(f)
-    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Check if we're already in a subprocess
-        if os.environ.get("RUNNING_IN_SUBPROCESS") == "1":
-            # If we are, just run the function directly
-            return f(*args, **kwargs)
-
-        import torch.multiprocessing as mp
-
-        with suppress(RuntimeError):
-            mp.set_start_method("spawn")
-
-        # Get the module
-        module_name = f.__module__
-
-        # Create a process with environment variable set
-        env = os.environ.copy()
-        env["RUNNING_IN_SUBPROCESS"] = "1"
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            output_filepath = os.path.join(tempdir, "new_process.tmp")
-
-            # `cloudpickle` allows pickling complex functions directly
-            input_bytes = cloudpickle.dumps((f, output_filepath))
-
-            repo_root = str(VLLM_PATH.resolve())
-
-            env = dict(env or os.environ)
-            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
-
-            cmd = [sys.executable, "-m", f"{module_name}"]
-
-            returned = subprocess.run(
-                cmd, input=input_bytes, capture_output=True, env=env
-            )
-
-            # check if the subprocess is successful
-            try:
-                returned.check_returncode()
-            except Exception as e:
-                # wrap raised exception to provide more information
-                raise RuntimeError(
-                    f"Error raised in subprocess:\n{returned.stderr.decode()}"
-                ) from e
-
-    return wrapper
-
 def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to spawn a new process for each test function.
 
@@ -1474,9 +1424,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=".tb", mode="wb"
-        ) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".tb", mode="wb") as tmp:
             tb_file = tmp.name
 
         try:
@@ -1489,7 +1437,8 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 "    from _pytest.outcomes import Skipped\n"
                 "except ImportError:\n"
                 "    class Skipped(BaseException): pass\n"
-                "f, args, kwargs, tb_file = cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "f, args, kwargs, tb_file = "
+                "cloudpickle.loads(sys.stdin.buffer.read())\n"
                 "try:\n"
                 "    f(*args, **kwargs)\n"
                 "except Skipped:\n"
