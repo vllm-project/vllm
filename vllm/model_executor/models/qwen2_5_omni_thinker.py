@@ -478,13 +478,21 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
-
-        hf_inputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        if "device" not in mm_kwargs and torch.cuda.is_available():
+            mm_kwargs["device"] = "cuda"
+            hf_inputs = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
+            ).to("cpu")
+        else:
+            hf_inputs = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
+            )
 
         input_features = hf_inputs.pop("input_features", None)
         feature_attention_mask = hf_inputs.get("feature_attention_mask", None)
