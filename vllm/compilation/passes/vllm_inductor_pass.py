@@ -39,6 +39,8 @@ class VllmInductorPass(InductorPass):
 
     dump_prefix: ClassVar[int | None] = None
     """Keep track of pass index for debug dump ordering."""
+    dump_context: ClassVar[dict[str, str]] = {}
+    """Dump-only labels for the current compiled function."""
 
     def __init__(self, config: VllmConfig):
         # Get only the necessary CompilationConfig for the inductor pass, since
@@ -57,6 +59,7 @@ class VllmInductorPass(InductorPass):
         self.graph_dump_metadata = collect_graph_metadata(
             config,
             pass_name=self.pass_name,
+            **VllmInductorPass.dump_context,
             model_dtype=self.model_dtype,
             device=self.device,
         )

@@ -28,7 +28,7 @@ def monitor_torch_compile(
     path = vllm_config.compile_debug_dump_path()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE and path:
         path.mkdir(parents=True, exist_ok=True)
-        logger.debug("Dumping vLLM compile debug output to %s", path)
+        logger.info_once("Writing vLLM compile debug dumps under %s", path)
 
     try:
         yield

@@ -123,8 +123,18 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         VllmPatternMatcherPass.log_match_summary()
 
-    def configure(self, config: VllmConfig) -> None:
+    def configure(
+        self,
+        config: VllmConfig,
+        prefix: str = "",
+        function_name: str = "",
+    ) -> None:
         self.pass_config = config.compilation_config.pass_config
+        VllmInductorPass.dump_context = {}
+        if prefix:
+            VllmInductorPass.dump_context["prefix"] = prefix
+        if function_name:
+            VllmInductorPass.dump_context["function_name"] = function_name
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):

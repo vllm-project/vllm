@@ -929,7 +929,11 @@ class VllmBackend:
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
     def configure_post_pass(self) -> None:
-        self.pass_manager.configure(self.vllm_config)
+        self.pass_manager.configure(
+            self.vllm_config,
+            prefix=self.prefix,
+            function_name=self.function_name,
+        )
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.

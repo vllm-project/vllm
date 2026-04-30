@@ -15,7 +15,7 @@ from torch._ops import OpOverload, OpOverloadPacket
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_dump_index = itertools.count()
+_dump_indices: dict[Path, itertools.count] = {}
 
 
 def _json_safe(value: Any) -> Any:
@@ -45,12 +45,17 @@ def collect_graph_metadata(
     metadata: dict[str, Any] = {}
     if vllm_config is not None:
         cc = vllm_config.compilation_config
+        model_config = vllm_config.model_config
+        device_config = vllm_config.device_config
         metadata.update(
             {
-                "model": getattr(vllm_config.model_config, "model", None),
+                "model": getattr(model_config, "model", None),
+                "model_dtype": getattr(model_config, "dtype", None),
+                "device": getattr(device_config, "device", None),
                 "mode": str(cc.mode),
                 "backend": cc.backend,
                 "custom_ops": cc.custom_ops,
+                "debug_dump_path": vllm_config.compile_debug_dump_path(),
                 "splitting_ops": cc.splitting_ops,
                 "compile_sizes": cc.compile_sizes,
                 "compile_ranges_endpoints": cc.compile_ranges_endpoints,
@@ -198,16 +203,53 @@ def _safe_name(name: str) -> str:
 
 def _next_base_path(dump_dir: Path, name: str) -> Path:
     safe = _safe_name(name)
+    counter = _dump_indices.setdefault(dump_dir, itertools.count())
     while True:
-        index = next(_dump_index)
+        index = next(counter)
         base = dump_dir / f"{index:04d}_{safe}"
-        paths = [
-            base.with_suffix(".structured.txt"),
-            base.with_suffix(".raw.py"),
-            base.with_suffix(".metadata.json"),
-        ]
-        if not any(path.exists() for path in paths):
+        if not any(
+            base.with_suffix(suffix).exists()
+            for suffix in (".structured.txt", ".raw.py", ".metadata.json")
+        ):
             return base
+
+
+def _append_index(
+    dump_dir: Path, base: Path, name: str, metadata: dict[str, Any]
+) -> None:
+    index_path = dump_dir / "index.md"
+    if not index_path.exists():
+        index_path.write_text(
+            "# vLLM Graph Dumps\n\n"
+            "Read `*.structured.txt` first for layer/module nesting, "
+            "`*.raw.py` for the raw FX graph, and `*.metadata.json` for "
+            "vLLM compile context.\n\n"
+            "| # | stage | context | vllm_ir | structured | raw | metadata |\n"
+            "|---|---|---|---|---|---|---|\n",
+            encoding="utf-8",
+        )
+
+    def cell(value: Any) -> str:
+        return str(value or "-").replace("\n", " ").replace("|", "\\|")
+
+    ir = ", ".join(
+        f"{item['op']}:{item['provider']}" if item.get("provider") else item["op"]
+        for item in metadata.get("vllm_ir") or []
+        if item.get("op")
+    )
+    row = [
+        base.name.split("_", 1)[0],
+        name,
+        metadata.get("function_name")
+        or metadata.get("parent_function_name")
+        or metadata.get("pass_name"),
+        ir,
+        f"[structured]({base.with_suffix('.structured.txt').name})",
+        f"[raw]({base.with_suffix('.raw.py').name})",
+        f"[metadata]({base.with_suffix('.metadata.json').name})",
+    ]
+    with index_path.open("a", encoding="utf-8") as f:
+        f.write("| " + " | ".join(cell(item) for item in row) + " |\n")
 
 
 def dump_graph(
@@ -234,3 +276,4 @@ def dump_graph(
         json.dumps(_json_safe(metadata), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    _append_index(dump_path, base, name, metadata)
