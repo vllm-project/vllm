@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -53,6 +54,10 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
@@ -116,7 +121,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             self.supports_quant_query_input = False
 
-        self._sm_count = torch.cuda.get_device_properties(0).multi_processor_count
+        self._sm_count = current_platform.num_compute_units()
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs

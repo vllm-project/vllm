@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    model_serializer,
     model_validator,
 )
 
@@ -166,6 +167,14 @@ class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] | None = None
+    defer_loading: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.defer_loading is None:
+            data.pop("defer_loading", None)
+        return data
 
 
 # extra="forbid" is a workaround to have kwargs as a field,

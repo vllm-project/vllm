@@ -11,7 +11,11 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
+    ResponseTextConfig,
     ResponseTextDeltaEvent,
+)
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
 )
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
@@ -23,12 +27,20 @@ from openai.types.responses.tool import (
 import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCreatedEvent,
+    ResponseRawMessageAndToken,
+    ResponsesRequest,
+    ResponsesResponse,
+    serialize_message,
+)
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
@@ -71,6 +83,16 @@ class MockConversationContext(ConversationContext):
 
     async def cleanup_session(self) -> None:
         pass
+
+
+def test_serialize_message_pydantic_model_returns_dict() -> None:
+    msg = ResponseRawMessageAndToken(message="hello", tokens=[1, 2, 3])
+
+    serialized = serialize_message(msg)
+
+    assert isinstance(serialized, dict)
+    assert serialized["type"] == "raw_message_tokens"
+    assert serialized["message"] == "hello"
 
 
 @pytest.fixture
@@ -132,6 +154,56 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+@pytest.mark.skip_global_cleanup
+def test_response_created_event_uses_public_json_schema_alias() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "event_name": {"type": "string"},
+            "date": {"type": "string"},
+            "participants": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["event_name", "date", "participants"],
+        "additionalProperties": False,
+    }
+    text = ResponseTextConfig()
+    text.format = ResponseFormatTextJSONSchemaConfig(
+        type="json_schema",
+        name="calendar_event",
+        schema=schema,
+        description="A calendar event.",
+        strict=True,
+    )
+    request = ResponsesRequest(
+        model="test-model",
+        input="Alice and Bob are going to a science fair on Friday.",
+        text=text,
+    )
+    sampling_params = request.to_sampling_params(default_max_tokens=64)
+    initial_response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="in_progress",
+        usage=None,
+    ).model_dump(mode="json", by_alias=True)
+
+    fmt = initial_response["text"]["format"]
+    assert fmt["schema"] == schema
+    assert "schema_" not in fmt
+
+    event = ResponseCreatedEvent(
+        type="response.created",
+        sequence_number=0,
+        response=initial_response,
+    )
+    assert event.response.text is not None
+    assert event.response.text.format is not None
+    assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
+
+
 class TestInitializeToolSessions:
     """Test class for _initialize_tool_sessions method"""
 
@@ -148,7 +220,6 @@ class TestInitializeToolSessions:
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
-        engine_client.io_processor = MagicMock()
         engine_client.renderer = MagicMock()
 
         models = MagicMock()
@@ -237,7 +308,6 @@ class TestValidateGeneratorInput:
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
-        engine_client.io_processor = MagicMock()
         engine_client.renderer = MagicMock()
 
         models = MagicMock()
@@ -299,7 +369,6 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
     engine_client.input_processor = MagicMock()
-    engine_client.io_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
     tokenizer = FakeTokenizer()
@@ -602,7 +671,6 @@ def _make_serving_instance_with_reasoning():
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
     engine_client.input_processor = MagicMock()
-    engine_client.io_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
     models = MagicMock()
@@ -628,6 +696,31 @@ def _identity_increment(event):
     return event
 
 
+def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
+    """Set up serving.parser so that it returns a mock parser instance
+    with a reasoning parser that returns the given delta_sequence.
+
+    The mock has reasoning_parser set (truthy) but tool_parser as None,
+    so the parser's parse_delta enters the reasoning-only branch.
+    """
+    call_count = 0
+
+    def mock_parse_delta(**kwargs):
+        nonlocal call_count
+        if call_count >= len(delta_sequence):
+            return None
+        result = delta_sequence[call_count]
+        call_count += 1
+        return result
+
+    mock_parser_instance = MagicMock()
+    mock_parser_instance.reasoning_parser = MagicMock()  # truthy
+    mock_parser_instance.tool_parser = None
+    mock_parser_instance.parse_delta = mock_parse_delta
+    mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
+    serving.parser = MagicMock(return_value=mock_parser_instance)
+
+
 class TestStreamingReasoningToContentTransition:
     """Tests for _process_simple_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
@@ -646,27 +739,13 @@ class TestStreamingReasoningToContentTransition:
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
-        # Sequence of DeltaMessages the mock reasoning parser will return
+        # Sequence of DeltaMessages the mock orchestrator will return
         delta_sequence = [
             DeltaMessage(reasoning="thinking..."),
             DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
             DeltaMessage(content=" world"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        # Mock the reasoning parser on the serving instance
-        mock_parser = MagicMock()
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
         # Create contexts for each streaming chunk
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -734,20 +813,7 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="thinking"),
             DeltaMessage(content="answer"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser = MagicMock()
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -809,20 +875,7 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="step 1"),
             DeltaMessage(reasoning=" step 2"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser = MagicMock()
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -877,3 +930,197 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+class TestAutoToolStreaming:
+    @staticmethod
+    async def _collect_events(delta_sequence: list[DeltaMessage]):
+        serving = _make_serving_instance_with_reasoning()
+        _mock_parser_with_reasoning(serving, delta_sequence)
+
+        contexts = [
+            _make_simple_context_with_output("chunk", [i])
+            for i in range(len(delta_sequence))
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice="auto",
+            stream=True,
+        )
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+        return events
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_auto_multi_tool_streaming_opens_one_item_per_tool(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_vienna",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="",
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(
+                            arguments='{"location":"Vienna"}',
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_berlin",
+                        type="function",
+                        index=1,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        events = await self._collect_events(delta_sequence)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 2
+        assert [event.item.name for event in function_items] == [
+            "get_weather",
+            "get_weather",
+        ]
+        assert [event.output_index for event in function_items] == [0, 1]
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert [event.arguments for event in argument_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in argument_done] == [0, 1]
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert [event.item.arguments for event in function_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in function_done] == [0, 1]
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_auto_tool_choice_first_delta_tool_call_does_not_duplicate_item(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_test",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="",
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        events = await self._collect_events(delta_sequence)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 1
+        assert function_items[0].item.name == "get_weather"
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert "".join(argument_deltas) == '{"location":"Berlin"}'
