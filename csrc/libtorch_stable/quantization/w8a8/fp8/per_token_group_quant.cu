@@ -238,12 +238,15 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
 // Register-resident fast path for group_size==128.
 //
-// Each thread holds 8 source elements (16 B = uint4) in registers across
+// Each thread holds 16 source elements (32 B = uint4 x 2) in registers across
 // the absmax reduce -> scale compute -> quantize pipeline. No shared memory.
 // UE8M0 scale extracted via bit math (bit-exact with exp2f(ceilf(log2f))).
 //
+// Loads two contiguous uint4s (16 B + 16 B = 32 B) per thread; on Blackwell
+// nvcc fuses these into a single 256-bit LDG.E.256.
+//
 // Constraints: GROUP_SIZE % (THREADS_PER_GROUP * VEC_SIZE) == 0; for
-// THREADS_PER_GROUP=16 and bf16/fp16 (VEC_SIZE=8), this means GROUP_SIZE=128.
+// THREADS_PER_GROUP=8 and bf16/fp16 (VEC_SIZE=16), this means GROUP_SIZE=128.
 template <typename T, typename DST_DTYPE, int GROUP_SIZE>
 __global__ void per_token_group_quant_8bit_packed_register_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
@@ -253,8 +256,8 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
     const int num_scale_elems, const float eps, const float min_8bit,
     const float max_8bit) {
   static_assert(GROUP_SIZE == 128, "fast path supports GROUP_SIZE==128");
-  constexpr int THREADS_PER_GROUP = 16;
-  constexpr int VEC_SIZE = 16 / sizeof(T);  // 8 for bf16/fp16
+  constexpr int THREADS_PER_GROUP = 8;
+  constexpr int VEC_SIZE = 32 / sizeof(T);  // 16 for bf16/fp16
   static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE,
                 "GROUP_SIZE must equal THREADS_PER_GROUP * VEC_SIZE");
 
@@ -272,15 +275,20 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   const int mn_idx = static_cast<int>(global_group_id / padded_groups_per_row);
   const bool is_valid_group = (mn_idx < mn) && (sf_k_idx < groups_per_row);
 
-  // Load 8 input elements into registers (skip for invalid groups).
+  // Load 16 input elements (32 B) into registers as two adjacent uint4
+  // loads. nvcc keeps these as 2x LDG.E.128 on sm_100; the per-thread cost
+  // is dominated by HBM bandwidth at large MN, so a fused 256-bit load via
+  // inline PTX gave no measurable speedup.
   T regs[VEC_SIZE];
   float local_absmax = eps;
   if (is_valid_group) {
     const T* group_input =
         input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
         sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
-    *reinterpret_cast<uint4*>(&regs[0]) =
-        *reinterpret_cast<const uint4*>(group_input);
+    uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
+    const uint4* src = reinterpret_cast<const uint4*>(group_input);
+    dst[0] = src[0];
+    dst[1] = src[1];
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
       float v = fabsf(static_cast<float>(regs[i]));
@@ -288,9 +296,9 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
     }
   }
 
-  // Half-warp shuffle reduce (same as GroupReduceMax).
-  unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 8));
+  // 8-lane subgroup shuffle reduce (octet of the warp). The mask selects the
+  // 8 lanes within the warp that share a group.
+  unsigned mask = 0xffu << (threadIdx.x & 24u);
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
@@ -333,22 +341,37 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   float y_s_q = __uint_as_float(static_cast<uint32_t>(exp_byte) << 23);
   float inv_y = 1.0f / y_s_q;
 
-  // Quantize and pack into 8 fp8/int8 bytes (= uint64).
-  uint64_t packed = 0;
+  // Quantize and pack into 16 fp8/int8 bytes (= uint4). VEC_SIZE==16 so we
+  // fill four 32-bit words, four bytes each.
+  uint32_t packed_lo = 0;
+  uint32_t packed_lo_hi = 0;
+  uint32_t packed_hi_lo = 0;
+  uint32_t packed_hi = 0;
 #pragma unroll
   for (int i = 0; i < VEC_SIZE; ++i) {
     float q =
         fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
     DST_DTYPE qb = DST_DTYPE(q);
     uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
-    packed |= static_cast<uint64_t>(byte) << (i * 8);
+    const int shift = (i & 3) * 8;
+    if (i < 4) {
+      packed_lo |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 8) {
+      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 12) {
+      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
+    } else {
+      packed_hi |= static_cast<uint32_t>(byte) << shift;
+    }
   }
 
+  uint4 packed_out =
+      make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
   DST_DTYPE* group_output =
       static_cast<DST_DTYPE*>(output_q) +
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
-  *reinterpret_cast<uint64_t*>(group_output) = packed;
+  *reinterpret_cast<uint4*>(group_output) = packed_out;
 }
 
 // Public entry point: register-resident packed quant kernel.
@@ -388,7 +411,7 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   cudaStream_t stream = get_current_cuda_stream();
 
-  constexpr int THREADS_PER_GROUP = 16;
+  constexpr int THREADS_PER_GROUP = 8;
   const int64_t padded_groups_per_row = k_num_packed_sfk * 4;
   const int64_t num_groups_padded = tma_aligned_mn * padded_groups_per_row;
   const int64_t num_scale_elems = mn + (k_num_packed_sfk - 1) * tma_aligned_mn;
