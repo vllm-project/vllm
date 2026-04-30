@@ -5,12 +5,13 @@
 import gc
 import os
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 
@@ -208,6 +209,30 @@ class Worker(WorkerBase):
             )
         return allocator.use_memory_pool(tag=tag)
 
+    @contextmanager
+    def _scoped_allocator_max_split(self, max_split_size_mb: int):
+        """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
+        cost of more cudaMalloc calls (negligible in practice). Restores the original
+        value on exit."""
+        if not current_platform.is_cuda():
+            yield
+            return
+
+        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        match = re.search(r"max_split_size_mb:(\d+)", conf)
+        original_value = match.group(1) if match else None
+
+        torch._C._accelerator_setAllocatorSettings(
+            f"max_split_size_mb:{max_split_size_mb}"
+        )
+        try:
+            yield
+        finally:
+            # PyTorch defaults to SIZE_MAX (no limit).
+            _SIZE_MAX_MB = (2**64 - 1) // (1024 * 1024)
+            restore = original_value if original_value else str(_SIZE_MAX_MB)
+            torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
+
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
@@ -312,6 +337,8 @@ class Worker(WorkerBase):
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
+            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
+            self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
