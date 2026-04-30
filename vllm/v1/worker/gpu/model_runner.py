@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -586,6 +587,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
             return 0
+
+        compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
         gc.collect()
