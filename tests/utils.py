@@ -1485,9 +1485,15 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
             child_script = (
                 "import sys, cloudpickle, traceback\n"
+                "try:\n"
+                "    from _pytest.outcomes import Skipped\n"
+                "except ImportError:\n"
+                "    class Skipped(BaseException): pass\n"
                 "f, args, kwargs, tb_file = cloudpickle.loads(sys.stdin.buffer.read())\n"
                 "try:\n"
                 "    f(*args, **kwargs)\n"
+                "except Skipped:\n"
+                "    sys.exit(0)\n"
                 "except BaseException:\n"
                 "    open(tb_file, 'w').write(traceback.format_exc())\n"
                 "    sys.exit(1)\n"
