@@ -77,7 +77,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test/cuda.in
     #   schemathesis
-bitsandbytes==0.49.2
+bitsandbytes==0.49.2; platform_system != "Darwin"
     # via
     #   -r requirements/test/cuda.in
     #   lightning
@@ -1039,13 +1039,13 @@ rsa==4.9.1
     # via google-auth
 rtree==1.4.0
     # via torchgeo
-runai-model-streamer==0.15.7
+runai-model-streamer==0.15.7; platform_system == "Linux" and platform_machine == "x86_64"
     # via -r requirements/test/cuda.in
-runai-model-streamer-azure==0.15.7
+runai-model-streamer-azure==0.15.7; platform_system == "Linux" and platform_machine == "x86_64"
     # via runai-model-streamer
-runai-model-streamer-gcs==0.15.7
+runai-model-streamer-gcs==0.15.7; platform_system == "Linux" and platform_machine == "x86_64"
     # via runai-model-streamer
-runai-model-streamer-s3==0.15.7
+runai-model-streamer-s3==0.15.7; platform_system == "Linux" and platform_machine == "x86_64"
     # via runai-model-streamer
 s3transfer==0.10.3
     # via boto3
