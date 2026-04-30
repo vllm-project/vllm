@@ -237,6 +237,13 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         prompt_is_reasoning_end and routes deltas as content without
         calling this method.
         """
+        # Reset per-request state at the very first delta of a new generation
+        # (previous_token_ids is empty).  Guards against _tool_call_pending
+        # leaking from a previous request that ended while the buffer was set
+        # (e.g. the stream was cut immediately after <tool_call>).
+        if not previous_token_ids:
+            self._tool_call_pending = None
+
         # Strip <think> from delta if present (old template / edge case
         # where the model generates <think> itself).
         if self.start_token_id in delta_token_ids:
