@@ -111,6 +111,7 @@ pub(crate) fn prepare_chat_request(
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: request.chat_template,
+            reasoning_effort: request.reasoning_effort,
             template_kwargs,
         },
         tools: convert_tools(request.tools)?,

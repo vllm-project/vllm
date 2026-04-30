@@ -82,20 +82,6 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    reject_non_default(
-        request.reasoning_effort.as_ref(),
-        "reasoning_effort",
-        "reasoning controls are not supported.",
-    )?;
-    reject_non_default(
-        request
-            .chat_template_kwargs
-            .as_ref()
-            .and_then(|kwargs| kwargs.get("reasoning_effort")),
-        "chat_template_kwargs",
-        "reasoning controls are not supported.",
-    )?;
-
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",
@@ -190,7 +176,10 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
+    use vllm_chat::ReasoningEffort;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
@@ -301,6 +290,21 @@ mod tests {
         };
         validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
             .expect("logprobs should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_reasoning_effort() {
+        let request = ChatCompletionRequest {
+            reasoning_effort: Some(ReasoningEffort::Max),
+            chat_template_kwargs: Some(HashMap::from([(
+                "reasoning_effort".to_string(),
+                json!("low"),
+            )])),
+            ..base_request()
+        };
+
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("reasoning_effort should be accepted");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
+use vllm_chat::ReasoningEffort;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -95,8 +96,8 @@ pub struct ChatCompletionRequest {
     /// Controls which (if any) tool is called by the model
     pub tool_choice: Option<ToolChoice>,
 
-    /// Effort level for reasoning models (none, low, medium, high)
-    pub reasoning_effort: Option<String>,
+    /// Effort level for reasoning models (none, minimal, low, medium, high, xhigh, max)
+    pub reasoning_effort: Option<ReasoningEffort>,
 
     /// Whether to enable parallel function calling during tool use
     pub parallel_tool_calls: Option<bool>,

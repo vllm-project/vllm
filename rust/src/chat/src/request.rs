@@ -238,6 +238,33 @@ pub enum GenerationPromptMode {
     NoGenerationPrompt,
 }
 
+/// Effort level for reasoning models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// Chat-template-related request options.
 ///
 /// These are the small subset of chat controls that currently affect prompt rendering in
@@ -252,6 +279,9 @@ pub struct ChatOptions {
     /// model's default chat template.
     pub chat_template: Option<String>,
 
+    /// Effort level exposed to chat templates for reasoning models.
+    pub reasoning_effort: Option<ReasoningEffort>,
+
     /// Additional keyword arguments exposed to the chat template.
     pub template_kwargs: HashMap<String, Value>,
 }
@@ -261,6 +291,7 @@ impl Default for ChatOptions {
         Self {
             generation_prompt_mode: GenerationPromptMode::StartNewAssistant,
             chat_template: None,
+            reasoning_effort: None,
             template_kwargs: HashMap::new(),
         }
     }

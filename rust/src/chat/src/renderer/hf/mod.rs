@@ -146,7 +146,6 @@ impl HfChatRenderer {
 
         let mut merged_template_kwargs = self.default_template_kwargs.clone();
         merged_template_kwargs.extend(request.chat_options.template_kwargs.clone());
-
         let prompt = effective_template
             .apply(TemplateContext {
                 messages: &messages,
@@ -156,6 +155,7 @@ impl HfChatRenderer {
                 documents: request.documents.as_deref(),
                 template_kwargs: Some(&merged_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
+                reasoning_effort: request.chat_options.reasoning_effort,
             })
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
@@ -352,7 +352,7 @@ mod tests {
     use super::{ChatTemplateContentFormatOption, HfChatRenderer};
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode,
+        GenerationPromptMode, ReasoningEffort,
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
@@ -632,6 +632,31 @@ mod tests {
         let rendered = renderer.render(&request).unwrap().prompt;
 
         assert_eq!(rendered, Prompt::Text("true|x".to_string()));
+    }
+
+    #[test]
+    fn chat_template_reasoning_effort_overrides_template_kwargs() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.reasoning_effort = Some(ReasoningEffort::Max);
+        request.chat_options.template_kwargs.insert(
+            "reasoning_effort".to_string(),
+            Value::String("low".to_string()),
+        );
+
+        let renderer = HfChatRenderer::new(
+            Some("{{ reasoning_effort }}".to_string()),
+            HashMap::from([(
+                "reasoning_effort".to_string(),
+                Value::String("medium".to_string()),
+            )]),
+            ChatTemplateContentFormatOption::Auto,
+            None,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap().prompt;
+
+        assert_eq!(rendered, Prompt::Text("max".to_string()));
     }
 
     #[test]
