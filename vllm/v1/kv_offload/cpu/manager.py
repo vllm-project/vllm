@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
@@ -11,10 +11,10 @@ from vllm.v1.kv_offload.abstract import (
     PrepareStoreOutput,
     ReqContext,
 )
-from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
