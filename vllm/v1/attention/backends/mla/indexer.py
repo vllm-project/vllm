@@ -303,7 +303,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 device=self.device,
             )
         self.arange_buffer = torch.arange(
-            scheduler_config.max_num_seqs * next_n,
+            max(
+                scheduler_config.max_num_seqs * next_n,
+                scheduler_config.max_num_batched_tokens,
+            ),
             dtype=torch.int32,
             device=self.device,
         )

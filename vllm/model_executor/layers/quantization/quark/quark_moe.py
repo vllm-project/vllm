@@ -1025,12 +1025,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        # TODO(aiter): extend once rocm_aiter_fused_experts gains dispatch
-        # for the other OCP MX schemes. Today its CK MoE kernel only has an
-        # entry for `w_mxfp4` (w4a16); mixed schemes like `w_mxfp4_a_mxfp6_*`
-        # fall through to QuantMethod.NO and raise "Unsupported kernel config
-        # for moe heuristic dispatch".
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4",)
+        # TODO: Remove once all OCP MX schemes use the kernel abstraction
+        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4")
         self.emulate = (
             not current_platform.supports_mx()
             or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES
@@ -1577,14 +1573,14 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
 
     def apply_monolithic(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        expert_map: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if layer.enable_eplb:
             raise NotImplementedError(
-                "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
+                f"EPLB not supported for {self.__class__.__name__} yet."
             )
 
         from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
@@ -1601,7 +1597,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
             topk=layer.top_k,
             renormalize=layer.renormalize,
             global_num_experts=layer.global_num_experts,
-            expert_map=expert_map,
+            expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             unpadded_N_w1=self.moe.intermediate_size_per_partition_unpadded * 2,
