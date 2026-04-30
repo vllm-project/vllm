@@ -616,16 +616,6 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
     ),
-    "qianfan_ocr": VLMTestInfo(
-        models=["bairongz/QianfanOCR"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>",
-        max_model_len=4096,
-        use_tokenizer_eos=True,
-        auto_cls=AutoModelForImageTextToText,
-        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("bairongz/QianfanOCR"),
-    ),
     "isaac": VLMTestInfo(
         # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF
         # repo has a stale model.safetensors.index.json that references
@@ -937,6 +927,16 @@ VLM_TEST_SETTINGS = {
                 reason="Model produces a vector of <UNK> output in HF on ROCm",
             ),
         ],
+    ),
+    "qianfan_ocr": VLMTestInfo(
+        models=["baidu/QianfanOCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModelForImageTextToText,
+        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/QianfanOCR"),
     ),
     "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
