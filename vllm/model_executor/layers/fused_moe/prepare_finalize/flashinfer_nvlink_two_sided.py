@@ -174,6 +174,7 @@ def flashinfer_alltoall_dispatch(
             # the hidden states, breaking the A2A kernel. So, we
             # delay the swizzling until after the A2A.
             is_fp4_scale_swizzled=False,
+            mx_alignment=quant_config.mx_alignment,
         )
 
         x = MnnvlMoe.mnnvl_moe_alltoallv(
