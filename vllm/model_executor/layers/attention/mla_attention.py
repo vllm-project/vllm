@@ -1527,7 +1527,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
         self._prefill_backend = get_mla_prefill_backend(vllm_config)
-        self.prefill_metadata_cls = self._prefill_backend.get_prefill_metadata_cls()
 
         prefill_impl_cls = self._prefill_backend.get_prefill_impl_cls()
         self._prefill_impl = prefill_impl_cls(

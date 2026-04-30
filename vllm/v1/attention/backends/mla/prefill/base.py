@@ -49,15 +49,6 @@ class MLAPrefillBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def get_prefill_metadata_cls() -> type["MLACommonPrefillMetadata"]:
-        """Return the metadata class for this prefill backend."""
-        from vllm.model_executor.layers.attention.mla_attention import (
-            MLACommonPrefillMetadata,
-        )
-
-        return MLACommonPrefillMetadata
-
-    @staticmethod
     def get_chunked_context_metadata_cls() -> type:
         """Return the ChunkedContextMetadata class for this backend."""
         from vllm.model_executor.layers.attention.mla_attention import (

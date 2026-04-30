@@ -66,10 +66,6 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
     def get_prefill_impl_cls() -> type["FlashInferPrefillImpl"]:
         return FlashInferPrefillImpl
 
-    @staticmethod
-    def get_prefill_metadata_cls() -> type["FlashInferPrefillMetadata"]:
-        return FlashInferPrefillMetadata
-
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         return device_capability.major == 10

@@ -62,10 +62,6 @@ class CudnnPrefillBackend(MLAPrefillBackend):
         return CudnnPrefillImpl
 
     @staticmethod
-    def get_prefill_metadata_cls() -> type["CudnnPrefillMetadata"]:
-        return CudnnPrefillMetadata
-
-    @staticmethod
     def get_chunked_context_metadata_cls() -> type:
         return CudnnPrefillMetadata.ChunkedContextMetadata
 
