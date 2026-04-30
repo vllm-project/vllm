@@ -570,6 +570,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
+        elif moe_config.is_lora_enabled and not cls.supports_lora():
+            return False, _make_reason("LoRA")
         return True, None
 
     @staticmethod
@@ -733,6 +735,15 @@ class FusedMoEExperts(ABC):
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
+
+    @staticmethod
+    def supports_lora() -> bool:
+        """Return True if this expert impl natively handles LoRA.
+
+        LoRA-aware experts should mix in LoRAExpertsMixin, which flips this
+        to True and provides the per-forward LoRA state plumbing.
+        """
+        return False
 
     @abstractmethod
     def supports_expert_map(self) -> bool:
@@ -1261,7 +1272,7 @@ class FusedMoEKernelModularImpl:
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
@@ -1526,6 +1537,9 @@ class FusedMoEKernel:
     @property
     def fused_experts(self) -> FusedMoEExperts:
         return self.impl.fused_experts
+
+    def supports_lora(self) -> bool:
+        return self.fused_experts.supports_lora()
 
     def _post_init_setup(self):
         """

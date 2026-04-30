@@ -24,7 +24,7 @@ if "UCX_RCACHE_MAX_UNRELEASED" not in os.environ:
         os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
 
 try:
-    if current_platform.is_cuda():
+    if not current_platform.is_rocm():
         from nixl._api import nixl_agent as NixlWrapper
     else:
         from rixl._api import nixl_agent as NixlWrapper
@@ -35,7 +35,7 @@ except ImportError:
     NixlWrapper = None  # type: ignore[assignment, misc]
 
 try:
-    if current_platform.is_cuda():
+    if not current_platform.is_rocm():
         from nixl._api import nixl_agent_config
     else:
         from rixl._api import nixl_agent_config
@@ -44,7 +44,7 @@ except ImportError:
     logger.warning_once("NIXL agent config is not available")
 
 try:
-    if current_platform.is_cuda():
+    if not current_platform.is_rocm():
         from nixl._bindings import nixlXferTelemetry
     else:
         from rixl._bindings import nixlXferTelemetry
