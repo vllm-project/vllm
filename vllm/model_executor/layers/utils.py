@@ -361,7 +361,8 @@ def _apply_unquant_bf16_linear_torch_compile(
         return None
 
     if not is_capturing:
-        _unquant_bf16_linear_capture_safe_keys.add(key)
+        with _unquant_bf16_linear_lock:
+            _unquant_bf16_linear_capture_safe_keys.add(key)
     return output
 
 
