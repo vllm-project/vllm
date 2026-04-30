@@ -97,3 +97,16 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_dflash.py -m slow_test
+
+- label: Spec Decode MTP hybrid (B200)
+  timeout_in_minutes: 30
+  device: b200
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_5_mtp.py
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "qwen3_5-hybrid"
