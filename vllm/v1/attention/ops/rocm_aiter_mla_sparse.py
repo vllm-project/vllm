@@ -243,9 +243,11 @@ def fp8_paged_mqa_logits_torch(
         device=q.device,
         dtype=torch.float32,
     )
-    context_lens = context_lens.tolist()
+    # context_lens can be 1D (B,) or 2D (B, next_n) for MTP decode.
+    # The last entry per row is always the full context length L_b.
+    context_lens = context_lens.reshape(batch_size, -1)[:, -1].tolist()
     for i in range(batch_size):
-        context_len = context_lens[i]
+        context_len = int(context_lens[i])
         q_offsets = torch.arange(context_len - next_n, context_len, device="cuda")
         weight_slice = (
             weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
@@ -322,15 +324,10 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    aiter_paged_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled():
-        aiter_paged_mqa_logits_module = paged_mqa_logits_module()
-
-    if aiter_paged_mqa_logits_module is not None:
+    _paged_mod = paged_mqa_logits_module()
+    if _paged_mod is not None:
         deepgemm_fp8_paged_mqa_logits_stage1 = (
-            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
+            _paged_mod.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
         out_qk = torch.full(
@@ -384,21 +381,30 @@ def fp8_mqa_logits_torch(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
     k_fp8, scale = kv
+    M = q.shape[0]
     seq_len_kv = k_fp8.shape[0]
-    k = k_fp8.to(torch.bfloat16)
-    q = q.to(torch.bfloat16)
+    # Process in query-token chunks to avoid OOM from [H, M, N] intermediate.
+    # With H=18, M=10240, N=10240 the full score tensor is ~7 GB; chunk=64 → ~45 MB.
+    k_f = k_fp8.to(torch.float32)               # [N, D]  (dequant via scale below)
+    q_f = q.to(torch.float32)                    # [M, H, D]
+    scale_f = scale.reshape(-1)                  # [N]  per-key scale
 
-    mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
-    )
-    mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
-    )
-    mask = mask_lo & mask_hi
+    device = q.device
+    arange_kv = torch.arange(seq_len_kv, device=device)
 
-    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale
-    logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
-    logits = logits.masked_fill(~mask, float("-inf"))
+    logits = torch.full([M, seq_len_kv], float("-inf"), device=device, dtype=torch.float32)
+
+    CHUNK_M = 64  # tune down if still OOM
+    for m0 in range(0, M, CHUNK_M):
+        m1 = min(m0 + CHUNK_M, M)
+        q_c = q_f[m0:m1]                          # [mc, H, D]
+        score_c = torch.einsum("mhd,nd->hmn", q_c, k_f) * scale_f  # [H, mc, N]
+        w_c = weights[m0:m1].unsqueeze(-1).transpose(0, 1)          # [H, mc, 1]
+        logits_c = (score_c.relu() * w_c).sum(dim=0)                # [mc, N]
+
+        mask_lo = arange_kv[None, :] >= cu_seqlen_ks[m0:m1, None]
+        mask_hi = arange_kv[None, :] < cu_seqlen_ke[m0:m1, None]
+        logits[m0:m1] = logits_c.masked_fill(~(mask_lo & mask_hi), float("-inf"))
 
     return logits
 
@@ -445,20 +451,34 @@ def rocm_fp8_mqa_logits(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
 
-    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
-    # path after aiter merge this kernel into main
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    aiter_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled():
-        aiter_mqa_logits_module = mqa_logits_module()
-
-    if aiter_mqa_logits_module is not None:
-        fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
+    _mqa_mod = mqa_logits_module()
+    if _mqa_mod is not None:
+        fp8_mqa_logits = _mqa_mod.fp8_mqa_logits
         k_fp8, scale = kv
         return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+
+
+def _top_k_per_row_torch(logits: torch.Tensor,
+                         topk_indices_buf: torch.Tensor,
+                         topk_tokens: int,
+                         num_rows: int) -> None:
+    """Pure PyTorch top-k per row.
+
+    logits already has -inf for invalid / masked positions, so a plain
+    torch.topk naturally selects valid positions first.
+    Writes results in-place into topk_indices_buf[:num_rows, :topk_tokens].
+    """
+    actual_k = min(topk_tokens, logits.shape[1])
+    rows = min(num_rows, topk_indices_buf.shape[0])
+    _, idx = torch.topk(logits[:rows], actual_k, dim=1,
+                        largest=True, sorted=False)
+    topk_indices_buf[:rows, :actual_k] = idx
+    if actual_k < topk_tokens:
+        # pad remaining slots with the first valid index (score = -inf → no effect)
+        topk_indices_buf[:rows, actual_k:] = idx[:, :1].expand(
+            rows, topk_tokens - actual_k)
 
 
 def rocm_aiter_sparse_attn_indexer_fake(
@@ -540,13 +560,20 @@ def rocm_aiter_sparse_attn_indexer(
     num_tokens = slot_mapping.shape[0]
     k = k[:num_tokens]
 
-    ops.indexer_k_quant_and_cache(
-        k,
-        kv_cache,
-        slot_mapping,
-        quant_block_size,
-        scale_fmt,
-    )
+    # When skip_k_cache_insert=True the compressor already wrote quantized K
+    # to kv_cache. The caller gathers the 544-byte quantized entry to satisfy
+    # the non-None k requirement, but we must NOT re-quantize it via
+    # indexer_k_quant_and_cache (head_dim=544 is not divisible by
+    # quant_block_size=64). Detect this by comparing k's last dim to head_dim.
+    k_already_cached = (k.shape[-1] != head_dim)
+    if not k_already_cached:
+        ops.indexer_k_quant_and_cache(
+            k,
+            kv_cache,
+            slot_mapping,
+            quant_block_size,
+            scale_fmt,
+        )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -580,20 +607,10 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
             )
             num_rows = logits.shape[0]
-            assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            _top_k_per_row_torch(logits, topk_indices, topk_tokens, num_rows)
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -631,18 +648,8 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
         num_rows = logits.shape[0]
-        assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
+        _top_k_per_row_torch(logits, topk_indices, topk_tokens, num_rows)
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack

@@ -295,9 +295,90 @@ def fp8_gemm_nt(*args, **kwargs):
     return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
+def _dequant_fp8_block(x, scale):
+    import torch
+    orig_shape = x.shape
+    n = x.numel()
+    if scale.dtype == torch.float8_e8m0fnu:
+        s_f = torch.exp2(scale.view(torch.uint8).to(torch.float32) - 127.0)
+    else:
+        s_f = scale.to(torch.float32)
+    s_flat = s_f.reshape(-1)
+    n_blocks = s_flat.numel()
+    if n_blocks == 1:
+        return x.to(torch.float32) * s_flat[0]
+    if n % n_blocks != 0:
+        return x.to(torch.float32) * s_flat.mean()
+    block_size = n // n_blocks
+    s_expanded = s_flat.repeat_interleave(block_size)
+    x_flat = x.reshape(-1).to(torch.float32)
+    return (x_flat * s_expanded).reshape(orig_shape)
+
+
+def _reshape_to_subscripts(tensor, subscripts, dim_map):
+    """Reshape tensor to match the number of subscript dimensions.
+    Uses dim_map to infer known dims; the single unknown dim is derived
+    from tensor.numel() / product(known_dims).
+    """
+    target_ndim = len(subscripts)
+    if tensor.ndim == target_ndim:
+        return tensor
+    known = [dim_map.get(c) for c in subscripts]
+    known_product = 1
+    unknown_count = 0
+    for v in known:
+        if v is not None:
+            known_product *= v
+        else:
+            unknown_count += 1
+    if unknown_count == 0:
+        return tensor.reshape(known)
+    if unknown_count == 1:
+        unknown_val = tensor.numel() // known_product
+        shape = [v if v is not None else unknown_val for v in known]
+        return tensor.reshape(shape)
+    # Cannot infer — return as-is and let einsum raise a descriptive error
+    return tensor
+
+
+def _rocm_fp8_einsum_fallback(equation, a_tuple, b_tuple, out, recipe=None):
+    import torch
+    a, a_scale = a_tuple
+    b, b_scale = b_tuple
+    a_f = _dequant_fp8_block(a, a_scale)
+    b_f = _dequant_fp8_block(b, b_scale)
+
+    # Parse equation "...,...->..." and fix ndim mismatches.
+    # Weights may be stored 2-D (e.g. [h*d, r]) while the equation
+    # expects 3-D (e.g. [h, d, r]). Build a dim_map from whichever
+    # operand already has the right number of dims, then reshape the other.
+    lhs, _ = equation.split('->')
+    a_subs, b_subs = lhs.split(',')
+    dim_map = {}
+    if a_f.ndim == len(a_subs):
+        for c, s in zip(a_subs, a_f.shape):
+            dim_map[c] = s
+    if b_f.ndim == len(b_subs):
+        for c, s in zip(b_subs, b_f.shape):
+            dim_map[c] = s
+
+    a_f = _reshape_to_subscripts(a_f, a_subs, dim_map)
+    # Rebuild dim_map after a_f may have been reshaped
+    if a_f.ndim == len(a_subs):
+        for c, s in zip(a_subs, a_f.shape):
+            dim_map[c] = s
+    b_f = _reshape_to_subscripts(b_f, b_subs, dim_map)
+
+    result = torch.einsum(equation, a_f, b_f)
+    out.copy_(result.to(out.dtype))
+
+
 def fp8_einsum(*args, **kwargs):
     _lazy_init()
     if _fp8_einsum_impl is None:
+        from vllm.platforms import current_platform
+        if current_platform.is_rocm():
+            return _rocm_fp8_einsum_fallback(*args, **kwargs)
         return _missing(*args, **kwargs)
     return _fp8_einsum_impl(*args, **kwargs)
 

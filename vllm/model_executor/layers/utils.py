@@ -303,6 +303,14 @@ def cublas_gemm_bf16_bf16_fp32(
     x: torch.Tensor,
     weight: torch.Tensor,
 ):
+    if current_platform.is_rocm():
+        try:
+            from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+            return gemm_a16w16(x.to(torch.bfloat16), weight.to(torch.bfloat16),
+                               dtype=torch.bfloat16).to(torch.float32)
+        except ImportError:
+            return torch.mm(x.to(torch.bfloat16),
+                            weight.t().to(torch.bfloat16)).to(torch.float32)
     return ops.router_gemm_bf16_fp32(x, weight)
 
 

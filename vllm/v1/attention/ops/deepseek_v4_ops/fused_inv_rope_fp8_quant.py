@@ -9,6 +9,7 @@ INT32-packed UE8M0 on SM100) so fp8_einsum skips transform_sf_into_required_layo
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -35,6 +36,7 @@ def _fused_inv_rope_fp8_quant_per_head(
     ROPE_START: tl.constexpr,
     HALF_ROPE: tl.constexpr,
     TMA_ALIGNED_SCALES: tl.constexpr,
+    IS_FNUZ: tl.constexpr = False,
 ):
     # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
     pid_token = tl.program_id(0).to(tl.int64)
@@ -103,7 +105,7 @@ def _fused_inv_rope_fp8_quant_per_head(
         ),
         (HEAD_DIM,),
     )
-    x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+    x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4b8 if IS_FNUZ else tl.float8e4nv)
 
     fp8_base = (
         fp8_ptr
@@ -177,7 +179,7 @@ def fused_inv_rope_fp8_quant(
     num_scale_blocks = d // quant_group_size
     chunks_per_head = head_dim // quant_group_size
 
-    fp8_dtype = torch.float8_e4m3fn
+    fp8_dtype = current_platform.fp8_dtype()
     fp8_max = torch.finfo(fp8_dtype).max
 
     fp8_buf = torch.empty(
@@ -223,8 +225,8 @@ def fused_inv_rope_fp8_quant(
         ROPE_START=nope_dim % quant_group_size,
         HALF_ROPE=rope_dim // 2,
         TMA_ALIGNED_SCALES=tma_aligned_scales,
+        IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         num_stages=1,
-        launch_pdl=False,
     )
 
     grid = (tma_aligned_T, n_groups * heads_per_group)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
+import os
 from collections.abc import Callable, Iterable
 from itertools import islice
 
@@ -18,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
+from vllm.model_executor.layers.deepseek_v4_debug import dump_tensor
 from vllm.model_executor.layers.deepseek_v4_attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
@@ -56,6 +58,36 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import AuxStreamType
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+_DSV4_DEBUG_COUNTS: dict[str, int] = {}
+
+
+def _dsv4_debug_enabled(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value not in ("", "0", "false", "False", "no", "No")
+
+
+def _dsv4_debug_log(name: str, msg: str, limit: int = 8) -> None:
+    count = _DSV4_DEBUG_COUNTS.get(name, 0)
+    if count < limit:
+        print(f"[DSV4_DEBUG:{name}] {msg}", flush=True)
+    _DSV4_DEBUG_COUNTS[name] = count + 1
+
+
+def _dsv4_tensor_summary(t: torch.Tensor) -> str:
+    if t.numel() == 0:
+        return f"shape={tuple(t.shape)} dtype={t.dtype} empty"
+    sample = t.detach().float() if t.is_floating_point() else t.detach().to(torch.float32)
+    try:
+        finite = torch.isfinite(t.detach()).all().item() if t.is_floating_point() else True
+    except NotImplementedError:
+        finite = "unsupported"
+    return (
+        f"shape={tuple(t.shape)} dtype={t.dtype} "
+        f"mean={sample.mean().item():.4e} std={sample.std(unbiased=False).item():.4e} "
+        f"amax={sample.abs().amax().item():.4e} finite={finite}"
+    )
 
 from .utils import (
     AutoWeightsLoader,
@@ -801,6 +833,7 @@ class DeepseekV4MoE(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
+        dump_tensor(f"{self.prefix}.input", hidden_states)
         if self.gate.tid2eid is not None:
             if input_ids is None:
                 raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -810,6 +843,7 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         router_logits, _ = self.gate(hidden_states)
+        dump_tensor(f"{self.prefix}.router_logits", router_logits)
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -827,17 +861,22 @@ class DeepseekV4MoE(nn.Module):
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
+        dump_tensor(f"{self.prefix}.topk_weights", topk_weights)
+        dump_tensor(f"{self.prefix}.topk_ids", topk_ids)
         final_hidden_states = self.experts(
             hidden_states,
             topk_weights,
             topk_ids,
             activation_clamp=activation_clamp,
         )
+        dump_tensor(f"{self.prefix}.experts_out", final_hidden_states)
 
         if self.shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
+            dump_tensor(f"{self.prefix}.shared_experts_out", shared_output)
             final_hidden_states += shared_output
 
+        dump_tensor(f"{self.prefix}.output", final_hidden_states.view(org_shape))
         return final_hidden_states.view(org_shape)
 
     def _forward_fused_moe(
@@ -853,12 +892,14 @@ class DeepseekV4MoE(nn.Module):
             )
         else:
             router_logits, _ = self.gate(hidden_states)
+            dump_tensor(f"{self.prefix}.router_logits", router_logits)
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
 
+        dump_tensor(f"{self.prefix}.output", final_hidden_states.view(org_shape))
         return final_hidden_states.view(org_shape)
 
     def finalize_mega_moe_weights(self) -> None:
@@ -880,6 +921,7 @@ class DeepseekV4Attention(nn.Module):
         layer_id = extract_layer_index(prefix)
 
         self.layer_id = layer_id
+        self.prefix = prefix
         self.hidden_size = config.hidden_size
         self.n_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
@@ -1032,7 +1074,10 @@ class DeepseekV4Attention(nn.Module):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None,
     ):
-        return self.mla_attn(positions, hidden_states, llama_4_scaling)
+        dump_tensor(f"{self.prefix}.input", hidden_states, layer_idx=self.layer_id)
+        out = self.mla_attn(positions, hidden_states, llama_4_scaling)
+        dump_tensor(f"{self.prefix}.output", out, layer_idx=self.layer_id)
+        return out
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -1046,6 +1091,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.prefix = prefix
+        self.layer_id = extract_layer_index(prefix)
 
         self.rms_norm_eps = config.rms_norm_eps
         self.attn = DeepseekV4Attention(
@@ -1149,21 +1196,30 @@ class DeepseekV4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
     ) -> torch.Tensor:
+        dump_tensor(f"{self.prefix}.input", x, layer_idx=self.layer_id)
         residual = x
         x, post, comb = self.hc_pre(
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
+        dump_tensor(f"{self.prefix}.attn_hc_pre", x, layer_idx=self.layer_id)
         x = self.attn_norm(x)
+        dump_tensor(f"{self.prefix}.attn_norm", x, layer_idx=self.layer_id)
         x = self.attn(positions, x, None)
+        dump_tensor(f"{self.prefix}.attn_out", x, layer_idx=self.layer_id)
         x = self.hc_post(x, residual, post, comb)
+        dump_tensor(f"{self.prefix}.attn_hc_post", x, layer_idx=self.layer_id)
 
         residual = x
         x, post, comb = self.hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
+        dump_tensor(f"{self.prefix}.ffn_hc_pre", x, layer_idx=self.layer_id)
         x = self.ffn_norm(x)
+        dump_tensor(f"{self.prefix}.ffn_norm", x, layer_idx=self.layer_id)
         x = self.ffn(x, input_ids)
+        dump_tensor(f"{self.prefix}.ffn_out", x, layer_idx=self.layer_id)
         x = self.hc_post(x, residual, post, comb)
+        dump_tensor(f"{self.prefix}.output", x, layer_idx=self.layer_id)
         return x
 
 
@@ -1257,7 +1313,9 @@ class DeepseekV4Model(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.embed_input_ids(input_ids)
+        dump_tensor("model.embed_tokens", hidden_states)
         hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        dump_tensor("model.embed_tokens_repeated", hidden_states)
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(
@@ -1270,15 +1328,34 @@ class DeepseekV4Model(nn.Module):
         num_tokens = hidden_states.shape[0]
         self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = hc_head(
-            hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-        )
+        dump_tensor("model.pre_hc_head", hidden_states)
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_LOG_STATS"):
+            _dsv4_debug_log("pre_hc_head", _dsv4_tensor_summary(hidden_states))
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_HC_HEAD_BYPASS"):
+            hidden_states = hidden_states[:, 0, :]
+        elif _dsv4_debug_enabled("VLLM_DEBUG_DSV4_HC_HEAD_BF16"):
+            hidden_states = hc_head_eager(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+        else:
+            hidden_states = hc_head(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+        dump_tensor("model.post_hc_head", hidden_states)
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_LOG_STATS"):
+            _dsv4_debug_log("post_hc_head", _dsv4_tensor_summary(hidden_states))
         hidden_states = self.norm(hidden_states)
+        dump_tensor("model.final_norm", hidden_states)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1391,6 +1468,24 @@ class DeepseekV4Model(nn.Module):
             layer.ffn.finalize_mega_moe_weights()
 
 
+def hc_head_eager(
+    hidden_states: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_norm_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    x = hidden_states
+    shape, dtype = x.size(), x.dtype
+    x = x.flatten(1).float()
+    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + rms_norm_eps)
+    mixes = F.linear(x, hc_fn) * rsqrt
+    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
+    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
+    return y.to(dtype)
+
+
 @torch.compile(backend=current_platform.simple_compile_backend)
 def hc_head(
     hidden_states: torch.Tensor,
@@ -1461,7 +1556,16 @@ class DeepseekV4ForCausalLM(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        dump_tensor("model.lm_head_input", hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states)
+        dump_tensor("model.logits", logits)
+        if logits is not None and _dsv4_debug_enabled("VLLM_DEBUG_DSV4_LOG_STATS"):
+            topv, topi = torch.topk(logits[0].float(), k=min(5, logits.shape[-1]))
+            _dsv4_debug_log(
+                "logits",
+                _dsv4_tensor_summary(logits)
+                + f" top_ids={topi.detach().cpu().tolist()} top_vals={topv.detach().cpu().tolist()}",
+            )
         return logits
 
     def forward(

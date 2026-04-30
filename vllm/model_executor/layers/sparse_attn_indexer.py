@@ -32,6 +32,11 @@ if current_platform.is_cuda_alike():
 elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops
 
+# Registers vllm::rocm_sparse_attn_indexer_no_insert for the DeepSeek-V4
+# layout where the compressor pre-inserts K and the indexer receives k=None.
+if current_platform.is_rocm():
+    import vllm.v1.attention.ops.rocm_sparse_attn_indexer  # noqa: F401
+
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -499,13 +504,25 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        assert not self.skip_k_cache_insert, (
-            "AMD platform doesn't support skip cache insert yet"
-        )
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
+        if self.skip_k_cache_insert:
+            return torch.ops.vllm.rocm_sparse_attn_indexer_no_insert(
+                hidden_states,
+                _encode_layer_name(self.k_cache.prefix),
+                self.k_cache.kv_cache,
+                q_quant,
+                weights,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+            )
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
@@ -525,5 +542,6 @@ class SparseAttnIndexer(CustomOp):
         else:
             raise RuntimeError(
                 "Sparse attention indexer ROCm custom op requires ROCm "
-                "Aiter ops to be enabled."
+                "Aiter ops to be enabled (or skip_k_cache_insert=True for "
+                "the V4 no-insert layout)."
             )

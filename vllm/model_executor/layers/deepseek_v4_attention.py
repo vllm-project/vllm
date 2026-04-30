@@ -5,6 +5,7 @@ DeepseekV4 MLA Attention Layer
 """
 
 from dataclasses import dataclass
+import os
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -22,6 +23,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    quantize_and_insert_k_cache,
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
@@ -43,6 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.deepseek_compressor import DeepseekCompressor
+from vllm.model_executor.layers.deepseek_v4_debug import dump_tensor
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
@@ -71,6 +74,75 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+_DEBUG_COUNTS: dict[str, int] = {}
+
+
+def _dsv4_debug_enabled(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value not in ("", "0", "false", "False", "no", "No")
+
+
+def _dsv4_debug_log(name: str, msg: str, limit: int = 8) -> None:
+    count = _DEBUG_COUNTS.get(name, 0)
+    if count < limit:
+        logger.warning("[DSV4_DEBUG:%s] %s", name, msg)
+    _DEBUG_COUNTS[name] = count + 1
+
+
+def _dsv4_tensor_summary(t: torch.Tensor) -> str:
+    if t.numel() == 0:
+        return f"shape={tuple(t.shape)} dtype={t.dtype} empty"
+    tf = t.detach()
+    try:
+        finite_ok = torch.isfinite(tf).all().item() if tf.is_floating_point() else True
+    except NotImplementedError:
+        finite_ok = "unsupported"
+    sample = tf.float() if tf.is_floating_point() else tf.to(torch.float32)
+    return (
+        f"shape={tuple(t.shape)} dtype={t.dtype} "
+        f"mean={sample.mean().item():.4e} std={sample.std(unbiased=False).item():.4e} "
+        f"amax={sample.abs().amax().item():.4e} finite={finite_ok}"
+    )
+
+
+def _dsv4_decode_scale(scale: torch.Tensor) -> torch.Tensor:
+    if hasattr(torch, "float8_e8m0fnu") and scale.dtype == torch.float8_e8m0fnu:
+        return torch.exp2(scale.view(torch.uint8).to(torch.float32) - 127.0)
+    return scale.to(torch.float32)
+
+
+def _dsv4_expand_block_scale(scale: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    scale_f = _dsv4_decode_scale(scale)
+    if scale_f.shape == weight.shape:
+        return scale_f
+    if scale_f.ndim == 2 and weight.ndim == 2:
+        block_m = (weight.shape[0] + scale_f.shape[0] - 1) // scale_f.shape[0]
+        block_k = (weight.shape[1] + scale_f.shape[1] - 1) // scale_f.shape[1]
+        return scale_f.repeat_interleave(block_m, 0).repeat_interleave(block_k, 1)[
+            : weight.shape[0], : weight.shape[1]
+        ]
+    if scale_f.numel() == 1:
+        return scale_f.reshape(1).expand_as(weight)
+    # Last-resort diagnostic path: preserve shape correctness over speed.
+    flat = scale_f.reshape(-1)
+    repeat = (weight.numel() + flat.numel() - 1) // flat.numel()
+    return flat.repeat_interleave(repeat)[: weight.numel()].reshape_as(weight)
+
+
+def _dsv4_linear_fp8_reference(module: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    weight = getattr(module, "weight", None)
+    scale = getattr(module, "weight_scale_inv", None)
+    if weight is None or scale is None:
+        raise RuntimeError(f"{module.__class__.__name__} has no FP8 weight/scale tensors")
+    w = weight.detach()
+    w_f = w.to(torch.float32) * _dsv4_expand_block_scale(scale.detach(), w)
+    y = F.linear(x.to(torch.float32), w_f)
+    bias = getattr(module, "bias", None)
+    if bias is not None:
+        y = y + bias.to(torch.float32)
+    return y.to(x.dtype)
+
 
 # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
 # workspace allocated at _forward_prefill (and the matching profile-time
@@ -277,8 +349,20 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_UNFUSE_QKV_DOWN"):
+            qr_kv = _dsv4_linear_fp8_reference(self.fused_wqa_wkv, hidden_states)
+        else:
+            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+        dump_tensor(self.layer_name + ".fused_wqa_wkv", qr_kv)
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_LOG_STATS"):
+            _dsv4_debug_log(
+                self.layer_name + ".fused_wqa_wkv",
+                "hidden=" + _dsv4_tensor_summary(hidden_states)
+                + " qr_kv=" + _dsv4_tensor_summary(qr_kv),
+            )
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        dump_tensor(self.layer_name + ".qr", qr)
+        dump_tensor(self.layer_name + ".kv", kv)
 
         # Pre-allocate attention output with FlashMLA-padded head count.
         # The op writes into `o_padded`; we slice to n_local_heads after.
@@ -299,6 +383,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.layer_name,
         )
         o = o_padded[:, : self.n_local_heads, :]
+        dump_tensor(self.layer_name + ".mla_attn_out", o)
 
         # O projection: inverse RoPE + FP8 quant + einsum + wo_b
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
@@ -313,7 +398,18 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         wo_a_fp8 = self.wo_a.weight
+        dump_tensor(self.layer_name + ".o_fp8", o_fp8)
+        dump_tensor(self.layer_name + ".o_scale", o_scale)
         wo_a_scale = self.wo_a.weight_scale_inv
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_WOA_FORCE_FP32_SCALE"):
+            wo_a_scale = _dsv4_decode_scale(wo_a_scale)
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_LOG_STATS"):
+            _dsv4_debug_log(
+                self.layer_name + ".wo_a_inputs",
+                "o_fp8=" + _dsv4_tensor_summary(o_fp8)
+                + " o_scale=" + _dsv4_tensor_summary(o_scale)
+                + " wo_a_scale=" + _dsv4_tensor_summary(wo_a_scale),
+            )
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
@@ -329,8 +425,14 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             "bhr,hdr->bhd",
             list(self._einsum_recipe),
         )
+        dump_tensor(self.layer_name + ".wo_a_z", z)
 
-        return self.wo_b(z.flatten(1))
+        out = self.wo_b(z.flatten(1))
+        if isinstance(out, tuple):
+            dump_tensor(self.layer_name + ".wo_b", out[0])
+        else:
+            dump_tensor(self.layer_name + ".wo_b", out)
+        return out
 
     def attention_impl(
         self,
@@ -350,7 +452,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.kv_norm.weight.data,
             self.eps,
         )
+        dump_tensor(self.layer_name + ".qr_norm", qr)
+        dump_tensor(self.layer_name + ".kv_norm", kv)
         q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+        dump_tensor(self.layer_name + ".wq_b_q", q)
 
         # Overlap kv_insert with whichever of indexer/compressor is present.
         # Indexer implies compressor; when both exist, compressor rides on the
@@ -415,6 +520,129 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
         self.mla_attn(q, kv, positions, output=out)
+        dump_tensor(self.layer_name + ".attention_impl_out", out)
+
+    def _rocm_qnorm_rope_kv_insert(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        swa_metadata: object,
+        positions: torch.Tensor,
+    ) -> None:
+        """Pure-PyTorch ROCm fallback for the CUDA fused op.
+
+        Q side:  per-head RMSNorm (no weight) + GPT-J RoPE (in-place on q).
+        KV side: GPT-J RoPE on last rope_head_dim dims, then pack into the
+                 584-byte DeepSeek V4 SWA cache format and scatter-write.
+
+        SWA cache layout per token (584 bytes):
+          [0:448]    448 × float8_e4m3 NoPE values
+          [448:576]  64 × bfloat16 RoPE values (128 bytes, NOT quantized)
+          [576:583]  7 × ue8m0 scale bytes (one per 64-value NoPE block)
+          [583:584]  1 byte padding
+        """
+        rope_head_dim = self.rope_head_dim   # 64
+        nope_head_dim = self.nope_head_dim   # 448
+        half_r = rope_head_dim // 2
+        dev = q.device
+
+        cos_sin = self.rotary_emb.cos_sin_cache[positions]  # [T, rope_head_dim]
+        cos = cos_sin[:, :half_r]    # [T, half_r=32]
+        sin = cos_sin[:, half_r:]    # [T, half_r=32]
+
+        # ---- Q: per-head RMSNorm (no learnable weight, in-place) ----
+        q_f = q.float()                            # [T, n_heads, head_dim]
+        rms = torch.rsqrt(q_f.pow(2).mean(-1, keepdim=True) + self.eps)
+        q.copy_((q_f * rms).to(q.dtype))
+
+        # ---- Q: GPT-J RoPE on last rope_head_dim dims of each head ----
+        q_r_f = q[:, :, nope_head_dim:].float()   # [T, n_heads, 64]
+        q_r0 = q_r_f[:, :, 0::2]                  # [T, n_heads, 32]
+        q_r1 = q_r_f[:, :, 1::2]
+        cos_q = cos.unsqueeze(1)                   # [T, 1, 32]
+        sin_q = sin.unsqueeze(1)
+        q_rope_new = torch.stack(
+            [q_r0 * cos_q - q_r1 * sin_q, q_r0 * sin_q + q_r1 * cos_q], dim=-1
+        ).flatten(-2)                              # [T, n_heads, 64]
+        q[:, :, nope_head_dim:].copy_(q_rope_new.to(q.dtype))
+
+        # ---- KV: GPT-J RoPE on last rope_head_dim dims of kv [T, 512] ----
+        kv_nope_f = kv[:, :nope_head_dim].float()  # [T, 448]
+        kv_rope_f = kv[:, nope_head_dim:].float()  # [T, 64]
+        kv_r0 = kv_rope_f[:, 0::2]                 # [T, 32]
+        kv_r1 = kv_rope_f[:, 1::2]
+        kv_rope_new = torch.stack(
+            [kv_r0 * cos - kv_r1 * sin, kv_r0 * sin + kv_r1 * cos], dim=-1
+        ).flatten(-2)                               # [T, 64]
+
+        if not _dsv4_debug_enabled("VLLM_DSV4_ROCM_KV_INSERT_LEGACY"):
+            # ROCm correctness path: use the shared Triton insert helper so the
+            # cache layout matches dequantize_and_gather_k_cache and the ROCm
+            # FlashMLA decode fallback: block token-data region followed by the
+            # block scale region. The legacy manual packer stored scale bytes
+            # inline per token and causes wrong dequantization.
+            slot_mapping = swa_metadata.slot_mapping          # type: ignore[attr-defined]
+            block_size = swa_kv_cache.shape[1]
+            k_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
+            k_for_cache = torch.cat([kv_nope_f, kv_rope_new], dim=-1).to(torch.bfloat16)
+            quantize_and_insert_k_cache(
+                k_for_cache,
+                k_cache_2d,
+                slot_mapping,
+                block_size=block_size,
+                is_ue8m0=True,
+            )
+            return
+
+        # ---- Legacy manual packer (debug-only fallback) ----
+        # Layout: [448 fp8_e4m3 NoPE][128 bf16 RoPE][7 ue8m0 scales][1 pad]
+        #
+        # NoPE: block quantize with block_size=64 → 7 blocks → 7 UE8M0 scales.
+        # UE8M0 scale for block: byte = clamp(floor(log2(max_abs)) + 127, 0, 255)
+        # quantized = round(nope_val / 2^(scale_byte-127)) clamped to fp8_e4m3.
+        T = kv.shape[0]
+        fp8_e4m3_max = 448.0   # float8_e4m3fnuz max on ROCm is 240; use e4m3 max
+        # DeepSeek V4 uses float8_e4m3 (CUDA fp8, max=448) for the NoPE cache.
+        # On ROCm we approximate with float8_e4m3fnuz (max=240) — close enough.
+        fp8_max = 240.0
+        n_blocks = nope_head_dim // 64   # = 7
+
+        nope_blocks = kv_nope_f.view(T, n_blocks, 64)          # [T, 7, 64]
+        max_abs = nope_blocks.abs().amax(dim=-1).clamp(min=1e-38)  # [T, 7]
+        # UE8M0: byte = floor(log2(max_abs / fp8_max)) + 127
+        log2_scale = torch.floor(torch.log2(max_abs / fp8_max)) + 127.0
+        ue8m0_bytes = log2_scale.clamp(0, 255).to(torch.uint8)  # [T, 7]
+        # Actual scale = 2^(byte-127)
+        actual_scale = torch.exp2(ue8m0_bytes.float() - 127.0)  # [T, 7]
+        # Quantize NoPE: divide by scale, clamp, cast to fp8 viewed as uint8
+        nope_quant = (nope_blocks / actual_scale.unsqueeze(-1)).clamp(
+            -fp8_max, fp8_max
+        ).to(torch.float8_e4m3fnuz).view(torch.uint8)  # [T, 7, 64]
+        nope_bytes = nope_quant.reshape(T, nope_head_dim)        # [T, 448]
+
+        # RoPE part: store as bfloat16 (128 bytes per token)
+        rope_bytes = kv_rope_new.to(torch.bfloat16).view(
+            torch.uint8
+        ).reshape(T, rope_head_dim * 2)              # [T, 128]
+
+        # Scale bytes: 7 ue8m0 + 1 padding
+        pad_byte = torch.zeros(T, 1, dtype=torch.uint8, device=dev)
+        scale_bytes = torch.cat([ue8m0_bytes, pad_byte], dim=-1)  # [T, 8]
+
+        # Assemble the 584-byte entry
+        entry = torch.cat([nope_bytes, rope_bytes, scale_bytes], dim=-1)  # [T, 584]
+
+        # ---- Scatter-write to paged SWA cache ----
+        # swa_kv_cache: [num_blocks, block_size, 584] uint8
+        slot_mapping = swa_metadata.slot_mapping          # type: ignore[attr-defined]
+        block_size = swa_kv_cache.shape[1]
+        num_slots = slot_mapping.shape[0]
+        if num_slots < T:
+            entry = entry[:num_slots]
+        block_idx = slot_mapping // block_size             # [S]
+        inblock_offset = slot_mapping % block_size         # [S]
+        swa_kv_cache[block_idx, inblock_offset, :] = entry
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -436,6 +664,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
         swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
+
+        from vllm.platforms import current_platform
+        if current_platform.is_rocm():
+            # The CUDA fused op does not exist on ROCm; use the pure-PyTorch
+            # fallback that handles Q-norm, RoPE, FP8 quant, and cache insert.
+            self._rocm_qnorm_rope_kv_insert(
+                q, kv, swa_kv_cache, swa_metadata, positions
+            )
+            return
 
         # Horizontally fused:
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
@@ -485,6 +722,63 @@ direct_register_custom_op(
 )
 
 
+def _dsv4_fp8_einsum_torch_fallback(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+    recipe: tuple[int, int, int],
+) -> None:
+    if equation != "bhr,hdr->bhd":
+        raise NotImplementedError(
+            f"DeepSeek-V4 FP8 einsum fallback only supports bhr,hdr->bhd, got {equation}"
+        )
+    m_block, n_block, k_block = recipe
+    h_groups = a.shape[-2]
+    d_out = out.shape[-1]
+    r_contract = a.shape[-1]
+
+    if b.dim() == 2:
+        b_3d = b.view(h_groups, d_out, r_contract)
+    elif b.dim() == 3:
+        b_3d = b
+    else:
+        raise RuntimeError(f"Unexpected wo_a weight dim: {b.dim()}")
+
+    n_d_scale = (d_out + n_block - 1) // n_block if n_block > 1 else d_out
+    n_r_scale = (r_contract + k_block - 1) // k_block if k_block > 1 else r_contract
+    b_scale_f = _dsv4_decode_scale(b_scale)
+    if b_scale_f.dim() == 2:
+        b_scale_f = b_scale_f.view(h_groups, n_d_scale, n_r_scale)
+
+    a_scale_f = _dsv4_decode_scale(a_scale).contiguous()
+    if k_block > 1:
+        a_scale_f = a_scale_f.repeat_interleave(k_block, dim=-1)
+    a_scale_f = a_scale_f[..., :r_contract]
+    if m_block > 1:
+        a_scale_f = a_scale_f.repeat_interleave(m_block, dim=0)[: a.shape[0]]
+    a_bf16 = (a.to(torch.float32) * a_scale_f).to(torch.bfloat16)
+
+    if k_block > 1:
+        b_scale_f = b_scale_f.repeat_interleave(k_block, dim=-1)
+    if n_block > 1:
+        b_scale_f = b_scale_f.repeat_interleave(n_block, dim=-2)
+    b_scale_f = b_scale_f[..., :d_out, :r_contract]
+    b_bf16 = (b_3d.to(torch.float32) * b_scale_f).to(torch.bfloat16)
+
+    if _dsv4_debug_enabled("VLLM_DSV4_ROCM_WOA_BMM"):
+        z_hbd = torch.bmm(
+            a_bf16.transpose(0, 1).contiguous(),
+            b_bf16.transpose(1, 2).contiguous(),
+        )
+        out.copy_(z_hbd.transpose(0, 1).to(out.dtype))
+        return
+
+    out.copy_(torch.einsum(equation, a_bf16, b_bf16).to(out.dtype))
+
+
 def deepseek_v4_fp8_einsum(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -494,6 +788,13 @@ def deepseek_v4_fp8_einsum(
     equation: str,
     recipe: list[int],
 ) -> None:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        _dsv4_fp8_einsum_torch_fallback(
+            a, a_scale, b, b_scale, out, equation, tuple(recipe)
+        )
+        return
     fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
 
 
@@ -775,6 +1076,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             "allocate one for this layer type."
         )
 
+        dump_tensor(self.prefix + ".decode_q", q)
+        dump_tensor(self.prefix + ".decode_swa_lens", swa_lens)
         out, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
@@ -786,12 +1089,17 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             indices=swa_indices,
             topk_length=swa_lens,
             softmax_scale=self.scale,
-            attn_sink=self.attn_sink,
+            attn_sink=(
+                torch.full_like(self.attn_sink, -float("inf"))
+                if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_DISABLE_ATTN_SINK")
+                else self.attn_sink
+            ),
             extra_k_cache=kv_cache if not swa_only else None,
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
         )
+        dump_tensor(self.prefix + ".decode_output", output)
 
     def _forward_prefill(
         self,
@@ -851,6 +1159,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         kv = workspace_manager.get_simultaneous(
             ((PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
+        if _dsv4_debug_enabled("VLLM_DSV4_ZERO_PREFILL_KV"):
+            # Debug correctness fallback: FlashMLA sparse should only read
+            # gathered positions, but zero-initializing catches accidental reads
+            # from workspace gaps and makes first-divergence triage deterministic.
+            kv.zero_()
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + PREFILL_CHUNK_SIZE, num_prefills)
@@ -868,6 +1181,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                 )
+                dump_tensor(self.prefix + ".prefill_after_compressed_gather", kv[:chunk_size])
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
@@ -880,6 +1194,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 block_size=swa_metadata.block_size,
                 offset=N,
             )
+            dump_tensor(self.prefix + ".prefill_after_swa_gather", kv[:chunk_size])
 
             # Combine the topk indices and SWA indices for gathered KV cache
             query_start = (
@@ -903,15 +1218,22 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 N,
             )
 
+            dump_tensor(self.prefix + ".prefill_q_chunk", q[query_start:query_end])
+            dump_tensor(self.prefix + ".prefill_kv_chunk", kv[:chunk_size])
             output_chunk, _, _ = flash_mla_sparse_fwd(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=self.scale,
-                attn_sink=self.attn_sink,
+                attn_sink=(
+                    torch.full_like(self.attn_sink, -float("inf"))
+                    if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_DISABLE_ATTN_SINK")
+                    else self.attn_sink
+                ),
                 topk_length=combined_lens,
                 out=output[query_start:query_end],
             )
+            dump_tensor(self.prefix + ".prefill_output_chunk", output[query_start:query_end])
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
@@ -1060,10 +1382,24 @@ class DeepseekV4Indexer(nn.Module):
         positions: torch.Tensor,
         rotary_emb: nn.Module,
     ) -> torch.Tensor:
+        if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_DISABLE_SPARSE_INDEXER"):
+            assert self.topk_indices_buffer is not None
+            num_tokens = hidden_states.shape[0]
+            fill_width = min(self.topk_tokens, max(1, num_tokens))
+            vals = torch.arange(fill_width, device=hidden_states.device, dtype=self.topk_indices_buffer.dtype)
+            self.topk_indices_buffer[:num_tokens, :fill_width] = vals.unsqueeze(0)
+            if fill_width < self.topk_tokens:
+                self.topk_indices_buffer[:num_tokens, fill_width:self.topk_tokens] = vals[-1]
+            if _dsv4_debug_enabled("VLLM_DEBUG_DSV4_LOG_STATS"):
+                _dsv4_debug_log(self.prefix + ".indexer_bypass", f"num_tokens={num_tokens} fill_width={fill_width}")
+            return self.topk_indices_buffer
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
+        dump_tensor(self.prefix + ".indexer_q", q)
         k = self.compressor(hidden_states, positions, rotary_emb)
+        dump_tensor(self.prefix + ".indexer_k", k)
         weights, _ = self.weights_proj(hidden_states)
+        dump_tensor(self.prefix + ".indexer_weights_raw", weights)
         q_quant, weights = fused_indexer_q_rope_quant(
             positions,
             q,
@@ -1073,4 +1409,12 @@ class DeepseekV4Indexer(nn.Module):
             self.n_head**-0.5,
             use_fp4=self.use_fp4_kv,
         )
-        return self.indexer_op(hidden_states, q_quant, k, weights)
+        if isinstance(q_quant, tuple):
+            dump_tensor(self.prefix + ".indexer_q_quant_values", q_quant[0])
+            dump_tensor(self.prefix + ".indexer_q_quant_scale", q_quant[1])
+        else:
+            dump_tensor(self.prefix + ".indexer_q_quant", q_quant)
+        dump_tensor(self.prefix + ".indexer_weights", weights)
+        out = self.indexer_op(hidden_states, q_quant, k, weights)
+        dump_tensor(self.prefix + ".indexer_topk", out)
+        return out
