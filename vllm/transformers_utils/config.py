@@ -132,7 +132,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     tarsier2="Tarsier2Config",
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",

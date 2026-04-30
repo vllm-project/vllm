@@ -769,11 +769,12 @@ def test_medusa_acceptance_rate(
     """
     target_model = "lmsys/vicuna-7b-v1.3"
     medusa_model = "FasterDecoding/medusa-vicuna-7b-v1.3"
-    test_prompts = get_test_prompts(mm_enabled=False)
+    prompts = _build_gsm8k_prompts(num_questions=10, num_shots=1)[0]
 
     spec_llm = LLM(
         model=target_model,
         speculative_config={
+            "method": "medusa",
             "model": medusa_model,
             "num_speculative_tokens": 3,
         },
@@ -781,7 +782,7 @@ def test_medusa_acceptance_rate(
         enforce_eager=True,
         disable_log_stats=False,
     )
-    spec_llm.chat(test_prompts, sampling_config)
+    spec_llm.generate(prompts, sampling_config)
     metrics = spec_llm.get_metrics()
     acceptance_rate = compute_acceptance_rate(metrics)
     del spec_llm
