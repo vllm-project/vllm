@@ -442,6 +442,33 @@ class VocabParallelEmbedding(PluggableLayer):
             param.data.copy_(loaded_weight)
             return
 
+        if packed_dim is not None and packed_dim == output_dim:
+            packed_factor = (
+                param.packed_factor
+                if isinstance(param, BasevLLMParameter)
+                else param.pack_factor
+            )
+            expected_output_size = self.org_vocab_size // packed_factor
+        else:
+            expected_output_size = self.org_vocab_size
+
+        # Quantized embedding companion params (for example FP8 block
+        # scales) follow the vocab axis but do not have raw vocab shape.
+        # Delegate those to the quant method before the main weight
+        # sharding assertions below.
+        if loaded_weight.shape[output_dim] != expected_output_size:
+            companion_loader = getattr(
+                self.quant_method, "load_embedding_companion", None
+            )
+            if companion_loader is None:
+                raise AssertionError(
+                    "Unsupported quantized embedding companion parameter "
+                    f"shape={tuple(loaded_weight.shape)} for "
+                    f"{type(self.quant_method).__name__}"
+                )
+            companion_loader(self, param, loaded_weight)
+            return
+
         # Shard indexes for loading the weight
         start_idx = self.shard_indices.org_vocab_start_index
         shard_size = self.shard_indices.org_vocab_end_index - start_idx

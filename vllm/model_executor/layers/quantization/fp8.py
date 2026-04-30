@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
+from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
@@ -41,6 +43,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
@@ -107,11 +110,13 @@ class Fp8Config(QuantizationConfig):
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
         lm_head_quantized: bool = False,
+        embeddings_quantized: bool = False,
     ) -> None:
         super().__init__()
 
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.lm_head_quantized = lm_head_quantized
+        self.embeddings_quantized = embeddings_quantized
 
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
@@ -169,12 +174,18 @@ class Fp8Config(QuantizationConfig):
                 config, ["modules_to_not_convert"], None
             )
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
+        embeddings_quantized = cls.get_from_keys_or(
+            config,
+            ["embed_tokens"],
+            cls.get_from_keys_or(config, ["embeddings"], False),
+        )
         return cls(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
             lm_head_quantized=lm_head_quantized,
+            embeddings_quantized=embeddings_quantized,
         )
 
     def get_quant_method(
@@ -214,6 +225,21 @@ class Fp8Config(QuantizationConfig):
             return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
+        elif type(layer) is VocabParallelEmbedding:
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedEmbeddingMethod()
+            if not self.embeddings_quantized:
+                return UnquantizedEmbeddingMethod()
+            if not self.is_checkpoint_fp8_serialized:
+                raise NotImplementedError(
+                    "Online FP8 quantization for VocabParallelEmbedding is "
+                    "not implemented. Serialize embed_tokens to FP8 offline."
+                )
+            return Fp8EmbeddingMethod(self)
         return None
 
     def get_cache_scale(self, name: str) -> str | None:
@@ -553,6 +579,143 @@ class Fp8LinearMethod(LinearMethodBase):
 
         return self.fp8_linear.apply_weights(layer, x, bias)
 
+
+
+class Fp8EmbeddingMethod(Fp8LinearMethod):
+    """Memory-first FP8 runtime for VocabParallelEmbedding.
+
+    The embedding table stays resident as FP8 and only gathered rows are
+    dequantized back to the model dtype during lookup. This is intended as a
+    correctness/VRAM test path, not the final fused performance design.
+    """
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            validate_fp8_block_shape(
+                layer,
+                input_size,
+                output_size,
+                input_size_per_partition,
+                output_partition_sizes,
+                self.weight_block_size,
+            )
+
+        weight = create_fp8_weight_parameter(
+            output_size_per_partition, input_size_per_partition, weight_loader
+        )
+        layer.register_parameter("weight", weight)
+
+        if not self.block_quant:
+            scale = create_fp8_scale_parameter(
+                PerTensorScaleParameter,
+                output_partition_sizes,
+                input_size_per_partition,
+                None,
+                weight_loader,
+            )
+            layer.register_parameter("weight_scale", scale)
+        else:
+            assert not self.act_q_static
+            assert self.weight_block_size is not None
+            scale = create_fp8_scale_parameter(
+                BlockQuantScaleParameter,
+                output_partition_sizes,
+                input_size_per_partition,
+                self.weight_block_size,
+                weight_loader,
+                scale_dtype=(torch.float8_e8m0fnu if self.is_scale_e8m0 else None),
+            )
+            layer.register_parameter("weight_scale_inv", scale)
+
+    def load_embedding_companion(
+        self,
+        layer: VocabParallelEmbedding,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+    ) -> None:
+        output_dim = getattr(param, "output_dim", None)
+        if output_dim is None:
+            if isinstance(param, UninitializedParameter):
+                param.materialize(tuple(loaded_weight.shape), dtype=loaded_weight.dtype)
+            assert param.data.shape == loaded_weight.shape
+            param.data.copy_(loaded_weight)
+            return
+
+        if isinstance(param, UninitializedParameter):
+            shape = list(loaded_weight.shape)
+            if self.block_quant:
+                assert self.weight_block_size is not None
+                block_n = self.weight_block_size[0]
+                shape[output_dim] = math.ceil(
+                    layer.num_embeddings_per_partition / block_n
+                )
+            else:
+                shape[output_dim] = layer.num_embeddings_per_partition
+            param.materialize(tuple(shape), dtype=loaded_weight.dtype)
+
+        if loaded_weight.shape == param.data.shape or loaded_weight.shape[output_dim] == 1:
+            param.data.copy_(loaded_weight)
+            return
+
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            block_n = self.weight_block_size[0]
+            start_idx = layer.shard_indices.org_vocab_start_index // block_n
+        else:
+            start_idx = layer.shard_indices.org_vocab_start_index
+
+        local_rows = param.data.shape[output_dim]
+        available_rows = max(0, loaded_weight.shape[output_dim] - start_idx)
+        copy_rows = min(local_rows, available_rows)
+
+        if copy_rows > 0:
+            shard = loaded_weight.narrow(output_dim, start_idx, copy_rows)
+            param.data.narrow(output_dim, 0, copy_rows).copy_(shard)
+        if copy_rows < local_rows:
+            param.data.narrow(output_dim, copy_rows, local_rows - copy_rows).fill_(0)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        layer._already_called_process_weights_after_loading = True
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        out_dtype = getattr(layer, "orig_dtype", torch.get_default_dtype())
+        flat_input = input_.reshape(-1).long()
+        weight_rows = layer.weight.index_select(0, flat_input).to(out_dtype)
+
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            block_n, block_k = self.weight_block_size
+            scales = layer.weight_scale_inv.to(out_dtype)
+            row_blocks = torch.div(flat_input, block_n, rounding_mode="floor")
+            row_scales = scales.index_select(0, row_blocks)
+            row_scales = row_scales.repeat_interleave(block_k, dim=-1)
+            row_scales = row_scales[..., : layer.embedding_dim]
+            output = weight_rows * row_scales
+        else:
+            scales = layer.weight_scale.to(out_dtype)
+            output = weight_rows * scales
+
+        return output.reshape(*input_.shape, layer.embedding_dim)
 
 # TODO(future PR): remove this class in favor of
 # online/fp8.py::Fp8PerTensorOnlineLinearMethod
