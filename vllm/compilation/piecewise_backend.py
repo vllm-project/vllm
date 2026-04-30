@@ -16,6 +16,7 @@ from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
+from vllm.compilation.graph_dump import collect_graph_metadata, dump_graph
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -308,6 +309,22 @@ class PiecewiseBackend:
         if not self._graph_logged:
             self._graph_logged = True
             assert self.graph is not None
+            debug_dump_path = self.vllm_config.compile_debug_dump_path()
+            dump_graph(
+                f"piecewise.{submod_name}",
+                self.graph,
+                debug_dump_path / "graphs" if debug_dump_path else None,
+                collect_graph_metadata(
+                    self.vllm_config,
+                    submod_name=submod_name,
+                    piecewise_index=subgraph_index,
+                    total_piecewise_compiles=self.total_piecewise_compiles,
+                    compile_range=str(compile_range),
+                    is_encoder=self.is_encoder_compilation,
+                    parent_prefix=self.vllm_backend.prefix,
+                    parent_function_name=self.vllm_backend.function_name,
+                ),
+            )
             trace_structured(
                 "graph_dump",
                 metadata_fn=lambda: {

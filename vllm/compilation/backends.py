@@ -45,6 +45,7 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
+from .graph_dump import collect_graph_metadata, dump_graph
 from .partition_rules import (
     inductor_partition_rule_context,
     should_split,
@@ -829,6 +830,7 @@ class VllmBackend:
         vllm_config: VllmConfig,
         prefix: str = "",
         is_encoder: bool = False,
+        function_name: str = "",
     ) -> None:
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -837,6 +839,7 @@ class VllmBackend:
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
+        self.function_name = function_name
 
         # Mark compilation for encoder.
         self.is_encoder = is_encoder or model_is_encoder
@@ -1157,12 +1160,16 @@ class VllmBackend:
         if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             original_split_gm = deepcopy(self.split_gm)
 
-        from torch._dynamo.utils import lazy_format_graph_code
-
-        # depyf will hook lazy_format_graph_code and dump the graph
-        # for debugging, no need to print the graph here
-        lazy_format_graph_code("before split", self.graph)
-        lazy_format_graph_code("after split", self.split_gm)
+        dump_path = vllm_config.compile_debug_dump_path()
+        if dump_path:
+            metadata = collect_graph_metadata(
+                vllm_config,
+                prefix=self.prefix,
+                function_name=self.function_name,
+                is_encoder=self.is_encoder,
+            )
+            dump_graph("before split", self.graph, dump_path / "graphs", metadata)
+            dump_graph("after split", self.split_gm, dump_path / "graphs", metadata)
 
         # Log the piecewise split graph for TORCH_TRACE/tlparse
         trace_structured(
