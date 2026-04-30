@@ -23,6 +23,10 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
+from vllm.compilation.codegen import (
+    compile_execution_fn,
+    generate_execution_code,
+)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -275,6 +279,7 @@ class CompilerManager:
         compilation_counter.num_backend_compilations += 1
 
         compiled_graph = None
+        handle = None
 
         # try to load from the cache
         compiled_graph = self.load(graph, example_inputs, graph_index, compile_range)
@@ -353,7 +358,7 @@ class CompilerManager:
                     )
                 except StopCompiling:
                     assert cache_key is not None
-                    return self.loaded_artifacts[cache_key]
+                    compiled_graph = self.loaded_artifacts[cache_key]
             if cache_key is not None and compiled_graph is not None:
                 self.loaded_artifacts[cache_key] = compiled_graph
 
@@ -1242,11 +1247,6 @@ class VllmBackend:
         self._called = True
         graph_to_serialize = (
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
-        )
-
-        from vllm.compilation.codegen import (
-            compile_execution_fn,
-            generate_execution_code,
         )
 
         execution_code, submod_names = generate_execution_code(self.split_gm)

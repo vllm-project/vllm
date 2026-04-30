@@ -46,7 +46,7 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import is_quantized_kv_cache, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -192,15 +192,8 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        # If the KV cache has just been woken up,
-        # the internal state of cache_engine must be reset,
-        # especially the FP8 scaling factor.
-        if (
-            (tags is None or "kv_cache" in tags)
-            and is_quantized_kv_cache(self.cache_config.cache_dtype)
-            and hasattr(self.model_runner, "init_fp8_kv_scales")
-        ):
-            self.model_runner.init_fp8_kv_scales()
+        if tags is None or "kv_cache" in tags:
+            self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if not self.vllm_config.model_config.enable_sleep_mode:
@@ -1015,6 +1008,11 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        # Release GPU resources held by the model runner so that memory
+        # can be reclaimed when running in-process
+        if model_runner := getattr(self, "model_runner", None):
+            model_runner.shutdown()
+
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
@@ -1027,11 +1025,10 @@ def init_worker_distributed_environment(
     backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
-    attention_config = vllm_config.attention_config
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
-    init_batch_invariance(attention_config.backend)
+    init_batch_invariance()
     override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 

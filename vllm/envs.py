@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
-    VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
+    VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
-    VLLM_MAIN_CUDA_VERSION: str = "12.9"
+    VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     MAX_JOBS: str | None = None
@@ -152,6 +152,10 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
+    VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
+    VLLM_HUMMING_USE_F16_ACCUM: bool = False
+    VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
@@ -283,6 +287,15 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if os.path.exists(value):
+        with open(value) as f:
+            return json.load(f)
+    return json.loads(value)
 
 
 def disable_compile_cache() -> bool:
@@ -493,7 +506,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
     # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: (
-        os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "12.9"
+        os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.0"
     ),
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
     # Valid options mirror torch.set_float32_matmul_precision
@@ -699,11 +712,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
-    # If set, vllm will use flashinfer sampler
+    # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
+    # by default when the hardware supports it — set to 0 to opt out
+    # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: (
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
-        else None
+        else True
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -984,6 +999,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
+    # - use aiter tuned gemms for unquantized gemms
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
     ),
@@ -1192,6 +1208,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
+    # The online quantization dtype for humming kernel
+    "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
+        os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
+    ),
+    # The activation dtype config for humming kernel
+    "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
+        os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
+    ),
+    # Whether to use fp16 accumulator mma
+    "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_HUMMING_USE_F16_ACCUM", "0")
+    ),
+    # Whether to use indexed gemm for humming moe
+    # if 1, force use indexed gemm
+    # if 0, force use grouped gemm
+    # if None, choose better gemm type automatically
+    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_HUMMING_MOE_GEMM_TYPE", None)
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with

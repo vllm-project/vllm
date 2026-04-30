@@ -100,6 +100,10 @@ class FlexAttentionBackend(AttentionBackend):
         return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         """FlexAttention supports full attention for image tokens."""
         return True
@@ -326,15 +330,9 @@ class BlockSparsityHint(NamedTuple):
 
 
 def copy_to_persistent(dst, src):
-    try:
-        dst = dst.as_strided(src.shape, src.stride())
-    except RuntimeError as e:
-        raise RuntimeError(
-            f"Fail to re-stride a persistent tensor of shape {dst.shape} "
-            f"for a tensor of shape {src.shape}"
-        ) from e
-    dst.copy_(src)
-    return dst
+    sliced = dst[tuple(slice(0, s) for s in src.shape)]
+    sliced.copy_(src)
+    return sliced
 
 
 @dataclass
@@ -782,10 +780,11 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> FlexAttentionMetadata:
-        # Use actual max_seq_len instead of max_model_len to avoid
-        # torch.compile recompilation during CUDA graph capture.
-        common_attn_metadata.max_seq_len = (
-            common_attn_metadata.seq_lens_cpu.max().item()
+        # Use actual max_seq_len (not max_model_len) to avoid torch.compile
+        # recompilation during CUDA graph capture.
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        common_attn_metadata.max_seq_len = int(
+            common_attn_metadata.seq_lens_cpu_upper_bound.max().item()
         )
         return self.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
