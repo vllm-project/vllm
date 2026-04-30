@@ -149,10 +149,8 @@ class DeepseekSparseSWAMetadata:
 
     is_valid_token: torch.Tensor | None = None  # [num_tokens]
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
-    decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, window_size]
-    decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
-    prefill_swa_indices: torch.Tensor | None = None
-    prefill_swa_lens: torch.Tensor | None = None
+    swa_indices: torch.Tensor | None = None  # [num_tokens, 1, window_size]
+    swa_lens: torch.Tensor | None = None  # [num_tokens]
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
@@ -160,34 +158,31 @@ class DeepseekSparseSWAMetadata:
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
 
-    # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
+    # Pre-computed prefill metadata shared across all DeepseekV4 attention layers
+    # when using the bf16 prefill fallback path.
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
 
-    # Per-layer-type FlashMLA tile-scheduler metadata. Decode and direct
-    # prefill use separate FlashMLASchedMeta objects because their batch shapes
-    # differ, but same-type layers share the object within a step. The first
-    # forward call of a given type triggers the in-kernel planner; subsequent
-    # same-type calls reuse the populated plan.
+    # Per-layer-type FlashMLA tile-scheduler metadata. All tokens in a scheduler
+    # step share one FlashMLASchedMeta per DeepseekV4 layer type.
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
-    prefill_tile_sched_swaonly: "FlashMLASchedMeta | None" = None
-    prefill_tile_sched_c4a: "FlashMLASchedMeta | None" = None
-    prefill_tile_sched_c128a: "FlashMLASchedMeta | None" = None
+    refresh_tile_scheduler: bool = False
+    scheduler_valid_count: torch.Tensor | None = None  # CUDA int32 scalar [1]
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """Builds metadata for DeepseekV4 SWA cache.
 
-    Similar to the indexer, this handles mixed batches by:
-    1. Using split_decodes_and_prefills() to determine the boundary
-    2. Building separate metadata for decode and prefill portions
+    This keeps the decode/prefill split counts for compatibility with other
+    DeepseekV4 metadata builders, but produces a single set of token metadata
+    consumed by FlashMLA's direct KV-cache path.
 
     Supports:
     - Mixed decode/prefill batches
     - MTP (Multi-Token Prediction) where decode has query_len > 1
-    - Chunked prefill (aligns with the indexer's chunking)
+    - Chunked prefill tokens treated as independent decode-kernel queries
     """
 
     # Base threshold: query_len <= 1 is decode
@@ -237,14 +232,14 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        self.decode_swa_indices = torch.zeros(
+        self.swa_indices = torch.zeros(
             max_tokens,
             1,
             self.window_size,
             dtype=torch.int32,
             device=self.device,
         )
-        self.decode_swa_lens = torch.zeros(
+        self.swa_lens = torch.zeros(
             max_tokens,
             dtype=torch.int32,
             device=self.device,
@@ -253,6 +248,19 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             max_tokens,
             dtype=torch.bool,
             device=self.device,
+        )
+        self.scheduler_valid_count = torch.zeros(
+            (1,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        compilation_config = self.vllm_config.compilation_config
+        self._use_cudagraph_tile_scheduler = (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+        )
+        self._max_cudagraph_capture_size = (
+            compilation_config.max_cudagraph_capture_size or 0
         )
 
     def build(
@@ -263,11 +271,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     ) -> DeepseekSparseSWAMetadata:
         """Build SWA metadata for mixed decode/prefill batches.
 
-        The batch is assumed to be reordered with decodes first (by vLLM scheduler).
-        We use split_decodes_and_prefills() to find the boundary, then build
-        separate window_topk_idxs for each portion.
-
-        For prefill, we use chunked prefill to align with the indexer's chunking.
+        The batch is assumed to be reordered with decodes first by the scheduler,
+        but all actual tokens are processed by a single FlashMLA call.
         """
         num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
@@ -284,25 +289,33 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         )
 
         # NOTE: Ensure all metadata tensors maintain fixed memory addresses
-        # for CUDA graph compatibility.
+        # for CUDA graph compatibility. Padded full-cudagraph decode rows have
+        # zero query length, so the repeated request-id list can be shorter
+        # than the padded token count. Keep the exposed slice padded and use a
+        # dummy request id for invalid rows; validity is carried separately by
+        # is_valid_token.
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         x = torch.repeat_interleave(torch.arange(num_reqs), query_lens).pin_memory()
-        token_to_req_indices = self.token_to_req_indices[: x.shape[0]]
-        token_to_req_indices.copy_(x, non_blocking=True)
+        num_tokens = num_decode_tokens + num_prefill_tokens
+        token_to_req_indices = self.token_to_req_indices[:num_tokens]
+        token_to_req_indices.zero_()
+        token_to_req_indices[: x.shape[0]].copy_(x, non_blocking=True)
 
-        is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
+        is_valid_token = self.is_valid_token[:num_tokens]
         is_valid_token.copy_(slot_mapping >= 0)
 
-        num_swa_tokens = num_decode_tokens
-        if self.use_flashmla_direct_kvcache_prefill:
-            num_swa_tokens += num_prefill_tokens
+        num_swa_tokens = (
+            num_tokens
+            if self.use_flashmla_direct_kvcache_prefill
+            else num_decode_tokens
+        )
 
         if num_swa_tokens > 0:
-            self.decode_swa_lens[num_swa_tokens:] = 0
+            self.swa_lens[num_swa_tokens:] = 0
             _compute_swa_indices_and_lens_kernel[(num_swa_tokens,)](
-                self.decode_swa_indices,
-                self.decode_swa_indices.stride(0),
-                self.decode_swa_lens,
+                self.swa_indices,
+                self.swa_indices.stride(0),
+                self.swa_lens,
                 self.window_size,
                 query_start_loc,
                 seq_lens,
@@ -314,29 +327,32 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 TRITON_BLOCK_SIZE=1024,
             )
 
-        prefill_swa_indices = None
-        prefill_swa_lens = None
-        if self.use_flashmla_direct_kvcache_prefill and num_prefill_tokens > 0:
-            prefill_end = num_decode_tokens + num_prefill_tokens
-            prefill_swa_indices = self.decode_swa_indices[num_decode_tokens:prefill_end]
-            prefill_swa_lens = self.decode_swa_lens[num_decode_tokens:prefill_end]
-
-        # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
-        deepseek_v4_fields = self._build_deepseek_v4_metadata(
-            num_decodes,
-            num_prefills,
-            seq_lens,
-            query_start_loc,
-        )
+        deepseek_v4_fields = {}
+        if not self.use_flashmla_direct_kvcache_prefill:
+            # Pre-compute DeepseekV4 prefill metadata shared across all
+            # attention layers for the bf16 prefill fallback.
+            deepseek_v4_fields = self._build_deepseek_v4_metadata(
+                num_decodes,
+                num_prefills,
+                seq_lens,
+                query_start_loc,
+            )
 
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
         # per present DeepseekV4 layer type; the first flash_mla_with_kvcache call of
         # each type triggers the planner and all same-type layers reuse the
         # resulting plan for the rest of the step.
-        tile_sched = self.build_tile_scheduler(num_decode_tokens)
-        prefill_tile_sched = self.build_tile_scheduler(
-            num_prefill_tokens if self.use_flashmla_direct_kvcache_prefill else 0
+        refresh_tile_scheduler = (
+            self._use_cudagraph_tile_scheduler
+            and num_prefills == 0
+            and 0 < num_swa_tokens <= self._max_cudagraph_capture_size
         )
+        scheduler_valid_count = None
+        if refresh_tile_scheduler:
+            self.scheduler_valid_count[0] = int(query_start_loc_cpu[-1])
+            scheduler_valid_count = self.scheduler_valid_count
+
+        tile_sched = self.build_tile_scheduler(num_swa_tokens)
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
@@ -346,10 +362,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             slot_mapping=slot_mapping,
             is_valid_token=is_valid_token,
             token_to_req_indices=token_to_req_indices,
-            decode_swa_indices=self.decode_swa_indices[:num_decode_tokens],
-            decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
-            prefill_swa_indices=prefill_swa_indices,
-            prefill_swa_lens=prefill_swa_lens,
+            swa_indices=self.swa_indices[:num_swa_tokens],
+            swa_lens=self.swa_lens[:num_swa_tokens],
             block_size=self.block_size,
             num_decodes=num_decodes,
             num_prefills=num_prefills,
@@ -358,14 +372,14 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
-            prefill_tile_sched_swaonly=prefill_tile_sched[_LAYER_TYPE_SWAONLY],
-            prefill_tile_sched_c4a=prefill_tile_sched[_LAYER_TYPE_C4A],
-            prefill_tile_sched_c128a=prefill_tile_sched[_LAYER_TYPE_C128A],
+            refresh_tile_scheduler=refresh_tile_scheduler,
+            scheduler_valid_count=scheduler_valid_count,
             **deepseek_v4_fields,
         )
 
     def build_tile_scheduler(
-        self, num_tokens: int
+        self,
+        num_tokens: int,
     ) -> dict[str, FlashMLASchedMeta | None]:
         """Allocate one empty ``FlashMLASchedMeta`` per present DeepseekV4 layer type.
 
@@ -390,7 +404,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             # returns a fresh empty FlashMLASchedMeta; using it keeps this
             # call site aligned with the rest of the vLLM FlashMLA backends
             # that already go through the same stub.
-            out[layer_type] = get_mla_metadata()[0]
+            sched_meta = get_mla_metadata()[0]
+            out[layer_type] = sched_meta
         return out
 
     def _build_deepseek_v4_metadata(
@@ -400,17 +415,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         seq_lens: torch.Tensor,
         query_start_loc: torch.Tensor,
     ) -> dict[str, torch.Tensor | None]:
-        """Pre-compute DeepseekV4 prefill metadata during the metadata build phase.
-
-        Returns a dict of keyword arguments to pass to the
-        DeepseekSparseSWAMetadata constructor.
-
-        Note: C128A topk indices are computed by the FlashMLASparse builder
-        (which owns the C128A block_table), not here.
-        """
+        """Pre-compute metadata for the DeepSeek V4 bf16 prefill fallback."""
         result: dict[str, torch.Tensor | None] = {}
 
-        # --- Prefill query metadata (single Triton kernel + CPU slicing) ---
         if num_prefills > 0:
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device

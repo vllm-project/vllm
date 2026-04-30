@@ -308,19 +308,19 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
     attention_config = engine_args.attention_config
-    assert attention_config.use_deepseek_v4_flashmla_direct_kvcache_prefill is True
+    assert attention_config.use_deepseek_v4_flashmla_direct_kvcache_prefill is False
 
-    # opt out via dot notation
+    # opt in via dot notation
     args = parser.parse_args(
         [
             "--attention-config.use_deepseek_v4_flashmla_direct_kvcache_prefill",
-            "false",
+            "true",
         ]
     )
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     attention_config = engine_args.attention_config
-    assert attention_config.use_deepseek_v4_flashmla_direct_kvcache_prefill is False
+    assert attention_config.use_deepseek_v4_flashmla_direct_kvcache_prefill is True
 
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
