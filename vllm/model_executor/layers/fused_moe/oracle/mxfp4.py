@@ -163,7 +163,7 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
-        from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
             AiterW4A8ExpertsMonolithic,
         )
 
@@ -196,8 +196,8 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         "triton": Mxfp4MoeBackend.TRITON,
         "triton_unfused": Mxfp4MoeBackend.TRITON_UNFUSED,
         "marlin": Mxfp4MoeBackend.MARLIN,
-        "aiter": Mxfp4MoeBackend.AITER_MXFP4_BF16,  # W4A16
-        "aiter_mxfp4_fp8": Mxfp4MoeBackend.AITER_MXFP4_FP8,  # W4A8
+        "aiter": Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        "aiter_mxfp4_fp8": Mxfp4MoeBackend.AITER_MXFP4_FP8,
         "xpu": Mxfp4MoeBackend.XPU,
         "emulation": Mxfp4MoeBackend.EMULATION,
     }
