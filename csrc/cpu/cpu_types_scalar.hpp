@@ -310,7 +310,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   // FP8 stub: dead code on scalar path (fp8 KV cache is x86-only), needed for
   // load_b_pair_vec template to compile on all platforms.
-  explicit FP32Vec16(const BF16Vec32&, int) : Base() {}
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
 
   FP32Vec16 operator*(const FP32Vec16& b) const {
     f32x16_t ret;

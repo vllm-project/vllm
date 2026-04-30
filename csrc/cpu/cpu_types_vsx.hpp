@@ -412,7 +412,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   // FP8 stub: dead code on PowerPC (fp8 KV cache is x86-only), needed for
   // load_b_pair_vec template to compile on all platforms.
-  explicit FP32Vec16(const BF16Vec32&, int) : Base() {}
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
 
   explicit FP32Vec16(const INT32Vec16& v) {
     reg.val[0] = vec_ctf(v.reg.val[0], 0);
