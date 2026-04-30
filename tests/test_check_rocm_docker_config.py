@@ -67,3 +67,21 @@ def test_rejects_gfx115x_with_pre_7_2_rocm_base(tmp_path: Path):
     assert "gfx1150" in errors[0]
     assert "ROCm 7.2+" in errors[0]
     assert "#31333" in errors[0]
+
+
+def test_extracts_arg_defaults_with_valid_dockerfile_spacing():
+    module = load_module()
+
+    dockerfile_text = """
+      ARG   BASE_IMAGE = "rocm/dev-ubuntu-22.04:7.2.1-complete"
+    ARG PYTORCH_ROCM_ARCH='gfx90a;gfx1151'
+    """
+
+    assert (
+        module._extract_arg_default(dockerfile_text, "BASE_IMAGE")
+        == "rocm/dev-ubuntu-22.04:7.2.1-complete"
+    )
+    assert (
+        module._extract_arg_default(dockerfile_text, "PYTORCH_ROCM_ARCH")
+        == "gfx90a;gfx1151"
+    )

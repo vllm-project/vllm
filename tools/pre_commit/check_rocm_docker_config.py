@@ -15,11 +15,14 @@ MIN_ROCM_VERSION_BY_ARCH = {
 
 
 def _extract_arg_default(dockerfile_text: str, arg_name: str) -> str | None:
-    prefix = f"ARG {arg_name}="
     for line in dockerfile_text.splitlines():
-        if not line.startswith(prefix):
+        line = line.strip()
+        if not line.startswith("ARG "):
             continue
-        return line.removeprefix(prefix).strip().strip("\"'")
+        parts = line[4:].split("=", maxsplit=1)
+        if len(parts) != 2 or parts[0].strip() != arg_name:
+            continue
+        return parts[1].strip().strip("\"'")
     return None
 
 
@@ -67,7 +70,7 @@ def validate_rocm_docker_config(dockerfile_path: Path) -> list[str]:
         errors.append(
             f"{dockerfile_path} advertises {arch} in PYTORCH_ROCM_ARCH but "
             f"BASE_IMAGE uses ROCm {actual}; ROCm {required}+ is required "
-            f"for gfx1150/gfx1151 (see #31333)."
+            f"for {arch} (see #31333)."
         )
 
     return errors
