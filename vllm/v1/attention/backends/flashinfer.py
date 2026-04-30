@@ -1529,9 +1529,8 @@ class FlashInferImpl(AttentionImpl):
                 # on size=1 dims. contiguous() ensures memory layout; then
                 # canonicalize_singleton_dim_strides fixes any remaining
                 # degenerate strides on size=1 dims for TMA alignment.
-                prefill_query = canonicalize_singleton_dim_strides(
-                    prefill_query.contiguous()
-                )
+                prefill_query = prefill_query.contiguous()
+                prefill_query = canonicalize_singleton_dim_strides(prefill_query)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
@@ -1658,9 +1657,8 @@ class FlashInferImpl(AttentionImpl):
                 # on size=1 dims. contiguous() ensures memory layout; then
                 # canonicalize_singleton_dim_strides fixes any remaining
                 # degenerate strides on size=1 dims for TMA alignment.
-                decode_query = canonicalize_singleton_dim_strides(
-                    decode_query.contiguous()
-                )
+                decode_query = decode_query.contiguous()
+                decode_query = canonicalize_singleton_dim_strides(decode_query)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
