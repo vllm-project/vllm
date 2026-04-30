@@ -239,7 +239,6 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
-                scope="local",
             )
 
         if self.max_num_partial_prefills > 1:
