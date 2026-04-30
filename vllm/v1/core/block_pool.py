@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
+    CachedBlockEntry,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
@@ -216,7 +217,7 @@ class BlockPool:
         num_full_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
-    ) -> None:
+    ) -> list[CachedBlockEntry]:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
         metadata to be updated and cached. Given a request, it updates the
@@ -233,9 +234,12 @@ class BlockPool:
                 be cached after this function.
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
+
+        Returns:
+            The physical block entries newly inserted into the prefix cache.
         """
         if num_cached_blocks >= num_full_blocks:
-            return
+            return []
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
         if block_size == self.hash_block_size:
@@ -255,6 +259,7 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        new_cached_blocks: list[CachedBlockEntry] = []
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null blocks when enabling sparse attention like
             # sliding window attention, or Mamba models with prefix-caching in
@@ -270,6 +275,13 @@ class BlockPool:
             )
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+            new_cached_blocks.append(
+                CachedBlockEntry(
+                    request_id=request.request_id,
+                    block_id=blk.block_id,
+                    block_hash=block_hash_with_group_id,
+                )
+            )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -318,6 +330,7 @@ class BlockPool:
                     group_idx=kv_cache_group_id,
                 )
             )
+        return new_cached_blocks
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -439,6 +452,15 @@ class BlockPool:
             )
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
+
+    def evict_cached_blocks(
+        self, cached_blocks: Iterable[CachedBlockEntry]
+    ) -> None:
+        """Evict specific cached blocks when scheduled work is cancelled."""
+        for cached_block in cached_blocks:
+            block = self.blocks[cached_block.block_id]
+            if block.block_hash == cached_block.block_hash:
+                self._maybe_evict_cached_block(block)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

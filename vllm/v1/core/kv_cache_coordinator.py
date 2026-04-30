@@ -10,6 +10,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
     BlockHashListWithBlockSize,
+    CachedBlockEntry,
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -184,7 +185,9 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_computed_tokens: int
+    ) -> list[CachedBlockEntry]:
         """
         Cache the blocks for the request.
 
@@ -194,8 +197,10 @@ class KVCacheCoordinator(ABC):
                 that need to be cached
                 (including tokens that are already cached).
         """
+        new_cached_blocks: list[CachedBlockEntry] = []
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, num_computed_tokens)
+            new_cached_blocks.extend(manager.cache_blocks(request, num_computed_tokens))
+        return new_cached_blocks
 
     def free(self, request_id: str) -> None:
         """
@@ -247,6 +252,65 @@ class KVCacheCoordinator(ABC):
             manager.req_to_blocks.get(request_id) or []
             for manager in self.single_type_managers
         )
+
+    def touch_computed_blocks(
+        self, computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+    ) -> None:
+        """Pin prefix-cache hits returned by find_longest_cache_hit().
+
+        get_computed_blocks() and allocate_slots() are separate scheduler
+        operations. If a hit block is currently an eviction candidate
+        (ref_cnt == 0), another request can recycle it between those calls
+        unless we pin it immediately.
+        """
+        if not self.enable_caching:
+            return
+        for group_blocks in computed_blocks:
+            blocks_to_touch = [block for block in group_blocks if not block.is_null]
+            self.block_pool.touch(blocks_to_touch)
+
+    def release_computed_blocks(
+        self, computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+    ) -> None:
+        """Undo touch_computed_blocks() when a request is not scheduled."""
+        if not self.enable_caching:
+            return
+        for group_blocks in computed_blocks:
+            self.block_pool.free_blocks(
+                block for block in group_blocks if not block.is_null
+            )
+
+    def has_pending_computed_blocks(
+        self, computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+    ) -> bool:
+        """Return whether a prefix hit still has in-flight GPU writes."""
+        if not self.enable_caching:
+            return False
+        return any(
+            manager.has_pending_computed_blocks(group_blocks)
+            for manager, group_blocks in zip(
+                self.single_type_managers, computed_blocks
+            )
+        )
+
+    def mark_blocks_computed(
+        self, cached_blocks: Sequence[CachedBlockEntry]
+    ) -> None:
+        """Mark pending prefix-cache entries as safe after GPU completion."""
+        if not self.enable_caching:
+            return
+        for manager in self.single_type_managers:
+            manager.mark_blocks_computed(cached_blocks)
+
+    def discard_pending_blocks(
+        self, cached_blocks: Sequence[CachedBlockEntry]
+    ) -> None:
+        """Remove pending prefix-cache entries for cancelled scheduled work."""
+        if not self.enable_caching:
+            return
+        for manager in self.single_type_managers:
+            manager.mark_blocks_computed(cached_blocks)
+        self.block_pool.evict_cached_blocks(cached_blocks)
 
     @abstractmethod
     def find_longest_cache_hit(
