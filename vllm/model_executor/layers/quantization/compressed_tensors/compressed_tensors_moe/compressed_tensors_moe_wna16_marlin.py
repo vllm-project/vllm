@@ -538,12 +538,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         return int4_w4a16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_zp=getattr(layer, "w13_weight_zero_point", None)
-            if not self.symmetric
-            else None,
-            w2_zp=getattr(layer, "w2_weight_zero_point", None)
-            if not self.symmetric
-            else None,
+            w1_zp=getattr(layer, "w13_weight_zero_point", None),
+            w2_zp=getattr(layer, "w2_weight_zero_point", None),
             block_shape=[0, self.group_size],
         )
 
