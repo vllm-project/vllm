@@ -460,9 +460,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # overlap with default's GEMM + cache write.
         if self.indexer is not None:
             aux_stream = (
-                self.aux_stream_list[0]
-                if self.aux_stream_list is not None
-                else None
+                self.aux_stream_list[0] if self.aux_stream_list is not None else None
             )
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
@@ -492,9 +490,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
             aux_stream = (
-                self.aux_stream_list[0]
-                if self.aux_stream_list is not None
-                else None
+                self.aux_stream_list[0] if self.aux_stream_list is not None else None
             )
             compressor = self.compressor
 
