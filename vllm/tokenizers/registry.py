@@ -258,7 +258,7 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
 
-    return cached_get_tokenizer(
+    tok = cached_get_tokenizer(
         model_config.tokenizer,
         runner_type=model_config.runner_type,
         tokenizer_mode=model_config.tokenizer_mode,
@@ -266,3 +266,9 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
+
+    # HF fast tokenizer specific method to reserve pool of tokenizers.
+    if hasattr(tok, "_reserve_pool"):
+        tok._reserve_pool(model_config.renderer_num_workers)
+
+    return tok

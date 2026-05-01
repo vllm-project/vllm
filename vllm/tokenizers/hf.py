@@ -15,49 +15,84 @@ from .protocol import TokenizerLike
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 
-def make_backend_thread_local(tokenizer: HfTokenizer) -> HfTokenizer:
-    """Make `PreTrainedTokenizerFast` thread-safe.
-    Make `encode`, `batch_encode`, and `__call__` methods, which may mutably
-    borrow the Rust backend tokenizer, thread-safe by routing them through a
-    deep-copied tokenizer pool.
+def make_tokenizer_pool(tokenizer: HfTokenizer) -> HfTokenizer:
+    """Ensure the public interface of  ``TokenizerLike`` is thread-safe.
+    Route calls to ``PreTrainedTokenizerFast`` through a deep-copied
+    tokenizer pool.
+
+    Note that:
+    - Mutation is not propagated to tokenizers in the pool.
+    - Adjacent method calls could happen on different deep copies.
+    - ``_tokenizer`` property is not protected by tokenizer pool.
     """
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         return tokenizer
 
     thread_safe_tokenizer = copy.copy(tokenizer)
 
-    encoder_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
+    tokenizer_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
 
     @contextlib.contextmanager
     def _borrow_from_pool():
         try:
-            tok = encoder_pool.get_nowait()
+            tok = tokenizer_pool.get_nowait()
             yield tok
         except queue.Empty:
             tok = copy.deepcopy(tokenizer)
             yield tok
         finally:
-            encoder_pool.put(tok)
+            tokenizer_pool.put(tok)
 
-    class ThreadLocalTokenizer(tokenizer.__class__):  # type: ignore
-        def encode(self, *args, **kwargs):
+    class TokenizerPool(tokenizer.__class__):  # type: ignore
+        def apply_chat_template(self, *args, **kwargs):
             with _borrow_from_pool() as tok:
-                return tok.encode(*args, **kwargs)
+                return tok.apply_chat_template(*args, **kwargs)
+
+        def batch_decode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.batch_decode(*args, **kwargs)
 
         def batch_encode(self, *args, **kwargs):
             with _borrow_from_pool() as tok:
                 return tok.batch_encode(*args, **kwargs)
+
+        def convert_tokens_to_ids(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.convert_tokens_to_ids(*args, **kwargs)
+
+        def convert_ids_to_tokens(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.convert_ids_to_tokens(*args, **kwargs)
+
+        def convert_tokens_to_string(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.convert_tokens_to_string(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.decode(*args, **kwargs)
+
+        def encode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.encode(*args, **kwargs)
 
         def __call__(self, *args, **kwargs):
             with _borrow_from_pool() as tok:
                 return tok(*args, **kwargs)
 
         def __reduce__(self):
-            return make_backend_thread_local, (tokenizer,)
+            return make_tokenizer_pool, (tokenizer,)
 
-    ThreadLocalTokenizer.__name__ = f"ThreadLocal{tokenizer.__class__.__name__}"
+        @staticmethod
+        def _reserve_pool(copies: int):
+            # Ensure tokenizer pool contains at least `copies` tokenizers.
+            num_to_add = copies - tokenizer_pool.qsize()
+            for _ in range(num_to_add):
+                tokenizer_pool.put(copy.deepcopy(tokenizer))
 
-    thread_safe_tokenizer.__class__ = ThreadLocalTokenizer
+    TokenizerPool.__name__ = f"TokenizerPool{tokenizer.__class__.__name__}"
+
+    thread_safe_tokenizer.__class__ = TokenizerPool
     return thread_safe_tokenizer
 
 
@@ -169,4 +204,4 @@ class CachedHfTokenizer(TokenizerLike):
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        return get_cached_tokenizer(make_backend_thread_local(tokenizer))
+        return get_cached_tokenizer(make_tokenizer_pool(tokenizer))

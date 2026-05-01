@@ -6,7 +6,7 @@ from collections.abc import Collection, Set
 
 from transformers import AutoTokenizer
 
-from .hf import HfTokenizer, get_cached_tokenizer, make_backend_thread_local
+from .hf import HfTokenizer, get_cached_tokenizer, make_tokenizer_pool
 from .protocol import TokenizerLike
 
 
@@ -68,5 +68,5 @@ class QwenVLTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(*args, **kwargs)
-        tokenizer = make_backend_thread_local(tokenizer)
+        tokenizer = make_tokenizer_pool(tokenizer)
         return get_cached_tokenizer(get_qwen_vl_tokenizer(tokenizer))
