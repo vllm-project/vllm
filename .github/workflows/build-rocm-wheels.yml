@@ -195,6 +195,22 @@ jobs:
           else
             echo "amd-smi not found"
           fi
+          echo "=== GPU clocks, power profile, and temperature ==="
+          for card in /sys/class/drm/card[0-9]/device /sys/class/drm/card[0-9][0-9]/device; do
+            [ -d "$card" ] || continue
+            echo "--- ${card} ---"
+            for f in "$card"/hwmon/hwmon*/temp*_input; do
+              [ -f "$f" ] || continue
+              echo "${f#"$card"/}: $(( $(cat "$f") / 1000 )) °C"
+            done
+            f=power_dpm_force_performance_level
+            [ -f "$card/$f" ] && echo "$f: $(cat "$card/$f")"
+            for f in pp_dpm_mclk pp_dpm_sclk pp_power_profile_mode; do
+              [ -f "$card/$f" ] || continue
+              echo "$f:"
+              head -20 "$card/$f" | sed 's/^/  /'
+            done
+          done
 
       - name: Install wheel and test dependencies
         run: |
