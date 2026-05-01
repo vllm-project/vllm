@@ -39,8 +39,6 @@ class VllmInductorPass(InductorPass):
 
     dump_prefix: ClassVar[int | None] = None
     """Keep track of pass index for debug dump ordering."""
-    dump_context: ClassVar[dict[str, str]] = {}
-    """Dump-only labels for the current compiled function."""
 
     def __init__(self, config: VllmConfig):
         # Get only the necessary CompilationConfig for the inductor pass, since
@@ -59,9 +57,13 @@ class VllmInductorPass(InductorPass):
         self.graph_dump_metadata = collect_graph_metadata(
             config,
             pass_name=self.pass_name,
-            **VllmInductorPass.dump_context,
             model_dtype=self.model_dtype,
             device=self.device,
+        )
+
+    def set_graph_dump_context(self, **metadata: str) -> None:
+        self.graph_dump_metadata.update(
+            {key: value for key, value in metadata.items() if value}
         )
 
     @staticmethod
@@ -81,15 +83,12 @@ class VllmInductorPass(InductorPass):
     def dump_graph(self, graph: torch.fx.Graph, stage: str) -> None:
         i = VllmInductorPass.dump_prefix
         i_str = "" if i is None else f".{i}"
+        metadata = collect_graph_metadata(None, **self.graph_dump_metadata, stage=stage)
         dump_graph(
             f"post_grad{i_str}.{self.pass_name}.{stage}",
             graph.owning_module,
             self.debug_dump_path / "graphs" if self.debug_dump_path else None,
-            collect_graph_metadata(
-                None,
-                **self.graph_dump_metadata,
-                stage=stage,
-            ),
+            metadata,
         )
 
     def begin(self) -> None:

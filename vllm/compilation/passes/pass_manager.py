@@ -90,6 +90,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def __init__(self) -> None:
         self.passes: list[InductorPass] = []
+        self.graph_dump_context: dict[str, str] = {}
 
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph) -> None:
@@ -130,11 +131,14 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         function_name: str = "",
     ) -> None:
         self.pass_config = config.compilation_config.pass_config
-        VllmInductorPass.dump_context = {}
-        if prefix:
-            VllmInductorPass.dump_context["prefix"] = prefix
-        if function_name:
-            VllmInductorPass.dump_context["function_name"] = function_name
+        self.graph_dump_context = {
+            key: value
+            for key, value in {
+                "prefix": prefix,
+                "function_name": function_name,
+            }.items()
+            if value
+        }
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -186,8 +190,21 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
+        for pass_ in (
+            *self.passes,
+            self.ir_lowering,
+            self.post_cleanup,
+            self.fix_functionalization,
+        ):
+            self.update_graph_dump_context(pass_)
+
+    def update_graph_dump_context(self, pass_: InductorPass) -> None:
+        if isinstance(pass_, VllmInductorPass):
+            pass_.set_graph_dump_context(**self.graph_dump_context)
+
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
+        self.update_graph_dump_context(pass_)
         self.passes.append(pass_)
 
     def uuid(self) -> str:

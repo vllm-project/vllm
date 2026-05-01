@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import enum
 import itertools
 import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,8 +16,11 @@ from torch._ops import OpOverload, OpOverloadPacket
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.compilation import CompilationConfig
 
 _dump_indices: dict[Path, itertools.count] = {}
+_dump_lock = threading.Lock()
+VLLM_IR_NAMESPACE = "vllm_ir"
 
 
 def json_safe(value: Any) -> Any:
@@ -23,20 +28,28 @@ def json_safe(value: Any) -> Any:
         return json_safe(dataclasses.asdict(value))
     if isinstance(value, dict):
         return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, enum.Enum):
+        return value.name
     if isinstance(value, (list, tuple)):
         return [json_safe(v) for v in value]
+    if isinstance(value, set):
+        return sorted((json_safe(v) for v in value), key=str)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
 
 
-def enabled_passes(pass_config: Any) -> list[str]:
-    return [
-        field.name
-        for field in dataclasses.fields(pass_config)
-        if isinstance(getattr(pass_config, field.name), bool)
-        and getattr(pass_config, field.name)
-    ]
+def compilation_config_metadata(cc: "CompilationConfig") -> dict[str, Any]:
+    metadata = {
+        field.name: getattr(cc, field.name)
+        for field in dataclasses.fields(cc)
+        if field.name != "static_forward_context"
+    }
+    metadata["compile_ranges"] = [str(r) for r in cc.get_compile_ranges()]
+    metadata["static_forward_context"] = {
+        "keys": sorted(str(k) for k in cc.static_forward_context)
+    }
+    return metadata
 
 
 def collect_graph_metadata(
@@ -52,17 +65,8 @@ def collect_graph_metadata(
                 "model": getattr(model_config, "model", None),
                 "model_dtype": getattr(model_config, "dtype", None),
                 "device": getattr(device_config, "device", None),
-                "mode": str(cc.mode),
-                "backend": cc.backend,
-                "custom_ops": cc.custom_ops,
                 "debug_dump_path": vllm_config.compile_debug_dump_path(),
-                "splitting_ops": cc.splitting_ops,
-                "compile_sizes": cc.compile_sizes,
-                "compile_ranges_endpoints": cc.compile_ranges_endpoints,
-                "compile_ranges": [str(r) for r in cc.get_compile_ranges()],
-                "cudagraph_mode": str(cc.cudagraph_mode),
-                "use_inductor_graph_partition": cc.use_inductor_graph_partition,
-                "enabled_passes": enabled_passes(cc.pass_config),
+                "compilation_config": compilation_config_metadata(cc),
                 "rank": vllm_config.parallel_config.rank,
                 "data_parallel_index": vllm_config.parallel_config.data_parallel_index,
             }
@@ -165,10 +169,10 @@ def default_overload(target: Any) -> OpOverload | None:
 def collect_vllm_ir_metadata(gm: fx.GraphModule) -> list[dict[str, Any]]:
     from vllm.ir.op import IrOp
 
-    metadata = []
+    metadata: list[dict[str, Any]] = []
     for node in gm.graph.nodes:
         op = default_overload(node.target)
-        if op is None or op.namespace != "vllm_ir":
+        if op is None or op.namespace != VLLM_IR_NAMESPACE:
             continue
 
         item: dict[str, Any] = {"node": node.name, "op": op._opname}
@@ -203,9 +207,10 @@ def safe_name(name: str) -> str:
 
 def next_base_path(dump_dir: Path, name: str) -> Path:
     safe = safe_name(name)
-    counter = _dump_indices.setdefault(dump_dir, itertools.count())
     while True:
-        index = next(counter)
+        with _dump_lock:
+            counter = _dump_indices.setdefault(dump_dir, itertools.count())
+            index = next(counter)
         base = dump_dir / f"{index:04d}_{safe}"
         if not any(
             base.with_suffix(suffix).exists()
@@ -218,16 +223,6 @@ def append_index(
     dump_dir: Path, base: Path, name: str, metadata: dict[str, Any]
 ) -> None:
     index_path = dump_dir / "index.md"
-    if not index_path.exists():
-        index_path.write_text(
-            "# vLLM Graph Dumps\n\n"
-            "Read `*.structured.txt` first for layer/module nesting, "
-            "`*.raw.py` for the raw FX graph, and `*.metadata.json` for "
-            "vLLM compile context.\n\n"
-            "| # | stage | context | vllm_ir | structured | raw | metadata |\n"
-            "|---|---|---|---|---|---|---|\n",
-            encoding="utf-8",
-        )
 
     def cell(value: Any) -> str:
         return str(value or "-").replace("\n", " ").replace("|", "\\|")
@@ -248,8 +243,19 @@ def append_index(
         f"[raw]({base.with_suffix('.raw.py').name})",
         f"[metadata]({base.with_suffix('.metadata.json').name})",
     ]
-    with index_path.open("a", encoding="utf-8") as f:
-        f.write("| " + " | ".join(cell(item) for item in row) + " |\n")
+    with _dump_lock:
+        if not index_path.exists():
+            index_path.write_text(
+                "# vLLM Graph Dumps\n\n"
+                "Read `*.structured.txt` first for layer/module nesting, "
+                "`*.raw.py` for the raw FX graph, and `*.metadata.json` for "
+                "vLLM compile context.\n\n"
+                "| # | stage | context | vllm_ir | structured | raw | metadata |\n"
+                "|---|---|---|---|---|---|---|\n",
+                encoding="utf-8",
+            )
+        with index_path.open("a", encoding="utf-8") as f:
+            f.write("| " + " | ".join(cell(item) for item in row) + " |\n")
 
 
 def dump_graph(
