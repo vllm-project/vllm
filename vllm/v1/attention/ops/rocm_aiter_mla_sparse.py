@@ -13,9 +13,6 @@ from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
-if current_platform.is_cuda_alike():
-    pass
-
 
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
