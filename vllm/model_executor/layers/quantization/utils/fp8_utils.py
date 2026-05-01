@@ -1310,9 +1310,28 @@ def process_fp8_weight_block_strategy(
     )
 
     if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
-        weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
-            weight=weight, weight_scale=weight_scale
-        )
+        if weight_scale.dtype == torch.float8_e8m0fnu:
+            # UE8M0 scales: e8m0 stores exponent-only values (2^(exp-127)),
+            # so doubling the dequant scale == incrementing the exponent byte
+            # by 1. Convert the OCP E4M3 weight bytes to FNUZ in place by
+            # reinterpreting and patching the NaN sentinel (-128 in int8),
+            # then double the UE8M0 exponent so the dequantized magnitudes
+            # match.
+            weight_as_int8 = weight.view(torch.int8)
+            ROCM_FP8_NAN_AS_INT = -128
+            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            exp_bytes = weight_scale.view(torch.uint8)
+            weight_scale = (
+                (exp_bytes.to(torch.int16) + 1)
+                .clamp(max=254)
+                .to(torch.uint8)
+                .view(torch.float8_e8m0fnu)
+            )
+        else:
+            weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                weight=weight, weight_scale=weight_scale
+            )
 
     weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale

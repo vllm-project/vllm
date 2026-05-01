@@ -85,7 +85,11 @@ constexpr int kQuantBlock = 64;
 constexpr int kNumQuantBlocks = kNopeDim / kQuantBlock;   // 7
 constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
+#if defined(USE_ROCM) && !defined(HIP_FP8_TYPE_OCP)
+constexpr float kFp8Max = 240.0f;
+#else
 constexpr float kFp8Max = 448.0f;
+#endif
 
 #ifndef USE_ROCM
 // When num_tokens is less than this threshold,
