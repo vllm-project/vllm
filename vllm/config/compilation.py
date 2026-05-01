@@ -726,7 +726,6 @@ class CompilationConfig:
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
-    bs_to_padded_graph_size: list[int] = field(default_factory=list, init=False)
     """Runtime map from batch size to cudagraph padded size."""
     static_all_moe_layers: list[str] = field(default_factory=list, init=False)
     """The names of all the MOE layers in the model
@@ -767,7 +766,6 @@ class CompilationConfig:
             "debug_dump_path",
             "cache_dir",
             "local_cache_dir",
-            "bs_to_padded_graph_size",
             "traced_files",
             "compilation_time",
             "encoder_compilation_time",

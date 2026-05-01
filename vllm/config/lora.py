@@ -91,6 +91,7 @@ class LoRAConfig:
         factors = get_compile_factors(self, ignored_factors)
         if self.target_modules is not None:
             # Runtime treats this as set-style membership; order is not semantic.
+            # we're overwriting here because we want to sort
             factors["target_modules"] = tuple(sorted(self.target_modules))
         return factors
 

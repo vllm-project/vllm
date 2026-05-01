@@ -12,7 +12,6 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -1007,13 +1006,15 @@ class VllmBackend:
 
         (
             env_hash,
-            config_hash,
             env_factors,
             config_factors,
+            config_hash,
         ) = compute_env_and_config_hashes(vllm_config)
         compiler_factors = self.compiler_manager.compile_factors(vllm_config)
         compiler_hash = hash_factors(compiler_factors)
-        forward_code_files = sorted(map(Path, set(self.compilation_config.traced_files)), key=Path.absolute)
+        forward_code_files = sorted(
+            map(Path, set(self.compilation_config.traced_files)), key=Path.absolute
+        )
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
@@ -1028,7 +1029,7 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            all_factors = {
+            all_factors: dict[str, object] = {
                 "env": env_factors,
                 "config": config_factors,
                 "code": {"files": code_factors},
@@ -1084,19 +1085,17 @@ class VllmBackend:
             local_cache_dir,
         )
 
-        # Persist and log only hash-relevant factors together.
+        # Persist cache key factors for debugging/repro.
         try:
-            logger.debug(
-                "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_hash,
-            )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
                 with open(meta_path, "w") as f:
                     json.dump(
                         {
                             "env": env_factors,  # raw factors used for env_hash
+                            "config": vllm_config.compile_factors(),
+                            "compiler": self.compilation_config.compile_factors(),
+                            "code": {"files": forward_code_files},
                             "config_hash": config_hash,
                             "code_hash": code_hash,
                             "compiler_hash": compiler_hash,

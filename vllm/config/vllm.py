@@ -410,10 +410,10 @@ class VllmConfig:
             factors["multimodal"] = {}
         if self.additional_config:
             additional_config = self.additional_config
-            if isinstance(additional_config, dict):
-                factors["additional"] = additional_config
-            elif isinstance(additional_config, SupportsCompileFactors):
+            if isinstance(additional_config, SupportsCompileFactors):
                 factors["additional"] = additional_config.compile_factors()
+            elif isinstance(additional_config, dict):
+                factors["additional"] = additional_config
             else:
                 raise TypeError(
                     "additional_config must be a dict or SupportsCompileFactors"
@@ -791,7 +791,7 @@ class VllmConfig:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
-                    executor_backend,
+                    str(executor_backend),
                 )
                 self.scheduler_config.async_scheduling = False
             else:
