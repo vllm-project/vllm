@@ -1716,11 +1716,6 @@ class Qwen3VLForConditionalGeneration(
             return None  # If vision tower is skipped
         if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
             return None
-        if num_tokens > self.deepstack_input_embeds_num_tokens:
-            raise ValueError(
-                "Requested more deepstack tokens than available in buffer: "
-                f"{num_tokens=} > {self.deepstack_input_embeds_num_tokens=}"
-            )
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1762,12 +1757,6 @@ class Qwen3VLForConditionalGeneration(
 
         # clear deepstack_input_embeds in buffer
         if num_tokens > 0:
-            if num_tokens > self.deepstack_input_embeds_num_tokens:
-                raise ValueError(
-                    "Requested to clear more deepstack tokens than available in "
-                    "buffer: "
-                    f"{num_tokens=} > {self.deepstack_input_embeds_num_tokens=}"
-                )
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
             self.deepstack_input_embeds_num_tokens = 0

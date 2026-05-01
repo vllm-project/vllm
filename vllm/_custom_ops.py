@@ -2449,23 +2449,6 @@ def moe_wna16_gemm(
     )
 
 
-def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
-    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
-
-
-if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
-
-    @register_fake("_moe_C::router_gemm_bf16_fp32")
-    def router_gemm_bf16_fp32_fake(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.empty(
-            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
-        )
-
-
 def dsv3_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -3403,6 +3386,9 @@ def cpu_attn_reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     isa: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
@@ -3411,6 +3397,9 @@ def cpu_attn_reshape_and_cache(
         value_cache,
         slot_mapping,
         isa,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 
@@ -3429,6 +3418,9 @@ def cpu_attention_with_kv_cache(
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache(
         query,
@@ -3446,6 +3438,9 @@ def cpu_attention_with_kv_cache(
         softcap,
         scheduler_metadata,
         s_aux,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 

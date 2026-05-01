@@ -750,32 +750,20 @@ class Scheduler(SchedulerInterface):
                 # loops; in practice 0-1 retries.
                 MAX_LATERAL_PREEMPT_RETRIES = 16
                 lateral_attempts = 0
-                fits_isl = True
-                new_blocks = None
                 while True:
-                    fits_isl = (
-                        not self.scheduler_reserve_full_isl
-                        or self.kv_cache_manager.can_fit_full_sequence(
-                            request,
-                            num_new_computed_tokens=num_new_local_computed_tokens,
-                            new_computed_blocks=new_computed_blocks,
-                            num_external_computed_tokens=num_external_computed_tokens,
-                            num_encoder_tokens=num_encoder_tokens,
-                        )
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
+                        full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     )
-                    if fits_isl:
-                        new_blocks = self.kv_cache_manager.allocate_slots(
-                            request,
-                            num_new_tokens,
-                            num_new_computed_tokens=num_new_local_computed_tokens,
-                            new_computed_blocks=new_computed_blocks,
-                            num_lookahead_tokens=effective_lookahead_tokens,
-                            num_external_computed_tokens=num_external_computed_tokens,
-                            delay_cache_blocks=load_kv_async,
-                            num_encoder_tokens=num_encoder_tokens,
-                        )
-                        if new_blocks is not None:
-                            break
+                    if new_blocks is not None:
+                        break
                     if lateral_attempts >= MAX_LATERAL_PREEMPT_RETRIES:
                         break
                     victim_pair = self._find_lateral_preempt_victim(
@@ -789,7 +777,7 @@ class Scheduler(SchedulerInterface):
                     )
                     lateral_attempts += 1
 
-                if not fits_isl or new_blocks is None:
+                if new_blocks is None:
                     # The request cannot be scheduled.
 
                     # NOTE: we need to untouch the request from the encode cache

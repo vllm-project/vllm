@@ -50,7 +50,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
-    RoutingMethodType,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -83,7 +82,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    sequence_parallel_chunk,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -336,17 +338,6 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
-        )
-
-        # NOTE(rob): this is a hack until we finish off the PR for
-        # merging TRTLLM kernels into the MK framework. Then we can
-        # query the MonolithicMK for the expected router logits.
-        # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
-        self.gate.set_out_dtype(
-            torch.float32
-            if self.experts.quant_method.is_monolithic
-            and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
-            else torch.bfloat16
         )
 
         # Pre-cast the bias to match the gate output dtype so the
@@ -975,6 +966,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.is_v32 = hasattr(config, "index_topk")
 
+        _skip_topk = False
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
@@ -992,6 +984,21 @@ class DeepseekV2MLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
+
+            # Enable IndexCache for DeepSeek models to reduce redundant top-k
+            # token selection computations in sparse attention.
+            use_index_cache = getattr(config, "use_index_cache", False)
+            if use_index_cache:
+                # IndexCache config
+                # Refer: https://arxiv.org/abs/2603.12201 for more details.
+                _index_topk_freq = getattr(config, "index_topk_freq", 1)
+                _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+                layer_id = extract_layer_index(prefix)
+                if _index_topk_pattern is None:
+                    _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
+                elif 0 <= layer_id < len(_index_topk_pattern):
+                    _skip_topk = _index_topk_pattern[layer_id] == "S"
+
         else:
             self.indexer_rope_emb = None
             self.indexer = None
@@ -1029,6 +1036,7 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            skip_topk=_skip_topk,
         )
 
     def forward(
