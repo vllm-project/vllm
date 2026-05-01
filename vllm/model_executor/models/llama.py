@@ -499,6 +499,19 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
+                # Skip the per-layer / model-level RMSNorm weights that the
+                # FlashNorm-folded HF checkpoint still carries as all-ones
+                # tensors for HF compatibility. With has_weight=False set,
+                # these layers do not register the weight as a Parameter, so
+                # `name not in params_dict`. Gating on flashnorm_folded keeps
+                # the skip from masking unrelated missing-tensor bugs.
+                if (
+                    name.endswith("norm.weight")
+                    and name not in params_dict
+                    and getattr(self.config, "flashnorm_folded", False)
+                ):
+                    continue
+
                 if is_pp_missing_parameter(name, self):
                     continue
 
