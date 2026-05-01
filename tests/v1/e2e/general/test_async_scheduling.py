@@ -57,6 +57,8 @@ def test_without_spec_decoding(
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
+        dict(prompt_logprobs=2),
+        dict(prompt_logprobs=2, logprobs=2),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
@@ -126,6 +128,8 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
+        dict(prompt_logprobs=2),
+        dict(prompt_logprobs=2, logprobs=2),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
