@@ -1163,6 +1163,7 @@ class GPUModelRunner(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 prompt_embeds=new_req_data.prompt_embeds,
+                prompt_is_token_ids=new_req_data.prompt_is_token_ids,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
@@ -1505,10 +1506,16 @@ class GPUModelRunner(
         )
         mrope_model = cast(SupportsMRoPE, model)
 
+        # `prompt_embeds` is a passthrough modality (no grid_thw), models'
+        # M-RoPE code assumes per-feature grid info, so filter it out. The
+        # prompt_embeds positions are treated as text positions for M-RoPE.
+        mrope_features = [
+            f for f in req_state.mm_features if f.modality != "prompt_embeds"
+        ]
         req_state.mrope_positions, req_state.mrope_position_delta = (
             mrope_model.get_mrope_input_positions(
                 req_state.prompt_token_ids,
-                req_state.mm_features,
+                mrope_features,
             )
         )
 
@@ -2743,6 +2750,33 @@ class GPUModelRunner(
 
         if not mm_kwargs:
             return []
+
+        # `prompt_embeds` is a passthrough modality, the tensor is already in
+        # the model embedding space, so no encoder runs. Inject each
+        # `prompt_embeds` tensor directly into the encoder cache here so that
+        # `_gather_mm_embeddings` can splice it via the standard `is_mm_embed`
+        # path.
+        pe_indices = [
+            i
+            for i, (modality, _) in enumerate(mm_kwargs)
+            if modality == "prompt_embeds"
+        ]
+        if pe_indices:
+            for i in pe_indices:
+                pe_tensor = mm_kwargs[i][1]["embedding"].data
+                assert isinstance(pe_tensor, torch.Tensor)
+
+                self.encoder_cache[mm_hashes[i]] = pe_tensor.to(self.device)
+                self.maybe_save_ec_to_connector(self.encoder_cache, mm_hashes[i])
+            # Filter out `prompt_embeds` items from mm_kwargs/mm_hashes/mm_lora_refs
+            # since they don't require further encoder processing.
+            mm_hashes = [h for i, h in enumerate(mm_hashes) if i not in pe_indices]
+            mm_kwargs = [k for i, k in enumerate(mm_kwargs) if i not in pe_indices]
+            mm_lora_refs = [
+                r for i, r in enumerate(mm_lora_refs) if i not in pe_indices
+            ]
+            if not mm_kwargs:
+                return []  # nothing left to encode after filtering out `prompt_embeds`
 
         should_time = bool(
             self.observability_config

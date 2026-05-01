@@ -292,11 +292,13 @@ class InputProcessor:
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_inputs["type"] == "embeds":
-            prompt_token_ids = None
             prompt_embeds = decoder_inputs["prompt_embeds"]
+            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
+            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
         else:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
+            prompt_is_token_ids = None
 
         sampling_params = None
         pooling_params = None
@@ -361,6 +363,7 @@ class InputProcessor:
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=prompt_is_token_ids,
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
