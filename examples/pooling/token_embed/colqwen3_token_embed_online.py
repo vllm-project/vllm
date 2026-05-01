@@ -21,10 +21,10 @@ Then run this script:
 """
 
 import argparse
-import base64
 from io import BytesIO
 
 import numpy as np
+import pybase64 as base64
 import requests
 from PIL import Image
 

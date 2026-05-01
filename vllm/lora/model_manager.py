@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import regex as re
 import torch
 from torch import nn
 
@@ -25,7 +24,9 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_in_target_modules,
     is_moe_model,
+    is_supported_lora_module,
     process_packed_modules_mapping,
     replace_submodule,
 )
@@ -160,14 +161,47 @@ class LoRAModelManager:
             device=self.device,
             lora_config=self.lora_config,
         )
+
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
-        if self.lora_config.enable_tower_connector_lora:
-            self.supports_tower_connector_lora = self.supports_mm and hasattr(
-                self.model, "get_num_mm_encoder_tokens"
-            )
+        # First, determine if the model supports tower connector LoRA.
+        self.supports_tower_connector_lora = self.supports_mm and hasattr(
+            self.model, "get_num_mm_encoder_tokens"
+        )
+
+        # Then, handle the case where the feature is disabled in the config.
+        if not self.lora_config.enable_tower_connector_lora:
+            if self.supports_tower_connector_lora:
+                logger.info(
+                    "%s supports adding LoRA to the tower modules. If needed, "
+                    "please set `enable_tower_connector_lora=True`.",
+                    self.model.__class__.__name__,
+                )
+            self.supports_tower_connector_lora = False
+            return
+
+        # After this point, the feature is enabled in the config.
+        # Now check if it's supported by the model.
         if not self.supports_tower_connector_lora:
+            # Enabled but not supported: log warning and return.
+            logger.warning(
+                "LoRA with tower connector is enabled, but the model %s "
+                "does not support it. This will be ignored.",
+                self.model.__class__.__name__,
+            )
+            return
+
+        # Check if initialize the language model only.
+        if (
+            vllm_config.model_config.multimodal_config
+            and vllm_config.model_config.multimodal_config.language_model_only
+        ):
+            logger.warning(
+                "Disabling `enable_tower_connector_lora` because the multimodal "
+                "model is configured to initialize the language model only."
+            )
+            self.supports_tower_connector_lora = False
             return
 
         logger.warning(
@@ -256,6 +290,9 @@ class LoRAModelManager:
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
+                logger.debug(
+                    "No LoRA weights found for module %s, skipping.", module_name
+                )
                 continue
 
             module.set_lora(
@@ -263,7 +300,7 @@ class LoRAModelManager:
                 module_lora.lora_a,
                 module_lora.lora_b,
             )
-
+            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -333,8 +370,8 @@ class LoRAModelManager:
             punica_wrapper = self._get_punica_wrapper(module_name)
             if punica_wrapper is None:
                 logger.warning(
-                    "Regarding %s, vLLM currently only supports adding LoRA to"
-                    " language model, %s will be ignored.",
+                    "Regarding %s, no matching PunicaWrapper "
+                    "is found; %s will be ignored.",
                     self.model.__class__.__name__,
                     module_name,
                 )
@@ -350,7 +387,6 @@ class LoRAModelManager:
                     "LoRA is not supported for non-gated MoE gate module."
                     " %s will be ignored.",
                     module_name,
-                    scope="local",
                 )
                 continue
 
@@ -400,12 +436,21 @@ class LoRAModelManager:
                     ),
                 )
 
-            # In some models, especially multimodal ones, layers with the same
-            # name may have different types, such as nn.Linear and
-            # ReplicatedLinear. The nn.Linear layers cannot be replaced with
-            # LoRA layers, leading to assertion error. The following check
-            # aims to prevent this error
-            if self.supports_mm and not isinstance(new_module, BaseLayerWithLoRA):
+            # Some matched modules can be unsupported by LoRA wrappers
+            # (e.g. subclasses with specialized forward behavior).
+            if not isinstance(new_module, BaseLayerWithLoRA):
+                error_msg = (
+                    "LoRA target module "
+                    f"{module_name} ({type(module).__name__}) matched the "
+                    "deployment configuration but could not be wrapped by any "
+                    "LoRA layer implementation."
+                )
+                if self.lora_config.target_modules is not None:
+                    raise ValueError(
+                        f"{error_msg} target_modules="
+                        f"{sorted(self.lora_config.target_modules)}"
+                    )
+                logger.warning_once("%s It will be ignored.", error_msg)
                 continue
             self.register_module(module_name, new_module)
 
@@ -541,13 +586,58 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
-        return any(
-            re.match(
-                r".*\.{target_module}$".format(target_module=target_module), module_name
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        """Return a dummy LoRA rank compatible with wrapped modules.
+
+        Dummy LoRAs keep warmup memory low by using a small rank. Fully
+        sharded MoE wrappers additionally require the dummy rank to be divisible
+        by tensor parallel size because they shard W13 along the rank axis.
+        """
+        if not self.lora_config.fully_sharded_loras:
+            return default_rank
+
+        required_multiple = 1
+        for module in self.modules.values():
+            if not getattr(module, "fully_sharded", False):
+                continue
+            required_multiple = math.lcm(required_multiple, module.tp_size)
+
+        if required_multiple == 1 or default_rank % required_multiple == 0:
+            return default_rank
+
+        adjusted_rank = (
+            (default_rank + required_multiple - 1) // required_multiple
+        ) * required_multiple
+        if adjusted_rank > self.lora_config.max_lora_rank:
+            raise ValueError(
+                "Unable to choose a dummy LoRA warmup rank compatible with "
+                "fully sharded MoE modules: "
+                f"default_rank={default_rank}, "
+                f"required_multiple={required_multiple}, "
+                f"max_lora_rank={self.lora_config.max_lora_rank}"
             )
-            or target_module == module_name
-            for target_module in self.supported_lora_modules
+        return adjusted_rank
+
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module should have LoRA applied.
+
+        This method first checks if the module is in vLLM's supported LoRA
+        modules, then applies deployment-time restrictions based on
+        LoRAConfig.target_modules.
+
+        Args:
+            module_name: Full dot-separated module name (e.g.,
+                "model.layers.0.self_attn.o_proj")
+
+        Returns:
+            True if LoRA should be applied to this module, False otherwise.
+        """
+        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+            return False
+        return is_in_target_modules(
+            module_name,
+            self.lora_config.target_modules,
+            self.packed_modules_mapping,
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:

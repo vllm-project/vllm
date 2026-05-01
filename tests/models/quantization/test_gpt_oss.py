@@ -21,8 +21,8 @@ import lm_eval
 import pytest
 from packaging import version
 
+from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
@@ -89,7 +89,7 @@ def test_gpt_oss_attention_quantization(
     expected_accuracy: float,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if tp_size > cuda_device_count_stateless():
+    if tp_size > current_platform.device_count():
         pytest.skip("Not enough GPUs to run this test case")
 
     if "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8" in model_name and on_gfx950():

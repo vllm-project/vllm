@@ -446,7 +446,7 @@ def parse_attention_types(node: ast.ClassDef) -> str:
 
     if not types:
         return "Decoder"
-    return "All" if len(types) >= 3 else ", ".join(sorted(types))
+    return "All" if types >= set(type_map.values()) else ", ".join(sorted(types))
 
 
 def parse_impl_bool_attr(
@@ -634,9 +634,10 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    # Analyze the functions to determine FA3-specific features
+    # Analyze the functions to determine FA3/FA4-specific features
     fa3_supports_fp8 = False
     fa3_supports_sinks = False
+    fa4_supports_sinks = False
     fa3_compute_cap: str | None = None
     fa4_compute_cap: str | None = None
 
@@ -656,17 +657,49 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
                     fa3_supports_fp8 = True
                     break
 
-        # Check flash_attn_supports_sinks - looks for `get_flash_attn_version() == 3`
+        # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
+        # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
         if node.name == "flash_attn_supports_sinks":
             for n in ast.walk(node):
                 if (
                     isinstance(n, ast.Compare)
-                    and isinstance(n.left, ast.Call)
-                    and isinstance(n.left.func, ast.Name)
-                    and n.left.func.id == "get_flash_attn_version"
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.Eq)
+                    and isinstance(n.comparators[0], ast.Constant)
                 ):
-                    fa3_supports_sinks = True
-                    break
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare:
+                        val = n.comparators[0].value
+                        if val == 3:
+                            fa3_supports_sinks = True
+                        elif val == 4:
+                            fa4_supports_sinks = True
+                elif (
+                    isinstance(n, ast.Compare)
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.In)
+                    and isinstance(n.comparators[0], (ast.Tuple, ast.List, ast.Set))
+                ):
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare:
+                        for elt in n.comparators[0].elts:
+                            if isinstance(elt, ast.Constant):
+                                if elt.value == 3:
+                                    fa3_supports_sinks = True
+                                elif elt.value == 4:
+                                    fa4_supports_sinks = True
 
         # Check get_flash_attn_version for FA3/FA4 compute capability
         if node.name == "get_flash_attn_version":
@@ -731,7 +764,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         "fa4": {
             "compute_capability": fa4_compute_cap,
             "supports_fp8": False,
-            "supports_sink": False,
+            "supports_sink": fa4_supports_sinks,
         },
     }
 
@@ -1262,14 +1295,23 @@ When no backend is specified (the default):
 """
 
 
-def _priority_table(title: str, backends: list[str]) -> list[str]:
+def _priority_table(
+    title: str,
+    backends: list[str],
+    annotations: dict[str, str] | None = None,
+) -> list[str]:
     """Generate a priority table for a list of backends."""
+
+    def _fmt(b: str) -> str:
+        suffix = annotations.get(b, "") if annotations else ""
+        return f"`{b}`{suffix}"
+
     return [
         f"**{title}:**",
         "",
         "| Priority | Backend |",
         "| -------- | ------- |",
-        *[f"| {i} | `{b}` |" for i, b in enumerate(backends, 1)],
+        *[f"| {i} | {_fmt(b)} |" for i, b in enumerate(backends, 1)],
         "",
     ]
 
@@ -1298,10 +1340,24 @@ def generate_priority_section(priorities: dict[str, list[str]]) -> str:
 
     lines.extend(["### MLA Attention (DeepSeek-style)", ""])
 
+    mla_sm100_annotations = {
+        "FLASHINFER_MLA_SPARSE": "**\\***",
+    }
     if "mla_sm100" in priorities:
-        lines.extend(_priority_table(sm100, priorities["mla_sm100"]))
+        lines.extend(
+            _priority_table(sm100, priorities["mla_sm100"], mla_sm100_annotations)
+        )
     if "mla_default" in priorities:
         lines.extend(_priority_table(ampere, priorities["mla_default"]))
+
+    if "mla_sm100" in priorities:
+        lines.append(
+            "> **\\*** For sparse MLA, FP8 KV cache always prefers "
+            "`FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` "
+            "is preferred for low query-head counts (<= 16), while "
+            "`FLASHMLA_SPARSE` is preferred otherwise."
+        )
+        lines.append(">")
 
     lines.append(
         "> **Note:** ROCm and CPU platforms have their own selection logic. "

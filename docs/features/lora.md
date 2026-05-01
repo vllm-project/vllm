@@ -47,7 +47,7 @@ the third parameter is the path to the LoRA adapter.
     )
     ```
 
-Check out [examples/offline_inference/multilora_inference.py](../../examples/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+Check out [examples/features/lora/multilora_offline.py](../../examples/features/lora/multilora_offline.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 
@@ -389,3 +389,17 @@ vllm serve model --enable-lora --max-lora-rank 64
 # Bad: unnecessarily high, wastes memory
 vllm serve model --enable-lora --max-lora-rank 256
 ```
+
+### Restricting LoRA to Specific Modules
+
+The `--lora-target-modules` parameter allows you to restrict which model modules have LoRA applied at deployment time. This is useful for performance tuning when you only need LoRA on specific layers:
+
+```bash
+# Apply LoRA only to output projection layers
+vllm serve model --enable-lora --lora-target-modules o_proj
+
+# Apply LoRA to multiple specific modules
+vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
+```
+
+When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.

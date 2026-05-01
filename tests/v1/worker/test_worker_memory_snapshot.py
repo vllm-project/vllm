@@ -117,7 +117,8 @@ def worker_process(
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs for tensor parallelism"
+    torch.accelerator.device_count() < 2,
+    reason="Need at least 2 GPUs for tensor parallelism",
 )
 def test_init_distributed_is_called_before_memory_snapshot():
     """Test that distributed env is setup before memory snapshot.

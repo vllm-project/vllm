@@ -4,11 +4,10 @@ import weakref
 
 import pytest
 
+from tests.entrypoints.openai.chat_completion.test_vision import TEST_IMAGE_ASSETS
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.sampling_params import SamplingParams
-
-from ..openai.test_vision import TEST_IMAGE_ASSETS
 
 
 @pytest.fixture(scope="function")
