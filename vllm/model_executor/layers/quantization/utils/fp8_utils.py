@@ -1289,9 +1289,24 @@ def process_fp8_weight_block_strategy(
     )
 
     if current_platform.is_fp8_fnuz():
-        weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
-            weight=weight, weight_scale=weight_scale
-        )
+        if weight_scale.dtype == torch.float8_e8m0fnu:
+            # e8m0 stores exponent-only values (2^(exp-127)).
+            # Doubling == incrementing the exponent byte by 1.
+            weight_as_int8 = weight.view(torch.int8)
+            ROCM_FP8_NAN_AS_INT = -128
+            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            exp_bytes = weight_scale.view(torch.uint8)
+            weight_scale = (
+                (exp_bytes.to(torch.int16) + 1)
+                .clamp(max=254)
+                .to(torch.uint8)
+                .view(torch.float8_e8m0fnu)
+            )
+        else:
+            weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                weight=weight, weight_scale=weight_scale
+            )
 
     weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale

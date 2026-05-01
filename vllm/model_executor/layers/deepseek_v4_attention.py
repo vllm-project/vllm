@@ -1124,6 +1124,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
+                    use_fnuz=current_platform.is_fp8_fnuz(),
                 )
 
             # Gather SWA KV
@@ -1136,6 +1137,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
+                use_fnuz=current_platform.is_fp8_fnuz(),
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
