@@ -135,6 +135,10 @@ class FlexAttentionBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size % 8 == 0
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
