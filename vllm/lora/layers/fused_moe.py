@@ -298,23 +298,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
 
-        # Under EP the adapter tensors carry all global experts; slice this
-        # rank's owned range so downstream shapes line up with local buffers.
-        global_num_experts = self.base_layer.global_num_experts
-        ep_rank = self.base_layer.ep_rank
-        if (
-            w1_lora_a.shape[0] == global_num_experts
-            and num_experts != global_num_experts
-        ):
-            expert_start = ep_rank * num_experts
-            expert_end = expert_start + num_experts
-            w1_lora_a = w1_lora_a[expert_start:expert_end]
-            w2_lora_a = w2_lora_a[expert_start:expert_end]
-            w3_lora_a = w3_lora_a[expert_start:expert_end]
-            w1_lora_b = w1_lora_b[expert_start:expert_end]
-            w2_lora_b = w2_lora_b[expert_start:expert_end]
-            w3_lora_b = w3_lora_b[expert_start:expert_end]
-
+        # EP slicing is done once at add time in
+        # LoRAModelManager._slice_moe_lora_ep, so by here the cached
+        # tensors already match the local-expert dim of the stacked buffers.
         assert (
             num_experts
             == w1_lora_a.shape[0]

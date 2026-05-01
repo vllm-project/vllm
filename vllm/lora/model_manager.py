@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
@@ -720,6 +721,8 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
+            elif isinstance(module, FusedMoEWithLoRA):
+                self._slice_moe_lora_ep(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -841,6 +844,43 @@ class LoRAModelManager:
 
                 module_lora.lora_a = lora_a
                 module_lora.lora_b = lora_b
+
+    def _slice_moe_lora_ep(
+        self,
+        lora_model: LoRAModel,
+        module: FusedMoEWithLoRA,
+        module_name: str,
+    ) -> None:
+        """Slice the cached LoRA tensors down to this rank's local experts.
+
+        The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
+        shape (num_experts, rank, in) / (num_experts, out, rank). When EP
+        is active each rank only owns local_num_experts; without this slice
+        the CPU LoRAModel keeps the full global weight and set_lora has to
+        re-slice on every activation.
+        """
+        if not module.base_layer.use_ep:
+            return
+        module_lora = self._get_lora_layer_weights(lora_model, module_name)
+        if module_lora is None or not isinstance(module_lora.lora_a, list):
+            return
+
+        local_num_experts = module.base_layer.local_num_experts
+        global_num_experts = module.base_layer.global_num_experts
+        ep_rank = module.base_layer.ep_rank
+        expert_start = ep_rank * local_num_experts
+        expert_end = expert_start + local_num_experts
+
+        new_lora_a: list[torch.Tensor | None] = []
+        new_lora_b: list[torch.Tensor | None] = []
+        for a, b in zip(module_lora.lora_a, module_lora.lora_b):
+            if a is not None and b is not None and a.shape[0] == global_num_experts:
+                a = a[expert_start:expert_end].contiguous()
+                b = b[expert_start:expert_end].contiguous()
+            new_lora_a.append(a)
+            new_lora_b.append(b)
+        module_lora.lora_a = new_lora_a
+        module_lora.lora_b = new_lora_b
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
