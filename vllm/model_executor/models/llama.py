@@ -450,7 +450,19 @@ class LlamaModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        # FlashNorm-folded HF checkpoints still carry the per-layer /
+        # model-level RMSNorm weights as all-ones tensors for HF
+        # compatibility. With has_weight=False, those norms register no
+        # weight Parameter (only a non-persistent buffer), so the incoming
+        # tensors are unexpected; ignore them instead of erroring. Gating on
+        # flashnorm_folded keeps this from masking unrelated
+        # missing-tensor bugs.
+        ignore_unexpected_suffixes = (
+            ["norm.weight"] if getattr(self.config, "flashnorm_folded", False) else None
+        )
+        loader = AutoWeightsLoader(
+            self, ignore_unexpected_suffixes=ignore_unexpected_suffixes
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
