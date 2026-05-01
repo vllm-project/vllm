@@ -1,0 +1,16 @@
+group: Docker
+depends_on:
+  - image-build-cpu
+steps:
+- label: Docker Build Metadata
+  timeout_in_minutes: 10
+  device: cpu-small
+  source_file_dependencies:
+    - .buildkite/release-pipeline.yaml
+    - .buildkite/scripts/docker-build-metadata-args.sh
+    - docker/Dockerfile
+    - docker/Dockerfile.cpu
+    - docker/docker-bake.hcl
+    - tests/tools/test_docker_build_metadata_args.py
+  commands:
+    - pytest -v -s tools/test_docker_build_metadata_args.py
