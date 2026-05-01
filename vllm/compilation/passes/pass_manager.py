@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from typing import Any, ParamSpec, TypeVar
 
 from torch import fx as fx
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.graph_dump import collect_graph_metadata, dump_graph
+from vllm.compilation.graph_dump import (
+    collect_graph_metadata,
+    dump_graph,
+    graph_dump_context,
+)
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -91,41 +96,49 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def __init__(self) -> None:
         self.passes: list[InductorPass] = []
-        self.graph_dump_context: dict[str, str] = {}
         self.graph_dump_metadata: dict[str, Any] = {}
         self.graph_dump_path = None
 
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph) -> None:
-        VllmInductorPass.dump_prefix = 0  # reset dump index
+        dump_index = 0
 
         compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
             if pass_.is_applicable_for_range(compile_range):
-                self.dump_custom_pass_graph(graph, pass_, "before")
-                pass_(graph)
-                self.dump_custom_pass_graph(graph, pass_, "after")
-                VllmInductorPass.dump_prefix += 1
+                with self.pass_graph_dump_context(graph, pass_, dump_index):
+                    if isinstance(pass_, VllmInductorPass):
+                        pass_(graph)
+                    else:
+                        dump_graph("before")
+                        pass_(graph)
+                        dump_graph("after")
+                dump_index += 1
             else:
                 logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
         # perform the first post-cleanup before IR lowering to clean up fusion artifacts
         # and make sure no dead IR ops are lowered.
-        self.post_cleanup(graph)
-        VllmInductorPass.dump_prefix += 1
+        with self.pass_graph_dump_context(graph, self.post_cleanup, dump_index):
+            self.post_cleanup(graph)
+        dump_index += 1
 
         # lowering before cleanup so DCE can clean up lowered ops.
         # DCE handles mutating ops correctly as well.
-        self.ir_lowering(graph)
-        VllmInductorPass.dump_prefix += 1
+        with self.pass_graph_dump_context(graph, self.ir_lowering, dump_index):
+            self.ir_lowering(graph)
+        dump_index += 1
 
         # clean up after lowering again
-        self.post_cleanup(graph)
-        VllmInductorPass.dump_prefix += 1
+        with self.pass_graph_dump_context(graph, self.post_cleanup, dump_index):
+            self.post_cleanup(graph)
+        dump_index += 1
 
         # always run fix_functionalization last
-        self.fix_functionalization(graph)
-        VllmInductorPass.dump_prefix = None  # Cleanup index
+        with self.pass_graph_dump_context(
+            graph, self.fix_functionalization, dump_index
+        ):
+            self.fix_functionalization(graph)
 
         VllmPatternMatcherPass.log_match_summary()
 
@@ -136,15 +149,13 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         function_name: str = "",
     ) -> None:
         self.pass_config = config.compilation_config.pass_config
-        self.graph_dump_context = {}
+        graph_dump_metadata = {}
         if prefix:
-            self.graph_dump_context["prefix"] = prefix
+            graph_dump_metadata["prefix"] = prefix
         if function_name:
-            self.graph_dump_context["function_name"] = function_name
+            graph_dump_metadata["function_name"] = function_name
         self.graph_dump_path = config.compile_debug_dump_path()
-        self.graph_dump_metadata = collect_graph_metadata(
-            config, **self.graph_dump_context
-        )
+        self.graph_dump_metadata = collect_graph_metadata(config, **graph_dump_metadata)
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -196,36 +207,24 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
-        for pass_ in (
-            *self.passes,
-            self.ir_lowering,
-            self.post_cleanup,
-            self.fix_functionalization,
-        ):
-            self.update_graph_dump_context(pass_)
-
-    def update_graph_dump_context(self, pass_: InductorPass) -> None:
-        if isinstance(pass_, VllmInductorPass):
-            pass_.set_graph_dump_context(**self.graph_dump_context)
-
-    def dump_custom_pass_graph(
-        self, graph: fx.Graph, pass_: InductorPass, stage: str
-    ) -> None:
-        if isinstance(pass_, VllmInductorPass) or not self.graph_dump_path:
-            return
+    @contextmanager
+    def pass_graph_dump_context(
+        self, graph: fx.Graph, pass_: InductorPass, dump_index: int
+    ) -> Generator[None, None, None]:
         pass_name = pass_.__class__.__name__
-        i = VllmInductorPass.dump_prefix
-        i_str = "" if i is None else f".{i}"
-        dump_graph(
-            f"post_grad{i_str}.{pass_name}.{stage}",
+        metadata = dict(self.graph_dump_metadata)
+        metadata.update(collect_graph_metadata(None))
+        metadata["pass_name"] = pass_name
+        with graph_dump_context(
             graph.owning_module,
-            self.graph_dump_path / "graphs",
-            dict(self.graph_dump_metadata, pass_name=pass_name, stage=stage),
-        )
+            self.graph_dump_path / "graphs" if self.graph_dump_path else None,
+            metadata,
+            f"post_grad.{dump_index}.{pass_name}",
+        ):
+            yield
 
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
-        self.update_graph_dump_context(pass_)
         self.passes.append(pass_)
 
     def uuid(self) -> str:

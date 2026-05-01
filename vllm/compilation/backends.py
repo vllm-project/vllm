@@ -45,7 +45,7 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .graph_dump import collect_graph_metadata, dump_graph
+from .graph_dump import collect_graph_metadata, dump_graph, graph_dump_context
 from .partition_rules import (
     inductor_partition_rule_context,
     should_split,
@@ -1164,15 +1164,17 @@ class VllmBackend:
             original_split_gm = deepcopy(self.split_gm)
 
         dump_path = vllm_config.compile_debug_dump_path()
-        if dump_path:
-            metadata = collect_graph_metadata(
-                vllm_config,
-                prefix=self.prefix,
-                function_name=self.function_name,
-                is_encoder=self.is_encoder,
-            )
-            dump_graph("before split", self.graph, dump_path / "graphs", metadata)
-            dump_graph("after split", self.split_gm, dump_path / "graphs", metadata)
+        graph_dump_path = dump_path / "graphs" if dump_path else None
+        metadata = collect_graph_metadata(
+            vllm_config,
+            prefix=self.prefix,
+            function_name=self.function_name,
+            is_encoder=self.is_encoder,
+        )
+        with graph_dump_context(self.graph, graph_dump_path, metadata):
+            dump_graph("before split")
+        with graph_dump_context(self.split_gm, graph_dump_path, metadata):
+            dump_graph("after split")
 
         # Log the piecewise split graph for TORCH_TRACE/tlparse
         trace_structured(

@@ -15,7 +15,7 @@ import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
-from vllm.compilation.graph_dump import collect_graph_metadata, dump_graph
+from vllm.compilation.graph_dump import dump_graph
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -37,9 +37,6 @@ class VllmInductorPass(InductorPass):
     It provides timing, logging, and dumping utilities.
     """
 
-    dump_prefix: ClassVar[int | None] = None
-    """Keep track of pass index for debug dump ordering."""
-
     def __init__(self, config: VllmConfig):
         # Get only the necessary CompilationConfig for the inductor pass, since
         # full `CompilationConfig` contains pointer to model which is unsafe.
@@ -53,14 +50,6 @@ class VllmInductorPass(InductorPass):
             config.device_config.device if config.device_config else None
         )
         self.pass_name = self.__class__.__name__
-        self.debug_dump_path = config.compile_debug_dump_path()
-        self.graph_dump_metadata = collect_graph_metadata(
-            config,
-            pass_name=self.pass_name,
-        )
-
-    def set_graph_dump_context(self, **metadata: str) -> None:
-        self.graph_dump_metadata.update(metadata)
 
     @staticmethod
     def time_and_log(
@@ -69,22 +58,12 @@ class VllmInductorPass(InductorPass):
         @functools.wraps(call_fn)
         def wrapped(self: VllmInductorPass, graph: torch.fx.Graph) -> None:
             self.begin()
-            self.dump_graph(graph, "before")
+            dump_graph("before")
             call_fn(self, graph)
-            self.dump_graph(graph, "after")
+            dump_graph("after")
             self.end_and_log()
 
         return wrapped
-
-    def dump_graph(self, graph: torch.fx.Graph, stage: str) -> None:
-        i = VllmInductorPass.dump_prefix
-        i_str = "" if i is None else f".{i}"
-        dump_graph(
-            f"post_grad{i_str}.{self.pass_name}.{stage}",
-            graph.owning_module,
-            self.debug_dump_path / "graphs" if self.debug_dump_path else None,
-            dict(self.graph_dump_metadata, stage=stage),
-        )
 
     def begin(self) -> None:
         self._start_time = time.perf_counter_ns()
@@ -322,4 +301,4 @@ class PrinterInductorPass(VllmInductorPass):
         self.name = name
 
     def __call__(self, graph: torch.fx.Graph) -> None:
-        self.dump_graph(graph, self.name)
+        dump_graph(self.name)

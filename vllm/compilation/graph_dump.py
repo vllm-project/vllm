@@ -5,7 +5,10 @@ import dataclasses
 import enum
 import itertools
 import json
-import threading
+import os
+import tempfile
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,12 +17,52 @@ import torch.fx as fx
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._ops import OpOverload, OpOverloadPacket
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.compilation import CompilationConfig
 
+logger = init_logger(__name__)
+
 _dump_indices: dict[Path, itertools.count] = {}
-_dump_lock = threading.Lock()
+
+
+@dataclasses.dataclass
+class GraphDumpContext:
+    gm: fx.GraphModule | None = None
+    dump_path: Path | None = None
+    metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+    stage_prefix: str = ""
+
+
+_graph_dump_context = GraphDumpContext()
+
+
+@contextmanager
+def graph_dump_context(
+    gm: fx.GraphModule | None = None,
+    dump_path: Path | None = None,
+    metadata: dict[str, Any] | None = None,
+    stage_prefix: str | None = None,
+) -> Generator[None, None, None]:
+    global _graph_dump_context
+    previous = _graph_dump_context
+    merged_metadata = dict(previous.metadata)
+    if metadata:
+        merged_metadata.update(metadata)
+    _graph_dump_context = GraphDumpContext(
+        gm=gm if gm is not None else previous.gm,
+        dump_path=dump_path if dump_path is not None else previous.dump_path,
+        metadata=merged_metadata,
+        stage_prefix=stage_prefix
+        if stage_prefix is not None
+        else previous.stage_prefix,
+    )
+    try:
+        yield
+    finally:
+        _graph_dump_context = previous
 
 
 def json_safe(value: Any) -> Any:
@@ -64,7 +107,6 @@ def collect_graph_metadata(
                 "model": getattr(model_config, "model", None),
                 "model_dtype": getattr(model_config, "dtype", None),
                 "device": getattr(device_config, "device", None),
-                "debug_dump_path": vllm_config.compile_debug_dump_path(),
                 "compilation_config": compilation_config_metadata(cc),
                 "rank": vllm_config.parallel_config.rank,
                 "data_parallel_index": vllm_config.parallel_config.data_parallel_index,
@@ -207,15 +249,34 @@ def safe_name(name: str) -> str:
 def next_base_path(dump_dir: Path, name: str) -> Path:
     safe = safe_name(name)
     while True:
-        with _dump_lock:
-            counter = _dump_indices.setdefault(dump_dir, itertools.count())
-            index = next(counter)
-        base = dump_dir / f"{index:04d}_{safe}"
+        counter = _dump_indices.setdefault(dump_dir, itertools.count())
+        index = next(counter)
+        base = dump_dir / f"{index:04d}_{os.getpid()}_{safe}"
         if not any(
             base.with_suffix(suffix).exists()
             for suffix in (".structured.txt", ".raw.py", ".metadata.json")
         ):
             return base
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            f.write(text)
+            tmp_path = Path(f.name)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def append_index(
@@ -242,43 +303,53 @@ def append_index(
         f"[raw]({base.with_suffix('.raw.py').name})",
         f"[metadata]({base.with_suffix('.metadata.json').name})",
     ]
-    with _dump_lock:
-        if not index_path.exists():
-            index_path.write_text(
-                "# vLLM Graph Dumps\n\n"
-                "Read `*.structured.txt` first for layer/module nesting, "
-                "`*.raw.py` for the raw FX graph, and `*.metadata.json` for "
-                "vLLM compile context.\n\n"
-                "| # | stage | context | vllm_ir | structured | raw | metadata |\n"
-                "|---|---|---|---|---|---|---|\n",
-                encoding="utf-8",
-            )
-        with index_path.open("a", encoding="utf-8") as f:
-            f.write("| " + " | ".join(cell(item) for item in row) + " |\n")
+    header = (
+        "# vLLM Graph Dumps\n\n"
+        "Read `*.structured.txt` first for layer/module nesting, "
+        "`*.raw.py` for the raw FX graph, and `*.metadata.json` for "
+        "vLLM compile context.\n\n"
+        "| # | stage | context | vllm_ir | structured | raw | metadata |\n"
+        "|---|---|---|---|---|---|---|\n"
+    )
+    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else header
+    row_text = "| " + " | ".join(cell(item) for item in row) + " |\n"
+    atomic_write_text(index_path, existing + row_text)
 
 
-def dump_graph(
+def write_graph_dump(
     name: str,
     gm: fx.GraphModule,
-    dump_path: Path | None,
     metadata: dict[str, Any] | None = None,
+    dump_path: Path | None = None,
 ) -> None:
     if dump_path is None:
+        logger.debug("%s", lazy_format_graph_code(name, gm))
         return
 
     dump_path.mkdir(parents=True, exist_ok=True)
     base = next_base_path(dump_path, name)
-    metadata = collect_graph_metadata(None, **dict(metadata or {}))
+    metadata = json_safe(dict(metadata or {}))
     metadata.update({"name": name, "vllm_ir": collect_vllm_ir_metadata(gm)})
 
-    base.with_suffix(".structured.txt").write_text(
-        format_structured_graph(gm), encoding="utf-8"
+    atomic_write_text(base.with_suffix(".structured.txt"), format_structured_graph(gm))
+    atomic_write_text(
+        base.with_suffix(".raw.py"), str(lazy_format_graph_code(name, gm))
     )
-    base.with_suffix(".raw.py").write_text(
-        str(lazy_format_graph_code(name, gm)), encoding="utf-8"
-    )
-    base.with_suffix(".metadata.json").write_text(
+    atomic_write_text(
+        base.with_suffix(".metadata.json"),
         json.dumps(json_safe(metadata), indent=2, sort_keys=True),
-        encoding="utf-8",
     )
     append_index(dump_path, base, name, metadata)
+
+
+def dump_graph(stage: str) -> None:
+    context = _graph_dump_context
+    if context.gm is None:
+        return
+    name = f"{context.stage_prefix}.{stage}" if context.stage_prefix else stage
+    write_graph_dump(
+        name,
+        context.gm,
+        dict(context.metadata, stage=stage),
+        context.dump_path,
+    )
