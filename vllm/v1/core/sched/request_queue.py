@@ -26,12 +26,12 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def pop_request(self) -> Request:
+    def pop_first_request(self) -> Request:
         """Pop the most urgent request from the queue according to the policy."""
         pass
 
     @abstractmethod
-    def pop_left_request(self) -> Request:
+    def pop_last_request(self) -> Request:
         """Pop the least urgent request from the queue according to the policy."""
         pass
 
@@ -89,11 +89,11 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         """Add a request to the queue according to FCFS policy."""
         self.append(request)
 
-    def pop_request(self) -> Request:
+    def pop_first_request(self) -> Request:
         """Pop the earliest request from the queue"""
         return self.popleft()
 
-    def pop_left_request(self) -> Request:
+    def pop_last_request(self) -> Request:
         """Pop the last request from the queue"""
         return self.pop()
 
@@ -163,13 +163,13 @@ class PriorityRequestQueue(RequestQueue):
         """Add a request to the queue according to priority policy."""
         heapq.heappush(self._heap, request)
 
-    def pop_request(self) -> Request:
+    def pop_first_request(self) -> Request:
         """Pop the request with the smallest priority value from the queue."""
         if not self._heap:
             raise IndexError("pop from empty heap")
         return heapq.heappop(self._heap)
 
-    def pop_left_request(self) -> Request:
+    def pop_last_request(self) -> Request:
         """Pop the request with the largest priority value from the queue."""
         max_req = max(self._heap)
         self.remove_request(max_req)

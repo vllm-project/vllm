@@ -444,7 +444,7 @@ class Scheduler(SchedulerInterface):
         # First, schedule the RUNNING requests.
         running_backup = self.running.copy()
         while self.running and token_budget > 0:
-            request = self.running.pop_request()
+            request = self.running.pop_first_request()
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -533,7 +533,7 @@ class Scheduler(SchedulerInterface):
                         # No more request to preempt. Cannot schedule this request.
                         break
                     else:
-                        preempted_req = self.running.pop_left_request()
+                        preempted_req = self.running.pop_last_request()
                         self._preempt_request(preempted_req, scheduled_timestamp)
                         preempted_reqs.append(preempted_req)
 
@@ -578,7 +578,7 @@ class Scheduler(SchedulerInterface):
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
-                    request_queue.pop_request()
+                    request_queue.pop_first_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -593,7 +593,7 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
-                    request_queue.pop_request()
+                    request_queue.pop_first_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -620,7 +620,7 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
-                            request_queue.pop_request()
+                            request_queue.pop_first_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
 
@@ -773,7 +773,7 @@ class Scheduler(SchedulerInterface):
                             preempted=request.num_preemptions > 0,
                         )
 
-                request = request_queue.pop_request()
+                request = request_queue.pop_first_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
@@ -1852,7 +1852,7 @@ class Scheduler(SchedulerInterface):
             # Preempt in reverse order so the requests will be added back to the
             # running queue in FIFO order.
             while self.running:
-                request = self.running.pop_request()
+                request = self.running.pop_last_request()
                 self._preempt_request(request, timestamp)
                 # NOTE(zhuohan): For async scheduling, we need to discard the latest
                 # output token on the fly to avoid a redundant repetitive output token.
