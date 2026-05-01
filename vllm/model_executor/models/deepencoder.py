@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionConfig
 
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -263,8 +264,12 @@ class Block(nn.Module):
         return x
 
 
-class RelPosAttention(nn.Module):
+# --8<-- [start:rel_pos_attention]
+@PluggableLayer.register("rel_pos_attention")
+class RelPosAttention(PluggableLayer):
     """Multi-head Attention block with relative position embeddings."""
+
+    # --8<-- [end:rel_pos_attention]
 
     def __init__(
         self,

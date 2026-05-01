@@ -15,6 +15,7 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.cpu_model
 def test_models(
     hf_runner,
     vllm_runner,

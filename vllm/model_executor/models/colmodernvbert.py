@@ -9,7 +9,6 @@ Reference: https://huggingface.co/ModernVBERT/colmodernvbert-merged
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import ClassVar, Literal
 
 import torch
 from torch import nn
@@ -17,11 +16,10 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -37,7 +35,11 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLateInteraction,
+    SupportsMultiModal,
+)
 from .interfaces_base import default_pooling_type
 from .modernbert import ModernBertEmbeddings, ModernBertLayer
 from .siglip import SiglipVisionModel
@@ -234,7 +236,9 @@ class ColModernVBertMultiModalProcessor(
     dummy_inputs=ColModernVBertDummyInputsBuilder,
 )
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
-class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
+class ColModernVBertForRetrieval(
+    nn.Module, SupportsMultiModal, SupportsLateInteraction
+):
     """ColModernVBERT multimodal late-interaction retrieval model.
 
     Architecture:
@@ -248,7 +252,6 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
     """
 
     is_pooling_model = True
-    supports_late_interaction: ClassVar[Literal[True]] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -354,69 +357,22 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
             "model.text_model.layers.": "text_layers.",
             "model.text_model.embeddings.": "text_embeddings.",
             "model.text_model.final_norm.": "text_final_norm.",
-            "model.connector.modality_projection.": "connector.",
+            "model.connector.modality_projection.": "connector.proj.",
             "model.custom_text_proj.": "custom_text_proj.",
-            "model.vision_model.": "vision_model.vision_model.",
+            "model.vision_model.vision_model.": "vision_model.vision_model.",
             "model.": "",
         },
-    )
-
-    # Checkpoint names for DecoupledEmbedding parts
-    _BASE_EMB = "model.text_model.embeddings.tok_embeddings.weight"
-    _EXTRA_EMB = (
-        "model.text_model.embeddings.tok_embeddings.additional_embedding.weight"
     )
 
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        # DecoupledEmbedding requires concatenating base + additional
-        # embedding tensors before loading, so we extract them first.
-        base_embedding_weight: torch.Tensor | None = None
-        additional_embedding_weight: torch.Tensor | None = None
-        remaining: list[tuple[str, torch.Tensor]] = []
-
-        for name, tensor in weights:
-            if name == self._BASE_EMB:
-                base_embedding_weight = tensor
-            elif name == self._EXTRA_EMB:
-                additional_embedding_weight = tensor
-            else:
-                remaining.append((name, tensor))
-
-        # Load all non-embedding weights via AutoWeightsLoader
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(
-            remaining,
+            weights,
             mapper=self.hf_to_vllm_mapper,
         )
-
-        # Concatenate and load DecoupledEmbedding weights
-        if base_embedding_weight is not None:
-            combined = base_embedding_weight
-            if additional_embedding_weight is not None:
-                combined = torch.cat(
-                    [base_embedding_weight, additional_embedding_weight],
-                    dim=0,
-                )
-            param_name = "text_embeddings.tok_embeddings.weight"
-            params_dict = dict(self.named_parameters())
-            if param_name in params_dict:
-                param = params_dict[param_name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
-                weight_loader(param, combined)
-                loaded_params.add(param_name)
-        elif additional_embedding_weight is not None:
-            raise ValueError(
-                "Found 'text_model.embeddings.tok_embeddings"
-                ".additional_embedding.weight' but not "
-                "'text_model.embeddings.tok_embeddings.weight'"
-            )
 
         # The pooler wraps ``custom_text_proj`` as its head projector.
         # Mark those params as loaded under the pooler path too.

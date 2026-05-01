@@ -9,15 +9,16 @@ from pydantic import Field
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import (
+from vllm.logger import init_logger
+from vllm.renderers import TokenizeParams
+from vllm.utils import random_uuid
+
+from ..base.protocol import (
     ChatRequestMixin,
     ClassifyRequestMixin,
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.logger import init_logger
-from vllm.renderers import TokenizeParams
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -32,6 +33,7 @@ class ClassificationCompletionRequest(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
@@ -54,6 +56,7 @@ class ClassificationChatRequest(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",

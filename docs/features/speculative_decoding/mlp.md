@@ -11,10 +11,10 @@ prompts = ["The future of AI is"]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-    model="meta-llama/Meta-Llama-3.1-70B-Instruct",
-    tensor_parallel_size=4,
+    model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    tensor_parallel_size=1,
     speculative_config={
-        "model": "ibm-ai-platform/llama3-70b-accelerator",
+        "model": "ibm-ai-platform/llama3-8b-accelerator",
         "draft_tensor_parallel_size": 1,
         "method": "mlp_speculator",
     },
@@ -26,6 +26,12 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+!!! warning "Known issue"
+    `ibm-ai-platform/llama3-70b-accelerator` can fail with:
+    `AttributeError: 'MLPSpeculatorConfig' object has no attribute 'num_attention_heads'`.
+    Track status in [#34106](https://github.com/vllm-project/vllm/issues/34106)
+    and [#34163](https://github.com/vllm-project/vllm/pull/34163).
 
 ## Pre-Trained MLP Drafter Models
 

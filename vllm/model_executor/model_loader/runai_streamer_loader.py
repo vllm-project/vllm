@@ -21,34 +21,22 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetenso
 class RunaiModelStreamerLoader(BaseModelLoader):
     """
     Model loader that can load safetensors
-    files from local FS or S3 bucket.
+    files from local FS, S3, GCS, or Azure Blob Storage.
     """
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
-        self._is_distributed = False
+        self._is_distributed: bool = False
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
-            if "distributed" in extra_config and isinstance(
-                extra_config.get("distributed"), bool
-            ):
-                self._is_distributed = extra_config.get("distributed")
-
-            if "concurrency" in extra_config and isinstance(
-                extra_config.get("concurrency"), int
-            ):
-                os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(
-                    extra_config.get("concurrency")
-                )
-
-            if "memory_limit" in extra_config and isinstance(
-                extra_config.get("memory_limit"), int
-            ):
-                os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(
-                    extra_config.get("memory_limit")
-                )
+            if isinstance(distributed := extra_config.get("distributed"), bool):
+                self._is_distributed = distributed
+            if isinstance(concurrency := extra_config.get("concurrency"), int):
+                os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(concurrency)
+            if isinstance(memory_limit := extra_config.get("memory_limit"), int):
+                os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(memory_limit)
 
             runai_streamer_s3_endpoint = os.getenv("RUNAI_STREAMER_S3_ENDPOINT")
             aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL")
@@ -93,7 +81,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return hf_weights_files
 
     def _get_weights_iterator(
-        self, model_or_path: str, revision: str
+        self, model_or_path: str, revision: str | None
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)

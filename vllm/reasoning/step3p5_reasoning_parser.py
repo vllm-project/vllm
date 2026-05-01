@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class Step3p5ReasoningParser(BaseThinkingReasoningParser):
@@ -50,7 +49,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         # Only examine newly generated tokens; they may contain multiple ids.
-        return self._is_reasoning_end_from_ids(delta_ids)
+        return self._is_reasoning_end_from_ids(tuple(delta_ids))
 
     def _is_reasoning_end_from_ids(self, input_ids: Sequence[int]) -> bool:
         # Scan backwards to find the last special token, <think> or </think>.
@@ -96,7 +95,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:
