@@ -468,8 +468,7 @@ class EplbState:
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
         )
-        model_factors = model_config.compile_factors()
-        model_hash = hash_factors(model_factors)
+        model_hash = hash_factors(model_config.compile_factors())
         self.model_states[model_hash] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 

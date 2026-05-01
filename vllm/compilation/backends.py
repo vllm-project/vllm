@@ -1013,10 +1013,7 @@ class VllmBackend:
         ) = compute_env_and_config_hashes(vllm_config)
         compiler_factors = self.compiler_manager.compile_factors(vllm_config)
         compiler_hash = hash_factors(compiler_factors)
-        traced_files = set(self.compilation_config.traced_files)
-        forward_code_files = sorted(
-            (Path(filepath) for filepath in traced_files), key=str
-        )
+        forward_code_files = sorted(map(Path, set(self.compilation_config.traced_files)), key=Path.absolute)
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
