@@ -322,7 +322,9 @@ def set_forward_context(
     try:
         with (
             override_forward_context(forward_context),
-            vllm_config.kernel_config.ir_op_priority.set_priority(),
+            vllm_config.kernel_config.ir_op_priority.set_priority(
+                cudagraph_active=cudagraph_runtime_mode != CUDAGraphMode.NONE
+            ),
             vllm.ir.enable_torch_wrap(
                 vllm_config.compilation_config.ir_enable_torch_wrap
             ),

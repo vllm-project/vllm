@@ -31,3 +31,11 @@ def rms_norm(
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
+
+
+@ir.ops.silu_and_mul_fp8.register_impl("vllm_c", supported=CUDA_ALIKE)
+def silu_and_mul_fp8(input: Tensor, scale: Tensor) -> Tensor:
+    output_shape = input.shape[:-1] + (input.shape[-1] // 2,)
+    out = torch.empty(output_shape, dtype=torch.float8_e4m3fn, device=input.device)
+    torch.ops._C.silu_and_mul_quant(out, input, scale)
+    return out

@@ -564,6 +564,7 @@ class CudaPlatformBase(Platform):
     def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
         from vllm.config.compilation import CompilationMode
         from vllm.config.kernel import IrOpPriorityConfig
+        from vllm.utils.import_utils import has_helion
 
         # Native used by default when compiling,
         # use vllm_c kernels where available when no codegen
@@ -578,7 +579,12 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        # Prefer helion for silu_and_mul_fp8 when available
+        silu_and_mul_fp8 = ["helion", "vllm_c", "native"] if has_helion() else default
+
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, silu_and_mul_fp8=silu_and_mul_fp8
+        )
 
 
 # NVML utils
