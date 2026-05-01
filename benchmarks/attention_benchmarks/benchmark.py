@@ -26,7 +26,9 @@ Examples:
 """
 
 import argparse
+import json
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -66,12 +68,15 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     )
 
 
-def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
+def run_benchmark(
+    config: BenchmarkConfig, cooldown: int = 0, **kwargs
+) -> BenchmarkResult:
     """
     Run a single benchmark with proper backend selection.
 
     Args:
         config: BenchmarkConfig with backend, batch_spec, and model params
+        cooldown: Seconds to sleep after benchmark completes (for thermal management)
         **kwargs: Additional arguments passed to MLA benchmarks
 
     Returns:
@@ -79,9 +84,15 @@ def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     """
     try:
         if is_mla_backend(config.backend):
-            return run_mla_benchmark(config, **kwargs)
+            result = run_mla_benchmark(config, **kwargs)
         else:
-            return run_standard_attention_benchmark(config)
+            result = run_standard_attention_benchmark(config)
+
+        # Apply thermal cooldown after benchmark completes
+        if cooldown > 0:
+            time.sleep(cooldown)
+
+        return result
     except Exception as e:
         return BenchmarkResult(
             config=config,
@@ -99,6 +110,9 @@ def run_model_parameter_sweep(
     base_config_args: dict,
     sweep: ModelParameterSweep,
     console: Console,
+    skip_filters: list[dict] | None = None,
+    intermittent_filters: list[dict] | None = None,
+    cooldown: int = 0,
 ) -> list[BenchmarkResult]:
     """
     Run model parameter sweep for given backends and batch specs.
@@ -109,10 +123,14 @@ def run_model_parameter_sweep(
         base_config_args: Base configuration arguments (num_layers, head_dim, etc.)
         sweep: ModelParameterSweep configuration
         console: Rich console for output
+        skip_filters: Optional list of skip filter dicts
+        intermittent_filters: Optional list of intermittent filter dicts
 
     Returns:
         List of BenchmarkResult objects
     """
+    skip_filters = skip_filters or []
+    intermittent_filters = intermittent_filters or []
     all_results = []
 
     console.print(
@@ -134,13 +152,30 @@ def run_model_parameter_sweep(
                         backend=backend, batch_spec=spec, **config_args
                     )
 
-                    # Run benchmark
-                    result = run_benchmark(clean_config)
-
-                    # Replace backend with labeled version for display
+                    # Create labeled version for display
                     backend_label = sweep.get_label(backend, value)
-                    labeled_config = replace(result.config, backend=backend_label)
+                    labeled_config = replace(clean_config, backend=backend_label)
+
+                    skip_result = _check_and_handle_skip(
+                        backend, spec, labeled_config, skip_filters, console
+                    )
+                    if skip_result:
+                        all_results.append(skip_result)
+                        pbar.update(1)
+                        continue
+
+                    # Run benchmark
+                    result = run_benchmark(clean_config, cooldown=cooldown)
                     result = replace(result, config=labeled_config)
+                    result = apply_intermittent_flag(
+                        result, backend, spec, intermittent_filters
+                    )
+                    if result.intermittent:
+                        console.print(
+                            f"[yellow]Intermittent {backend} {spec}: "
+                            f"{result.intermittent}[/]"
+                        )
+
                     all_results.append(result)
 
                     if not result.success:
@@ -266,6 +301,9 @@ def run_parameter_sweep(
     base_config_args: dict,
     sweep: ParameterSweep,
     console: Console,
+    skip_filters: list[dict] | None = None,
+    intermittent_filters: list[dict] | None = None,
+    cooldown: int = 0,
 ) -> list[BenchmarkResult]:
     """
     Run parameter sweep for given backends and batch specs.
@@ -276,10 +314,14 @@ def run_parameter_sweep(
         base_config_args: Base configuration arguments (num_layers, head_dim, etc.)
         sweep: ParameterSweep configuration
         console: Rich console for output
+        skip_filters: Optional list of skip filter dicts
+        intermittent_filters: Optional list of intermittent filter dicts
 
     Returns:
         List of BenchmarkResult objects
     """
+    skip_filters = skip_filters or []
+    intermittent_filters = intermittent_filters or []
     all_results = []
 
     # Build list of values to sweep (including auto if requested)
@@ -300,18 +342,35 @@ def run_parameter_sweep(
                         backend=backend, batch_spec=spec, **base_config_args
                     )
 
+                    # Create labeled version for display
+                    backend_label = sweep.get_label(backend, value)
+                    labeled_config = replace(config, backend=backend_label)
+
+                    skip_result = _check_and_handle_skip(
+                        backend, spec, labeled_config, skip_filters, console
+                    )
+                    if skip_result:
+                        all_results.append(skip_result)
+                        pbar.update(1)
+                        continue
+
                     # Prepare kwargs for benchmark runner
                     kwargs = {}
                     if value != "auto":
                         kwargs[sweep.param_name] = value
 
                     # Run benchmark
-                    result = run_benchmark(config, **kwargs)
-
-                    # Replace backend with labeled version for display
-                    backend_label = sweep.get_label(backend, value)
-                    labeled_config = replace(result.config, backend=backend_label)
+                    result = run_benchmark(config, cooldown=cooldown, **kwargs)
                     result = replace(result, config=labeled_config)
+                    result = apply_intermittent_flag(
+                        result, backend, spec, intermittent_filters
+                    )
+                    if result.intermittent:
+                        console.print(
+                            f"[yellow]Intermittent {backend} {spec}: "
+                            f"{result.intermittent}[/]"
+                        )
+
                     all_results.append(result)
 
                     if not result.success:
@@ -428,6 +487,110 @@ def generate_batch_specs_from_ranges(ranges: list[dict]) -> list[str]:
     return all_specs
 
 
+# Skip/Intermittent Filter Helpers
+def parse_filter_args(filter_args: list[str]) -> list[dict]:
+    """Parse JSON filter arguments into list of filter dicts."""
+    filters = []
+    for arg in filter_args:
+        try:
+            filters.append(json.loads(arg))
+        except json.JSONDecodeError as e:
+            print(f"Invalid JSON in filter: {arg}")
+            print(f"Error: {e}")
+            sys.exit(1)
+    return filters
+
+
+def matches_filter(backend: str, batch_spec: str, filter_dict: dict) -> bool:
+    """
+    Check if backend/batch_spec matches a filter.
+
+    Pattern matching:
+    - backends: exact match or "*" wildcard
+    - batch_specs: exact match, "*" wildcard, or substring match (e.g., "*128*")
+    """
+    # Check backend match (exact or wildcard)
+    filter_backends = filter_dict.get("backends", [])
+    backend_match = any(backend == b or b == "*" for b in filter_backends)
+
+    # Check batch_spec match (exact, wildcard, or substring)
+    filter_specs = filter_dict.get("batch_specs", [])
+    spec_match = any(
+        batch_spec == s or s == "*" or (s.replace("*", "") in batch_spec)
+        for s in filter_specs
+    )
+
+    return backend_match and spec_match
+
+
+def should_skip(
+    backend: str, batch_spec: str, skip_filters: list[dict]
+) -> tuple[bool, str]:
+    """Check if case should be skipped. Returns (should_skip, reason)."""
+    for f in skip_filters:
+        if matches_filter(backend, batch_spec, f):
+            return True, f.get("reason", "No reason provided")
+    return False, ""
+
+
+def is_intermittent(
+    backend: str, batch_spec: str, intermittent_filters: list[dict]
+) -> tuple[bool, str]:
+    """Check if case is intermittent. Returns (is_intermittent, reason)."""
+    for f in intermittent_filters:
+        if matches_filter(backend, batch_spec, f):
+            return True, f.get("reason", "Marked as intermittent")
+    return False, ""
+
+
+def create_skipped_result(config: BenchmarkConfig, skip_reason: str) -> BenchmarkResult:
+    """Create a BenchmarkResult marked as skipped with null timing fields."""
+    return BenchmarkResult(
+        config=config,
+        mean_time=0.0,
+        std_time=0.0,
+        min_time=0.0,
+        max_time=0.0,
+        skip=skip_reason,
+    )
+
+
+def apply_intermittent_flag(
+    result: BenchmarkResult,
+    backend: str,
+    batch_spec: str,
+    intermittent_filters: list[dict],
+) -> BenchmarkResult:
+    """Check and apply intermittent flag to result if it matches filters."""
+    is_intermittent_case, reason = is_intermittent(
+        backend, batch_spec, intermittent_filters
+    )
+    if is_intermittent_case:
+        result.intermittent = reason
+    return result
+
+
+def _check_and_handle_skip(
+    backend: str,
+    spec: str,
+    config: BenchmarkConfig,
+    skip_filters: list[dict],
+    console: Console,
+) -> BenchmarkResult | None:
+    """
+    Check if case should be skipped and return skipped result if so.
+
+    Returns:
+        BenchmarkResult if skipped, None otherwise
+    """
+    should_skip_case, skip_reason = should_skip(backend, spec, skip_filters)
+    if should_skip_case:
+        result = create_skipped_result(config, skip_reason)
+        console.print(f"[yellow]Skipped {backend} {spec}: {skip_reason}[/]")
+        return result
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Universal vLLM attention benchmark",
@@ -511,6 +674,39 @@ def main():
     # Output
     parser.add_argument("--output-csv", help="Save to CSV")
     parser.add_argument("--output-json", help="Save to JSON")
+
+    # Skip/Intermittent filters
+    parser.add_argument(
+        "--skip",
+        type=str,
+        action="append",
+        default=[],
+        help=(
+            'Skip filter as JSON: {"batch_specs": ["spec1"], '
+            '"backends": ["backend1"], "reason": "..."}'
+        ),
+    )
+    parser.add_argument(
+        "--intermittent",
+        type=str,
+        action="append",
+        default=[],
+        help=(
+            'Intermittent filter as JSON: {"batch_specs": ["spec1"], '
+            '"backends": ["backend1"], "reason": "..."}'
+        ),
+    )
+
+    # Thermal management
+    parser.add_argument(
+        "--inter-batch-cooldown",
+        type=int,
+        default=20,
+        help=(
+            "Cooldown period in seconds between each "
+            "backend/batch_spec combination (default: 20)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -659,6 +855,9 @@ def main():
 
     init_workspace_manager(args.device)
 
+    skip_filters = parse_filter_args(args.skip)
+    intermittent_filters = parse_filter_args(args.intermittent)
+
     # Run benchmarks
     all_results = []
 
@@ -716,24 +915,55 @@ def main():
                     )
 
                     # Add decode pipeline config
-                    decode_threshold = query_length
-                    config_decode = replace(
-                        base_config,
-                        backend=f"{backend}_decode_qlen{query_length}_bs{batch_size}",
+                    decode_backend_name = (
+                        f"{backend}_decode_qlen{query_length}_bs{batch_size}"
                     )
-                    configs_with_thresholds.append((config_decode, decode_threshold))
+                    config_decode = replace(base_config, backend=decode_backend_name)
+
+                    should_skip_decode, skip_reason_decode = should_skip(
+                        decode_backend_name, batch_spec, skip_filters
+                    )
+                    if should_skip_decode:
+                        result = create_skipped_result(
+                            config_decode, skip_reason_decode
+                        )
+                        all_results.append(result)
+                        console.print(
+                            f"[yellow]Skipped {decode_backend_name} "
+                            f"{batch_spec}: {skip_reason_decode}[/]"
+                        )
+                    else:
+                        decode_threshold = query_length
+                        configs_with_thresholds.append(
+                            (config_decode, decode_threshold)
+                        )
 
                     # Add prefill pipeline config if query_length > 1
                     if query_length > 1:
-                        prefill_threshold = query_length - 1
+                        prefill_backend_name = (
+                            f"{backend}_prefill_qlen{query_length}_bs{batch_size}"
+                        )
                         config_prefill = replace(
-                            base_config,
-                            backend=f"{backend}_prefill_qlen{query_length}"
-                            f"_bs{batch_size}",
+                            base_config, backend=prefill_backend_name
                         )
-                        configs_with_thresholds.append(
-                            (config_prefill, prefill_threshold)
+
+                        should_skip_prefill, skip_reason_prefill = should_skip(
+                            prefill_backend_name, batch_spec, skip_filters
                         )
+                        if should_skip_prefill:
+                            result = create_skipped_result(
+                                config_prefill, skip_reason_prefill
+                            )
+                            all_results.append(result)
+                            console.print(
+                                f"[yellow]Skipped {prefill_backend_name} "
+                                f"{batch_spec}: {skip_reason_prefill}[/]"
+                            )
+                        else:
+                            prefill_threshold = query_length - 1
+                            configs_with_thresholds.append(
+                                (config_prefill, prefill_threshold)
+                            )
 
                 # Run all benchmarks for this batch size in one go (batched mode)
                 try:
@@ -754,6 +984,19 @@ def main():
                             max_time=timing["max"],
                             throughput_tokens_per_sec=timing.get("throughput", None),
                         )
+
+                        result = apply_intermittent_flag(
+                            result,
+                            config.backend,
+                            config.batch_spec,
+                            intermittent_filters,
+                        )
+                        if result.intermittent:
+                            console.print(
+                                f"[yellow]Intermittent {config.backend} "
+                                f"{config.batch_spec}: {result.intermittent}[/]"
+                            )
+
                         all_results.append(result)
 
                 except Exception as e:
@@ -874,6 +1117,9 @@ def main():
             base_config_args,
             args.model_parameter_sweep,
             console,
+            skip_filters,
+            intermittent_filters,
+            args.inter_batch_cooldown,
         )
 
     # Handle parameter sweep mode (unified)
@@ -893,7 +1139,14 @@ def main():
             "use_cuda_graphs": args.cuda_graphs,
         }
         all_results = run_parameter_sweep(
-            backends, args.batch_specs, base_config_args, args.parameter_sweep, console
+            backends,
+            args.batch_specs,
+            base_config_args,
+            args.parameter_sweep,
+            console,
+            skip_filters,
+            intermittent_filters,
+            args.inter_batch_cooldown,
         )
 
     else:
@@ -925,7 +1178,32 @@ def main():
                             use_cuda_graphs=args.cuda_graphs,
                         )
 
-                        result = run_benchmark(config)
+                        should_skip_case, skip_reason = should_skip(
+                            backend, spec, skip_filters
+                        )
+                        if should_skip_case:
+                            result = create_skipped_result(config, skip_reason)
+                            decode_results.append(result)
+                            console.print(
+                                f"[yellow]Skipped {backend} {spec}: {skip_reason}[/]"
+                            )
+                            pbar.update(1)
+                            continue
+
+                        # Run benchmark normally
+                        result = run_benchmark(
+                            config, cooldown=args.inter_batch_cooldown
+                        )
+
+                        result = apply_intermittent_flag(
+                            result, backend, spec, intermittent_filters
+                        )
+                        if result.intermittent:
+                            console.print(
+                                f"[yellow]Intermittent {backend} "
+                                f"{spec}: {result.intermittent}[/]"
+                            )
+
                         decode_results.append(result)
 
                         if not result.success:
@@ -953,6 +1231,10 @@ def main():
             with tqdm(total=total, desc="Prefill benchmarking") as pbar:
                 for spec in args.batch_specs:
                     for pb in prefill_backends:
+                        should_skip_case, skip_reason = should_skip(
+                            pb, spec, skip_filters
+                        )
+
                         config = BenchmarkConfig(
                             backend=decode_backend,
                             batch_spec=spec,
@@ -968,11 +1250,31 @@ def main():
                             prefill_backend=pb,
                         )
 
-                        result = run_benchmark(config)
-
                         # Label result with prefill backend name for display
-                        labeled_config = replace(result.config, backend=pb)
+                        labeled_config = replace(config, backend=pb)
+
+                        if should_skip_case:
+                            result = create_skipped_result(labeled_config, skip_reason)
+                            prefill_results.append(result)
+                            console.print(
+                                f"[yellow]Skipped {pb} {spec}: {skip_reason}[/]"
+                            )
+                            pbar.update(1)
+                            continue
+
+                        result = run_benchmark(
+                            config, cooldown=args.inter_batch_cooldown
+                        )
                         result = replace(result, config=labeled_config)
+                        result = apply_intermittent_flag(
+                            result, pb, spec, intermittent_filters
+                        )
+                        if result.intermittent:
+                            console.print(
+                                f"[yellow]Intermittent {pb} "
+                                f"{spec}: {result.intermittent}[/]"
+                            )
+
                         prefill_results.append(result)
 
                         if not result.success:

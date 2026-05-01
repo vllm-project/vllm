@@ -241,6 +241,8 @@ class BenchmarkResult:
     memory_allocated_mb: float | None = None
     memory_reserved_mb: float | None = None
     error: str | None = None
+    skip: str | None = None  # If set, benchmark was skipped with this reason
+    intermittent: str | None = None  # If set, benchmark is flaky with this reason
 
     @property
     def success(self) -> bool:
@@ -249,17 +251,29 @@ class BenchmarkResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "config": asdict(self.config),
-            "mean_time": self.mean_time,
-            "std_time": self.std_time,
-            "min_time": self.min_time,
-            "max_time": self.max_time,
-            "throughput_tokens_per_sec": self.throughput_tokens_per_sec,
-            "memory_allocated_mb": self.memory_allocated_mb,
-            "memory_reserved_mb": self.memory_reserved_mb,
+            "mean_time": self.mean_time if not self.skip else None,
+            "std_time": self.std_time if not self.skip else None,
+            "min_time": self.min_time if not self.skip else None,
+            "max_time": self.max_time if not self.skip else None,
+            "throughput_tokens_per_sec": (
+                self.throughput_tokens_per_sec if not self.skip else None
+            ),
+            "memory_allocated_mb": (
+                self.memory_allocated_mb if not self.skip else None
+            ),
+            "memory_reserved_mb": (self.memory_reserved_mb if not self.skip else None),
             "error": self.error,
         }
+
+        # Only include skip/intermittent if present
+        if self.skip:
+            result["skip"] = self.skip
+        if self.intermittent:
+            result["intermittent"] = self.intermittent
+
+        return result
 
 
 class ResultsFormatter:
@@ -334,7 +348,12 @@ class ResultsFormatter:
             for backend in backends:
                 if backend in spec_results:
                     r = spec_results[backend]
-                    if r.success:
+                    if r.skip:
+                        # Skipped entry
+                        row.append("[yellow]skip[/]")
+                        if multi and compare_to_fastest:
+                            row.append("--")
+                    elif r.success:
                         row.append(f"{r.mean_time:.6f}")
                         if multi and compare_to_fastest:
                             pct = (

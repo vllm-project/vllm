@@ -130,8 +130,9 @@ def _create_vllm_config(
 ) -> VllmConfig:
     """Create a VllmConfig for benchmarking with mock model methods."""
     model_config = ModelConfig(
-        model="meta-llama/Meta-Llama-3-8B",
-        tokenizer="meta-llama/Meta-Llama-3-8B",
+        model="HuggingFaceTB/SmolLM2-135M",  # Use public model to avoid login issues
+        tokenizer="HuggingFaceTB/SmolLM2-135M",
+        skip_tokenizer_init=True,
         trust_remote_code=False,
         dtype="auto",  # Use model's native dtype
         seed=0,
