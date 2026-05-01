@@ -1086,6 +1086,8 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
+        self.disabled = False
+
         self.dump_patterns(config, self.pm_pass)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
