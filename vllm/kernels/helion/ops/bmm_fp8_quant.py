@@ -236,13 +236,6 @@ def bmm_fp8_group_quant_helion(
     Each group is one head's V elements for one token. Scales are computed
     dynamically as abs_max / FP8_MAX per group.
 
-    The TMA-aligned packed scale layout is not implemented in this Helion
-    kernel — callers that need it should use the Triton version in
-    `vllm/kernels/triton/ops/bmm_fp8_quant.py` (see `_v_up_proj`). The
-    packing relies on atomic byte writes which Helion doesn't expose. The
-    returned (B, N) fp32 scales are compatible with the column-major layout
-    by viewing with swapped strides at the caller.
-
     Args:
         input: (N, B, L) input tensor in bf16/fp16
         weight: (N, L, V) weight tensor in bf16/fp16
@@ -250,7 +243,9 @@ def bmm_fp8_group_quant_helion(
 
     Returns:
         out: (B, N, V) tensor in FP8
-        scales: (B, N) tensor in float32
+        scales: (B, N) fp32 tensor allocated with column-major strides
+                (stride[0]=1, stride[1]=B), matching the layout the MLA
+                fusion pass passes to per_token_group_fp8_quant.
     """
     N, B, _L = input.shape
     V = hl.specialize(weight.shape[2])
@@ -265,10 +260,14 @@ def bmm_fp8_group_quant_helion(
         f"(group_size for kFp8Dynamic128Sym), got V={weight.shape[2]}"
     )
 
-    # Allocate directly in (B, N, V) / (B, N) to skip a full-tensor
-    # .permute().contiguous() copy at the end.
+    # Allocate directly in (B, N, V) to skip a full-tensor .permute().contiguous()
+    # copy at the end. Scales are allocated with column-major strides directly
+    # so the caller doesn't pay a contiguous() copy if it consumes them as
+    # column-major.
     out = torch.empty(B, N, V, device=input.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(B, N, device=input.device, dtype=torch.float32)
+    scales = torch.empty_strided(
+        (B, N), (1, B), device=input.device, dtype=torch.float32
+    )
 
     for tile_n, tile_b in hl.tile([N, B]):
         result = input[tile_n, tile_b, :] @ weight[tile_n, :, :]
