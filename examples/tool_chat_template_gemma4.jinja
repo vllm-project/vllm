@@ -295,6 +295,15 @@
                                 {%- endif -%}
                             {%- endfor -%}
                             {{- format_tool_response_block(ns_tname.name, ns_txt.s) -}}
+                            {%- for part in tool_body -%}
+                                {%- if part.get('type') == 'image' -%}
+                                    {{- '<|image|>' -}}
+                                {%- elif part.get('type') == 'audio' -%}
+                                    {{- '<|audio|>' -}}
+                                {%- elif part.get('type') == 'video' -%}
+                                    {{- '<|video|>' -}}
+                                {%- endif -%}
+                            {%- endfor -%}
                         {%- else -%}
                             {{- format_tool_response_block(ns_tname.name, tool_body) -}}
                         {%- endif -%}
