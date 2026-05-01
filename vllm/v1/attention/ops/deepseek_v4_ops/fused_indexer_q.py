@@ -365,7 +365,7 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        if fused_indexer_q_rope_quant_mxfp4_cutedsl is not None:
+        if HAS_CUTEDSL:
             fused_indexer_q_rope_quant_mxfp4_cutedsl(
                 positions,
                 index_q,
