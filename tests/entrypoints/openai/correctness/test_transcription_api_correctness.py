@@ -184,7 +184,7 @@ def test_wer_correctness(
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
-        f"--max_num_seqs=32", # avoid OOM on small GPUs
+        "--max_num_seqs=32",  # avoid OOM on small GPUs
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
