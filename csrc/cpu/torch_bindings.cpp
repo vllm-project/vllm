@@ -239,6 +239,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCPU, &gelu_quick);
 
+  // Squared ReLU implementation.
+  ops.def("relu2(Tensor! out, Tensor input) -> ()");
+  ops.impl("relu2", torch::kCPU, &relu2);
+
 #if (defined(__aarch64__) && !defined(__APPLE__))
 
   ops.def(

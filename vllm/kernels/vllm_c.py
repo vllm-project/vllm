@@ -11,6 +11,9 @@ current_platform.import_kernels()
 CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
 
+RELU2_VLLM_C_SUPPORTED = CUDA_ALIKE or current_platform.is_cpu()
+"""relu2 is available in the _C extension on CUDA-like platforms and CPU."""
+
 rms_no_var_size = (
     lambda x, weight, epsilon, variance_size=None: variance_size is None
     and (weight is None or weight.dtype == x.dtype)
@@ -30,4 +33,11 @@ def rms_norm(
     assert variance_size is None
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
+    return output
+
+
+@ir.ops.relu2.register_impl("vllm_c", supported=RELU2_VLLM_C_SUPPORTED)
+def relu2(x: Tensor) -> Tensor:
+    output = torch.empty_like(x)
+    torch.ops._C.relu2(output, x)
     return output

@@ -36,3 +36,10 @@ def rms_norm(
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
+
+
+# Register the provider name so relu2 can participate in platform defaults.
+# XPU does not have a fused relu2 kernel yet, so dispatch falls back to native.
+@ir.ops.relu2.register_impl("xpu_kernels", supported=False)
+def relu2(x: Tensor) -> Tensor:
+    return torch.square(torch.relu(x))

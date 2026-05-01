@@ -82,6 +82,42 @@ FORCE_INLINE vec_op::FP32Vec8 gelu_tanh_act(const vec_op::FP32Vec8& x) {
   const vec_op::FP32Vec8 inner = w1 * (x + x_3 * w3);
   return x * w2 * (ones + inner.tanh());
 }
+
+FORCE_INLINE float relu2_scalar(float x) { return x <= 0.0f ? 0.0f : x * x; }
+
+FORCE_INLINE vec_op::FP32Vec8 relu2_act(const vec_op::FP32Vec8& x) {
+  using VecReg = decltype(x.reg);
+  vec_op::AliasReg<VecReg, float, vec_op::FP32Vec8::VEC_ELEM_NUM> in{x.reg};
+  vec_op::AliasReg<VecReg, float, vec_op::FP32Vec8::VEC_ELEM_NUM> out{};
+
+  for (int i = 0; i < vec_op::FP32Vec8::VEC_ELEM_NUM; ++i) {
+    out.values[i] = relu2_scalar(in.values[i]);
+  }
+
+  return vec_op::FP32Vec8(out.reg);
+}
+
+template <typename scalar_t>
+void relu2_kernel(const int64_t numel, const scalar_t* in_ptr,
+                  scalar_t* out_ptr) {
+  using scalar_vec_t = vec_op::vec_t<scalar_t>;
+  constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
+  const int64_t vec_numel = numel / VEC_ELEM_NUM * VEC_ELEM_NUM;
+
+#pragma omp parallel for
+  for (int64_t i = 0; i < vec_numel; i += VEC_ELEM_NUM) {
+    const scalar_vec_t x(in_ptr + i);
+    const vec_op::FP32Vec8 f32_x(x);
+    const vec_op::FP32Vec8 f32_ans = relu2_act(f32_x);
+    const scalar_vec_t result(f32_ans);
+    result.save(out_ptr + i);
+  }
+
+  for (int64_t i = vec_numel; i < numel; ++i) {
+    out_ptr[i] = static_cast<scalar_t>(relu2_scalar(
+        static_cast<float>(in_ptr[i])));
+  }
+}
 };  // namespace
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input) {
@@ -159,5 +195,16 @@ void gelu_quick(torch::Tensor& out, torch::Tensor& input) {
     activation_kernel<scalar_t, gelu_quick_act, false>(
         num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
     CPU_KERNEL_GUARD_OUT(gelu_quick_impl)
+  });
+}
+
+void relu2(torch::Tensor& out, torch::Tensor& input) {
+  const int64_t numel = input.numel();
+
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "relu2_impl", [&] {
+    CPU_KERNEL_GUARD_IN(relu2_impl)
+    relu2_kernel<scalar_t>(numel, input.data_ptr<scalar_t>(),
+                           out.data_ptr<scalar_t>());
+    CPU_KERNEL_GUARD_OUT(relu2_impl)
   });
 }

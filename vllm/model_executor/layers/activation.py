@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vllm import ir
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -537,11 +538,10 @@ class ReLUSquaredActivation(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        return torch.square(F.relu(x))
+        return ir.ops.relu2(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO : implement cuda kernels
-        return self.forward_native(x)
+        return ir.ops.relu2(x)
 
 
 # --8<-- [start:xielu]
