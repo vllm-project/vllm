@@ -157,12 +157,11 @@ In the very verbose logs, we can see:
       DEBUG 03-07 03:06:54 [backends.py:370] xxx/vllm/model_executor/models/llama.py
 
       DEBUG 03-07 03:07:07 [backends.py:462] Computation graph saved to ~/.cache/vllm/torch_compile_cache/1517964802/rank_0_0/computation_graph.py
-      DEBUG 03-07 03:07:07 [wrapper.py:105] Dynamo transformed code saved to ~/.cache/vllm/torch_compile_cache/1517964802/rank_0_0/transformed_code.py
       ```
 
 This is about the Python code compilation, i.e. graph capture by Dynamo. It tries to trace the function with code `xxx/vllm/model_executor/models/llama.py:339`, which is the `forward` function of the model we compile. During the forward pass, there are also other functions called and inlined by Dynamo, as shown by the logs, including some PyTorch functions from `xxx/torch/nn/modules/module.py` (used by PyTorch `nn.Module`, because module attribute access will trigger a function call), some communication / attention / activation functions from vLLM. All the traced files will be considered when we decide the cache directory to use. This way, any code change in the above files will trigger compilation cache miss, and therefore recompilation.
 
-The result of the Dynamo compilation, is a new function stored in `~/.cache/vllm/torch_compile_cache/1517964802/rank_0_0/transformed_code.py`. Usually, this function unpacks tensors from the module, and then pass it to the traced computation graph. The computation graph is stored in `~/.cache/vllm/torch_compile_cache/1517964802/rank_0_0/computation_graph.py`.
+The result of the Dynamo compilation is a computation graph stored in `~/.cache/vllm/torch_compile_cache/1517964802/rank_0_0/computation_graph.py`.
 
 ## Computation Graph Processing
 

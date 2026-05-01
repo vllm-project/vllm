@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dis
 import os
 import sys
 from abc import abstractmethod
@@ -22,15 +21,6 @@ logger = init_logger(__name__)
 
 R = TypeVar("R")
 P = ParamSpec("P")
-
-
-def _format_transformed_code(code: CodeType) -> str:
-    try:
-        import depyf
-
-        return depyf.decompile(code)
-    except Exception:
-        return dis.Bytecode(code).dis()
 
 
 @contextmanager
@@ -238,36 +228,16 @@ class TorchCompileWithNoGuardsWrapper:
 
         self._compiled_bytecode = new_code
 
-        path = self.vllm_config.compile_debug_dump_path()
-        if path:
-            decompiled_file = path / "transformed_code.py"
-            if not decompiled_file.exists():
-                try:
-                    # usually the decompilation will succeed for most models,
-                    # as we guarantee a full-graph compilation in Dynamo.
-                    # but there's no 100% guarantee, since decompliation is
-                    # not a reversible process.
-                    src = _format_transformed_code(new_code)
-
-                    with open(decompiled_file, "w") as f:
-                        f.write(src)
-
-                    logger.debug("Dynamo transformed code saved to %s", decompiled_file)
-                except Exception:
-                    pass
-
         if (
             self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and "update" in new_code.co_names
         ):
-            src = _format_transformed_code(new_code)
             msg = (
                 "Assigning / modifying buffers of nn.Module during forward pass is not "
                 "allowed when using cudagraph inside the compiler because it will "
-                "cause silent errors. Please use eager mode or fix the code. The "
-                "following transformed code or bytecode contains clues about which "
-                "buffer is being modified "
-                f"(please search for the usage of the function `update`):\n{src}"
+                "cause silent errors. Please use eager mode or fix the code. "
+                "The transformed bytecode references `update`, which usually "
+                "indicates a module buffer update during forward."
             )
             raise RuntimeError(msg)
 

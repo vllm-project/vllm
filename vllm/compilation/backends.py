@@ -171,7 +171,6 @@ class CompilerManager:
         inside cache_dir, there will be:
         - vllm_compile_cache.py
         - computation_graph.py
-        - transformed_code.py
 
         for multiple prefixes, they can share the same
         base cache dir of /path/to/hash_str/rank_i_j/ ,
