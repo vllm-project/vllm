@@ -810,6 +810,11 @@ class MoERunner(MoERunnerInterface):
     #
 
     @property
+    def expert_map_manager(self):
+        """Forward to routed_experts.expert_map_manager for backward compatibility."""
+        return self.routed_experts.expert_map_manager
+
+    @property
     def expert_placement_strategy(self) -> ExpertPlacementStrategy:
         return self.expert_map_manager.placement_strategy
 

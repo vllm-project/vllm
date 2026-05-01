@@ -934,6 +934,7 @@ class RoutedExperts(torch.nn.Module):
         router_logits: torch.Tensor | None = None,
         shared_experts: torch.nn.Module | None = None,  # SharedExperts
         shared_experts_input: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Execute routed experts using the quantization method's apply function.
@@ -963,6 +964,7 @@ class RoutedExperts(torch.nn.Module):
                 layer=self,  # Pass RoutedExperts as layer
                 x=x,
                 router_logits=router_logits,
+                input_ids=input_ids,
             )
         else:
             # Modular kernels use pre-computed routing
@@ -973,6 +975,7 @@ class RoutedExperts(torch.nn.Module):
                 topk_ids=topk_ids,
                 shared_experts=shared_experts,
                 shared_experts_input=shared_experts_input,
+                input_ids=input_ids,
             )
 
 
