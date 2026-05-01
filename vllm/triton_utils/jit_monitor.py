@@ -51,7 +51,7 @@ def activate() -> None:
     _setup_triton_autotuning_print()
     _setup_triton_jit_hook()
 
-    logger.debug(
+    logger.info(
         "Kernel JIT monitor activated — Triton JIT compilations "
         "during inference will be logged as warnings."
     )
@@ -100,7 +100,7 @@ def _setup_triton_jit_hook() -> None:
         # pre-existing hook unchanged.
         fn = kwargs.get("fn")
         fn_name = getattr(fn, "name", "<unknown>")
-        logger.warning(
+        logger.warning_once(
             "Triton kernel JIT compilation during inference: %s. "
             "This causes a latency spike; consider extending warmup "
             "to cover this shape/config.",
