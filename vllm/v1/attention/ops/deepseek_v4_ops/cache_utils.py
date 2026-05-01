@@ -215,6 +215,7 @@ def _dequantize_and_gather_k_kernel(
     output_dim: tl.constexpr,  # 512
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 7 real blocks
+    use_fnuz: tl.constexpr = False,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -272,8 +273,11 @@ def _dequantize_and_gather_k_kernel(
                 # Load quantized fp8 values (stored as uint8)
                 x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
 
-                # Bitcast uint8 back to fp8
-                x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+                # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP otherwise)
+                if use_fnuz:
+                    x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+                else:
+                    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
 
                 # Convert fp8 to float32 for computation
                 x_float = x_fp8.to(tl.float32)
@@ -316,6 +320,7 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    use_fnuz: bool = False,
 ) -> None:
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
@@ -346,6 +351,7 @@ def dequantize_and_gather_k_cache(
         output_dim=512,
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
+        use_fnuz=use_fnuz,
     )
 
 

@@ -843,6 +843,15 @@ def w8a8_triton_block_scaled_mm(
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
 
+    # Triton cannot currently bind E8M0 scale tensors directly. On ROCm,
+    # DeepSeek-V4 checkpoints store block scales in exponent-only E8M0 format,
+    # so decode them to fp32 before launching the kernel.
+    if current_platform.is_rocm():
+        if As.dtype == torch.float8_e8m0fnu:
+            As = _upcast_e8m0_to_fp32(As).contiguous()
+        if Bs.dtype == torch.float8_e8m0fnu:
+            Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
+
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1] and A.is_contiguous()
     assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
@@ -1280,9 +1289,24 @@ def process_fp8_weight_block_strategy(
     )
 
     if current_platform.is_fp8_fnuz():
-        weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
-            weight=weight, weight_scale=weight_scale
-        )
+        if weight_scale.dtype == torch.float8_e8m0fnu:
+            # e8m0 stores exponent-only values (2^(exp-127)).
+            # Doubling == incrementing the exponent byte by 1.
+            weight_as_int8 = weight.view(torch.int8)
+            ROCM_FP8_NAN_AS_INT = -128
+            weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+            weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+            exp_bytes = weight_scale.view(torch.uint8)
+            weight_scale = (
+                (exp_bytes.to(torch.int16) + 1)
+                .clamp(max=254)
+                .to(torch.uint8)
+                .view(torch.float8_e8m0fnu)
+            )
+        else:
+            weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                weight=weight, weight_scale=weight_scale
+            )
 
     weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale

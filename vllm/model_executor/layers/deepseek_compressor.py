@@ -174,6 +174,54 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+def hadamard_transform_ref(x: torch.Tensor) -> torch.Tensor:
+    hidden_size = x.shape[-1]
+    assert hidden_size > 0 and (hidden_size & (hidden_size - 1)) == 0, (
+        f"Hidden size must be a power of 2, got {hidden_size}"
+    )
+    dtype = x.dtype
+    y = x.to(torch.float32).reshape(-1, hidden_size)
+    h = 1
+    while h < hidden_size:
+        y = y.view(-1, hidden_size // (2 * h), 2, h)
+        a = y[:, :, 0, :]
+        b = y[:, :, 1, :]
+        y = torch.cat((a + b, a - b), dim=-1)
+        h *= 2
+    y = y.view(*x.shape) * (hidden_size**-0.5)
+    return y.to(dtype)
+
+
+def apply_gptj_rope_ref(
+    x: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_dim: int,
+) -> torch.Tensor:
+    if rope_dim == 0 or x.numel() == 0:
+        return x
+    half_rot = rope_dim // 2
+    nope_dim = x.shape[-1] - rope_dim
+    dtype = x.dtype
+    x = x.to(torch.float32)
+    cache = cos_sin_cache.index_select(0, positions.to(torch.long))
+    cos = cache[:, :half_rot].to(torch.float32)
+    sin = cache[:, half_rot : 2 * half_rot].to(torch.float32)
+    view_shape = (positions.shape[0],) + (1,) * (x.dim() - 2) + (half_rot,)
+    cos = cos.view(view_shape)
+    sin = sin.view(view_shape)
+    rope = x[..., nope_dim:]
+    x_even = rope[..., 0::2]
+    x_odd = rope[..., 1::2]
+    rope_out = torch.stack(
+        (x_even * cos - x_odd * sin, x_odd * cos + x_even * sin),
+        dim=-1,
+    ).flatten(-2)
+    x = x.clone()
+    x[..., nope_dim:] = rope_out
+    return x.to(dtype)
+
+
 class DeepseekCompressor(nn.Module):
     def __init__(
         self,
@@ -300,6 +348,7 @@ class DeepseekCompressor(nn.Module):
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
         state_width = state_cache.shape[-1] // 2
+        pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
 
         # Store the KV and score (with fused APE addition) in the state.
         # NOTE: PDL is disabled — both this kernel and _fused_kernel below
@@ -324,7 +373,7 @@ class DeepseekCompressor(nn.Module):
             TRITON_BLOCK_SIZE=triton.next_power_of_2(kv.shape[-1]),
             STATE_WIDTH=state_width,
             COMPRESS_RATIO=self.compress_ratio,
-            launch_pdl=False,
+            **pdl_kwargs,
         )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
@@ -373,7 +422,7 @@ class DeepseekCompressor(nn.Module):
             SCALE_DIM=self._scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
             num_warps=self._num_warps,
-            launch_pdl=False,
+            **pdl_kwargs,
         )
 
 

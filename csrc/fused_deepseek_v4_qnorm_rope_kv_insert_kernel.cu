@@ -29,7 +29,11 @@
  */
 
 #include <cmath>
-#include <cuda_fp8.h>
+#ifndef USE_ROCM
+  #include <cuda_fp8.h>
+#else
+  #include <hip/hip_fp8.h>
+#endif
 #include <cuda_runtime.h>
 #include <type_traits>
 
@@ -42,7 +46,27 @@
 #include "type_convert.cuh"
 
 #ifndef FINAL_MASK
-  #define FINAL_MASK 0xffffffffu
+  #ifdef USE_ROCM
+    #define FINAL_MASK 0xffffffffffffffffULL
+  #else
+    #define FINAL_MASK 0xffffffffu
+  #endif
+#endif
+
+#ifdef USE_ROCM
+// ROCm-compatible FP8 conversion helpers
+__device__ __forceinline__ uint8_t rocm_cvt_float_to_fp8_e4m3(float val) {
+  // HIP defines HIP_FP8_TYPE_OCP based on HIP version, not GPU arch. On gfx942
+  // mfma only supports FNUZ fp8, and the rest of vLLM's gfx942 path (Triton
+  // indexer / current_platform.fp8_dtype()) uses FNUZ. Gate OCP on __gfx950__
+  // so the K cache encoding matches what the reader expects.
+  #if defined(HIP_FP8_TYPE_OCP) && defined(__gfx950__)
+  __hip_fp8_e4m3 fp8_val(val);
+  #else
+  __hip_fp8_e4m3_fnuz fp8_val(val);
+  #endif
+  return reinterpret_cast<uint8_t&>(fp8_val);
+}
 #endif
 
 namespace vllm {
@@ -65,7 +89,13 @@ constexpr int kQuantBlock = 64;
 constexpr int kNumQuantBlocks = kNopeDim / kQuantBlock;   // 7
 constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
+// Match the encoding chosen in rocm_cvt_float_to_fp8_e4m3: FNUZ on gfx942
+// (max 240), OCP on gfx950 (max 448).
+#if defined(USE_ROCM) && (!defined(HIP_FP8_TYPE_OCP) || !defined(__gfx950__))
+constexpr float kFp8Max = 240.0f;
+#else
 constexpr float kFp8Max = 448.0f;
+#endif
 
 // Per-warp layout:  32 lanes × 16 elems/lane = 512 elems = HEAD_DIM.
 constexpr int kNumLanes = 32;
@@ -314,9 +344,13 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
       for (int i = 0; i < kElemsPerLane; i++) {
         float scaled = elements[i] * inv_scale;
         scaled = fminf(fmaxf(scaled, -kFp8Max), kFp8Max);
+#ifndef USE_ROCM
         __nv_fp8_storage_t s =
             __nv_cvt_float_to_fp8(scaled, __NV_SATFINITE, __NV_E4M3);
         out_bytes[i] = static_cast<uint8_t>(s);
+#else
+      out_bytes[i] = rocm_cvt_float_to_fp8_e4m3(scaled);
+#endif
       }
       // One 16-byte STG per lane.
       *reinterpret_cast<uint4*>(token_fp8_ptr + dim_base) =
@@ -384,6 +418,7 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
   // PDL: enable programmatic stream serialization whenever the hardware
   // supports it (SM90+).  On pre-Hopper GPUs the attribute is unavailable,
   // so leave numAttrs = 0 and launch as a regular kernel.
+#ifndef USE_ROCM
   static int const sm_version = getSMVersion();
   // Host-side guard: the device kernel body is compiled as a no-op for
   // bf16 on pre-Ampere (sm_70/sm_75) because _typeConvert<BFloat16> is
@@ -410,6 +445,15 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
       q_inout, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache, eps,
       num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
       kv_block_stride);
+#else
+  // ROCm: use standard kernel launch syntax (no PDL/stream serialization)
+  // clang-format off
+  fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<scalar_t_in>
+      <<<grid, kBlockSize, 0, stream>>>(
+          q_inout, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache,
+          eps, num_tokens_full, num_tokens_insert, num_heads_q,
+          cache_block_size, kv_block_stride);
+#endif
 }
 
 }  // namespace deepseek_v4_fused_ops
