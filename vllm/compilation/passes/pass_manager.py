@@ -131,14 +131,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         function_name: str = "",
     ) -> None:
         self.pass_config = config.compilation_config.pass_config
-        self.graph_dump_context = {
-            key: value
-            for key, value in {
-                "prefix": prefix,
-                "function_name": function_name,
-            }.items()
-            if value
-        }
+        self.graph_dump_context = {}
+        if prefix:
+            self.graph_dump_context["prefix"] = prefix
+        if function_name:
+            self.graph_dump_context["function_name"] = function_name
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):

@@ -57,14 +57,10 @@ class VllmInductorPass(InductorPass):
         self.graph_dump_metadata = collect_graph_metadata(
             config,
             pass_name=self.pass_name,
-            model_dtype=self.model_dtype,
-            device=self.device,
         )
 
     def set_graph_dump_context(self, **metadata: str) -> None:
-        self.graph_dump_metadata.update(
-            {key: value for key, value in metadata.items() if value}
-        )
+        self.graph_dump_metadata.update(metadata)
 
     @staticmethod
     def time_and_log(
@@ -83,12 +79,11 @@ class VllmInductorPass(InductorPass):
     def dump_graph(self, graph: torch.fx.Graph, stage: str) -> None:
         i = VllmInductorPass.dump_prefix
         i_str = "" if i is None else f".{i}"
-        metadata = collect_graph_metadata(None, **self.graph_dump_metadata, stage=stage)
         dump_graph(
             f"post_grad{i_str}.{self.pass_name}.{stage}",
             graph.owning_module,
             self.debug_dump_path / "graphs" if self.debug_dump_path else None,
-            metadata,
+            dict(self.graph_dump_metadata, stage=stage),
         )
 
     def begin(self) -> None:

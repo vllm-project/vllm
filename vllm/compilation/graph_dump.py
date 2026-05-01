@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 _dump_indices: dict[Path, itertools.count] = {}
 _dump_lock = threading.Lock()
-VLLM_IR_NAMESPACE = "vllm_ir"
 
 
 def json_safe(value: Any) -> Any:
@@ -172,7 +171,7 @@ def collect_vllm_ir_metadata(gm: fx.GraphModule) -> list[dict[str, Any]]:
     metadata: list[dict[str, Any]] = []
     for node in gm.graph.nodes:
         op = default_overload(node.target)
-        if op is None or op.namespace != VLLM_IR_NAMESPACE:
+        if op is None or op.namespace != "vllm_ir":
             continue
 
         item: dict[str, Any] = {"node": node.name, "op": op._opname}
@@ -269,7 +268,7 @@ def dump_graph(
 
     dump_path.mkdir(parents=True, exist_ok=True)
     base = next_base_path(dump_path, name)
-    metadata = dict(metadata or {})
+    metadata = collect_graph_metadata(None, **dict(metadata or {}))
     metadata.update({"name": name, "vllm_ir": collect_vllm_ir_metadata(gm)})
 
     base.with_suffix(".structured.txt").write_text(
