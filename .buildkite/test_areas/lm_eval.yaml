@@ -127,9 +127,8 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
 
-- label: MRCR Eval Small Models (H200 18GB)
+- label: MRCR Eval Small Models
   timeout_in_minutes: 30
-  device: h200_18gb
   source_file_dependencies:
   - tests/evals/mrcr/
   commands:
