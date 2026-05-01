@@ -56,7 +56,11 @@
 #ifdef USE_ROCM
 // ROCm-compatible FP8 conversion helpers
 __device__ __forceinline__ uint8_t rocm_cvt_float_to_fp8_e4m3(float val) {
-  #if defined(HIP_FP8_TYPE_OCP)
+  // HIP defines HIP_FP8_TYPE_OCP based on HIP version, not GPU arch. On gfx942
+  // mfma only supports FNUZ fp8, and the rest of vLLM's gfx942 path (Triton
+  // indexer / current_platform.fp8_dtype()) uses FNUZ. Gate OCP on __gfx950__
+  // so the K cache encoding matches what the reader expects.
+  #if defined(HIP_FP8_TYPE_OCP) && defined(__gfx950__)
   __hip_fp8_e4m3 fp8_val(val);
   #else
   __hip_fp8_e4m3_fnuz fp8_val(val);
@@ -85,7 +89,9 @@ constexpr int kQuantBlock = 64;
 constexpr int kNumQuantBlocks = kNopeDim / kQuantBlock;   // 7
 constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
-#if defined(USE_ROCM) && !defined(HIP_FP8_TYPE_OCP)
+// Match the encoding chosen in rocm_cvt_float_to_fp8_e4m3: FNUZ on gfx942
+// (max 240), OCP on gfx950 (max 448).
+#if defined(USE_ROCM) && (!defined(HIP_FP8_TYPE_OCP) || !defined(__gfx950__))
 constexpr float kFp8Max = 240.0f;
 #else
 constexpr float kFp8Max = 448.0f;
