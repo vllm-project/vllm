@@ -97,6 +97,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 f"attention backend '{attn_backend.backend.name}'"
             )
 
+        if attn_backend.backend.name == "FLASHINFER":
+            from vllm.utils.flashinfer import supports_trtllm_attention
+
+            if not supports_trtllm_attention():
+                matches = matches._replace(attn_quant_fusion=0)
+
         # TODO: remove this after finishing migration from envs to model kwargs
         if model_name == "openai/gpt-oss-20b":
             from .common import is_blackwell

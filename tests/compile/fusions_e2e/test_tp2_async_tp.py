@@ -13,7 +13,6 @@ from .common import (
     AttentionBackendCase,
     Matches,
     custom_ops_combos,
-    is_blackwell,
 )
 from .models import (
     FLASHINFER_ATTN,
@@ -46,13 +45,8 @@ def test_tp2_async_tp_fp8_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
     matches = matches_fn(n_layers)
-
-    if is_blackwell():
-        # Disable FlashInfer scaled_mm FP8 as it's not supported in async tp patterns
-        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
@@ -173,13 +167,8 @@ def test_tp2_sp_ar_rms_fp8_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
     matches = matches_fn(n_layers)
-
-    if is_blackwell():
-        # Disable FlashInfer scaled_mm FP8 as it's not supported in async tp patterns
-        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
