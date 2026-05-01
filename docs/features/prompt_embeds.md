@@ -20,11 +20,46 @@ You can pass prompt embeddings from Hugging Face Transformers models to the  `'p
 
 ## Online Serving
 
-Our OpenAI-compatible server accepts prompt embeddings inputs via the [Completions API](https://platform.openai.com/docs/api-reference/completions). Prompt embeddings inputs are added via a new `'prompt_embeds'` key in the JSON package and are enabled by the `--enable-prompt-embeds` flag in `vllm serve`.
+Our OpenAI-compatible server accepts prompt embeddings inputs via both the [Completions API](https://platform.openai.com/docs/api-reference/completions) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Both are enabled by the `--enable-prompt-embeds` flag in `vllm serve`.
+
+### Completions API
+
+Prompt embeddings inputs are added via a `'prompt_embeds'` key in the JSON request body.
 
 When a mixture of `'prompt_embeds'` and `'prompt'` inputs are provided in a single request, the prompt embeds are always returned first.
 
 Prompt embeddings are passed in as base64 encoded torch tensors.
+
+The Completions endpoint does **not** apply a chat template to `prompt_embeds`. If the model assumes some chat template, the caller is responsible for producing embeddings for the full, already-templated prompt: apply the chat template, then embed the resulting token IDs. Anything the model would normally need (system prompt, role markers, generation prompt, etc.) must already be baked into the embedded tokens.
+
+### Chat Completions API
+
+Prompt embeddings can be included as content parts in chat messages, interleaved with text:
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {"type": "text", "text": "You are a helpful assistant."},
+        {"type": "prompt_embeds", "data": "<base64_encoded_tensor>"}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "prompt_embeds", "data": "<base64_encoded_tensor>"},
+        {"type": "text", "text": "Summarize the above."}
+      ]
+    }
+  ]
+}
+```
+
+Each `prompt_embeds` content part contains a `data` field with a base64-encoded `torch.Tensor` of shape `(num_tokens, hidden_size)`. Multiple `prompt_embeds` parts can appear in any message, in any position relative to text parts. The server expands each part into the correct number of placeholder tokens during chat template rendering, then splices the pre-computed embeddings into the model's input at the corresponding positions.
+
+Unlike the Completions API, a `prompt_embeds` content part should encode **only** the content, not a templated conversation. The server wraps the chat template around the embedded content at request time, the same way it would for a plain text `content` string. Embedding a full templated conversation here would double-apply the template and produce incorrect inputs to the model.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
