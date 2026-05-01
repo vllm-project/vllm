@@ -660,6 +660,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
             num_experts=max(self.config.moe_num_experts),
         )
 
+        # print(f"EPM {expert_params_mapping}")
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -693,7 +695,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                 break
             else:
                 # Distinguish between vision experts and text experts
-                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXX
+                if "mlp.experts" in name:
                     moe_offset = int(name.split(".")[-3])
                     vision_expert_start_idx = self.config.moe_num_experts[0]
                     is_text_expert = moe_offset <= vision_expert_start_idx - 1
@@ -707,6 +709,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
 
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
+
+                    # print(f"MATCH {weight_name, name}")
 
                     if weight_name not in name:
                         continue
