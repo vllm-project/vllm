@@ -111,33 +111,17 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
 
 
 def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
-    """Canonicalize strides on dimensions of size=1 for CUDA TMA compatibility.
+    """Fix degenerate strides on size=1 dimensions for CUDA TMA compatibility.
 
-    PyTorch's ``is_contiguous()`` returns ``True`` for *any* stride value on a
-    dimension of size=1, because a dimension of size=1 is never actually stepped
-    across.  As a result, memory allocators may produce tensors where a size=1
-    dimension has ``stride = 1`` (one element) rather than the canonical
-    ``product(shape[i+1:])``.
-
-    CUDA's TMA (Tensor Memory Accelerator), used by FlashInfer's XQA SM90
-    decode kernel and by Flash-Attention 3/4 on H100+, requires every
-    non-outermost stride to be a multiple of 16 bytes.  For a bf16 tensor,
-    ``stride = 1`` element means 2 bytes — well below the 16-byte minimum —
-    and triggers ``cudaErrorIllegalInstruction``.
-
-    This function uses ``torch.as_strided`` to patch size=1 dim strides to
-    their canonical value.  **No data is copied**; only stride
-    metadata is updated.  It is safe because a dimension of size=1 is *never
-    stepped across* in pointer arithmetic — ``index * stride`` is always
-    ``0 * stride = 0`` regardless of the stride value.  Patching to the
-    canonical value therefore does not change any memory access; it only
-    satisfies TMA's alignment check.
-
-    Typical trigger: paged KV cache with ``num_kv_heads_per_rank == 1`` (e.g.
-    Qwen3.5-397B with ``--tensor-parallel-size 8``).  When prefix-cached
-    blocks are freed and reallocated, the resulting view can have a degenerate
-    stride on the singleton head dimension.
+    PyTorch allows any stride on a size=1 dim (is_contiguous() is always True
+    there), so a size=1 dim may have stride=1 (2 bytes for bf16) instead of
+    the canonical product(shape[i+1:]).  CUDA TMA on H100+ requires all
+    non-outermost strides to be ≥16-byte aligned; stride=1 triggers
+    cudaErrorIllegalInstruction.  Zero-copy: patches stride metadata only via
+    as_strided; returns t unchanged if all size=1 strides are already canonical.
     """
+    if 1 not in t.shape:
+        return t
     strides = list(t.stride())
     shape = t.shape
     prev_stride = 1
