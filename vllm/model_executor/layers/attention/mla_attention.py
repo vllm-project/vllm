@@ -259,6 +259,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     SparseMLAAttentionImpl,
 )
+from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackend
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -1231,6 +1232,7 @@ class MLACommonPrefillMetadata:
     chunked_context: ChunkedContextMetadata | None = None
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
+    prefill_backend: MLAPrefillBackend | None = None
 
 
 @dataclass
@@ -1805,6 +1807,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 chunked_context=chunked_context_metadata,
                 output_dtype=self.model_config.dtype,
                 q_data_type=self.q_data_type,
+                prefill_backend=self._prefill_backend,
             )
 
             self._prefill_backend.prepare_metadata(prefill_metadata)
@@ -1997,21 +2000,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             and (self.qk_rope_head_dim == 64)
         )
 
-        from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
-        vllm_config = get_current_vllm_config()
-        prefill_backend = get_mla_prefill_backend(vllm_config)
-        self._prefill_backend = prefill_backend(
-            num_heads=self.num_heads,
-            scale=self.scale,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            v_head_dim=self.v_head_dim,
-            vllm_config=vllm_config,
-            device=vllm_config.device_config.device,
-        )
-
         self.dcp_world_size: int = -1
 
         self.cp_kv_cache_interleave_size: int = (
@@ -2058,6 +2046,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     ):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
 
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
@@ -2126,7 +2115,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
-                self._prefill_backend.run_prefill_context_chunk(
+                prefill_metadata.prefill_backend.run_prefill_context_chunk(
                     chunk_idx=i,
                     q=q,
                     k=k,
@@ -2164,6 +2153,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
         assert prefill_metadata.chunked_context.padded_local_chunk_seq_lens is not None
         assert prefill_metadata.chunked_context.local_context_lens_allranks is not None
@@ -2231,7 +2221,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
-                self._prefill_backend.run_prefill_context_chunk(
+                prefill_metadata.prefill_backend.run_prefill_context_chunk(
                     chunk_idx=i,
                     q=q,
                     k=k,
@@ -2268,11 +2258,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
 
         prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata.prefill_backend is not None
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         # Convert q to FP8 if FP8 prefill attention is enabled
@@ -2291,7 +2281,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = k.to(prefill_metadata.q_data_type)
             v = v.to(prefill_metadata.q_data_type)
 
-        output_prefill = self._prefill_backend.run_prefill_new_tokens(
+        output_prefill = prefill_metadata.prefill_backend.run_prefill_new_tokens(
             q=q,
             k=k,
             v=v,
