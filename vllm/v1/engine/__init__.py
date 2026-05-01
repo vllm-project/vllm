@@ -120,6 +120,7 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
