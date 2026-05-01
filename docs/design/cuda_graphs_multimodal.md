@@ -85,7 +85,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 | Architecture | Models | CG for Image | CG for Video |
 | ------------ | ------ | ------------ | ------------ |
-| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ |  |
+| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | - |
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
 
 !!! note
