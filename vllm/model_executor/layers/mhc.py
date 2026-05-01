@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import os
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,12 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
+
+# When unset, TileLang routes JIT temp dirs through a world-shared
+# /tmp/tvm-debug-mode-tempdirs/ whose ownership is pinned to whichever user
+# compiles first, breaking every other user on a shared host. Opt into
+# per-process tempdirs unless the user explicitly chose the debug layout.
+os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
 # tilelang is only available on CUDA platforms
 if TYPE_CHECKING or current_platform.is_cuda_alike():
