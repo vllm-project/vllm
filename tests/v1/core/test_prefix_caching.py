@@ -2568,7 +2568,9 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     prompt_len = 32 * block_size
     req = make_request("long", list(range(prompt_len)), block_size, sha256)
 
-    assert manager.can_fit_full_sequence(req)
+    assert (
+        manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is not None
+    )
 
 
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():
@@ -2619,4 +2621,4 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     prompt_len = 16 * block_size
     req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
 
-    assert not manager.can_fit_full_sequence(req)
+    assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
