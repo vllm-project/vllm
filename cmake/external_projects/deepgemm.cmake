@@ -74,7 +74,11 @@ if(DEEPGEMM_ARCHS)
   endif()
 
   # The pybind11 module name must be _C to match DeepGEMM's Python imports.
-  set_target_properties(_deep_gemm_C PROPERTIES OUTPUT_NAME "_C")
+  # Place the build artifact in a subdir so it doesn't collide with vLLM's own
+  # `_C.abi3.so` in the build tree (the install destination still differs).
+  set_target_properties(_deep_gemm_C PROPERTIES
+    OUTPUT_NAME "_C"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/deep_gemm")
 
   target_compile_definitions(_deep_gemm_C PRIVATE
     "-DTORCH_EXTENSION_NAME=_C")
