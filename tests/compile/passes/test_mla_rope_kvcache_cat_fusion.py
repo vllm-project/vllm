@@ -37,6 +37,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
@@ -233,20 +234,11 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         return [torch.ops.vllm.fused_rope_unified_mla_kv_cache_update.default]
 
 
-if current_platform.is_cuda():
-    MLA_BACKENDS = [
-        AttentionBackendEnum.FLASH_ATTN_MLA,
-        AttentionBackendEnum.FLASHINFER_MLA,
-    ]
-    BLOCK_SIZES = [512]
-elif is_aiter_found_and_supported():
-    MLA_BACKENDS = [
-        AttentionBackendEnum.TRITON_MLA,
-        AttentionBackendEnum.ROCM_AITER_MLA,
-    ]
-    BLOCK_SIZES = [16]
-else:
-    MLA_BACKENDS = []
+MLA_BACKENDS = [AttentionBackendEnum.TRITON_MLA]
+if flash_attn_supports_mla():
+    MLA_BACKENDS += [AttentionBackendEnum.FLASH_ATTN_MLA]
+if is_aiter_found_and_supported():
+    MLA_BACKENDS += [AttentionBackendEnum.ROCM_AITER_MLA]
 
 
 @pytest.mark.parametrize("attn_backend", MLA_BACKENDS)
@@ -257,7 +249,7 @@ else:
 @pytest.mark.parametrize("v_head_dim", [128])
 @pytest.mark.parametrize("q_lora_rank", [1536])
 @pytest.mark.parametrize("kv_lora_rank", [512])
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
