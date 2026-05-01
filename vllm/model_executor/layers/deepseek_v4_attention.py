@@ -386,7 +386,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.ln_events[0],
             self.ln_events[1:4],
             self.aux_stream_list[:3],
-            enable=envs.VLLM_ENABLE_MULTI_STREAM_GEMM,
+            enable=hidden_states.shape[0]
+            <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
         )
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
