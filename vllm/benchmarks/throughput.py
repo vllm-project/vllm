@@ -625,26 +625,18 @@ def validate_args(args):
         random_output_len = getattr(args, "random_output_len", None)
         random_prefix_len = getattr(args, "random_prefix_len", None)
 
-        if (
-            args.input_len is not None
-            and random_input_len is not None
-            and args.input_len != random_input_len
-        ):
+        if args.input_len is not None and random_input_len is not None:
             warnings.warn(
-                f"Both --input-len={args.input_len} and "
-                f"--random-input-len={random_input_len} are specified. "
-                f"Using --random-input-len={random_input_len}.",
+                "Both --input-len and --random-input-len are specified. "
+                "The random version (--random-input-len) will be preferred "
+                "in this run.",
                 stacklevel=2,
             )
-        if (
-            args.output_len is not None
-            and random_output_len is not None
-            and args.output_len != random_output_len
-        ):
+        if args.output_len is not None and random_output_len is not None:
             warnings.warn(
-                f"Both --output-len={args.output_len} and "
-                f"--random-output-len={random_output_len} are specified. "
-                f"Using --random-output-len={random_output_len}.",
+                "Both --output-len and --random-output-len are specified. "
+                "The random version (--random-output-len) will be preferred "
+                "in this run.",
                 stacklevel=2,
             )
         if args.prefix_len is not None and random_prefix_len is not None:
