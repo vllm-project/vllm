@@ -5667,14 +5667,27 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits.clone(), sampling_metadata=dummy_metadata
             )
-            # Also warm forward_native (taken when generators dict is non-empty).
-            self.sampler(
-                logits=logits.clone(),
-                sampling_metadata=replace(
-                    dummy_metadata,
-                    generators={0: torch.Generator(device=self.device).manual_seed(0)},
-                ),
-            )
+            # Also warm forward_native (taken when generators dict is non-empty),
+            # but only when the main forward path is not already native — in
+            # that case the extra call is redundant and inflates peak memory
+            # during profile_run (e.g. logprobs_mode='processed_logprobs',
+            # where TopKTopPSampler binds forward = forward_native).
+            # Compare underlying functions: bound methods are recreated on each
+            # attribute access, so `forward is forward_native` is always False.
+            topk_topp_sampler = self.sampler.topk_topp_sampler
+            if (
+                topk_topp_sampler.forward.__func__
+                is not topk_topp_sampler.forward_native.__func__
+            ):
+                self.sampler(
+                    logits=logits.clone(),
+                    sampling_metadata=replace(
+                        dummy_metadata,
+                        generators={
+                            0: torch.Generator(device=self.device).manual_seed(0)
+                        },
+                    ),
+                )
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(
