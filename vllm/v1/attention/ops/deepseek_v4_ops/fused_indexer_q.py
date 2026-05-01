@@ -5,6 +5,7 @@ from functools import cache
 import cutlass
 import cutlass.cute as cute
 import torch
+from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
@@ -507,6 +508,7 @@ class IndexerQMxFp4Kernel:
         q_scale: cute.Tensor,
         weights_out: cute.Tensor,
         scale: Float32,
+        stream: CUstream,
     ):
         num_tokens, num_heads, _ = q.shape
         total_threads = num_tokens * num_heads * self.subwarp_size
@@ -520,7 +522,7 @@ class IndexerQMxFp4Kernel:
             q_scale,
             weights_out,
             scale,
-        ).launch(grid=grid, block=[self.tb_size, 1, 1])
+        ).launch(grid=grid, block=[self.tb_size, 1, 1], stream=stream)
 
     @cute.kernel
     def kernel(
@@ -676,6 +678,7 @@ def _compile_indexer_q_mxfp4(
     weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
 
     kernel = IndexerQMxFp4Kernel(head_dim, rope_dim, num_heads, cos_sin_dtype)
+    stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     return cute.compile(
         kernel,
         positions,
@@ -686,5 +689,6 @@ def _compile_indexer_q_mxfp4(
         q_scale,
         weights_out,
         Float32(0.0),
+        stream,
         options="--enable-tvm-ffi",
     )
