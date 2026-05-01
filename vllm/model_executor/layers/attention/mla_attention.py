@@ -288,16 +288,11 @@ def _detect_output_quant_key(
     output_scale: torch.Tensor | None,
     output_block_scale: torch.Tensor | None,
     output_dim: int,
-    quant_group_size: int | None = None,
 ) -> QuantKey | None:
     """Detect the output quantization key from fusion pass parameters.
 
     Returns the appropriate QuantKey, or None if no quantization is needed.
     Detection is based on output dtype and which scale tensors are present.
-
-    `quant_group_size`, when supplied by the fusion pass, is the authoritative
-    group size. It's required for the TMA-aligned packed layout, whose
-    `output_block_scale.shape[-1]` no longer encodes the group count.
     """
     if output_scale is None and output_block_scale is None:
         return None
@@ -305,12 +300,10 @@ def _detect_output_quant_key(
         if output.dtype == _FP8_DTYPE:
             # Per-group FP8 uses block scales only, not a separate output_scale
             assert output_scale is None
-            if quant_group_size is not None:
-                group_size = quant_group_size
-            else:
-                # Row-major / column-major fp32 scales: shape[-1] == num_groups.
-                num_groups = output_block_scale.shape[-1]
-                group_size = output_dim // num_groups
+            # Row-/column-major fp32 scales: shape[-1] == num_groups (the
+            # leading-dim stride may be TMA-aligned, but shape is unchanged).
+            num_groups = output_block_scale.shape[-1]
+            group_size = output_dim // num_groups
             if group_size == 128:
                 return kFp8Dynamic128Sym
             elif group_size == 64:
@@ -629,7 +622,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             output_scale,
             output_block_scale,
             self.num_heads * self.v_head_dim,
-            quant_group_size=quant_group_size,
         )
         if quant_key is not None:
             # The fusion pass has allocated output with quantized dtype
@@ -1028,10 +1020,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key == kFp8Dynamic128Sym
             and quant_output is not None
             and output_block_scale is not None
-            and (quant_group_size is None or quant_group_size == self.v_head_dim)
         ):
-            # Fused per-group FP8. Supports every kFp8Dynamic128Sym flag
-            # combination (scale_ue8m0 + column-major + TMA-aligned).
+            # Fused per-group FP8. scale_ue8m0 changes scale values; col-major
+            # / TMA-aligned strides are carried by `output_block_scale` itself.
             from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_group_quant
 
             bmm_fp8_group_quant(
@@ -1040,7 +1031,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 quant_output,
                 output_block_scale,
                 scale_ue8m0=bool(quant_scale_ue8m0),
-                tma_aligned=bool(quant_tma_aligned),
             )
             return
         elif (

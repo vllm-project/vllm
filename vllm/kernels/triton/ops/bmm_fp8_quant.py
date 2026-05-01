@@ -210,13 +210,10 @@ def _bmm_fp8_group_quant_kernel(
     # Strides for output (B, N * V)
     stride_out_b,
     stride_out_v,
-    # Strides for scales (B, N), used when !TMA_ALIGNED. Column-major is
-    # selected implicitly when stride_scales_b < stride_scales_n.
+    # Strides for scales (B, N) fp32. Column-major (TMA-aligned) is selected
+    # implicitly by passing a tensor with stride_scales_b == 1.
     stride_scales_b,
     stride_scales_n,
-    # Runtime param for the TMA-aligned packed layout: mn padded to a
-    # multiple of 4, which is the stride between 4-scale packs.
-    tma_aligned_mn,
     # Meta-parameters
     BLOCK_SIZE_B: tl.constexpr,
     BLOCK_SIZE_V: tl.constexpr,  # must cover full V
@@ -224,7 +221,6 @@ def _bmm_fp8_group_quant_kernel(
     FP8_MAX: tl.constexpr,
     EPS: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
-    TMA_ALIGNED: tl.constexpr,
 ):
     """Fused BMM + per-group dynamic FP8 quantization kernel.
 
@@ -232,19 +228,12 @@ def _bmm_fp8_group_quant_kernel(
     Grid: (cdiv(B, BLOCK_SIZE_B), N)
     BLOCK_SIZE_V must be >= V so each tile covers a full group.
 
-    Scale output modes (SCALE_UE8M0 / TMA_ALIGNED):
-      - default:       fp32 scale written at (b, n) using supplied strides.
-                       Column-major is handled automatically by passing
-                       swapped strides.
-      - SCALE_UE8M0:   scale rounded up to the next power of 2 before storing
-                       (matches `per_token_group_quant_8bit` with scale_ue8m0).
-      - TMA_ALIGNED:   scale rounded to UE8M0, then its 8-bit exponent is
-                       packed into one byte of a uint32 at
-                         out_idx = (n // 4) * tma_aligned_mn + b,
-                         pos     = n % 4
-                       matching `per_token_group_quant_8bit_packed`. Requires
-                       the scales buffer to be pre-zeroed so disjoint-byte
-                       atomic_or writes sum correctly, including padding.
+    Scale output:
+      - default:     fp32 scale written at (b, n) using supplied strides.
+                     Row- vs column-major (incl. TMA-aligned strides) is
+                     handled by passing the strides of the caller's tensor.
+      - SCALE_UE8M0: scale rounded up to the next power of 2 before storing
+                     (matches `per_token_group_quant_8bit` with scale_ue8m0).
     """
     pid_b = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -310,18 +299,8 @@ def _bmm_fp8_group_quant_kernel(
     tl.store(out_ptrs, result, mask=out_mask)
 
     b_mask_1d = offs_b < B
-    if TMA_ALIGNED:
-        # Pack the UE8M0 exponent of `scale` into one byte of a uint32.
-        bits = scale.to(tl.uint32, bitcast=True)
-        exponent = (bits >> 23) & 0xFF
-        pack_idx = pid_n // 4
-        pos = pid_n % 4
-        packed_val = exponent << (pos * 8)
-        scale_addr = scales_ptr + pack_idx * tma_aligned_mn + offs_b
-        tl.atomic_or(scale_addr, packed_val, mask=b_mask_1d)
-    else:
-        scale_ptrs = scales_ptr + offs_b * stride_scales_b + pid_n * stride_scales_n
-        tl.store(scale_ptrs, scale, mask=b_mask_1d)
+    scale_ptrs = scales_ptr + offs_b * stride_scales_b + pid_n * stride_scales_n
+    tl.store(scale_ptrs, scale, mask=b_mask_1d)
 
 
 def bmm_fp8_group_quant(
@@ -330,7 +309,6 @@ def bmm_fp8_group_quant(
     output: torch.Tensor,
     output_scales: torch.Tensor,
     scale_ue8m0: bool = False,
-    tma_aligned: bool = False,
 ) -> None:
     """Fused batched matrix multiply + per-group dynamic FP8 quantization.
 
@@ -341,16 +319,10 @@ def bmm_fp8_group_quant(
         input: (N, B, L) input tensor in bf16/fp16
         weight: (N, L, V) weight tensor in bf16/fp16
         output: (B, N*V) pre-allocated output tensor in FP8
-        output_scales: pre-allocated scales buffer. Layout depends on flags:
-            - default: (B, N) fp32. Row- or column-major is inferred from
-              strides (caller supplies the layout it wants filled in).
-            - scale_ue8m0=True: same (B, N) fp32, values rounded up to the
-              next power of 2 (UE8M0 representation).
-            - tma_aligned=True: (B, ceil(N/4)) int32 with strides
-              (1, ((B+3)//4)*4) — packed UE8M0 exponents matching
-              `per_token_group_quant_8bit_packed`. Implies scale_ue8m0=True.
+        output_scales: pre-allocated (B, N) fp32 scales buffer. Row- or
+            column-major (incl. TMA-aligned) is selected by the strides of
+            the tensor the caller passes in.
         scale_ue8m0: store scales as power-of-2 (UE8M0).
-        tma_aligned: store scales in the DeepGEMM packed UE8M0 layout.
     """
     assert input.ndim == 3
     assert weight.ndim == 3
@@ -371,41 +343,12 @@ def bmm_fp8_group_quant(
         f"(group_size for kFp8Dynamic128Sym), got V={V}"
     )
 
-    if tma_aligned:
-        # TMA-packed layout: (mn, ceil(N/4)) int32 with strides (1, stride_pack).
-        # `stride_pack` is the distance (in int32) between adjacent 4-scale
-        # packs — read from the tensor so sliced buffers (MQA/MHA splits that
-        # reuse a larger underlying allocation) work transparently.
-        k_num_packed_sfk = (N + 3) // 4
-        assert output_scales.dtype == torch.int32, (
-            f"tma_aligned scales must be int32, got {output_scales.dtype}"
-        )
-        assert output_scales.shape == (B, k_num_packed_sfk), (
-            f"tma_aligned scales shape must be {(B, k_num_packed_sfk)}, "
-            f"got {tuple(output_scales.shape)}"
-        )
-        assert output_scales.stride(0) == 1, (
-            f"tma_aligned scales must have stride(0)==1, got {output_scales.stride()}"
-        )
-        # Kernel uses atomic_or to pack disjoint bytes — requires zero init on
-        # the visible region, which also handles mn / head padding bytes
-        # inside the slice.
-        output_scales.zero_()
-        stride_scales_b = 0
-        stride_scales_n = 0
-        tma_aligned_mn = output_scales.stride(1)
-        effective_ue8m0 = True
-    else:
-        assert output_scales.shape == (B, N), (
-            f"scales shape must be {(B, N)}, got {tuple(output_scales.shape)}"
-        )
-        assert output_scales.dtype == torch.float32, (
-            f"non-packed scales must be float32, got {output_scales.dtype}"
-        )
-        tma_aligned_mn = 0
-        stride_scales_b = output_scales.stride(0)
-        stride_scales_n = output_scales.stride(1)
-        effective_ue8m0 = scale_ue8m0
+    assert output_scales.shape == (B, N), (
+        f"scales shape must be {(B, N)}, got {tuple(output_scales.shape)}"
+    )
+    assert output_scales.dtype == torch.float32, (
+        f"scales must be float32, got {output_scales.dtype}"
+    )
 
     _, fp8_max = get_fp8_min_max()
 
@@ -432,14 +375,12 @@ def bmm_fp8_group_quant(
         weight.stride(2),
         output.stride(0),
         output.stride(1),
-        stride_scales_b,
-        stride_scales_n,
-        tma_aligned_mn,
+        output_scales.stride(0),
+        output_scales.stride(1),
         BLOCK_SIZE_B=32,
         BLOCK_SIZE_V=block_size_v,
         BLOCK_SIZE_L=64,
         FP8_MAX=fp8_max,
         EPS=1e-12,
-        SCALE_UE8M0=effective_ue8m0,
-        TMA_ALIGNED=tma_aligned,
+        SCALE_UE8M0=scale_ue8m0,
     )
