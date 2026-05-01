@@ -31,6 +31,12 @@ class PEFTHelper:
 
     bias: Literal["none"] = field(default="none")
     modules_to_save: list[str] | None = field(default=None)
+    # PEFT 0.18+ `target_parameters`: list of parameter-path suffixes (e.g.
+    # "mlp.experts.gate_up_proj") for which LoRA was trained directly against
+    # an nn.Parameter instead of an nn.Module. Used by 3D MoE LoRA loading
+    # in model_manager._stack_moe_lora_weights to disambiguate the PEFT vs
+    # vLLM-native lora_A/B layout.
+    target_parameters: list[str] | None = field(default=None)
     # True to use Rank-Stabilized LoRA (rsLoRA, see: https://arxiv.org/abs/2312.03732)
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
