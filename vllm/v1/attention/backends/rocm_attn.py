@@ -113,49 +113,78 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
-        # Split-K decode workspace.  Profitable when num_seqs * num_kv_heads
-        # is below the GPU's CU count -- the 3-D kernel adds a K-direction
-        # parallelism dim so small-batch decode saturates the device on
-        # RDNA3 (96 CUs).  Threshold mirrors TRITON_ATTN.
-        self.seq_threshold_3D = max(
-            1, MIN_LAUNCH_GRID_SIZE_2D // max(self.num_heads_kv, 1)
-        )
+        # Split-K decode workspace -- RDNA3 ONLY.  Profitable when
+        # num_seqs * num_kv_heads is below the GPU's CU count: the 3-D
+        # kernel adds a K-direction parallelism dim so small-batch decode
+        # saturates the device on RDNA3 (96 CUs).  Threshold mirrors
+        # TRITON_ATTN.
+        #
+        # Skip the path on non-gfx11 ROCm devices: on CDNA (MI200/MI300)
+        # the existing `chunked_prefill_paged_decode` dispatches to the
+        # heavily-tuned C++ `paged_attention_rocm` kernel for the standard
+        # block sizes, and our Triton split-K is RDNA3-tuned (constants,
+        # CU count) -- preempting it on CDNA could regress those paths.
+        # The dispatcher in ``RocmAttentionImpl.forward`` checks
+        # ``softmax_segm_output is not None`` so leaving the workspaces as
+        # ``None`` here is enough to disable the 3-D path.
+        self._split_k_supported = False
+        if current_platform.is_rocm():
+            try:
+                from vllm.platforms.rocm import on_gfx11
 
-        self.decode_cudagraph_enabled = (
-            vllm_config.compilation_config.cudagraph_mode
-            in (
-                CUDAGraphMode.FULL_AND_PIECEWISE,
-                CUDAGraphMode.FULL_DECODE_ONLY,
-                CUDAGraphMode.FULL,
+                self._split_k_supported = on_gfx11()
+            except ImportError:
+                pass
+
+        if self._split_k_supported:
+            self.seq_threshold_3D = max(
+                1, MIN_LAUNCH_GRID_SIZE_2D // max(self.num_heads_kv, 1)
             )
-        )
-        if self.decode_cudagraph_enabled:
-            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-            if capture_sizes:
-                # Snap to the nearest captured batch size so a single graph
-                # covers the 3-D path without re-capture.
-                self.seq_threshold_3D = min(
-                    capture_sizes,
-                    key=lambda x: abs(x - self.seq_threshold_3D),
-                )
 
-        headdim_padded = next_power_of_2(self.headdim)
-        ns = NUM_PAR_SOFTMAX_SEGMENTS
-        self.softmax_segm_output = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, ns, headdim_padded),
-            dtype=torch.float32,
-            device=device,
-        )
-        self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, ns),
-            dtype=torch.float32,
-            device=device,
-        )
-        self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, ns),
-            dtype=torch.float32,
-            device=device,
-        )
+            self.decode_cudagraph_enabled = (
+                vllm_config.compilation_config.cudagraph_mode
+                in (
+                    CUDAGraphMode.FULL_AND_PIECEWISE,
+                    CUDAGraphMode.FULL_DECODE_ONLY,
+                    CUDAGraphMode.FULL,
+                )
+            )
+            if self.decode_cudagraph_enabled:
+                capture_sizes = (
+                    vllm_config.compilation_config.cudagraph_capture_sizes
+                )
+                if capture_sizes:
+                    # Snap to the nearest captured batch size so a single
+                    # graph covers the 3-D path without re-capture.
+                    self.seq_threshold_3D = min(
+                        capture_sizes,
+                        key=lambda x: abs(x - self.seq_threshold_3D),
+                    )
+
+            headdim_padded = next_power_of_2(self.headdim)
+            ns = NUM_PAR_SOFTMAX_SEGMENTS
+            self.softmax_segm_output = torch.empty(
+                (self.seq_threshold_3D, self.num_heads_q, ns, headdim_padded),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.softmax_segm_max = torch.empty(
+                (self.seq_threshold_3D, self.num_heads_q, ns),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.softmax_segm_expsum = torch.empty(
+                (self.seq_threshold_3D, self.num_heads_q, ns),
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            # Workspaces left as None disables the 3-D path; CDNA / non-ROCm
+            # falls through to the existing chunked_prefill_paged_decode flow.
+            self.seq_threshold_3D = 0
+            self.softmax_segm_output = None
+            self.softmax_segm_max = None
+            self.softmax_segm_expsum = None
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
