@@ -10,6 +10,7 @@ from torch._inductor.pattern_matcher import (
     PatternMatcherPass,
     register_graph_pattern,
 )
+from torch._library.triton import set_wrap_triton_enabled
 from torch._ops import OpOverload, OpOverloadPacket
 
 from vllm.config import VllmConfig
@@ -92,14 +93,19 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Defaults not present on node.args but required for replacement tracing
         bound_args = ir_op._py_signature.bind(*node.args)
         bound_args.apply_defaults()
-        match.replace_by_example(ir_op_impl.impl_fn, bound_args.args)
+        match.replace_by_example(
+            ir_op_impl.impl_fn, bound_args.args, run_functional_passes=False
+        )
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         # clear at the beginning instead of end, so that tests can inspect
         self.selected_impls.clear()
 
-        count = self.patterns.apply(graph)
+        # Triton wrap is disabled in the forward context, enable it during lowering.
+        # This way make_fx replacement tracing handles the Triton kernel correctly.
+        with set_wrap_triton_enabled(True):
+            count = self.patterns.apply(graph)
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
 
         # TODO write self.selected_impls to depyf/tlparse dir

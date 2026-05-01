@@ -3,6 +3,7 @@
 import pytest
 import torch
 from torch import nn
+from torch._library.triton import set_wrap_triton_enabled
 
 import vllm.kernels  # noqa: F401 to register kernels
 from vllm import ir
@@ -47,6 +48,7 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
     with (
         ops.rms_norm.set_priority([rms_provider, "native"]),
         ir.enable_torch_wrap(True),
+        set_wrap_triton_enabled(False),  # set by default in forward context
     ):
         compiled_model = torch.compile(model, backend=backend, fullgraph=True)
         compiled_unlowered_model = torch.compile(
