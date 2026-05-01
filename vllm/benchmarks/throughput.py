@@ -338,10 +338,14 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-def validate_random_dataset_args(
+def get_random_dataset_args(
     args: argparse.Namespace, dataset_name: str
 ) -> tuple[int | None, int | None]:
-    """Validate and return input/output lengths for random datasets.
+    """Get input/output lengths for random datasets.
+
+    Prefers random-specific parameters over generic ones. If neither is
+    specified, datasets.py will fall back to RandomDataset.DEFAULT_INPUT_LEN
+    and DEFAULT_OUTPUT_LEN (1024/128).
 
     Args:
         args: Command line arguments.
@@ -349,25 +353,9 @@ def validate_random_dataset_args(
 
     Returns:
         Tuple of (random_input_len, random_output_len).
-
-    Raises:
-        ValueError: If neither random-specific nor generic length parameters
-                    are specified.
     """
     random_input_len = getattr(args, "random_input_len", None)
     random_output_len = getattr(args, "random_output_len", None)
-
-    # Validate that user provided length values
-    if random_input_len is None and args.input_len is None:
-        raise ValueError(
-            f"When using --dataset-name={dataset_name}, you must specify "
-            "either --random-input-len or --input-len"
-        )
-    if random_output_len is None and args.output_len is None:
-        raise ValueError(
-            f"When using --dataset-name={dataset_name}, you must specify "
-            "either --random-output-len or --output-len"
-        )
 
     return random_input_len, random_output_len
 
@@ -396,10 +384,8 @@ def get_requests(args, tokenizer):
         sample_kwargs["prefix_len"] = (
             random_prefix_len if random_prefix_len is not None else args.prefix_len
         )
-        # Validate and get random dataset parameters
-        random_input_len, random_output_len = validate_random_dataset_args(
-            args, "random"
-        )
+        # Get random dataset parameters (prefer random-specific over generic)
+        random_input_len, random_output_len = get_random_dataset_args(args, "random")
 
         sample_kwargs["input_len"] = (
             random_input_len if random_input_len is not None else args.input_len
@@ -485,10 +471,8 @@ def get_requests(args, tokenizer):
         sample_kwargs["output_len"] = args.prefix_repetition_output_len
     elif args.dataset_name == "random-mm":
         dataset_cls = RandomMultiModalDataset
-        # Validate and get random dataset parameters
-        random_input_len, random_output_len = validate_random_dataset_args(
-            args, "random-mm"
-        )
+        # Get random dataset parameters (prefer random-specific over generic)
+        random_input_len, random_output_len = get_random_dataset_args(args, "random-mm")
 
         sample_kwargs["input_len"] = (
             random_input_len
@@ -519,8 +503,8 @@ def get_requests(args, tokenizer):
         sample_kwargs["range_ratio"] = args.random_range_ratio
     elif args.dataset_name == "random-rerank":
         dataset_cls = RandomDatasetForReranking
-        # Validate and get random dataset parameters
-        random_input_len, random_output_len = validate_random_dataset_args(
+        # Get random dataset parameters (prefer random-specific over generic)
+        random_input_len, random_output_len = get_random_dataset_args(
             args, "random-rerank"
         )
 
