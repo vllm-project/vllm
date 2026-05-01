@@ -1343,21 +1343,26 @@ class GPUModelRunner(
             # because the sampled tokens are already cached.
             if not is_last_rank:
                 start_token_index = self.input_batch.num_tokens_no_spec[req_index]
-                full_num_tokens_no_spec = num_computed_tokens + len(new_token_ids)
-                num_new_tokens = full_num_tokens_no_spec - start_token_index
-                if new_token_ids and num_new_tokens > 0:
-                    # Add new_token_ids to token_ids_cpu.
-                    tokens_to_append = new_token_ids[-num_new_tokens:]
-                    end_token_index = start_token_index + num_new_tokens
-                    self.input_batch.token_ids_cpu[
+                # For chunked prefill, num_computed_tokens may less
+                # than num_tokens_no_spec.
+                # Async scheduled PP: no new_token_ids, advance num_tokens_no_spec
+                # according to num_computed_tokens.
+                end_token_index = max(
+                    start_token_index,
+                    num_computed_tokens + len(new_token_ids),
+                )
+                if end_token_index > start_token_index:
+                    if new_token_ids:
+                        # Add new_token_ids to token_ids_cpu.
+                        num_new_tokens = end_token_index - start_token_index
+                        tokens_to_append = new_token_ids[-num_new_tokens:]
+                        self.input_batch.token_ids_cpu[
+                            req_index, start_token_index:end_token_index
+                        ] = tokens_to_append
+                    self.input_batch.is_token_ids[
                         req_index, start_token_index:end_token_index
-                    ] = tokens_to_append
+                    ] = True
                     self.input_batch.num_tokens_no_spec[req_index] = end_token_index
-                else:
-                    self.input_batch.num_tokens_no_spec[req_index] = max(
-                        self.input_batch.num_tokens_no_spec[req_index],
-                        num_computed_tokens,
-                    )
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
