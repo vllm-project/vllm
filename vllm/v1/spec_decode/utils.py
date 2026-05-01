@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -563,7 +562,6 @@ def copy_and_expand_dflash_inputs_kernel(
     )
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def update_num_computed_tokens_for_batch_change(
     num_computed_tokens: torch.Tensor,
     num_accepted_tokens: torch.Tensor,
