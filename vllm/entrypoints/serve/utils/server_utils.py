@@ -3,12 +3,14 @@
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from argparse import Namespace
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from typing import ClassVar
 
 import pydantic
 from fastapi import FastAPI, HTTPException, Request
@@ -90,6 +92,117 @@ class AuthenticationMiddleware:
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
+
+
+class UnicodeFilterMiddleware:
+    """
+    Pure ASGI middleware that sanitizes incoming request payloads by
+    stripping characters in the Unicode "Tags" block (U+E0020 to U+E007F)
+    from request bodies sent to LLM completion endpoints.
+
+    These characters are invisible to humans but are tokenized by language
+    models, which can lead to unpredictable responses. The middleware is
+    intended to clean up requests from clients that emit unwanted Unicode
+    content. Normal Unicode, including emojis, is left untouched. Only
+    POST requests whose path matches :attr:`ROUTES_TO_FILTER` are
+    inspected; all other traffic passes through unchanged.
+
+    Pass ``use_translation_table=True`` to filter via ``str.translate``
+    with a precomputed table, which can be faster than the regex on
+    large payloads.
+    """
+
+    ROUTES_TO_FILTER: ClassVar[frozenset[str]] = frozenset(
+        {"/v1/chat/completions", "/v1/completions"}
+    )
+
+    # Unicode "Tags" block (U+E0020 - U+E007F).
+    UNICODE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"[\U000E0020-\U000E007F]"
+    )
+    _TRANSLATION_TABLE: ClassVar[dict[int, None]] = dict.fromkeys(
+        range(0xE0020, 0xE0080)
+    )
+
+    def __init__(self, app: ASGIApp, use_translation_table: bool = False) -> None:
+        self.app = app
+        self.use_translation_table = use_translation_table
+
+    def _filter_text(self, text: str) -> str:
+        if self.use_translation_table:
+            return text.translate(self._TRANSLATION_TABLE)
+        return self.UNICODE_PATTERN.sub("", text)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        root_path = scope.get("root_path", "")
+        path = URL(scope=scope).path.removeprefix(root_path)
+        if path not in self.ROUTES_TO_FILTER:
+            await self.app(scope, receive, send)
+            return
+
+        # Buffer the entire request body so we can rewrite it before
+        # forwarding to downstream handlers.
+        body = bytearray()
+        disconnected = False
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                disconnected = True
+                break
+            body.extend(message.get("body", b""))
+            more_body = message.get("more_body", False)
+
+        if disconnected:
+
+            async def disconnect_receive() -> Message:
+                return {"type": "http.disconnect"}
+
+            await self.app(scope, disconnect_receive, send) 
+            return
+
+        body_bytes = bytes(body)
+        try:
+            decoded = body_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            # Leave non-UTF-8 bodies alone; downstream will reject them.
+            decoded = None
+        if decoded is not None:
+            filtered = self._filter_text(decoded)
+            if filtered != decoded:
+                logger.debug(
+                    "UnicodeFilterMiddleware stripped tag-block characters from %s",
+                    path,
+                )
+                body_bytes = filtered.encode("utf-8")
+
+        # Keep Content-Length consistent with the (possibly rewritten) body.
+        new_headers = [
+            (k, v)
+            for k, v in scope.get("headers", [])
+            if k.lower() != b"content-length"
+        ]
+        new_headers.append((b"content-length", str(len(body_bytes)).encode()))
+        scope = {**scope, "headers": new_headers}
+
+        body_sent = False
+
+        async def replay_receive() -> Message:
+            nonlocal body_sent
+            if body_sent:
+                return {"type": "http.disconnect"}
+            body_sent = True
+            return {
+                "type": "http.request",
+                "body": body_bytes,
+                "more_body": False,
+            }
+
+        await self.app(scope, replay_receive, send)
 
 
 class XRequestIdMiddleware:

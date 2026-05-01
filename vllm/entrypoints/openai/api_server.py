@@ -268,6 +268,14 @@ def build_app(
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
+    if envs.VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE:
+        from vllm.entrypoints.openai.server_utils import UnicodeFilterMiddleware
+
+        app.add_middleware(
+            UnicodeFilterMiddleware,
+            use_translation_table=envs.VLLM_ENABLE_UNICODE_FILTERING_TRANSLATION_TABLE,
+        )
+
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware
         from vllm.entrypoints.speech_to_text.factories import (
