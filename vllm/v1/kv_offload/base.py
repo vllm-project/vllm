@@ -7,7 +7,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NewType
 
@@ -128,7 +128,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_load(
         self,
-        keys: Sequence[OffloadKey],
+        keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         """
@@ -147,7 +147,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Sequence[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey]):
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
@@ -157,7 +157,7 @@ class OffloadingManager(ABC):
         """
         return
 
-    def complete_load(self, keys: Iterable[OffloadKey]):
+    def complete_load(self, keys: Collection[OffloadKey]):
         """
         Marks previous blocks that were prepared to load as done loading.
 
@@ -169,7 +169,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_store(
         self,
-        keys: Sequence[OffloadKey],
+        keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         """
@@ -189,7 +189,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True):
+    def complete_store(self, keys: Collection[OffloadKey], success: bool = True):
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
