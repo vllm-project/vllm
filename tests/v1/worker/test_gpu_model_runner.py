@@ -760,9 +760,7 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner.rejection_sampler = Mock(return_value="sampler_output")
     runner.sampler = Mock()
     runner._draft_prob_req_ids = ["req_c", "req_a", "req_b"]
-    runner._draft_probs = torch.arange(
-        3 * 3 * 4, dtype=torch.float32
-    ).reshape(3, 3, 4)
+    runner._draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4)
 
     spec_decode_metadata = SpecDecodeMetadata.make_dummy(
         [[1, 2], [], [3]],

@@ -409,10 +409,7 @@ class SpecDecodeBaseProposer:
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if (
-            not self._enable_probabilistic_draft_probs
-            or sampling_metadata.all_greedy
-        ):
+        if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
             return self._greedy_sample(hidden_states), None
         logits = self.model.compute_logits(hidden_states)
         return self._sample_from_logits(logits, sampling_metadata)
@@ -650,9 +647,7 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
-            self._last_draft_probs = torch.stack(
-                draft_probs_list, dim=1
-            ).contiguous()
+            self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
         return draft_token_ids
 
     def _update_positions_dependent_metadata(
