@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import subprocess
+import sys
 from dataclasses import dataclass
 from functools import cache
 
@@ -122,13 +123,10 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
 
 def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
     cpu_list = _get_cpu_list()
-    if platform.system() == "Darwin":
-        return cpu_list
-
-    global_allowed_cpu_id_list = os.sched_getaffinity(0)  # type: ignore[attr-defined]
-    logical_cpu_list = [x for x in cpu_list if x.id in global_allowed_cpu_id_list]
-
-    return logical_cpu_list
+    if sys.platform == "linux":
+        allowed = os.sched_getaffinity(0)
+        return [x for x in cpu_list if x.id in allowed]
+    return cpu_list
 
 
 def get_visible_memory_node() -> list[int]:
