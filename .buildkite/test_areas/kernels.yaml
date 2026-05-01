@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: vLLM IR Tests
+  key: vllm-ir-tests
   timeout_in_minutes: 10
   device: h200_18gb
   working_dir: "/vllm-workspace/"
@@ -14,6 +15,7 @@ steps:
     - pytest -v -s tests/kernels/ir
 
 - label: Kernels Core Operation Test
+  key: kernels-core-operation-test
   timeout_in_minutes: 75
   source_file_dependencies:
   - csrc/
@@ -23,6 +25,7 @@ steps:
     - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
+  key: kernels-minimax-reduce-rms-test-2-gpus
   timeout_in_minutes: 15
   num_devices: 2
   device: h100
@@ -36,6 +39,7 @@ steps:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
 - label: Kernels Attention Test %N
+  key: kernels-attention-test
   timeout_in_minutes: 35
   source_file_dependencies:
   - csrc/attention/
@@ -49,6 +53,7 @@ steps:
   parallelism: 2
 
 - label: Kernels Quantization Test %N
+  key: kernels-quantization-test
   timeout_in_minutes: 90
   source_file_dependencies:
   - csrc/quantization/
@@ -59,6 +64,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test %N
+  key: kernels-moe-test
   timeout_in_minutes: 25
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -74,6 +80,7 @@ steps:
   parallelism: 5
 
 - label: Kernels Mamba Test
+  key: kernels-mamba-test
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/mamba/
@@ -82,7 +89,18 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels KDA Test
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/model_executor/layers/fla/ops/kda.py
+  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - tests/kernels/test_kda.py
+  commands:
+    - pytest -v -s kernels/test_kda.py
+
 - label: Kernels DeepGEMM Test (H100)
+  key: kernels-deepgemm-test-h100
   timeout_in_minutes: 45
   device: h100
   num_devices: 1
@@ -104,6 +122,7 @@ steps:
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
 - label: Kernels (B200)
+  key: kernels-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200
@@ -152,6 +171,7 @@ steps:
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
 - label: Kernels Helion Test
+  key: kernels-helion-test
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
@@ -163,6 +183,7 @@ steps:
 
  
 - label: Kernels FP8 MoE Test (1 H100)
+  key: kernels-fp8-moe-test-1-h100
   timeout_in_minutes: 90
   device: h100
   num_devices: 1
@@ -179,6 +200,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
 - label: Kernels FP8 MoE Test (2 H100s)
+  key: kernels-fp8-moe-test-2-h100s
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
@@ -188,6 +210,7 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: Kernels Fp4 MoE Test (B200)
+  key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 60
   device: b200
   num_devices: 1
@@ -200,6 +223,7 @@ steps:
 
 
 - label: Kernels FusedMoE Layer Test (2 H100s)
+  key: kernels-fusedmoe-layer-test-2-h100s
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
@@ -216,6 +240,7 @@ steps:
 
 
 - label: Kernels FusedMoE Layer Test (2 B200s)
+  key: kernels-fusedmoe-layer-test-2-b200s
   timeout_in_minutes: 90
   device: b200
   num_devices: 2

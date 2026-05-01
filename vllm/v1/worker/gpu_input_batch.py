@@ -50,6 +50,10 @@ class CachedRequestState:
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). See `Request.prompt_is_token_ids`.
+    prompt_is_token_ids: list[bool] | None = None
+
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
 
@@ -356,7 +360,12 @@ class InputBatch:
         end_idx = start_idx + len(request.output_token_ids)
         if request.prompt_token_ids is not None:
             self.token_ids_cpu[req_index, :num_prompt_tokens] = request.prompt_token_ids
-            self.is_token_ids[req_index, :num_prompt_tokens] = True
+            if request.prompt_is_token_ids is not None:
+                self.is_token_ids[req_index, :num_prompt_tokens] = (
+                    request.prompt_is_token_ids
+                )
+            else:
+                self.is_token_ids[req_index, :num_prompt_tokens] = True
         else:
             self.is_token_ids[req_index, :num_prompt_tokens] = False
         if request.prompt_embeds is not None:
