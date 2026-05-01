@@ -424,7 +424,9 @@ class Scheduler(SchedulerInterface):
 
             # Allocate the encoder cache.
             if encoder_inputs_to_schedule:
-                scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                scheduled_encoder_inputs[request.request_id] = (
+                    encoder_inputs_to_schedule
+                )
             for i in encoder_inputs_to_schedule:
                 self.encoder_cache_manager.allocate(request, i)
                 if self.ec_connector is not None:

@@ -7,6 +7,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import FCFSRequestQueue
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
@@ -273,7 +274,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
     scheduler.requests = {request.request_id: request}
-    scheduler.running = [request]
+    scheduler.running = FCFSRequestQueue([request])
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()
     scheduler.kv_cache_manager.take_events.return_value = None
