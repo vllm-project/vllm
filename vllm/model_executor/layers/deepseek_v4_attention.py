@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
@@ -385,6 +386,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.ln_events[0],
             self.ln_events[1:4],
             self.aux_stream_list[:3],
+            enable=envs.VLLM_ENABLE_MULTI_STREAM_GEMM,
         )
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
