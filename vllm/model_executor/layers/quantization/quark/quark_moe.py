@@ -55,6 +55,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -1040,6 +1041,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kFp8StaticTensorSym
             )
+        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
+            # W4A4: MXFP4 weights + MXFP4 activations
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=kMxfp4Dynamic
+            )
 
         # Validation for unsupported schemes
         if any(
@@ -1059,45 +1065,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "Please open an issue."
             )
 
-        self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
-
         self.model_type = getattr(
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        # TODO: Remove once all OCP MX schemes use the kernel abstraction
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4", "w_mxfp4_a_fp8")
-        self.emulate = (
-            not current_platform.supports_mx()
-            or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES
-        ) and (
-            self.mxfp4_backend is Mxfp4MoeBackend.NONE or not self.use_rocm_aiter_moe
-        )
-
-        if self.emulate:
-            # We use the same code path between MXFP4/MXFP6 emulation.
+        # If no native backend available, use emulation.
+        if self.mxfp4_backend is Mxfp4MoeBackend.NONE:
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
 
-        # TODO: Remove `self.mxfp4_backend != Mxfp4MoeBackend.NONE` and make it so that
-        # all MXFP4 backends use the kernel abstraction.
-        if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
 
-        # Log backend selection
-        if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
-            logger.info_once(
-                f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
-            )
-        elif self.emulate:
-            logger.warning_once(
-                f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_rocm_aiter_moe={self.use_rocm_aiter_moe}, "
-                f"ocp_mx_scheme={self.ocp_mx_scheme}) "
-                "does not support native MXFP4/MXFP6 "
-                "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
-            )
+        logger.info_once(
+            f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
+        )
 
     def maybe_roundup_sizes(
         self,
@@ -1372,6 +1352,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
+
+        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
 
         torch.accelerator.empty_cache()
 

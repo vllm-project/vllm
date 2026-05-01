@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
 )
 
@@ -378,6 +379,21 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
+            reason = (
+                f"{reason}. AITER MoE is not enabled — "
+                "set VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 "
+                "to enable it"
+            )
+        return is_supported, reason
+
+    @staticmethod
     def _supports_current_device() -> bool:
         return rocm_aiter_ops.is_fused_moe_enabled()
 
@@ -501,3 +517,17 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
+
+
+class AiterMxfp4Experts(AiterExperts):
+    """MXFP4 W4A4 variant: MXFP4 weights + dynamic MXFP4 activations."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (
+            kMxfp4Static,
+            kMxfp4Dynamic,
+        )
