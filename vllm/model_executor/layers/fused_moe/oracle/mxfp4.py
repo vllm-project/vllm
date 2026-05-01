@@ -1195,10 +1195,18 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif mxfp4_backend in (
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-    ):
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+        return mxfp4_mxfp8_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+            mx_alignment=256,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8:
         return mxfp4_mxfp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
@@ -1250,7 +1258,6 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
-    # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
