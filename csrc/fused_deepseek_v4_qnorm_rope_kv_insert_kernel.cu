@@ -437,8 +437,8 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
       kv_block_stride);
 #else
   // ROCm: use standard kernel launch syntax (no PDL/stream serialization)
+  // clang-format off
   fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<scalar_t_in>
-      // clang-format off
       <<<grid, kBlockSize, 0, stream>>>(
           q_inout, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache,
           eps, num_tokens_full, num_tokens_insert, num_heads_q,
