@@ -116,6 +116,22 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
                 *sparse_backends,
             ]
+        elif device_capability.major == 9:
+            # Hopper (SM90) — CUTLASS FA3 is highest priority for sparse MLA
+            # with BF16 KV cache. Falls back to FlashMLA Sparse for FP8.
+            sparse_backends = [
+                AttentionBackendEnum.CUTLASS_FA3_MLA_SPARSE,
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+            ]
+            return [
+                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.CUTLASS_MLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.FLASHMLA,
+                AttentionBackendEnum.TRITON_MLA,
+                *sparse_backends,
+            ]
         else:
             return [
                 AttentionBackendEnum.FLASH_ATTN_MLA,

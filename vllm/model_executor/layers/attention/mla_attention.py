@@ -410,6 +410,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
             )
 
+        # CUTLASS FA3 MLA Sparse requires BF16 KV cache — force "auto" dtype
+        if self.attn_backend.get_name() == "CUTLASS_FA3_MLA_SPARSE":
+            if cache_config is not None:
+                cache_config.cache_dtype = "auto"
+            kv_cache_dtype = "auto"
+            logger.info_once(
+                "CUTLASS FA3 MLA Sparse backend requires BF16 KV cache. "
+                "Setting kv_cache_dtype to 'auto' (BF16)."
+            )
+
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
