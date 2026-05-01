@@ -3,7 +3,6 @@
 
 import json
 import os
-import platform
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -79,7 +78,7 @@ def parse_id_list(raw_str: str) -> list[int]:
 
 
 def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         # MacOS has no memory node
         return MemoryNodeInfo(
             total_memory=psutil.virtual_memory().total,
@@ -130,7 +129,7 @@ def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
 
 
 def get_visible_memory_node() -> list[int]:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         return [0]
 
     allowed_memory_node_list = get_memory_affinity()
@@ -161,7 +160,7 @@ def _synthesize_cpu_list() -> list[LogicalCPUInfo]:
 
 
 def _get_cpu_list() -> list[LogicalCPUInfo]:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         # For MacOS, no user-level CPU affinity and SMT, return all CPUs
         return _synthesize_cpu_list()
 
