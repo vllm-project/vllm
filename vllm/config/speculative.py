@@ -10,7 +10,7 @@ from typing_extensions import Self
 
 from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
-from vllm.config.model import ModelConfig
+from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -617,6 +617,7 @@ class SpeculativeConfig:
                 # lack a model_type key in config.json, so AutoConfig cannot
                 # detect them. When the method is explicitly "medusa", inject
                 # model_type so MedusaConfig.from_pretrained is used instead.
+                draft_hf_overrides: HfOverrides
                 if self.method == "medusa":
                     draft_hf_overrides = {"model_type": "medusa"}
                 else:
