@@ -24,20 +24,86 @@ path for those.
 Cudagraph-safe: the three workspace tensors must be pre-allocated by the
 metadata builder; this entry point performs no allocations.
 """
+from dataclasses import dataclass
 from typing import Final
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-# Number of parallel split-K segments per sequence.  Matches TRITON_ATTN's
-# default; chosen so that for typical Hkv >= 4 we land at >= 64 programs.
-NUM_PAR_SOFTMAX_SEGMENTS: Final[int] = 16
 
-# Below this many programs the 2-D kernel under-utilizes the GPU and the
-# 3-D split-K path becomes profitable.  Used by the dispatcher (not by
-# the kernel itself).
-MIN_LAUNCH_GRID_SIZE_2D: Final[int] = 128
+@dataclass(frozen=True)
+class SplitKArchConfig:
+    """Per-arch tuning constants for the split-K paged decode dispatcher.
+
+    The Triton kernel itself is hardware-portable; only the profitability
+    threshold and split-K degree are arch-specific.  Add an entry to
+    ``_SPLIT_K_ARCH_CONFIGS`` only after benchmarking against the existing
+    ``chunked_prefill_paged_decode`` path on that GPU -- on CDNA the C++
+    ``paged_attention_rocm`` kernel is heavily tuned and pre-empting it
+    can regress the well-optimized path.
+    """
+
+    # Below this many programs the default 2-D grid under-utilizes the
+    # GPU and the 3-D split-K kernel becomes profitable.  Roughly ~1.3x
+    # the CU count works well in practice (gfx1100: 96 CUs -> 128).
+    min_launch_grid_size_2d: int
+
+    # K-dimension parallel split-K degree.  Workspaces in the metadata
+    # builder are sized for this constant; matches TRITON_ATTN's default
+    # so for typical Hkv >= 4 we land at >= 64 programs.
+    num_par_softmax_segments: int
+
+
+# Per-arch tuning.  Keys are GCN arch substrings matched against
+# ``vllm.platforms.rocm._GCN_ARCH``.  Add entries here to enable the
+# split-K decode path on additional GPUs.
+#
+# Currently enabled:
+#   * gfx1100 (RX 7900 XT/XTX, 96 CUs) -- measured profitable on Qwen3.5
+#     dense W4A16 decode for batch <= ~16.
+#
+# Intentionally NOT enabled:
+#   * gfx942 (MI300X, 304 CUs), gfx950, gfx90a (MI250, 220 CUs):
+#     the existing C++ ``paged_attention_rocm`` is well tuned and the
+#     CU count differs by ~3x, so the threshold needs re-tuning before
+#     this path can safely override it.
+#   * Other RDNA3/4 (gfx1101/1150/1151/1200/1201): likely benefit but
+#     not validated; threshold may need adjustment for their CU counts.
+_SPLIT_K_ARCH_CONFIGS: dict[str, SplitKArchConfig] = {
+    "gfx1100": SplitKArchConfig(
+        min_launch_grid_size_2d=128,
+        num_par_softmax_segments=16,
+    ),
+}
+
+
+def get_split_k_arch_config() -> SplitKArchConfig | None:
+    """Return the split-K config for the current GPU, or ``None``.
+
+    ``None`` means the path is disabled for this device: the metadata
+    builder leaves the workspaces as ``None`` and the dispatcher in
+    :class:`RocmAttentionImpl` falls through to the standard 2-D
+    ``chunked_prefill_paged_decode`` path.
+    """
+    if not current_platform.is_rocm():
+        return None
+    try:
+        from vllm.platforms.rocm import _GCN_ARCH
+    except ImportError:
+        return None
+    for arch_key, cfg in _SPLIT_K_ARCH_CONFIGS.items():
+        if arch_key in _GCN_ARCH:
+            return cfg
+    return None
+
+
+# Default for ``paged_decode_split_k``'s ``num_segments`` kwarg.  Derived
+# from gfx1100 to keep a single source of truth.
+_DEFAULT_NUM_SEGMENTS: Final[int] = (
+    _SPLIT_K_ARCH_CONFIGS["gfx1100"].num_par_softmax_segments
+)
 
 
 @triton.jit
@@ -165,7 +231,7 @@ def _kernel_paged_decode_split_k(
         p = tl.where(m_j[:, None] == float("-inf"), 0.0, p)
         l_j = tl.sum(p, axis=1)
         alpha = tl.exp(M - m_j)
-        alpha = tl.where(M == float("-inf"), 0.0, alpha)
+        alpha = tl.where(float("-inf") == M, 0.0, alpha)
 
         acc = acc * alpha[:, None]
         L = L * alpha + l_j
@@ -268,7 +334,7 @@ def paged_decode_split_k(
     softmax_segm_output: torch.Tensor,
     softmax_segm_max: torch.Tensor,
     softmax_segm_expsum: torch.Tensor,
-    num_segments: int = NUM_PAR_SOFTMAX_SEGMENTS,
+    num_segments: int = _DEFAULT_NUM_SEGMENTS,
     tile_size: int = 16,
 ) -> None:
     """3-D split-K paged decode + reduce.

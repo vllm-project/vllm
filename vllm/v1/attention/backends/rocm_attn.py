@@ -34,12 +34,15 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.rocm_paged_prefill_attn import (
     is_available as rdna3_prefill_is_available,
+)
+from vllm.v1.attention.ops.rocm_paged_prefill_attn import (
     paged_prefill_attn_rdna3,
+)
+from vllm.v1.attention.ops.rocm_paged_prefill_attn import (
     supports_shape as rdna3_prefill_supports_shape,
 )
 from vllm.v1.attention.ops.rocm_split_k_decode import (
-    MIN_LAUNCH_GRID_SIZE_2D,
-    NUM_PAR_SOFTMAX_SEGMENTS,
+    get_split_k_arch_config,
     paged_decode_split_k,
 )
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -113,32 +116,23 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
-        # Split-K decode workspace -- RDNA3 ONLY.  Profitable when
-        # num_seqs * num_kv_heads is below the GPU's CU count: the 3-D
-        # kernel adds a K-direction parallelism dim so small-batch decode
-        # saturates the device on RDNA3 (96 CUs).  Threshold mirrors
-        # TRITON_ATTN.
-        #
-        # Skip the path on non-gfx11 ROCm devices: on CDNA (MI200/MI300)
-        # the existing `chunked_prefill_paged_decode` dispatches to the
-        # heavily-tuned C++ `paged_attention_rocm` kernel for the standard
-        # block sizes, and our Triton split-K is RDNA3-tuned (constants,
-        # CU count) -- preempting it on CDNA could regress those paths.
-        # The dispatcher in ``RocmAttentionImpl.forward`` checks
-        # ``softmax_segm_output is not None`` so leaving the workspaces as
-        # ``None`` here is enough to disable the 3-D path.
-        self._split_k_supported = False
-        if current_platform.is_rocm():
-            try:
-                from vllm.platforms.rocm import on_gfx11
+        # Split-K decode workspace -- gated by per-arch lookup.  Profitable
+        # when num_seqs * num_kv_heads is below the GPU's CU count: the
+        # 3-D kernel adds a K-direction parallelism dim so small-batch
+        # decode saturates the device.  Threshold + segment count are
+        # tuned per arch in ``_SPLIT_K_ARCH_CONFIGS``; ``None`` (= unknown
+        # arch / non-ROCm) leaves the workspaces unallocated and the
+        # dispatcher in ``RocmAttentionImpl.forward`` falls through to
+        # the standard 2-D ``chunked_prefill_paged_decode`` path (which
+        # is what CDNA's well-tuned C++ ``paged_attention_rocm`` lives
+        # behind).  See the dataclass docstring for the addition policy.
+        self._split_k_cfg = get_split_k_arch_config()
 
-                self._split_k_supported = on_gfx11()
-            except ImportError:
-                pass
-
-        if self._split_k_supported:
+        if self._split_k_cfg is not None:
             self.seq_threshold_3D = max(
-                1, MIN_LAUNCH_GRID_SIZE_2D // max(self.num_heads_kv, 1)
+                1,
+                self._split_k_cfg.min_launch_grid_size_2d
+                // max(self.num_heads_kv, 1),
             )
 
             self.decode_cudagraph_enabled = (
@@ -162,7 +156,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
                     )
 
             headdim_padded = next_power_of_2(self.headdim)
-            ns = NUM_PAR_SOFTMAX_SEGMENTS
+            ns = self._split_k_cfg.num_par_softmax_segments
             self.softmax_segm_output = torch.empty(
                 (self.seq_threshold_3D, self.num_heads_q, ns, headdim_padded),
                 dtype=torch.float32,
