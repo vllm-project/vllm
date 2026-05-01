@@ -40,6 +40,7 @@ from vllm.benchmarks.datasets.datasets import (
     process_audio,
     process_image,
     process_video,
+    resolve_random_dataset_args,
     zeta_prompt,
 )
 from vllm.benchmarks.datasets.utils import RangeRatio
@@ -67,6 +68,7 @@ __all__ = [
     "RandomDataset",
     "RandomDatasetForReranking",
     "RandomMultiModalDataset",
+    "resolve_random_dataset_args",
     "SampleRequest",
     "ShareGPTDataset",
     "SonnetDataset",

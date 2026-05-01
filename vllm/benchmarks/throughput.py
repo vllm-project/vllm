@@ -32,6 +32,7 @@ from vllm.benchmarks.datasets import (
     VisionArenaDataset,
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
+    resolve_random_dataset_args,
 )
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -338,28 +339,6 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-def get_random_dataset_args(
-    args: argparse.Namespace, dataset_name: str
-) -> tuple[int | None, int | None]:
-    """Get input/output lengths for random datasets.
-
-    Prefers random-specific parameters over generic ones. If neither is
-    specified, datasets.py will fall back to RandomDataset.DEFAULT_INPUT_LEN
-    and DEFAULT_OUTPUT_LEN (1024/128).
-
-    Args:
-        args: Command line arguments.
-        dataset_name: Name of the dataset (e.g., 'random', 'random-mm').
-
-    Returns:
-        Tuple of (random_input_len, random_output_len).
-    """
-    random_input_len = getattr(args, "random_input_len", None)
-    random_output_len = getattr(args, "random_output_len", None)
-
-    return random_input_len, random_output_len
-
-
 def get_requests(args, tokenizer):
     # Common parameters for all dataset types.
     common_kwargs = {
@@ -379,20 +358,12 @@ def get_requests(args, tokenizer):
         and args.dataset_name not in {"prefix_repetition", "random-mm", "random-rerank"}
     ):
         sample_kwargs["range_ratio"] = args.random_range_ratio
-        # prefer random_* arguments, fall back to regular arguments
-        random_prefix_len = getattr(args, "random_prefix_len", None)
-        sample_kwargs["prefix_len"] = (
-            random_prefix_len if random_prefix_len is not None else args.prefix_len
-        )
-        # Get random dataset parameters (prefer random-specific over generic)
-        random_input_len, random_output_len = get_random_dataset_args(args, "random")
 
-        sample_kwargs["input_len"] = (
-            random_input_len if random_input_len is not None else args.input_len
-        )
-        sample_kwargs["output_len"] = (
-            random_output_len if random_output_len is not None else args.output_len
-        )
+        # Get fully resolved random dataset parameters
+        prefix_len, input_len, output_len = resolve_random_dataset_args(args, "random")
+        sample_kwargs["prefix_len"] = prefix_len
+        sample_kwargs["input_len"] = input_len
+        sample_kwargs["output_len"] = output_len
         dataset_cls = RandomDataset
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
@@ -471,19 +442,14 @@ def get_requests(args, tokenizer):
         sample_kwargs["output_len"] = args.prefix_repetition_output_len
     elif args.dataset_name == "random-mm":
         dataset_cls = RandomMultiModalDataset
-        # Get random dataset parameters (prefer random-specific over generic)
-        random_input_len, random_output_len = get_random_dataset_args(args, "random-mm")
 
-        sample_kwargs["input_len"] = (
-            random_input_len
-            if random_input_len is not None
-            else getattr(args, "input_len", None)
+        # Get fully resolved random dataset parameters
+        prefix_len, input_len, output_len = resolve_random_dataset_args(
+            args, "random-mm"
         )
-        sample_kwargs["output_len"] = (
-            random_output_len
-            if random_output_len is not None
-            else getattr(args, "output_len", None)
-        )
+        sample_kwargs["prefix_len"] = prefix_len
+        sample_kwargs["input_len"] = input_len
+        sample_kwargs["output_len"] = output_len
         sample_kwargs["base_items_per_request"] = getattr(
             args, "random_mm_base_items_per_request", None
         )
@@ -495,29 +461,16 @@ def get_requests(args, tokenizer):
         )
         sample_kwargs["bucket_config"] = getattr(args, "random_mm_bucket_config", None)
         sample_kwargs["enable_multimodal_chat"] = True
-        random_prefix_len = getattr(args, "random_prefix_len", None)
-        prefix_len = getattr(args, "prefix_len", None)
-        sample_kwargs["prefix_len"] = (
-            random_prefix_len if random_prefix_len is not None else prefix_len
-        )
         sample_kwargs["range_ratio"] = args.random_range_ratio
     elif args.dataset_name == "random-rerank":
         dataset_cls = RandomDatasetForReranking
-        # Get random dataset parameters (prefer random-specific over generic)
-        random_input_len, random_output_len = get_random_dataset_args(
+
+        # Get fully resolved random dataset parameters
+        _prefix_len, input_len, output_len = resolve_random_dataset_args(
             args, "random-rerank"
         )
-
-        sample_kwargs["input_len"] = (
-            random_input_len
-            if random_input_len is not None
-            else getattr(args, "input_len", None)
-        )
-        sample_kwargs["output_len"] = (
-            random_output_len
-            if random_output_len is not None
-            else getattr(args, "output_len", None)
-        )
+        sample_kwargs["input_len"] = input_len
+        sample_kwargs["output_len"] = output_len
         sample_kwargs["batchsize"] = getattr(args, "random_batch_size", 1)
         sample_kwargs["is_reranker"] = not getattr(args, "no_reranker", False)
         sample_kwargs["range_ratio"] = args.random_range_ratio

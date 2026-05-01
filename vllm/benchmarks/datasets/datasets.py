@@ -1822,6 +1822,58 @@ def _parse_range_ratio(value: str) -> RangeRatio:
         return json.loads(value)
 
 
+def resolve_random_dataset_args(
+    args: argparse.Namespace, dataset_name: str
+) -> tuple[int, int, int]:
+    """Resolve input/output/prefix lengths for random datasets.
+
+    Implements complete fallback chain:
+    - prefix_len: random_prefix_len → prefix_len → 0
+    - input_len: random_input_len → input_len → DEFAULT_INPUT_LEN (1024)
+    - output_len: random_output_len → output_len → DEFAULT_OUTPUT_LEN (128)
+
+    Args:
+        args: Command line arguments.
+        dataset_name: Name of the dataset (e.g., 'random', 'random-mm').
+
+    Returns:
+        Tuple of (prefix_len, input_len, output_len) - all non-None integers.
+    """
+    # Prefix length resolution
+    random_prefix_len = getattr(args, "random_prefix_len", None)
+    prefix_len = (
+        random_prefix_len
+        if random_prefix_len is not None
+        else (getattr(args, "prefix_len", None) or 0)
+    )
+
+    # Input length resolution
+    random_input_len = getattr(args, "random_input_len", None)
+    input_len = (
+        random_input_len
+        if random_input_len is not None
+        else (
+            getattr(args, "input_len", None)
+            if getattr(args, "input_len", None) is not None
+            else RandomDataset.DEFAULT_INPUT_LEN
+        )
+    )
+
+    # Output length resolution
+    random_output_len = getattr(args, "random_output_len", None)
+    output_len = (
+        random_output_len
+        if random_output_len is not None
+        else (
+            getattr(args, "output_len", None)
+            if getattr(args, "output_len", None) is not None
+            else RandomDataset.DEFAULT_OUTPUT_LEN
+        )
+    )
+
+    return prefix_len, input_len, output_len
+
+
 def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
@@ -2039,6 +2091,11 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         )
 
     else:
+        # Resolve random dataset parameters once for all random dataset types
+        random_prefix_len, random_input_len, random_output_len = (
+            resolve_random_dataset_args(args, args.dataset_name)
+        )
+
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
@@ -2082,17 +2139,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
-                prefix_len=args.random_prefix_len,
-                input_len=(
-                    args.random_input_len
-                    if args.random_input_len is not None
-                    else RandomDataset.DEFAULT_INPUT_LEN
-                ),
-                output_len=(
-                    args.random_output_len
-                    if args.random_output_len is not None
-                    else RandomDataset.DEFAULT_OUTPUT_LEN
-                ),
+                prefix_len=random_prefix_len,
+                input_len=random_input_len,
+                output_len=random_output_len,
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
@@ -2105,18 +2154,10 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
-                prefix_len=args.random_prefix_len,
+                prefix_len=random_prefix_len,
                 range_ratio=args.random_range_ratio,
-                input_len=(
-                    args.random_input_len
-                    if args.random_input_len is not None
-                    else RandomDataset.DEFAULT_INPUT_LEN
-                ),
-                output_len=(
-                    args.random_output_len
-                    if args.random_output_len is not None
-                    else RandomDataset.DEFAULT_OUTPUT_LEN
-                ),
+                input_len=random_input_len,
+                output_len=random_output_len,
                 base_items_per_request=args.random_mm_base_items_per_request,
                 limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
@@ -2132,11 +2173,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
-                input_len=(
-                    args.random_input_len
-                    if args.random_input_len is not None
-                    else RandomDataset.DEFAULT_INPUT_LEN
-                ),
+                input_len=random_input_len,
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
