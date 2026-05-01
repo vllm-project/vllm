@@ -18,8 +18,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
-from contextlib import ExitStack, contextmanager, suppress
-import multiprocessing
+from contextlib import ExitStack, contextmanager
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Literal
