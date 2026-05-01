@@ -195,7 +195,8 @@ def pick_bmm_fp8_group_quant_config(
     if not config_keys:
         return None
 
-    input_tensor, _weight = args
+    # args is (input, weight, scale_ue8m0); only the input shape drives picking.
+    input_tensor = args[0]
     N = input_tensor.shape[0]
     B = input_tensor.shape[1]
 
@@ -273,10 +274,8 @@ def bmm_fp8_group_quant_helion(
         result = input[tile_n, tile_b, :] @ weight[tile_n, :, :]
         result_f32 = result.to(torch.float32)
 
-        # Per-group: compute abs_max over V dim for each (n, b)
-        # Use keepdim=True to keep 3D shape — avoids unsqueeze which
-        # triggers a Helion codegen bug with 2D→3D broadcasting.
-        abs_max = result_f32.abs().amax(dim=-1, keepdim=True)  # (tile_n, tile_b, 1)
+        # Per-group: compute abs_max over V dim for each (n, b).
+        abs_max = result_f32.abs().amax(dim=-1)  # (tile_n, tile_b)
         abs_max = abs_max.clamp(min=1e-12)
 
         if scale_ue8m0:
@@ -288,12 +287,15 @@ def bmm_fp8_group_quant_helion(
             inv_scale = 1.0 / group_scale
         else:
             group_scale = abs_max / _FP8_MAX
-            inv_scale = _FP8_MAX / abs_max  # broadcast
+            inv_scale = _FP8_MAX / abs_max
 
-        result_scaled = (result_f32 * inv_scale).clamp(-_FP8_MAX, _FP8_MAX)
+        # Broadcast 2D inv_scale across V to match result_f32 (3D).
+        result_scaled = (result_f32 * inv_scale.unsqueeze(-1)).clamp(
+            -_FP8_MAX, _FP8_MAX
+        )
 
         # Transpose first two dims in registers and write directly to (B, N, V)
         out[tile_b, tile_n, :] = result_scaled.transpose(0, 1).to(out.dtype)
-        scales[tile_b, tile_n] = group_scale.squeeze(-1).transpose(0, 1)
+        scales[tile_b, tile_n] = group_scale.transpose(0, 1)
 
     return out, scales
