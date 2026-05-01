@@ -5699,19 +5699,21 @@ class GPUModelRunner(
         )
         try:
             sampler_output = self.sampler(
-                logits=logits.clone(), sampling_metadata=dummy_metadata
+                logits=logits, sampling_metadata=dummy_metadata
             )
             # Also warm forward_native (taken when generators dict is non-empty),
             # but skip the extra call in 'processed_logits' / 'processed_logprobs'
             # modes — there TopKTopPSampler binds forward = forward_native at
             # init time, so the warmup call is redundant and only inflates peak
             # memory during profile_run.
+            # No .clone() of logits: warmup output is discarded, so any in-place
+            # mutation by forward_native does not affect correctness.
             if self.sampler.logprobs_mode not in (
                 "processed_logits",
                 "processed_logprobs",
             ):
                 self.sampler(
-                    logits=logits.clone(),
+                    logits=logits,
                     sampling_metadata=replace(
                         dummy_metadata,
                         generators={
