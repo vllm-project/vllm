@@ -38,10 +38,13 @@ def is_available() -> bool:
     if not current_platform.is_rocm():
         return False
     try:
-        from vllm.platforms.rocm import on_gfx11
+        from vllm.platforms.rocm import _GCN_ARCH
     except ImportError:
         return False
-    if not on_gfx11():
+    # gfx11xx (RDNA3 / RDNA3.5).  Substring match mirrors the pattern used
+    # by ``get_split_k_arch_config`` and avoids depending on an
+    # ``on_gfx11()`` helper that is not present on every vLLM revision.
+    if "gfx11" not in _GCN_ARCH:
         return False
     return hasattr(torch.ops._C, "paged_prefill_attn_rdna3")
 
