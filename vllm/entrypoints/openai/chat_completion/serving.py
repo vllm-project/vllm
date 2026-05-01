@@ -1051,10 +1051,7 @@ class OpenAIServingChat(OpenAIServing):
                             and reasoning_parser is not None
                             and delta_message is not None
                             and not delta_message.content
-                            and not (
-                                delta_message.tool_calls
-                                and delta_message.tool_calls
-                            )
+                            and not delta_message.tool_calls
                         ):
                             logger.warning(
                                 "MTP truncation detected for request %s: "
