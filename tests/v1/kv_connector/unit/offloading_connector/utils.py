@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -150,46 +150,61 @@ class MockOffloadingSpec(OffloadingSpec):
         return specs
 
 
+@dataclass(frozen=True)
+class GPUBlock:
+    group_idx: int
+    request_block_offset: int
+
+
 @dataclass
 class TransferSummary:
-    gpu_block_indices: list[int]
+    gpu_blocks: list[GPUBlock]
     offload_addresses: list[Any]
 
 
 class RequestRunner:
     def __init__(
         self,
-        offloaded_block_size: int,
-        gpu_block_size: int,
+        block_size: int,
         num_gpu_blocks: int,
+        block_size_factor: int = 1,
         async_scheduling: bool = True,
+        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ):
-        self.offloaded_block_size: int = offloaded_block_size
-        self.gpu_block_size: int = gpu_block_size
+        assert block_size_factor == 1 or kv_cache_groups is None, (
+            "block_size_factor > 1 requires all groups to have the same "
+            "block size, so kv_cache_groups must be None (use default group)"
+        )
+
+        self.block_size_factor: int = block_size_factor
+        self.block_size: int = block_size
         self.num_gpu_blocks: int = num_gpu_blocks
         self.async_scheduling: bool = async_scheduling
 
         self.req_id: int = -1
 
         vllm_config = create_vllm_config(
-            block_size=gpu_block_size, max_num_batched_tokens=1000
+            block_size=block_size,
+            max_num_batched_tokens=1000,
+            disable_hybrid_kv_cache_manager=False,
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
+
+        extra_config: dict[str, Any] = {
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",  # noqa: E501
+        }
+        if block_size_factor > 1:
+            extra_config["block_size"] = block_size * block_size_factor
+
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={
-                "spec_name": "MockOffloadingSpec",
-                "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",  # noqa: E501
-                "block_size": offloaded_block_size,
-            },
+            kv_connector_extra_config=extra_config,
         )
 
-        block_size = vllm_config.cache_config.block_size
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_gpu_blocks,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
+        if kv_cache_groups is None:
+            kv_cache_groups = [
                 KVCacheGroupSpec(
                     ["layer"],
                     FullAttentionSpec(
@@ -199,7 +214,12 @@ class RequestRunner:
                         dtype=torch.float32,
                     ),
                 )
-            ],
+            ]
+
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_gpu_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=kv_cache_groups,
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
@@ -219,11 +239,38 @@ class RequestRunner:
 
         # register worker kv_caches to enable OffloadingWorker creations
         # set_current_vllm_config is needed for get_kv_cache_layout() to work
-        with set_current_vllm_config(vllm_config):
-            self.worker_connector.register_cross_layers_kv_cache(
-                kv_cache=torch.empty(0),
-                attn_backend=FlashAttentionBackend,
-            )
+        # Mock get_layers_from_vllm_config so that mock layer names
+        # resolve to layers whose get_attn_backend() returns
+        # FlashAttentionBackend.
+        def _mock_get_layers(_vllm_config, _layer_type, layer_names):
+            mock_layer = MagicMock()
+            mock_layer.get_attn_backend.return_value = FlashAttentionBackend
+            return {name: mock_layer for name in layer_names}
+
+        kv_caches: dict[str, torch.Tensor] = {}
+        for group in kv_cache_groups:
+            spec = group.kv_cache_spec
+            for layer_name in group.layer_names:
+                # Shape follows FlashAttention layout:
+                # (2, num_blocks, block_size, num_kv_heads, head_size)
+                kv_caches[layer_name] = torch.empty(
+                    2,
+                    num_gpu_blocks,
+                    spec.block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    dtype=spec.dtype,
+                )
+
+        with (
+            set_current_vllm_config(vllm_config),
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1"
+                ".offloading.worker.get_layers_from_vllm_config",
+                side_effect=_mock_get_layers,
+            ),
+        ):
+            self.worker_connector.register_kv_caches(kv_caches)
 
         # extract connector of scheduler
         scheduler_connector = self.scheduler.connector
@@ -238,10 +285,17 @@ class RequestRunner:
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert len(self.connector_scheduler.config.kv_group_configs) == 1
-        kv_group_config = self.connector_scheduler.config.kv_group_configs[0]
-        assert kv_group_config.gpu_block_size == gpu_block_size
-        assert kv_group_config.offloaded_block_size == offloaded_block_size
+        num_kv_groups = len(kv_cache_config.kv_cache_groups)
+        assert len(self.connector_scheduler.config.kv_group_configs) == num_kv_groups
+        for group_config, kv_cache_group in zip(
+            self.connector_scheduler.config.kv_group_configs,
+            kv_cache_config.kv_cache_groups,
+        ):
+            gpu_block_size = kv_cache_group.kv_cache_spec.block_size
+            assert group_config.gpu_block_size == gpu_block_size
+            assert (
+                group_config.offloaded_block_size == gpu_block_size * block_size_factor
+            )
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker
@@ -250,18 +304,18 @@ class RequestRunner:
         assert isinstance(offloading_spec, MockOffloadingSpec)
         self.offloading_spec: MockOffloadingSpec = offloading_spec
 
-        # mapping (offloading address) -> gpu_block_index
-        self.offloaded: dict[Any, int] = {}
+        # mapping (offloading address) -> GPUBlock
+        self.offloaded: dict[Any, GPUBlock] = {}
 
         self.completed_loads: list[TransferSummary] = []
         self.completed_stores: list[TransferSummary] = []
-        self.flushed_gpu_block_indexes: set[int] = set()
+        self.flushed_gpu_blocks: set[GPUBlock] = set()
 
-        # maps {block_id: block_offset}
-        self.gpu_block_index: dict[int, int] = {}
+        # block_id -> GPUBlock
+        self.gpu_blocks: dict[int, GPUBlock] = {}
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(gpu_block_size, sha256)
+        self._block_hasher = get_request_block_hasher(block_size, sha256)
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
@@ -297,11 +351,9 @@ class RequestRunner:
             assert isinstance(src_spec, GPULoadStoreSpec)
 
             for block_id in src_spec.block_ids:
-                self.flushed_gpu_block_indexes.add(
-                    self.gpu_block_index[block_id.item()]
-                )
+                self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
 
-        block_size_factor = self.offloaded_block_size // self.gpu_block_size
+        block_size_factor = self.block_size_factor
 
         for transfer_spec in self.offloading_spec.get_completed_transfers():
             src_spec, dst_spec = transfer_spec
@@ -317,10 +369,11 @@ class RequestRunner:
 
             assert isinstance(offload_spec, MockLoadStoreSpec)
             assert isinstance(gpu_spec, GPULoadStoreSpec)
+            assert len(gpu_spec.group_sizes) == self.num_kv_groups
 
-            gpu_block_indices: list[int] = []
+            gpu_blocks: list[GPUBlock] = []
             for block_id in gpu_spec.block_ids:
-                gpu_block_indices.append(self.gpu_block_index[block_id.item()])
+                gpu_blocks.append(self.gpu_blocks[block_id.item()])
 
             # list of (offload_key, sub_block_offset)
             offload_addresses: list[Any] = []
@@ -328,30 +381,49 @@ class RequestRunner:
                 for sub_block_idx in range(block_size_factor):
                     offload_addresses.append((offload_key, sub_block_idx))
 
+            assert gpu_spec.block_indices is not None
+            assert len(gpu_spec.block_indices) == self.num_kv_groups
+
+            gpu_block_offset = 0
+            offload_address_offset = 0
+            for group_size, logical_offset in zip(
+                gpu_spec.group_sizes, gpu_spec.block_indices
+            ):
+                gpu_block_end_offset = gpu_block_offset + group_size
+                assert gpu_block_end_offset <= len(gpu_blocks)
+
+                offload_addresses_to_skip = logical_offset % block_size_factor
+                offload_addresses_end_offset = (
+                    offload_address_offset + offload_addresses_to_skip + group_size
+                )
+                assert offload_addresses_end_offset <= len(offload_addresses)
+
+                offload_addresses = (
+                    offload_addresses[:offload_address_offset]
+                    + offload_addresses[
+                        offload_address_offset + offload_addresses_to_skip :
+                    ]
+                )
+
+                gpu_block_offset += group_size
+                offload_address_offset += group_size
+
+            assert gpu_block_offset == len(gpu_blocks)
+            assert offload_address_offset == len(offload_addresses)
+
+            transfer_summary = TransferSummary(gpu_blocks, offload_addresses)
             if store:
-                assert len(gpu_block_indices) == len(offload_addresses)
-
-                self.completed_stores.append(
-                    TransferSummary(gpu_block_indices, offload_addresses)
-                )
+                self.completed_stores.append(transfer_summary)
             else:
-                remainder_sub_block_count = len(offload_addresses) - len(
-                    gpu_block_indices
-                )
-                assert remainder_sub_block_count >= 0
-                assert remainder_sub_block_count < block_size_factor
-                offload_addresses = offload_addresses[remainder_sub_block_count:]
+                self.completed_loads.append(transfer_summary)
 
-                self.completed_loads.append(
-                    TransferSummary(gpu_block_indices, offload_addresses)
-                )
-
-    def _update_gpu_block_idx(self):
-        for blocks in self.scheduler.kv_cache_manager.coordinator.single_type_managers[
-            0
-        ].req_to_blocks.values():
-            for block_idx, block in enumerate(blocks):
-                self.gpu_block_index[block.block_id] = block_idx
+    def _update_gpu_blocks(self):
+        for group_idx, manager in enumerate(
+            self.scheduler.kv_cache_manager.coordinator.single_type_managers
+        ):
+            for blocks in manager.req_to_blocks.values():
+                for block_idx, block in enumerate(blocks):
+                    self.gpu_blocks[block.block_id] = GPUBlock(group_idx, block_idx)
 
     def _run(self, decoded_tokens: list[int], complete_transfers: bool):
         """
@@ -376,7 +448,7 @@ class RequestRunner:
                 break
 
             scheduler_output = self.scheduler.schedule()
-            self._update_gpu_block_idx()
+            self._update_gpu_blocks()
 
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
@@ -447,13 +519,30 @@ class RequestRunner:
         if EOS_TOKEN_ID in decoded_tokens:
             assert not self.scheduler.running
 
+    def _to_gpu_blocks(
+        self, blocks: tuple[int | tuple[int, int], ...]
+    ) -> list[GPUBlock]:
+        gpu_blocks: list[GPUBlock] = []
+        for block in blocks:
+            if isinstance(block, int):
+                for group_idx in range(self.num_kv_groups):
+                    gpu_blocks.append(
+                        GPUBlock(group_idx=group_idx, request_block_offset=block)
+                    )
+            else:
+                group_idx, offset = block
+                gpu_blocks.append(
+                    GPUBlock(group_idx=group_idx, request_block_offset=offset)
+                )
+        return gpu_blocks
+
     def run(
         self,
         decoded_tokens: list[int],
         complete_transfers: bool = True,
-        expected_stored_gpu_block_indexes: tuple[int, ...] = (),
-        expected_loaded_gpu_block_indexes: tuple[int, ...] = (),
-        expected_flushed_gpu_block_indexes: tuple[int, ...] = (),
+        expected_stored: tuple[int | tuple[int, int], ...] = (),
+        expected_loaded: tuple[int | tuple[int, int], ...] = (),
+        expected_flushed: tuple[int | tuple[int, int], ...] = (),
     ):
         """
         Runs multiple engine (scheduler + worker) steps.
@@ -462,41 +551,49 @@ class RequestRunner:
         Args:
             decoded_tokens: the tokens to yield at each step.
             complete_transfers: complete transfers immediately
-            expected_stored_gpu_block_indexes: GPU block indexes
+            expected_stored: GPU blocks
                 that are expected to be written during the run.
-            expected_loaded_gpu_block_indexes: GPU block indexes
+            expected_loaded: GPU blocks
                 that are expected to be loaded during the run.
-            expected_flushed_gpu_block_indexes: GPU block indexes
+            expected_flushed: GPU blocks
                 that are expected to be flushed during the run.
+
+            A GPU block is either a (group_idx: int, request_block_offset: int)
+            or just request_block_offset: int.
+            The latter case is a convenience for representing all groups.
         """
+
+        expected_stored_gpu_blocks = self._to_gpu_blocks(expected_stored)
+        expected_loaded_gpu_blocks = self._to_gpu_blocks(expected_loaded)
+        expected_flushed_gpu_blocks = self._to_gpu_blocks(expected_flushed)
 
         self.manager.reset_mock()
         self._run(decoded_tokens, complete_transfers)
 
-        loaded_gpu_block_indexes: set[int] = set()
+        loaded_gpu_blocks: set[GPUBlock] = set()
         for transfer in self.completed_loads:
-            for gpu_block_idx, offloaded_address in zip(
-                transfer.gpu_block_indices, transfer.offload_addresses
+            for gpu_block, offloaded_address in zip(
+                transfer.gpu_blocks, transfer.offload_addresses
             ):
-                loaded_gpu_block_indexes.add(gpu_block_idx)
-                assert gpu_block_idx == self.offloaded[offloaded_address]
+                loaded_gpu_blocks.add(gpu_block)
+                assert gpu_block == self.offloaded[offloaded_address]
 
-        assert set(expected_loaded_gpu_block_indexes) == loaded_gpu_block_indexes
+        assert set(expected_loaded_gpu_blocks) == loaded_gpu_blocks
         self.completed_loads.clear()
 
-        stored_gpu_block_indexes: set[int] = set()
+        stored_gpu_blocks: set[GPUBlock] = set()
         for transfer in self.completed_stores:
-            for gpu_block_idx, offloaded_address in zip(
-                transfer.gpu_block_indices, transfer.offload_addresses
+            for gpu_block, offloaded_address in zip(
+                transfer.gpu_blocks, transfer.offload_addresses
             ):
-                stored_gpu_block_indexes.add(gpu_block_idx)
-                self.offloaded[offloaded_address] = gpu_block_idx
+                stored_gpu_blocks.add(gpu_block)
+                self.offloaded[offloaded_address] = gpu_block
 
-        assert set(expected_stored_gpu_block_indexes) == stored_gpu_block_indexes
+        assert set(expected_stored_gpu_blocks) == stored_gpu_blocks
         self.completed_stores.clear()
 
-        assert set(expected_flushed_gpu_block_indexes) == self.flushed_gpu_block_indexes
-        self.flushed_gpu_block_indexes.clear()
+        assert set(expected_flushed_gpu_blocks) == self.flushed_gpu_blocks
+        self.flushed_gpu_blocks.clear()
 
 
 @pytest.fixture
@@ -504,13 +601,18 @@ def request_runner():
     runners = []
 
     def runner_factory(
-        offloaded_block_size, gpu_block_size, num_gpu_blocks, async_scheduling
+        block_size,
+        num_gpu_blocks,
+        async_scheduling,
+        block_size_factor=1,
+        kv_cache_groups=None,
     ):
         runner = RequestRunner(
-            offloaded_block_size=offloaded_block_size,
-            gpu_block_size=gpu_block_size,
+            block_size=block_size,
             num_gpu_blocks=num_gpu_blocks,
+            block_size_factor=block_size_factor,
             async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
         )
         runners.append(runner)
         return runner
