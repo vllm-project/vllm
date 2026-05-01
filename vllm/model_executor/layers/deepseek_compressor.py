@@ -221,7 +221,7 @@ class DeepseekCompressor(nn.Module):
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,
             return_bias=False,
-            quant_config=None,
+            quant_config=vllm_config.quant_config,
             disable_tp=True,
             prefix=f"{prefix}.fused_wkv_wgate",
         )
