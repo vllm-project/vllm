@@ -78,14 +78,12 @@ direct_register_aiter_op(
 
 rms_add_no_var_16bit_only = (
     lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
-    and x.dtype
-    in (
-        torch.float16,
-        torch.bfloat16,
-    )
+    and x.dtype in (torch.float16, torch.bfloat16)
+    and (weight is None or weight.dtype == x.dtype)
 )
 """
 AITER fused_add_rms_norm only supports 16-bit activations and no var_size override.
+Requires weight dtype to match x dtype.
 """
 
 

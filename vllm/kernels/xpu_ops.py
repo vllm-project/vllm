@@ -40,6 +40,7 @@ def rms_norm(
 
 rms_add_no_var_size = (
     lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+    and (weight is None or weight.dtype == x.dtype)
 )
 
 

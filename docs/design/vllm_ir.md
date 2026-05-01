@@ -228,7 +228,7 @@ residual_out = out[1]
 ```
 
 The pass also tracks which inputs were "donated" (passed to `maybe_inplace`),
-storing this information in vLLM's  `PassContext` for later use in clone elimination.
+storing this information in vLLM's `PassContext` for later use in clone elimination.
 
 ### 3. IR Fusion and Transformation Passes
 
