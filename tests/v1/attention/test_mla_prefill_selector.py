@@ -13,7 +13,6 @@ from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnu
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
-    _get_mla_prefill_backend_priorities,
     get_mla_prefill_backend,
     is_deepseek_r1_mla_compatible,
 )
@@ -108,37 +107,6 @@ class TestIsDeepseekR1MLACompatible:
         mock_vllm_config = MagicMock(spec=VllmConfig)
         mock_vllm_config.model_config = None
         assert is_deepseek_r1_mla_compatible(mock_vllm_config) is False
-
-
-class TestGetMLAPrefillBackendPriorities:
-    """Tests for _get_mla_prefill_backend_priorities function."""
-
-    def test_blackwell_priorities(self):
-        """Test backend priorities for Blackwell (SM10.x)."""
-        capability = DeviceCapability(major=10, minor=0)
-        priorities = _get_mla_prefill_backend_priorities(capability)
-
-        assert len(priorities) == 4
-        assert priorities[0] == MLAPrefillBackendEnum.TRTLLM_RAGGED
-        assert priorities[1] == MLAPrefillBackendEnum.FLASHINFER
-        assert priorities[2] == MLAPrefillBackendEnum.CUDNN
-        assert priorities[3] == MLAPrefillBackendEnum.FLASH_ATTN
-
-    def test_hopper_priorities(self):
-        """Test backend priorities for Hopper (SM9.x)."""
-        capability = DeviceCapability(major=9, minor=0)
-        priorities = _get_mla_prefill_backend_priorities(capability)
-
-        assert len(priorities) == 1
-        assert priorities[0] == MLAPrefillBackendEnum.FLASH_ATTN
-
-    def test_older_gpu_priorities(self):
-        """Test backend priorities for older GPUs (SM8.x)."""
-        capability = DeviceCapability(major=8, minor=0)
-        priorities = _get_mla_prefill_backend_priorities(capability)
-
-        assert len(priorities) == 1
-        assert priorities[0] == MLAPrefillBackendEnum.FLASH_ATTN
 
 
 class TestGetMLAPrefillBackend:
@@ -356,10 +324,6 @@ class TestMLAPrefillBackendEnum:
         """Test FlashInfer backend has correct path."""
         assert "flashinfer" in MLAPrefillBackendEnum.FLASHINFER.get_path()
 
-    def test_cudnn_backend_path(self):
-        """Test cuDNN backend has correct path."""
-        assert "cudnn" in MLAPrefillBackendEnum.CUDNN.get_path()
-
     def test_trtllm_ragged_backend_path(self):
         """Test TRT-LLM Ragged backend has correct path."""
         assert "trtllm_ragged" in MLAPrefillBackendEnum.TRTLLM_RAGGED.get_path()
@@ -404,26 +368,6 @@ class TestBackendValidation:
             DeviceCapability(major=9, minor=0)
         )
         assert not FlashInferPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=8, minor=0)
-        )
-
-    def test_cudnn_only_supports_blackwell(self):
-        """Test cuDNN only supports Blackwell."""
-        try:
-            from vllm.v1.attention.backends.mla.prefill.cudnn import (
-                CudnnPrefillBackend,
-            )
-        except ImportError:
-            pytest.skip("cuDNN prefill backend not available")
-
-        # Only Blackwell (SM10)
-        assert CudnnPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=10, minor=0)
-        )
-        assert not CudnnPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=9, minor=0)
-        )
-        assert not CudnnPrefillBackend.supports_compute_capability(
             DeviceCapability(major=8, minor=0)
         )
 
@@ -524,11 +468,6 @@ class TestDeprecatedFlagMigration:
         """No deprecated flags set means mla_prefill_backend stays None."""
         config = AttentionConfig()
         assert config.mla_prefill_backend is None
-
-    def test_use_cudnn_prefill_migrates_to_cudnn(self):
-        """use_cudnn_prefill=True migrates to CUDNN backend."""
-        config = AttentionConfig(use_cudnn_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.CUDNN
 
     def test_use_trtllm_ragged_migrates_to_trtllm_ragged(self):
         """use_trtllm_ragged_deepseek_prefill=True migrates to TRTLLM_RAGGED."""
