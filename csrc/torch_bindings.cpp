@@ -442,6 +442,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
+  // Paged prefill attention for AMD RDNA3 (gfx1100). WMMA-based 16M ×
+  // 16K tile, 1 wave per block, two-phase iteration (cached prefix +
+  // current chunk). Replaces the Triton context_attention_fwd path
+  // for ROCM_ATTN. fp16/bf16, head_size == 128 (v1).
+  ops.def(
+      "paged_prefill_attn_rdna3(Tensor! out, Tensor q, Tensor k_chunk, "
+      "Tensor v_chunk, Tensor k_cache, Tensor v_cache, Tensor block_table, "
+      "Tensor cu_seqlens_q, Tensor seq_lens, float sm_scale, bool causal) "
+      "-> ()");
+  ops.impl("paged_prefill_attn_rdna3", torch::kCUDA,
+           &paged_prefill_attn_rdna3);
+
   // Compute FP8 quantized tensor for given scaling factor.
   // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
   // scaling. Optional group_m/group_n specify the group shape explicitly;
