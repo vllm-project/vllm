@@ -480,7 +480,6 @@ def hc_head_fuse_tilelang(
     """
     num_tokens = T.dynamic("num_tokens")
     hc_dim = hc_mult * hidden_size
-    # cf. tile_kernels.mhc.pre_apply_mix_kernel line 25: h_blk = math.gcd(h_blk, hidden)
     h_block = math.gcd(h_blk, hidden_size)
     n_h = hidden_size // h_block
 
