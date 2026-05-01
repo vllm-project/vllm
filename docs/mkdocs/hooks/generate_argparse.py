@@ -38,8 +38,20 @@ class MockCustomOp:
         return decorator
 
 
+class MockPluggableLayer:
+    @staticmethod
+    def register(name):
+        def decorator(cls):
+            return cls
+
+        return decorator
+
+
 mock_if_no_torch("vllm._C", MagicMock())
-mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
+mock_if_no_torch(
+    "vllm.model_executor.custom_op",
+    MagicMock(CustomOp=MockCustomOp, PluggableLayer=MockPluggableLayer),
+)
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
