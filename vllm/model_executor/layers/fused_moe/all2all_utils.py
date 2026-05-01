@@ -228,23 +228,37 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_fi_nvl_one_sided_kernels:
         assert quant_config is not None
-        if quant_config.quant_dtype != "nvfp4":
-            raise ValueError(
-                "The 'flashinfer_nvlink_one_sided' all2all backend only "
-                "supports nvfp4 activation quantization, but got "
-                f"quant_dtype={quant_config.quant_dtype!r}. Use a different "
-                "all2all backend (e.g. 'flashinfer_nvlink_two_sided' or "
-                "'allgather_reducescatter') for non-nvfp4 models."
-            )
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
+        if quant_config.quant_dtype is None:
+            dispatch_dtype_bytes_per_elem = 2
+            dispatch_scale_bytes_per_token = 0
+        elif quant_config.quant_dtype == "nvfp4":
+            dispatch_dtype_bytes_per_elem = 0
+            dispatch_scale_bytes_per_token = moe.hidden_dim // 16
+        elif quant_config.quant_dtype == "mxfp8":
+            dispatch_dtype_bytes_per_elem = 1
+            align = quant_config.mx_alignment
+            if align > 0:
+                padded_k = ((moe.hidden_dim + align - 1) // align) * align
+            else:
+                padded_k = moe.hidden_dim
+            dispatch_scale_bytes_per_token = padded_k // 32
+        else:
+            raise NotImplementedError(
+                "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
+                "and bf16 (quant_dtype=None) today; got "
+                f"quant_dtype={quant_config.quant_dtype!r}"
+            )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
+            dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
+            dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
