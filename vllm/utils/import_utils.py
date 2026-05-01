@@ -401,8 +401,14 @@ def _has_module(module_name: str) -> bool:
     for the same module incur no additional overhead.
     """
     try:
-        if importlib.util.find_spec(module_name) is None:
-            return False
+        module_spec = importlib.util.find_spec(module_name)
+    except ModuleNotFoundError:
+        return False
+
+    if module_spec is None:
+        return False
+
+    try:
         importlib.import_module(module_name)
     except Exception:
         logger.warning(
