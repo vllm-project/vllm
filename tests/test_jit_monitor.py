@@ -164,7 +164,7 @@ class TestJitHook:
 
 class TestNoTritonFallback:
     def test_activate_without_triton(self):
-        with mock.patch.dict(sys.modules, {"triton": None}):
+        with mock.patch.object(jit_monitor, "HAS_TRITON", False):
             jit_monitor.activate()
         assert jit_monitor.is_active()
 

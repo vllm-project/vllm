@@ -17,6 +17,7 @@ Currently monitors:
 import os
 
 from vllm.logger import init_logger
+from vllm.triton_utils.importing import HAS_TRITON
 
 logger = init_logger(__name__)
 
@@ -63,10 +64,9 @@ def activate() -> None:
 
 def _setup_triton_autotuning_print() -> None:
     """Enable ``TRITON_PRINT_AUTOTUNING`` unless the user opted out."""
-    try:
-        from triton import knobs  # type: ignore[import-untyped]
-    except ImportError:
+    if not HAS_TRITON:
         return
+    from triton import knobs  # type: ignore[import-untyped]
 
     user_val = os.environ.get("TRITON_PRINT_AUTOTUNING")
     if user_val == "0":
@@ -86,10 +86,9 @@ def _setup_triton_autotuning_print() -> None:
 
 def _setup_triton_jit_hook() -> None:
     """Register a ``jit_post_compile_hook`` that warns on compilation."""
-    try:
-        from triton import knobs  # type: ignore[import-untyped]
-    except ImportError:
+    if not HAS_TRITON:
         return
+    from triton import knobs  # type: ignore[import-untyped]
 
     existing_hook = knobs.runtime.jit_post_compile_hook
 
