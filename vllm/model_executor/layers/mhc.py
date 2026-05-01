@@ -466,8 +466,9 @@ def hc_head_fuse_tilelang(
     hidden_size: int,
     rms_eps: float,
     hc_eps: float,
-    h_block: int,
     hc_mult: int = 4,
+    n_thr: int = 128,
+    h_blk: int = 1024,
 ):
     """Two-pass fused kernel for hc_head.
 
@@ -479,6 +480,8 @@ def hc_head_fuse_tilelang(
     """
     num_tokens = T.dynamic("num_tokens")
     hc_dim = hc_mult * hidden_size
+    # cf. tile_kernels.mhc.pre_apply_mix_kernel line 25: h_blk = math.gcd(h_blk, hidden)
+    h_block = math.gcd(h_blk, hidden_size)
     n_h = hidden_size // h_block
 
     residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
@@ -487,7 +490,7 @@ def hc_head_fuse_tilelang(
     hc_base: T.Tensor[[hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
     out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
 
-    with T.Kernel(num_tokens, threads=64) as i:
+    with T.Kernel(num_tokens, threads=n_thr) as i:
         T.pdl_sync()
 
         # ------------------------------------------------------------------
@@ -558,7 +561,6 @@ def _hc_head_fused_kernel(
     hidden_size: int,
     rms_eps: float,
     hc_eps: float,
-    h_block: int,
     hc_mult: int,
 ) -> None:
     """Fill pre-allocated `out` (T, H) in-place with the hc_head result."""
@@ -572,7 +574,6 @@ def _hc_head_fused_kernel(
             hidden_size,
             rms_eps,
             hc_eps,
-            h_block,
             hc_mult,
         )
 

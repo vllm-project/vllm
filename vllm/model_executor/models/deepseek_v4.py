@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -1451,12 +1450,10 @@ def hc_head(
     rms_norm_eps: float,
     hc_eps: float,
 ) -> torch.Tensor:
-    hc_mult = hidden_states.shape[-2]
-    hidden_size = hidden_states.shape[-1]
+    hc_mult, hidden_size = hidden_states.shape[-2:]
     outer_shape = hidden_states.shape[:-2]
     hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
     num_tokens = hs_flat.shape[0]
-    h_block = math.gcd(512, hidden_size)
     out = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
     )
@@ -1469,7 +1466,6 @@ def hc_head(
         hidden_size,
         rms_norm_eps,
         hc_eps,
-        h_block,
         hc_mult,
     )
     return out.view(*outer_shape, hidden_size)
