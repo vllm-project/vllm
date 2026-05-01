@@ -13,7 +13,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.ir.ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
-from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
+from vllm.distributed import get_tp_group
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -29,6 +29,7 @@ logger = init_logger(__name__)
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
+# Keyed by CUDA compute capability (int).
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
     90: 8192,  # H100: only for models with hidden_size >= 8192
 }
@@ -36,9 +37,37 @@ SP_MIN_HIDDEN_SIZE: dict[int, int] = {
 # Min size per GPU per device capability for sequence parallelism
 # Total min size = min_per_gpu_size * tp_size
 # This ensures the threshold scales appropriately with tensor parallelism
+# Keyed by CUDA compute capability (int).
 SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
     90: 8,  # 8MB per GPU for H100
 }
+
+# XPU defaults — XPU does not expose CUDA-style compute capabilities,
+# so we maintain separate constants.
+SP_XPU_MIN_HIDDEN_SIZE: int = 4096
+SP_XPU_MIN_PER_GPU_SIZE_MB: float = 8
+
+
+def _get_sp_limits() -> tuple[int, float] | None:
+    """Return (min_hidden_size, min_per_gpu_size_mb) for the current device,
+    or *None* if the platform is unsupported / has no configured thresholds."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        return SP_XPU_MIN_HIDDEN_SIZE, SP_XPU_MIN_PER_GPU_SIZE_MB
+
+    if current_platform.is_cuda():
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return None
+        device_capability = capability.to_int()
+        min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
+        min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
+        if min_hidden_size is None or min_per_gpu_size_mb is None:
+            return None
+        return min_hidden_size, min_per_gpu_size_mb
+
+    return None
 
 
 def get_sequence_parallelism_threshold(
@@ -59,22 +88,11 @@ def get_sequence_parallelism_threshold(
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
     """
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_cuda():
+    limits = _get_sp_limits()
+    if limits is None:
         return None
 
-    capability = current_platform.get_device_capability()
-    if capability is None:
-        return None
-    device_capability = capability.to_int()
-
-    # Check if device has configured thresholds
-    min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
-    min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
-
-    if min_hidden_size is None or min_per_gpu_size_mb is None:
-        return None
+    min_hidden_size, min_per_gpu_size_mb = limits
 
     # Only apply sequence parallelism for models meeting the size threshold
     if hidden_size < min_hidden_size:
@@ -111,7 +129,9 @@ class _SequenceParallelPatternHelper:
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def _all_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        return tensor_model_parallel_all_reduce(x)
+        return torch.ops.vllm.all_reduce.default(
+            x, group_name=self.tp_group.unique_name
+        )
 
     def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.reduce_scatter.default(

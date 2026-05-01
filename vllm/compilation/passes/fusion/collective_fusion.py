@@ -396,12 +396,13 @@ class AsyncTPPass(VllmPatternMatcherPass):
                 self.patterns
             )
 
-            CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
-                self.patterns
-            )
-            AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
-                self.patterns
-            )
+            if current_platform.is_cuda():
+                CutlassScaledMMReduceScatterPattern(
+                    self.model_dtype, self.device
+                ).register(self.patterns)
+                AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
+                    self.patterns
+                )
 
         self.dump_patterns(config, self.patterns)
 
@@ -417,4 +418,4 @@ class AsyncTPPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.info("Replaced %s patterns", self.matched_count)

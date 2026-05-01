@@ -42,7 +42,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 logger.info("Using AgRs manager on XPU device.")
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        output = input_.clone() if torch.compiler.is_compiling() else input_
+        # Always clone to ensure out-of-place semantics. When called via
+        # torch.ops.vllm.all_reduce (use_custom_op_call=True), the op is
+        # registered with mutates_args=[], so torch.compile assumes the input
+        # is never modified. Mutating input_ in-place would violate that
+        # contract and produce incorrect results in compiled graphs.
+        output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
 
