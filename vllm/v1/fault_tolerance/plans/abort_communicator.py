@@ -22,13 +22,14 @@ from vllm.v1.fault_tolerance.registry import register_recovery_plan
 from vllm.v1.fault_tolerance.types import (
     BaseRecoveryPlan,
     FaultToleranceResult,
+    InterruptCommand,
     KvAction,
 )
 
 logger = init_logger(__name__)
 
 
-@register_recovery_plan("abort_communicator")
+@register_recovery_plan(InterruptCommand.ABORT_COMMUNICATOR.value)
 class AbortCommunicatorPlan(BaseRecoveryPlan):
     """Fire a one-way interrupt to a worker's aux thread.
 
@@ -41,7 +42,7 @@ class AbortCommunicatorPlan(BaseRecoveryPlan):
     subsequent plans can run; no KV state is touched.
     """
 
-    instruction = "abort_communicator"
+    instruction = InterruptCommand.ABORT_COMMUNICATOR.value
     kv_action = KvAction.NONE
 
     def execute(  # type: ignore[override]
@@ -59,7 +60,7 @@ class AbortCommunicatorPlan(BaseRecoveryPlan):
                 ),
             )
         try:
-            send_interrupt(target, "abort_communicator")
+            send_interrupt(target, InterruptCommand.ABORT_COMMUNICATOR)
         except Exception as e:
             logger.exception("send_interrupt failed: %s", e)
             return FaultToleranceResult(

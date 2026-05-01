@@ -43,6 +43,23 @@ class Disposition(enum.Enum):
     SCHEDULE_RETRY = "schedule_retry"
 
 
+class InterruptCommand(str, enum.Enum):
+    """Worker-side aux-thread interrupt commands.
+
+    Sent by ``DefaultFaultSupervisor.send_interrupt`` over the supervisor's
+    interrupt PUB; received by ``Worker._ft_interrupt_loop`` on the SUB.
+    The wire payload is the enum's ``.value`` so msgpack/JSON encodings
+    don't need a custom resolver. Use the enum everywhere in code.
+
+    Inherits from ``str`` so an enum member is interchangeable with its
+    string value at the wire boundary, and ``InterruptCommand(cmd_str)``
+    raises ``ValueError`` for unknown commands rather than dispatching
+    them to the wrong handler.
+    """
+
+    ABORT_COMMUNICATOR = "abort_communicator"
+
+
 class KvAction(enum.Enum):
     """KV cache lifecycle effect of a recovery action.
 

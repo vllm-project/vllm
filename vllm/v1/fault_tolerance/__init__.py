@@ -35,6 +35,7 @@ from vllm.v1.fault_tolerance.types import (
     FaultToleranceHooks,
     FaultToleranceRequest,
     FaultToleranceResult,
+    InterruptCommand,
     KvAction,
     NoOpFaultHooks,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "FaultToleranceRequest",
     "FaultToleranceResult",
     "GLOBAL_NOOP_HOOKS",
+    "InterruptCommand",
     "KvAction",
     "NoOpFaultHooks",
     # Registry

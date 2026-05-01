@@ -53,7 +53,11 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.fault_tolerance import FaultSignal, FaultToleranceResult
+from vllm.v1.fault_tolerance import (
+    FaultSignal,
+    FaultToleranceResult,
+    InterruptCommand,
+)
 from vllm.v1.fault_tolerance.maskable import FTMaskBuffer
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -1181,11 +1185,14 @@ class Worker(WorkerBase):
                 continue
             except zmq.ZMQError:
                 break
-            cmd = payload.decode("utf-8", errors="replace")
-            if cmd == "abort_communicator":
+            cmd_str = payload.decode("utf-8", errors="replace")
+            try:
+                cmd = InterruptCommand(cmd_str)
+            except ValueError:
+                logger.warning("unknown FT interrupt cmd: %s", cmd_str)
+                continue
+            if cmd is InterruptCommand.ABORT_COMMUNICATOR:
                 self._abort_nccl_communicators()
-            else:
-                logger.warning("unknown FT interrupt cmd: %s", cmd)
 
         with suppress(Exception):
             sock.close(linger=0)

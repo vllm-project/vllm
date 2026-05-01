@@ -40,6 +40,7 @@ from vllm.v1.fault_tolerance.types import (
     FaultToleranceHooks,
     FaultToleranceRequest,
     FaultToleranceResult,
+    InterruptCommand,
 )
 
 if TYPE_CHECKING:
@@ -206,12 +207,12 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
             while self._state is FaultStatus.PAUSED and not self._shutdown:
                 self._pause_cv.wait()
 
-    def send_interrupt(self, target: int | str, command: str) -> None:
+    def send_interrupt(self, target: int | str, command: InterruptCommand) -> None:
         """Fire a one-way interrupt to a worker's aux thread (§9.11).
 
         ``target`` is either a worker local rank or the literal string ``"all"``.
-        ``command`` is one of the interrupt commands the worker's
-        `_ft_interrupt_loop` understands (today: ``"abort_communicator"``).
+        ``command`` is one of the typed ``InterruptCommand`` values the
+        worker's `_ft_interrupt_loop` understands.
         """
         if self._interrupt_pub is None:
             logger.warning(
@@ -221,7 +222,7 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
         topic = f"worker_{target}" if target != "all" else "all"
         try:
             self._interrupt_pub.send_multipart(
-                [topic.encode("utf-8"), command.encode("utf-8")]
+                [topic.encode("utf-8"), command.value.encode("utf-8")]
             )
         except Exception as e:
             logger.warning("send_interrupt failed: %s", e)
