@@ -672,6 +672,7 @@ def run_attention_backend(
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
+    workspace_init,
     batch_spec_name: str,
     model: str,
     tensor_parallel_size: int,
