@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from importlib.util import find_spec
-
 import torch
 
 from vllm.triton_utils import tl, triton
-
-HAS_CUTEDSL = find_spec("cutlass") is not None
+from vllm.utils.import_utils import has_cutedsl
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
@@ -347,7 +344,7 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        if HAS_CUTEDSL:
+        if has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from .fused_indexer_q_cutedsl import (
                 fused_indexer_q_rope_quant_mxfp4_cutedsl,
