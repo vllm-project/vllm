@@ -402,9 +402,7 @@ def flash_attn_triton_available() -> bool:
 
         if not (
             _has_spec("flash_attn.flash_attn_triton_amd")
-            or _has_spec(
-                "aiter.ops.triton._triton_kernels.flash_attn_triton_amd"
-            )
+            or _has_spec("aiter.ops.triton._triton_kernels.flash_attn_triton_amd")
         ):
             return False
         if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
