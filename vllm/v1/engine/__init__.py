@@ -120,6 +120,7 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
 
     # If True, the request should be added to the scheduler's waiting queue
     # and immediately aborted, so connector-side cleanup runs via the standard

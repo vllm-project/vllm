@@ -75,6 +75,7 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
         pre_admission_aborted: bool = False,
     ) -> None:
         self.request_id = request_id
@@ -88,6 +89,9 @@ class Request:
         )
         if self.structured_output_request is not None:
             self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_parser_kwargs = (
+                reasoning_parser_kwargs
+            )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -206,6 +210,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             pre_admission_aborted=request.pre_admission_aborted,
         )
 
