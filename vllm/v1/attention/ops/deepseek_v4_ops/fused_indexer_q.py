@@ -9,24 +9,6 @@ from vllm.triton_utils import tl, triton
 
 HAS_CUTEDSL = find_spec("cutlass") is not None
 
-if HAS_CUTEDSL:
-    from .fused_indexer_q_cutedsl import fused_indexer_q_rope_quant_mxfp4_cutedsl
-else:
-
-    def fused_indexer_q_rope_quant_mxfp4_cutedsl(
-        positions: torch.Tensor,
-        index_q: torch.Tensor,
-        index_q_cos_sin_cache: torch.Tensor,
-        index_weights: torch.Tensor,
-        index_weights_softmax_scale: float,
-        index_weights_head_scale: float,
-        index_q_packed: torch.Tensor,
-        index_q_scale: torch.Tensor,
-        index_weights_out: torch.Tensor,
-    ) -> None:
-        pass
-
-
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
 
@@ -366,6 +348,11 @@ def fused_indexer_q_rope_quant(
             device=index_q.device,
         )
         if HAS_CUTEDSL:
+            # lazily import, otherwise some tests fail due to CUDA driver init failure.
+            from .fused_indexer_q_cutedsl import (
+                fused_indexer_q_rope_quant_mxfp4_cutedsl,
+            )
+
             fused_indexer_q_rope_quant_mxfp4_cutedsl(
                 positions,
                 index_q,
