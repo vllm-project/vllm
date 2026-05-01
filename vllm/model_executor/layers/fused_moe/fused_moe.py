@@ -1568,21 +1568,36 @@ def _prepare_expert_assignment(
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
-    naive_block_assignment = (
-        expert_map is None
-        and num_tokens * top_k_num * 4 <= global_num_experts
-        and not (
-            (use_int8_w8a16 or use_int4_w4a16)
-            and block_shape is not None
-            and block_shape[1] > 0
-        )
+    # path of the fused_moe_kernel kernel.
+    # Under VLLM_BATCH_INVARIANT, force the naive path for block-quantized
+    # w8a8 matmuls (FP8/INT8 with block_shape). The aligned path packs up to
+    # BLOCK_SIZE_M tokens routed to the same expert into one M-tile, and the
+    # needle's row position within that tile depends on which other tokens
+    # share the expert. FP8/INT8 wgmma on Hopper/Blackwell is row-position
+    # sensitive enough to flip greedy-sampled tokens. BF16 and per-tensor
+    # paths (block_shape is None) appear row-invariant in aligned mode, so
+    # they keep the heuristic and the aligned-path throughput.
+    force_naive_for_invariance = envs.VLLM_BATCH_INVARIANT and block_shape is not None
+    naive_block_assignment = not (
+        (use_int8_w8a16 or use_int4_w4a16)
+        and block_shape is not None
+        and block_shape[1] > 0
+    ) and (
+        force_naive_for_invariance
+        or (expert_map is None and num_tokens * top_k_num * 4 <= global_num_experts)
     )
 
     if naive_block_assignment:
+        # Under EP, topk_ids holds global expert ids but the kernel indexes
+        # into local weights. Map global -> local; non-local experts become
+        # -1 and the kernel writes zeros for those blocks (their contribution
+        # comes from another rank).
+        flat_expert_ids = topk_ids.view(-1)
+        if expert_map is not None:
+            flat_expert_ids = expert_map[flat_expert_ids]
         return (
             None,
-            topk_ids.view(-1),
+            flat_expert_ids,
             torch.full(
                 (1,),
                 topk_ids.numel() * config["BLOCK_SIZE_M"],
