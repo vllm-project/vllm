@@ -175,15 +175,16 @@ class Sampler(nn.Module):
 
         # Find max number of tokens across all requests
         max_num_tokens = max(len(tids) for tids in logprob_token_ids.values())
+        pin = self.pin_memory
 
         # Build the padded token_ids and valid_mask matrices on pinned CPU,
         # then upload non-blocking.
         token_ids_cpu = torch.zeros(
-            batch_size, max_num_tokens + 1, dtype=torch.int64, pin_memory=True
+            batch_size, max_num_tokens + 1, dtype=torch.int64, pin_memory=pin
         )
         # Create mask for valid positions (True = valid, False = padded)
         valid_mask_cpu = torch.zeros(
-            batch_size, max_num_tokens + 1, dtype=torch.bool, pin_memory=True
+            batch_size, max_num_tokens + 1, dtype=torch.bool, pin_memory=pin
         )
         valid_mask_cpu[:, 0] = True  # Sampled token is always valid
         for req_idx, token_ids in logprob_token_ids.items():

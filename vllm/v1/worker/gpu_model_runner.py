@@ -998,7 +998,11 @@ class GPUModelRunner(
             ids = (torch.arange(seq_len_i) >= pos).int()
             token_type_ids.append(ids)
 
-        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
+        token_type_ids_cpu = torch.empty(
+            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=self.pin_memory
+        )
+        torch.cat(token_type_ids, out=token_type_ids_cpu)
+        model_kwargs["token_type_ids"] = token_type_ids_cpu.to(
             device=self.device, non_blocking=True
         )
         return model_kwargs
