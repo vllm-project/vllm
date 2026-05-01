@@ -898,8 +898,7 @@ class EplbState:
             model_config=model_config,
         )
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
-        model_factors = model_config.compile_factors()
-        model_hash = hash_factors(model_factors)
+        model_hash = hash_factors(model_config.compile_factors())
         eplb_model_state = eplb_state.model_states[model_hash]
         eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
 
