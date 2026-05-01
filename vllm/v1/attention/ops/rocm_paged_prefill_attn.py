@@ -71,6 +71,7 @@ def paged_prefill_attn_rdna3(
     block_table: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
+    max_query_len: int,
     sm_scale: float,
     causal: bool = True,
 ) -> None:
@@ -92,6 +93,10 @@ def paged_prefill_attn_rdna3(
         cu_seqlens_q: ``[num_seqs + 1]`` cumulative query lengths, int32.
         seq_lens: ``[num_seqs]`` total sequence lengths (ctx + chunk),
             int32.
+        max_query_len: largest per-sequence query length in the batch.
+            Passed in from the metadata builder as a Python int so the
+            C++ entry point doesn't have to sync ``cu_seqlens_q`` to CPU
+            once per call.
         sm_scale: softmax scale (typically ``1 / sqrt(head_size)``).
         causal: only ``True`` is supported in v1.
     """
@@ -112,6 +117,7 @@ def paged_prefill_attn_rdna3(
         block_table,
         cu_seqlens_q,
         seq_lens,
+        int(max_query_len),
         float(sm_scale),
         bool(causal),
     )

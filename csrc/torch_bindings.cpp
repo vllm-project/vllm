@@ -449,8 +449,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "paged_prefill_attn_rdna3(Tensor! out, Tensor q, Tensor k_chunk, "
       "Tensor v_chunk, Tensor k_cache, Tensor v_cache, Tensor block_table, "
-      "Tensor cu_seqlens_q, Tensor seq_lens, float sm_scale, bool causal) "
-      "-> ()");
+      "Tensor cu_seqlens_q, Tensor seq_lens, int max_query_len, "
+      "float sm_scale, bool causal) -> ()");
   ops.impl("paged_prefill_attn_rdna3", torch::kCUDA,
            &paged_prefill_attn_rdna3);
 

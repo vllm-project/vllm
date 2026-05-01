@@ -659,7 +659,8 @@ void paged_prefill_attn_rdna3(
     torch::Tensor& out, torch::Tensor q, torch::Tensor k_chunk,
     torch::Tensor v_chunk, torch::Tensor k_cache, torch::Tensor v_cache,
     torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-    torch::Tensor seq_lens, double sm_scale, bool causal) {
+    torch::Tensor seq_lens, int64_t max_query_len, double sm_scale,
+    bool causal) {
   TORCH_CHECK(out.is_cuda() && q.is_cuda() && k_chunk.is_cuda() &&
                   v_chunk.is_cuda() && k_cache.is_cuda() && v_cache.is_cuda() &&
                   block_table.is_cuda() && cu_seqlens_q.is_cuda() &&
@@ -699,15 +700,13 @@ void paged_prefill_attn_rdna3(
   TORCH_CHECK(num_query_heads % num_kv_heads == 0,
               "num_query_heads must be a multiple of num_kv_heads");
 
-  // Compute max_query_len from cu_seqlens_q on CPU. cu_seqlens_q is small
-  // (num_seqs + 1 int32) so the H2D copy + max scan is negligible vs the
-  // kernel runtime; it spares us a Python-side argument.
-  auto cu_cpu = cu_seqlens_q.to(torch::kCPU);
-  const int* cu_ptr = cu_cpu.data_ptr<int>();
-  int max_query_len = 0;
-  for (int i = 0; i < num_seqs; ++i) {
-    max_query_len = std::max(max_query_len, cu_ptr[i + 1] - cu_ptr[i]);
-  }
+  // ``max_query_len`` is supplied by the caller (already a Python int in
+  // ``RocmAttentionMetadata``), so we avoid the GPU->CPU sync that would
+  // be required to derive it from ``cu_seqlens_q`` here.  Doing the sync
+  // would stall the stream every prefill call (~once per layer per step),
+  // which kills CUDA-graph / kernel overlap on hot serving paths.
+  TORCH_CHECK(max_query_len > 0,
+              "max_query_len must be > 0 (got ", max_query_len, ")");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(q));
   auto stream = at::cuda::getCurrentCUDAStream();

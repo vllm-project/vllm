@@ -576,6 +576,7 @@ class RocmAttentionImpl(AttentionImpl):
                 block_table=block_table,
                 cu_seqlens_q=cu_seqlens_q,
                 seq_lens=seqused_k,
+                max_query_len=max_seqlen_q,
                 sm_scale=self.scale,
                 causal=True,
             )
