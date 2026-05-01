@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Language Models Tests (Standard)
+  key: language-models-tests-standard
   timeout_in_minutes: 25
   source_file_dependencies:
   - vllm/
@@ -15,6 +16,7 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Tests (Extra Standard) %N
+  key: language-models-tests-extra-standard
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -31,6 +33,7 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Tests (Hybrid) %N
+  key: language-models-tests-hybrid
   timeout_in_minutes: 75
   source_file_dependencies:
   - vllm/
@@ -47,6 +50,7 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Test (Extended Generation) # 80min
+  key: language-models-test-extended-generation
   timeout_in_minutes: 110
   optional: true
   source_file_dependencies:
@@ -69,6 +73,7 @@ steps:
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
+  key: language-models-test-ppl
   timeout_in_minutes: 110
   device: h200_18gb
   optional: true
@@ -79,6 +84,7 @@ steps:
     - pytest -v -s models/language/generation_ppl_test
 
 - label: Language Models Test (Extended Pooling)  # 36min
+  key: language-models-test-extended-pooling
   timeout_in_minutes: 50
   optional: true
   source_file_dependencies:
@@ -93,6 +99,7 @@ steps:
       - image-build-amd
 
 - label: Language Models Test (MTEB)
+  key: language-models-test-mteb
   timeout_in_minutes: 110
   device: h200_18gb
   optional: true
