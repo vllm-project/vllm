@@ -38,15 +38,27 @@ class MockCustomOp:
         return decorator
 
 
+class MockPluggableLayer:
+    @staticmethod
+    def register(name):
+        def decorator(cls):
+            return cls
+
+        return decorator
+
+
 mock_if_no_torch("vllm._C", MagicMock())
-mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
+mock_if_no_torch(
+    "vllm.model_executor.custom_op",
+    MagicMock(CustomOp=MockCustomOp, PluggableLayer=MockPluggableLayer),
+)
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
 
 
 # Mock any version checks by reading from compiled CI requirements
-with open(ROOT_DIR / "requirements/test.txt") as f:
+with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
     VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 

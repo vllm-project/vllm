@@ -36,7 +36,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl"]
+EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -90,6 +90,7 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
     - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
     """
@@ -623,6 +624,18 @@ class ParallelConfig:
         )
 
     @property
+    def use_batched_dp_moe(self) -> bool:
+        return (
+            self.all2all_backend
+            in (
+                "deepep_low_latency",
+                "nixl_ep",
+            )
+            and self.enable_expert_parallel
+            and self.data_parallel_size > 1
+        )
+
+    @property
     def node_rank_within_dp(self) -> int:
         return self.node_rank % self.nnodes_within_dp
 
@@ -649,6 +662,33 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
+
+    @staticmethod
+    def sync_dp_state(
+        dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
+    ) -> tuple[bool, bool]:
+        """Combined all-reduce for DP state synchronization.
+
+        Uses a single SUM all-reduce on a 2-element tensor:
+          [0] = 1 if this rank has unfinished work, else 0.
+                SUM > 0 ≡ logical OR across ranks → any rank has work.
+          [1] = 1 if this rank has a pending pause request, else 0.
+                SUM == dp_size ≡ all ranks reached pause consensus.
+
+        has_unfinished_global is true if any rank has unfinished work,
+        or if some ranks are waiting for a pause consensus.
+
+        Returns:
+            (has_unfinished_global, pause_consensus)
+        """
+        tensor = torch.tensor(
+            [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
+        )
+        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        dp_size = dp_group.size()
+        pause_count = tensor[1].item()
+        has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
+        return has_unfinished_global, pause_count == dp_size
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
@@ -700,6 +740,14 @@ class ParallelConfig:
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
+            # NUMA binding is per-rank host-side memory locality; it does
+            # not affect collective-communication semantics. When numa_bind
+            # is enabled with auto-detection, each DP rank stores its own
+            # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
+            # `_get_numa_node`), which would otherwise diverge the DP hash.
+            "numa_bind",
+            "numa_bind_nodes",
+            "numa_bind_cpus",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

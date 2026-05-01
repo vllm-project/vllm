@@ -234,12 +234,20 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     get_and_maybe_dequant_weights,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
     direct_register_custom_op,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -272,6 +280,44 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+_FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def _detect_output_quant_key(
+    output: torch.Tensor,
+    output_scale: torch.Tensor | None,
+    output_block_scale: torch.Tensor | None,
+    output_dim: int,
+) -> QuantKey | None:
+    """Detect the output quantization key from fusion pass parameters.
+
+    Returns the appropriate QuantKey, or None if no quantization is needed.
+    Detection is based on output dtype and which scale tensors are present.
+    """
+    if output_scale is None and output_block_scale is None:
+        return None
+    if output_block_scale is not None:
+        if output.dtype == _FP8_DTYPE:
+            # Per-group FP8 uses block scales only, not a separate output_scale
+            assert output_scale is None
+            # Infer group size from scale shape
+            num_groups = output_block_scale.shape[-1]
+            group_size = output_dim // num_groups
+            if group_size == 128:
+                return kFp8Dynamic128Sym
+            elif group_size == 64:
+                return kFp8Dynamic64Sym
+            else:
+                raise ValueError(
+                    f"Unsupported group FP8 group_size={group_size} "
+                    f"(output_dim={output_dim}, num_groups={num_groups}). "
+                    f"Only group_size 128 and 64 are supported."
+                )
+        # output_scale None implies MXFP4, not supported
+        assert output_scale is not None
+        return kNvfp4Dynamic
+    return kFp8StaticTensorSym
 
 
 class MLAAttention(nn.Module, AttentionLayerBase):
@@ -381,12 +427,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             logger.warning_once(
                 "Disabling prefix caching for TRITON_MLA / FLASHINFER "
                 "with batch invariance, as it is not yet supported.",
-                scope="local",
             )
             cache_config.enable_prefix_caching = False
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -473,20 +518,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+            torch.ops.vllm.maybe_calc_kv_scales(
+                q,
+                kv_c_normed,
+                k_pe,
+                _encode_layer_name(self.layer_name),
+            )
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
-            attn_metadata = forward_context.attn_metadata
-            if isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata[self.layer_name]
+            attn_metadata_raw = forward_context.attn_metadata
+            attn_metadata: MLACommonMetadata
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
+            elif isinstance(attn_metadata_raw, list):
+                # list[dict[str, AttentionMetadata]]: used in speculative decoding
+                # where [0] is the base-model (non-speculative) metadata dict.
+                attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+            else:
+                attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            self.impl.do_kv_cache_update(
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
                 self_kv_cache,
@@ -505,10 +562,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
         else:
+            encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
-                self.layer_name,
+                encoded,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -518,7 +576,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_c_normed,
                 k_pe,
                 output,
-                self.layer_name,
+                encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output
@@ -533,9 +591,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        quant_group_size: int | None = None,
+        quant_scale_ue8m0: bool | None = None,
+        quant_col_major: bool | None = None,
+        quant_tma_aligned: bool | None = None,
     ) -> torch.Tensor:
-        use_quant = output_scale is not None or output_block_scale is not None
-        if use_quant:
+        assert output is not None, "Output tensor must be provided."
+
+        quant_key = _detect_output_quant_key(
+            output, output_scale, output_block_scale, self.num_heads * self.v_head_dim
+        )
+        if quant_key is not None:
             # The fusion pass has allocated output with quantized dtype
             # (FP8 or uint8 for FP4). We can't write into it directly,
             # so we swap in a temp buffer for computation, then quantize
@@ -566,7 +632,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
-            if use_quant:
+            if quant_key is not None:
                 return quant_output.fill_(0)
             return output.fill_(0)
 
@@ -603,7 +669,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
-            self.impl.forward_mha(
+            self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
                 k_pe[num_mqa_tokens:],
@@ -686,7 +752,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -708,18 +774,41 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
 
-        if use_quant:
+        if quant_key is not None:
             # Quantize the BF16 computation result into the quantized output
             actual = output[:num_actual_toks]
-            if output_block_scale is not None:
+            if quant_key == kNvfp4Dynamic:
                 # NVFP4: two FP4 values packed into one uint8
+                assert output_block_scale is not None
                 fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
                 quant_output[:num_actual_toks].copy_(fp4_data)
-                output_block_scale.copy_(fp4_scales)
-            else:
+                output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
+            elif quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
+                # Per-group FP8
+                assert output_block_scale is not None
+                assert quant_group_size is not None, (
+                    "Group FP8 output quant requested but "
+                    "quant_group_size not passed through custom op"
+                )
+                finfo = torch.finfo(_FP8_DTYPE)
+                torch.ops._C.per_token_group_fp8_quant(
+                    actual,
+                    quant_output[:num_actual_toks],
+                    output_block_scale[:num_actual_toks],
+                    quant_group_size,
+                    1e-10,  # eps
+                    finfo.min,
+                    finfo.max,
+                    quant_scale_ue8m0,
+                    quant_col_major,
+                    quant_tma_aligned,
+                )
+            elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
                 fp8_data, _ = self._quant_fp8_op(actual, output_scale)
                 quant_output[:num_actual_toks].copy_(fp8_data)
+            else:
+                raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
         return output_padded
@@ -900,7 +989,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
@@ -908,6 +997,7 @@ def unified_mla_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    layer_name = _resolve_layer_name(layer_name)
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
@@ -939,7 +1029,7 @@ def unified_mla_kv_cache_update(
 def unified_mla_kv_cache_update_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
@@ -959,15 +1049,20 @@ def unified_mla_attention_with_output(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
+    quant_group_size: int | None = None,
+    quant_scale_ue8m0: bool | None = None,
+    quant_col_major: bool | None = None,
+    quant_tma_aligned: bool | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
+    layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
@@ -978,6 +1073,10 @@ def unified_mla_attention_with_output(
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
+        quant_group_size=quant_group_size,
+        quant_scale_ue8m0=quant_scale_ue8m0,
+        quant_col_major=quant_col_major,
+        quant_tma_aligned=quant_tma_aligned,
     )
 
 
@@ -986,10 +1085,14 @@ def unified_mla_attention_with_output_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
+    quant_group_size: int | None = None,
+    quant_scale_ue8m0: bool | None = None,
+    quant_col_major: bool | None = None,
+    quant_tma_aligned: bool | None = None,
 ) -> None:
     return
 
@@ -1042,9 +1145,9 @@ except ImportError:
                 "AITER_MLA backends use aiter kernels instead."
             )
     elif current_platform.is_xpu():
-        from vllm._xpu_ops import xpu_ops as ops
+        from vllm._xpu_ops import xpu_ops
 
-        flash_attn_varlen_func = ops.flash_attn_varlen_func  # type: ignore[no-redef]
+        flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[no-redef,attr-defined,assignment]
 
 
 def dynamic_per_batched_tensor_quant(
@@ -1319,6 +1422,20 @@ class MLADims:
 def get_mla_dims(model_config: ModelConfig) -> MLADims:
     hf_text_config = model_config.hf_text_config
 
+    # Check if this is a DeepseekV4 config (uses unified head_dim + rope_head_dim)
+    if hasattr(hf_text_config, "compress_ratios"):
+        # DeepseekV4 style config: unified head_dim with rope_head_dim
+        head_dim = hf_text_config.head_dim
+        rope_head_dim = hf_text_config.qk_rope_head_dim
+        return MLADims(
+            q_lora_rank=hf_text_config.q_lora_rank,
+            kv_lora_rank=head_dim,
+            qk_nope_head_dim=head_dim - rope_head_dim,
+            qk_rope_head_dim=rope_head_dim,
+            v_head_dim=head_dim,
+        )
+
+    # DeepseekV2/V3 style config
     return MLADims(
         q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
         kv_lora_rank=hf_text_config.kv_lora_rank,
@@ -1419,9 +1536,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if use_fp8:
             fp8_dtype = current_platform.fp8_dtype()
-            logger.info_once(
-                "FP8 prefill attention enabled: query data type is FP8", scope="local"
-            )
+            logger.info_once("FP8 prefill attention enabled: query data type is FP8")
             return fp8_dtype
         elif vllm_config.attention_config.use_prefill_query_quantization:
             logger.info_once(
@@ -1429,9 +1544,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 " use_prefill_query_quantization is enabled. Please"
                 " ensure that --kv-cache-dtype is set to fp8 and your prefill"
                 " backend is compatible with FP8 attention.",
-                scope="local",
             )
             return model_dtype
+        elif (
+            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
+            and backend_supports_prefill_query_quantization()
+        ):
+            logger.warning_once(
+                "FP8 KV cache is enabled but prefill queries are not "
+                "quantized to FP8. For long-context workloads (ISL >= 4K), "
+                "enabling FP8 prefill attention can significantly optimize "
+                "prefill latency. To enable, add: "
+                '--attention-config \'{"use_prefill_query_quantization"'
+                ": true}'",
+            )
 
         return model_dtype
 
@@ -1710,13 +1836,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
-            num_computed_tokens_cpu = (
-                common_attn_metadata.compute_num_computed_tokens().cpu()
-            )
-
             reqs_start = num_decodes  # prefill_start
 
-            context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
+            # Upper bound is exact for prefill rows (no D2H sync).
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
+            prefill_query_lens_cpu = (
+                query_start_loc_cpu[reqs_start + 1 : num_reqs + 1]
+                - query_start_loc_cpu[reqs_start:num_reqs]
+            )
+            context_lens_cpu = (
+                seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
+            )
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
@@ -1964,7 +2095,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             assert isinstance(attn_metadata.prefill, FlashInferPrefillMetadata)
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
-        return attn_metadata
+        return attn_metadata  # type: ignore[return-value]
 
 
 def reorg_kvcache(
@@ -2047,12 +2178,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     """
 
     def fused_output_quant_supported(self, quant_key):
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        return quant_key in (
             kFp8StaticTensorSym,
             kNvfp4Dynamic,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
         )
-
-        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
 
     def __init__(
         self,
@@ -2074,6 +2205,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        # DSV3.2 MLA Specific Arguments
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
@@ -2096,6 +2228,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
@@ -2108,21 +2241,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
         if use_trtllm_ragged_deepseek_prefill():
-            logger.info_once(
-                "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
-            )
+            logger.info_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
             self._run_prefill_context_chunk = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_flashinfer_prefill():
-            logger.info_once("Using FlashInfer prefill for MLA", scope="local")
+            logger.info_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
         elif use_cudnn_prefill():
-            logger.info_once("Using CUDNN prefill for MLA", scope="local")
+            logger.info_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
@@ -2133,7 +2264,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     "available. Please install flash_attn or use "
                     "--attention-backend ROCM_AITER_MLA."
                 )
-            logger.info_once("Using FlashAttention prefill for MLA", scope="local")
+            logger.info_once("Using FlashAttention prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
 
