@@ -772,9 +772,7 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
             get_kv_cache_spec_sliding_window(spec)
             for spec in kv_cache_spec.kv_cache_specs.values()
         }
-        if len(inner_windows) == 1:
-            return next(iter(inner_windows))
-        return None
+        return next(iter(inner_windows)) if len(inner_windows) == 1 else None
     if isinstance(kv_cache_spec, SlidingWindowSpec):
         return kv_cache_spec.sliding_window
     return None

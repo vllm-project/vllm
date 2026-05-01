@@ -541,8 +541,7 @@ class KVCacheManager:
                 self.kv_cache_event_metadata
             ):
                 logger.warning(
-                    "Group index `%s` not in KV cache metadata",
-                    event.group_idx,
+                    "Group index `%s` not in KV cache metadata", event.group_idx
                 )
                 continue
             # Annotate here so BlockPool can keep emitting structural cache
