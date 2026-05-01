@@ -75,6 +75,36 @@ Open it to see the logs. It'll look something like the following:
 
 ![tlparse example](../assets/design/debug_vllm_compile/tlparse_inductor.png)
 
+## Use vLLM graph dumps
+
+If you mainly want to inspect the vLLM graphs, set `VLLM_DEBUG_DUMP_PATH`.
+This writes a rank-local dump directory.
+
+```sh
+VLLM_DEBUG_DUMP_PATH=/tmp/vllm-dumps vllm serve <model>
+```
+
+For offline inference, the same env var works around the Python script:
+
+```sh
+VLLM_DEBUG_DUMP_PATH=/tmp/vllm-dumps python my_script.py
+```
+
+The useful entry point is:
+
+```text
+/tmp/vllm-dumps/rank_0_dp_0/graphs/index.md
+```
+
+Open `index.md` first. It lists the graph stages in order and links to the
+three files for each stage:
+
+- `*.structured.txt`: the graph nested by model/layer where Dynamo metadata
+  is available
+- `*.raw.py`: the raw FX graph
+- `*.metadata.json`: vLLM context like model name, compile ranges,
+  pass context, function name, and vLLM IR provider metadata
+
 ## Turn off vLLM-torch.compile integration
 
 Pass `--enforce-eager` to turn off the vLLM-torch.compile integration and run entirely
