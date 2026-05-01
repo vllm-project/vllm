@@ -246,11 +246,14 @@ class FrontendArgs(BaseFrontendArgs):
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
-    """Allowed origins."""
+    """Allowed origins for CORS. Defaults to wildcard, which allows any
+    origin to make cross-origin requests. For internet-exposed servers,
+    set this to specific origins to prevent cross-origin request forgery
+    (OWASP A05)."""
     allowed_methods: list[str] = field(default_factory=lambda: ["*"])
-    """Allowed methods."""
+    """Allowed methods for CORS."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])
-    """Allowed headers."""
+    """Allowed headers for CORS."""
     api_key: list[str] | None = None
     """If provided, the server will require one of these keys to be presented in
     the header."""

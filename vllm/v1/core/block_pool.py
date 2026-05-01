@@ -417,6 +417,11 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
+            assert block.ref_cnt >= 0, (
+                f"Block {block.block_id} ref_cnt went negative "
+                f"({block.ref_cnt}). This indicates a double-free bug in "
+                f"the KV cache block management."
+            )
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )

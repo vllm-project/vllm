@@ -198,3 +198,6 @@ mkdocs.yaml @hmellor
 /docs/usage/security.md @russellb
 /SECURITY.md @russellb
 /docs/contributing/vulnerability_management.md @russellb
+
+# CI/CD pipeline files require security review
+/.github/workflows/ @russellb

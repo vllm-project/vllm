@@ -253,6 +253,13 @@ def build_app(
         register_pooling_api_routers(app, supported_tasks, model_config)
 
     app.root_path = args.root_path
+    if args.allowed_origins == ["*"]:
+        logger.warning(
+            "CORS is using wildcard origins (allowed_origins=['*']). "
+            "Any website can make cross-origin requests to this server. "
+            "For internet-exposed deployments, set --allowed-origins to "
+            "specific trusted origins."
+        )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
