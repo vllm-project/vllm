@@ -41,7 +41,7 @@ IR operations are declared using the `@register_op` decorator with a native PyTo
 from torch import Tensor
 from vllm.ir import register_op
 
-@register_op(has_reduction=True)
+@register_op
 def rms_norm(x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None) -> Tensor:
     """Weighted root-mean-square layer normalization"""
     orig_dtype = x.dtype
@@ -160,7 +160,7 @@ llm = LLM(
 Each platform provides default priority lists that are automatically applied:
 
 ```python
-# CUDA platform defaults (when compiling with Inductor)
+# CUDA/XPU/ROCm platform defaults (when compiling with Inductor)
 {
   "rms_norm": ["native"],  # Native torch is default
   "fused_add_rms_norm": ["native"],
@@ -176,6 +176,12 @@ Each platform provides default priority lists that are automatically applied:
 {
     "rms_norm": ["aiter", "vllm_c", "native"],
     "fused_add_rms_norm": ["aiter", "vllm_c", "native"],
+}
+
+# XPU platform defaults (eager or Dynamo-only)
+{
+    "rms_norm": ["xpu_kernels", "native"],
+    "fused_add_rms_norm": ["xpu_kernels", "native"],
 }
 ```
 
@@ -485,6 +491,7 @@ def impl_fn(...):
 - `native`: Reserved for the native torch implementation (declared with `@register_op`)
 - `vllm_c`: C++/CUDA kernels via `torch.ops._C`
 - `aiter`: AMD AITER library
+- `xpu_kernels`: SYCL/SYCLTLA kernels implemented in `vllm-xpu-kernels`
 - `triton_*`: Triton kernels
 - Platform/library names for other implementations
 
@@ -604,5 +611,5 @@ The migration can be done incrementally, one operation at a time.
 ## See Also
 
 - [torch.compile Integration](torch_compile.md) - General compilation infrastructure
+- [Fusions](fusions.md) - Custom fusion and transformation passes in vLLM
 - [Custom Operations](custom_op.md) - Legacy custom op system
-- [Kernel Development Guide](../../contributing/kernel_development.md) - Writing and registering kernels
