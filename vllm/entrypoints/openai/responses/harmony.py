@@ -37,6 +37,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -155,7 +156,18 @@ def response_input_to_harmony(
         if isinstance(content, str):
             msg = Message.from_role_and_content(role, text_prefix + content)
         else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
+            contents = []
+            for i, c in enumerate(content):
+                text = c.get("text")
+                if text is None:
+                    raise VLLMValidationError(
+                        f"Content item missing 'text' field: {c}",
+                        parameter="input",
+                    )
+                # Only prepend the developer "Instructions:" prefix to the
+                # first content item; otherwise it is repeated per-item.
+                prefix = text_prefix if i == 0 else ""
+                contents.append(TextContent(text=prefix + text))
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
