@@ -59,8 +59,20 @@ if(DEEPGEMM_ARCHS)
   # Build the _C pybind11 extension from DeepGEMM's C++ source.
   # This is a CXX-only module — CUDA kernels are JIT-compiled at runtime.
   #
-  Python_add_library(_deep_gemm_C MODULE WITH_SOABI
-    "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  # Tag the resulting .so with the stable ABI suffix (`.abi3.so`) so it loads
+  # on any supported CPython, mirroring vLLM's other native extensions
+  # (see `_C` in CMakeLists.txt and `_flashmla_C` in flashmla.cmake).
+  # Free-threaded Python doesn't yet support the stable ABI, so skip it there.
+  run_python(IS_FREETHREADED_PYTHON
+    "import sysconfig; print(1 if sysconfig.get_config_var(\"Py_GIL_DISABLED\") else 0)"
+    "Failed to determine whether interpreter is free-threaded")
+  if (NOT IS_FREETHREADED_PYTHON)
+    Python_add_library(_deep_gemm_C MODULE WITH_SOABI USE_SABI 3
+      "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  else()
+    Python_add_library(_deep_gemm_C MODULE WITH_SOABI
+      "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  endif()
 
   # The pybind11 module name must be _C to match DeepGEMM's Python imports.
   set_target_properties(_deep_gemm_C PROPERTIES OUTPUT_NAME "_C")
@@ -75,11 +87,16 @@ if(DEEPGEMM_ARCHS)
     "${deepgemm_SOURCE_DIR}/third-party/cutlass/tools/util/include"
     "${deepgemm_SOURCE_DIR}/third-party/fmt/include")
 
+  # Keep the stable ABI suffix on the module, but *not* on the C++ sources:
+  # pybind11's `PYBIND11_MODULE` and torch_python's tensor casters use Python
+  # C API symbols outside the strict limited subset, so compile against the
+  # full API. This matches the pattern used by `_flashmla_C`.
   target_compile_options(_deep_gemm_C PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
     $<$<COMPILE_LANGUAGE:CXX>:-O3>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-psabi>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>)
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>
+    $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
 
   # torch_python is required because DeepGEMM uses pybind11 type casters
   # for at::Tensor (via PYBIND11_MODULE), unlike vLLM's own extensions which
