@@ -7,7 +7,8 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
-from vllm.v1.fault_tolerance import AllReduceResult, FaultSignal
+from vllm.v1.fault_tolerance import FaultSignal
+from vllm.v1.fault_tolerance.errors import DpAllReduceFaultError
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,
@@ -40,13 +41,12 @@ def _run_ar(
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
-) -> AllReduceResult:
-    """Run the DP synchronization all-reduce and return a structured result.
+) -> torch.Tensor:
+    """Run the DP synchronization all-reduce.
 
-    Returns an `AllReduceResult` carrying the synced tensor on success, or a
-    typed `FaultSignal` on collective failure. Replaces the previous
-    bare-tensor return + raise-on-error pattern so callers can distinguish
-    fault from exception without pattern-matching string messages.
+    Raises ``DpAllReduceFaultError`` (carrying a typed ``FaultSignal``) on
+    collective failure so the supervisor's ``on_step_error`` hook can surface
+    the fault via ``exc.signal`` without parsing the exception message.
     """
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
@@ -59,12 +59,10 @@ def _run_ar(
     try:
         dist.all_reduce(tensor, group=group)
     except RuntimeError as e:
-        return AllReduceResult(
-            ok=False,
-            tensor=None,
-            fault_signal=FaultSignal(kind="dp_allreduce_failed", detail=str(e)),
-        )
-    return AllReduceResult(ok=True, tensor=tensor, fault_signal=None)
+        raise DpAllReduceFaultError(
+            signal=FaultSignal(kind="dp_allreduce_failed", detail=str(e))
+        ) from e
+    return tensor
 
 
 def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
@@ -141,22 +139,13 @@ def _synchronize_dp_ranks(
     # Coordinate between the DP ranks via an All Reduce
     # to determine the total number of tokens that each rank
     # will run and if we are using ubatching or not.
-    result = _run_ar(
+    tensor = _run_ar(
         should_ubatch=should_attempt_ubatching,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
         cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
     )
-    if not result.ok:
-        # The collective failed; surface the typed signal so the supervisor's
-        # `after_step` hook can handle it via the normal output channel
-        # rather than a bare `RuntimeError` that downstream code would have
-        # to pattern-match.
-        from vllm.v1.fault_tolerance.errors import DpAllReduceFaultError
-
-        raise DpAllReduceFaultError(result.fault_signal)
-    tensor = result.tensor
 
     # Synchronize cudagraph_mode across ranks first (take min).
     # This is needed before DP padding decision since we use the synced

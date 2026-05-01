@@ -25,7 +25,6 @@ from vllm.v1.fault_tolerance.registry import (
 )
 from vllm.v1.fault_tolerance.types import (
     GLOBAL_NOOP_HOOKS,
-    AllReduceResult,
     BaseRecoveryPlan,
     ClusterRecoveryPlan,
     Disposition,
@@ -42,7 +41,6 @@ from vllm.v1.fault_tolerance.types import (
 
 __all__ = [
     # Types
-    "AllReduceResult",
     "BaseRecoveryPlan",
     "ClusterRecoveryPlan",
     "Disposition",

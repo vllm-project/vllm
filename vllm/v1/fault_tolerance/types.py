@@ -142,20 +142,6 @@ class FaultToleranceResult:
     request_id: str | None = None
 
 
-@dataclass
-class AllReduceResult:
-    """Structured return from `dp_utils._run_ar`.
-
-    Replaces the bare `torch.Tensor` return so collective failures can be
-    surfaced as a typed `FaultSignal` instead of an opaque `RuntimeError`
-    that downstream code has to pattern-match.
-    """
-
-    ok: bool
-    tensor: Any  # torch.Tensor when ok=True, None otherwise
-    fault_signal: FaultSignal | None = None
-
-
 @runtime_checkable
 class FaultToleranceHooks(Protocol):
     """Contract that engine hot-path code sees.

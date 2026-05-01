@@ -4,6 +4,7 @@
 
 import gc
 import os
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from datetime import timedelta
@@ -14,12 +15,15 @@ import numpy as np
 import regex as re
 import torch
 import torch.nn as nn
+import zmq
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.distributed import (
     ensure_model_parallel_initialized,
+    get_dp_group,
+    get_ep_group,
     init_distributed_environment,
     set_custom_all_reduce,
 )
@@ -49,6 +53,8 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.fault_tolerance import FaultSignal, FaultToleranceResult
+from vllm.v1.fault_tolerance.maskable import FTMaskBuffer
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -68,7 +74,6 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.fault_tolerance import FaultToleranceResult
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -779,9 +784,6 @@ class Worker(WorkerBase):
         # field on the success path (no exception, no string match) and
         # decides whether to keep the loop paused or to move to RECOVERING.
         if self._ft_paused:
-            from vllm.v1.fault_tolerance import FaultSignal
-            from vllm.v1.outputs import ModelRunnerOutput
-
             return ModelRunnerOutput(
                 req_ids=[],
                 req_id_to_index={},
@@ -1073,7 +1075,7 @@ class Worker(WorkerBase):
     _ft_shutdown: bool = False
     _ft_interrupt_thread: Any = None
 
-    def ft_pause(self) -> "FaultToleranceResult":
+    def ft_pause(self) -> FaultToleranceResult:
         """Pause this worker. Called via collective_rpc between iterations.
 
         Sets a flag the next ``execute_model`` call observes; it then
@@ -1081,23 +1083,22 @@ class Worker(WorkerBase):
         kind="paused")`` so the engine's supervisor sees the state change
         on the success path (no exceptions over IPC).
         """
-        from vllm.v1.fault_tolerance import FaultToleranceResult
-
         self._ft_paused = True
         return FaultToleranceResult(success=True)
 
-    def ft_resume_after_retry(self, **params: Any) -> "FaultToleranceResult":
+    def ft_resume_after_retry(self, **params: Any) -> FaultToleranceResult:
         """Clean up worker state and resume.
 
         - Clears any in-flight input batch (KvAction.PREEMPT_LOGICAL_FREE).
         - Calls ``clean_mask`` on the all2all manager iff the backend
           implements ``FTMaskBuffer``.
-        - Optionally rebuilds the DP gloo group when ``params`` request it.
-        """
-        from vllm.v1.fault_tolerance import FaultToleranceResult
-        from vllm.v1.fault_tolerance.maskable import FTMaskBuffer
 
-        self._ft_paused = False
+        Order matters: ``_ft_paused`` is only cleared after every cleanup
+        step succeeds. If any step fails, the worker stays paused so the
+        next iteration doesn't run on inconsistent state, and the returned
+        result carries the failure reason for the supervisor.
+        """
+        cleanup_errors: list[str] = []
 
         # Clear in-flight input batch — equivalent to today's
         # ``clear_input_batch_callback`` body.
@@ -1108,17 +1109,28 @@ class Worker(WorkerBase):
                 for req_id in cached:
                     input_batch.remove_request(req_id)
 
-        # Clean FT mask if the backend implements it.
+        # Clean FT mask if the backend supports it. EP group is only created
+        # for MoE models, so absence is normal — silently skip in that case.
         try:
-            from vllm.distributed import get_ep_group
+            ep_group = get_ep_group()
+        except AssertionError:
+            ep_group = None
+        if ep_group is not None:
+            mgr = getattr(ep_group.device_communicator, "all2all_manager", None)
+            if isinstance(mgr, FTMaskBuffer):
+                try:
+                    mgr.clean_mask()
+                except Exception as e:
+                    logger.exception("ft_resume_after_retry: clean_mask failed")
+                    cleanup_errors.append(f"clean_mask: {e}")
 
-            comm = get_ep_group().device_communicator
-            mgr = getattr(comm, "all2all_manager", None) if comm else None
-            if mgr is not None and isinstance(mgr, FTMaskBuffer):
-                mgr.clean_mask()
-        except Exception as e:
-            logger.warning("ft_resume_after_retry: clean_mask failed: %s", e)
+        if cleanup_errors:
+            return FaultToleranceResult(
+                success=False,
+                reason="; ".join(cleanup_errors),
+            )
 
+        self._ft_paused = False
         return FaultToleranceResult(success=True)
 
     # ------------------------------------------------------------------
@@ -1135,35 +1147,29 @@ class Worker(WorkerBase):
         """
         if self._ft_interrupt_thread is not None:
             return
-        import threading
 
         self._ft_interrupt_addr = addr
         self._ft_shutdown = False
         self._ft_interrupt_thread = threading.Thread(
             target=self._ft_interrupt_loop,
             daemon=True,
-            name=f"FTInterruptThread_{getattr(self, 'local_rank', 0)}",
+            name=f"FTInterruptThread_{self.local_rank}",
         )
         self._ft_interrupt_thread.start()
 
     def _ft_interrupt_loop(self) -> None:
         """Tiny daemon. Handles only operations that must run while the
         main thread is blocked (e.g. NCCL hang). Pause / retry come
-        through ``collective_rpc`` to the main thread, not here."""
-        try:
-            import zmq
-        except ImportError:
-            logger.debug("zmq unavailable; FT interrupt thread exiting")
-            return
+        through ``collective_rpc`` to the main thread, not here.
 
+        SUB socket connect failures propagate so the daemon thread crashes
+        loudly with a logged traceback rather than silently leaving the
+        worker without an abort path.
+        """
         ctx = zmq.Context.instance()
         sock = ctx.socket(zmq.SUB)
-        try:
-            sock.connect(self._ft_interrupt_addr)
-        except Exception as e:
-            logger.warning("FT interrupt SUB connect failed: %s", e)
-            return
-        topic_self = f"worker_{getattr(self, 'local_rank', 0)}".encode()
+        sock.connect(self._ft_interrupt_addr)
+        topic_self = f"worker_{self.local_rank}".encode()
         sock.setsockopt(zmq.SUBSCRIBE, topic_self)
         sock.setsockopt(zmq.SUBSCRIBE, b"all")
         sock.setsockopt(zmq.RCVTIMEO, 1000)
@@ -1186,20 +1192,19 @@ class Worker(WorkerBase):
 
     def _abort_nccl_communicators(self) -> None:
         """Abort all FT-aware comm groups so the main thread errors out
-        of NCCL and becomes responsive again. Called from the aux thread."""
-        from vllm.distributed import get_dp_group, get_tp_group
-        from vllm.distributed.parallel_state import get_ep_group
+        of NCCL and becomes responsive again. Called from the aux thread.
 
+        Best-effort: a failure on one group does not stop the others — we
+        only need ANY communicator to abort to unstick the main thread.
+        """
         groups = []
         for fn in (get_dp_group, get_ep_group, get_tp_group):
             try:
                 groups.append(fn())
-            except Exception:
-                # Group may not exist on this worker (e.g. EP not in use).
+            except AssertionError:
+                # Group not initialized on this worker (EP only for MoE).
                 continue
         for group in groups:
-            if group is None:
-                continue
             comm = getattr(group, "device_communicator", None)
             if comm is None:
                 continue
@@ -1208,8 +1213,8 @@ class Worker(WorkerBase):
                 continue
             try:
                 abort()
-            except Exception as e:
-                logger.warning("communicator abort failed: %s", e)
+            except RuntimeError:
+                logger.exception("communicator abort failed; continuing")
 
 
 def init_worker_distributed_environment(

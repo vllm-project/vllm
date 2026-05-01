@@ -56,29 +56,18 @@ class AbortRequestsPlan(ClusterRecoveryPlan):
         self, coord: ClusterCoordinator, params: dict[str, Any]
     ) -> FaultToleranceResult:
         engine_index = (params or {}).get("engine_index")
-        if engine_index is None or not isinstance(engine_index, int):
+        if not isinstance(engine_index, int):
             return FaultToleranceResult(
                 success=False,
                 reason="abort requires params.engine_index (int)",
             )
 
-        abort_fn = getattr(coord, "abort_inflight_on", None)
-        if abort_fn is None:
-            return FaultToleranceResult(
-                success=False,
-                reason=(
-                    "ClusterCoordinator does not expose abort_inflight_on; "
-                    "the deployment cannot fail in-flight requests on a "
-                    "specific engine."
-                ),
-            )
-
         try:
-            num_aborted = abort_fn(engine_index)
+            num_aborted = coord.abort_inflight_on(engine_index)
         except Exception as e:
             logger.exception("abort_inflight_on(%d) failed: %s", engine_index, e)
             return FaultToleranceResult(
-                success=False, reason=f"abort_inflight_on raised: {e}"
+                success=False, reason=f"abort_inflight_on failed: {e}"
             )
 
         return FaultToleranceResult(

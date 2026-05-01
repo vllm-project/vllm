@@ -15,9 +15,14 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
+import msgspec.msgpack
+import zmq
+
 from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.fault_tolerance.types import FaultInfo
 
 if TYPE_CHECKING:
@@ -49,20 +54,11 @@ class FaultStateBus:
         self._init_pub_socket()
 
     def _init_pub_socket(self) -> None:
-        """Create the ZMQ PUB socket lazily so the bus is usable in tests
-        even when ZMQ isn't available."""
-        try:
-            import zmq
-
-            from vllm.utils.network_utils import make_zmq_socket
-        except ImportError:
-            logger.debug("zmq unavailable; FaultStateBus running in-process only")
-            return
-
+        """Create the ZMQ PUB socket if the FT config provides a bind target."""
+        # `fault_tolerance_config` may not exist on configs predating #34833.
         ft_cfg = getattr(self._vllm_config, "fault_tolerance_config", None)
         port = getattr(ft_cfg, "external_fault_notify_port", None) if ft_cfg else None
         if port is None:
-            # No port configured; skip socket creation.
             return
         host = getattr(ft_cfg, "external_fault_notify_host", "0.0.0.0")
         path = f"tcp://{host}:{port}"
@@ -86,8 +82,6 @@ class FaultStateBus:
             self._subscribers.append(cb)
 
     def unsubscribe(self, cb: Callable[[FaultInfo], None]) -> None:
-        from contextlib import suppress
-
         with self._sub_lock, suppress(ValueError):
             self._subscribers.remove(cb)
 
@@ -118,8 +112,6 @@ class FaultStateBus:
     # ---- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
-        from contextlib import suppress
-
         if self._closed:
             return
         self._closed = True
@@ -130,10 +122,10 @@ class FaultStateBus:
 
 
 def _encode_fault_info(info: FaultInfo) -> bytes:
-    """Encode a FaultInfo for the wire.
+    """Encode a FaultInfo for the wire using msgpack via msgspec.
 
-    Uses msgpack via msgspec when available (matching the existing
-    fault-reporting wire format); falls back to JSON otherwise.
+    Wire format matches what vllm-project/vllm#34833 established so
+    external subscribers (e.g., Dynamo) work without modification.
     """
     payload = {
         "schema_version": 1,
@@ -144,11 +136,4 @@ def _encode_fault_info(info: FaultInfo) -> bytes:
         if isinstance(info.detail, (str, type(None)))
         else str(info.detail),
     }
-    try:
-        import msgspec.msgpack
-
-        return msgspec.msgpack.encode(payload)
-    except ImportError:
-        import json
-
-        return json.dumps(payload).encode("utf-8")
+    return msgspec.msgpack.encode(payload)

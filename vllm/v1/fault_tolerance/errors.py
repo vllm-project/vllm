@@ -37,8 +37,8 @@ class FaultToleranceError(Exception):
 
 
 class DpAllReduceFaultError(FaultToleranceError):
-    """Raised when the DP synchronization all-reduce in
-    `vllm.v1.worker.dp_utils._run_ar` returns a failure result.
+    """Raised by `vllm.v1.worker.dp_utils._run_ar` when the DP synchronization
+    all-reduce fails.
 
     The supervisor's `on_step_error` hook can read `self.signal` to surface
     the failure as a `FaultInfo` on the bus.

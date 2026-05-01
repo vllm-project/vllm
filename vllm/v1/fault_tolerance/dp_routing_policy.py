@@ -11,6 +11,7 @@ this generalizes that to all non-HEALTHY states by subscribing to the bus.
 from __future__ import annotations
 
 import threading
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -70,7 +71,5 @@ class DPRoutingPolicy:
                 self._eligible.add(info.engine_index)
 
     def close(self) -> None:
-        from contextlib import suppress
-
         with suppress(Exception):
             self._bus.unsubscribe(self._on_event)

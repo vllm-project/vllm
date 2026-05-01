@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import queue
 import threading
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
+import zmq
+
 from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.fault_tolerance.errors import FaultToleranceError
 from vllm.v1.fault_tolerance.fault_state_bus import FaultStateBus
 from vllm.v1.fault_tolerance.registry import (
@@ -32,7 +36,6 @@ from vllm.v1.fault_tolerance.types import (
     Disposition,
     EngineLocalRecoveryPlan,
     FaultInfo,
-    FaultSignal,
     FaultStatus,
     FaultToleranceHooks,
     FaultToleranceRequest,
@@ -57,9 +60,7 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
     def __init__(self, vllm_config: VllmConfig, engine: Any | None = None):
         self.vllm_config = vllm_config
         self.engine = engine
-        self.engine_index = (
-            getattr(engine, "engine_index", 0) if engine is not None else 0
-        )
+        self.engine_index = engine.engine_index if engine is not None else 0
 
         self.bus = FaultStateBus(vllm_config)
 
@@ -84,12 +85,7 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
         self._interrupt_pub = self._init_interrupt_pub()
 
     def _init_interrupt_pub(self):
-        try:
-            import zmq
-
-            from vllm.utils.network_utils import make_zmq_socket
-        except ImportError:
-            return None
+        # `fault_tolerance_config` may not exist on configs predating #34833.
         ft_cfg = getattr(self.vllm_config, "fault_tolerance_config", None)
         addr = getattr(ft_cfg, "interrupt_addr", None) if ft_cfg else None
         if addr is None:
@@ -113,12 +109,9 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
                 self._pause_cv.wait()
 
     def after_step(self, engine: Any, output: ModelRunnerOutput | None) -> None:
-        if output is None:
+        if output is None or output.fault_signal is None:
             return
-        signal: FaultSignal | None = getattr(output, "fault_signal", None)
-        if signal is None:
-            return
-        info = FaultInfo.from_signal(self.engine_index, signal)
+        info = FaultInfo.from_signal(self.engine_index, output.fault_signal)
         self._set_status(info.status)
         self._enqueue(info)
 
@@ -157,15 +150,14 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
             )
 
         if isinstance(plan, EngineLocalRecoveryPlan):
-            executor = getattr(self.engine, "executor", None) if self.engine else None
-            if executor is None:
+            if self.engine is None:
                 return FaultToleranceResult(
                     success=False,
-                    reason="No executor on engine; supervisor cannot run plan.",
+                    reason="No engine attached to supervisor; cannot run plan.",
                     request_id=ft_request.request_id,
                 )
             try:
-                result = plan.execute(executor, ft_request.params)
+                result = plan.execute(self.engine.executor, ft_request.params)
             except Exception as e:
                 logger.exception("Plan %s failed: %s", ft_request.instruction, e)
                 return FaultToleranceResult(
@@ -265,8 +257,6 @@ class DefaultFaultSupervisor(FaultToleranceHooks):
                 logger.warning("Bus publish failed: %s", e)
 
     def shutdown(self) -> None:
-        from contextlib import suppress
-
         self._shutdown = True
         with self._state_lock:
             self._pause_cv.notify_all()

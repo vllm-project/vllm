@@ -58,10 +58,7 @@ class RayClusterCoordinator:
     def alive_engine_indices(self) -> list[int]:
         # The client tracks live engines via core_engines (ordered by current
         # list index, not original dp_rank). Translate to ints.
-        engines = getattr(self._client, "core_engines", None)
-        if engines is None:
-            return []
-        return list(range(len(engines)))
+        return list(range(len(self._client.core_engines)))
 
     def scale_down(self, dead_index: int) -> None:
         """Run the existing fault-triggered scale-down on the client's loop.

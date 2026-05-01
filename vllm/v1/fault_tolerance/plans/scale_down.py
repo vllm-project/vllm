@@ -49,40 +49,28 @@ class ScaleDownRecoveryPlan(ClusterRecoveryPlan):
     kv_action = KvAction.LOSE_DEAD_ENGINE_BLOCKS
 
     def is_applicable(self, vllm_config: VllmConfig) -> bool:
-        pc = getattr(vllm_config, "parallel_config", None)
-        if pc is None:
-            return False
+        pc = vllm_config.parallel_config
+        # `enable_ep_fault_tolerance` and `data_parallel_backend` are added
+        # by #38862; tolerate older configs that don't carry them.
         if not getattr(pc, "enable_ep_fault_tolerance", False):
             return False
-        if getattr(pc, "tensor_parallel_size", 1) != 1:
+        if pc.tensor_parallel_size != 1:
             return False
-        # Ray DP backend is required by the existing elastic EP machinery.
-        backend = getattr(pc, "data_parallel_backend", "")
-        return backend in {"ray"}
+        return getattr(pc, "data_parallel_backend", "") == "ray"
 
     def execute(  # type: ignore[override]
         self, coord: ClusterCoordinator, params: dict[str, Any]
     ) -> FaultToleranceResult:
         dead_index = (params or {}).get("dead_engine_index")
-        if dead_index is None or not isinstance(dead_index, int):
+        if not isinstance(dead_index, int):
             return FaultToleranceResult(
                 success=False,
                 reason="scale_down requires params.dead_engine_index (int)",
             )
 
-        scale_down_fn = getattr(coord, "scale_down", None)
-        if scale_down_fn is None:
-            return FaultToleranceResult(
-                success=False,
-                reason=(
-                    "ClusterCoordinator does not expose scale_down(...); "
-                    "the deployment cannot perform elastic scale-down."
-                ),
-            )
-
         try:
-            scale_down_fn(dead_index)
+            coord.scale_down(dead_index)
         except Exception as e:
             logger.exception("scale_down(%d) failed: %s", dead_index, e)
-            return FaultToleranceResult(success=False, reason=f"scale_down raised: {e}")
+            return FaultToleranceResult(success=False, reason=f"scale_down failed: {e}")
         return FaultToleranceResult(success=True)
