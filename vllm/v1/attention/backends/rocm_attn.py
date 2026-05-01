@@ -32,6 +32,11 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
+from vllm.v1.attention.ops.rocm_paged_prefill_attn import (
+    is_available as rdna3_prefill_is_available,
+    paged_prefill_attn_rdna3,
+    supports_shape as rdna3_prefill_supports_shape,
+)
 from vllm.v1.attention.ops.rocm_split_k_decode import (
     MIN_LAUNCH_GRID_SIZE_2D,
     NUM_PAR_SOFTMAX_SEGMENTS,
@@ -515,6 +520,41 @@ class RocmAttentionImpl(AttentionImpl):
                 softmax_segm_output=attn_metadata.softmax_segm_output,
                 softmax_segm_max=attn_metadata.softmax_segm_max,
                 softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+            )
+            return output
+
+        # WMMA prefill fast path for RDNA3 (gfx1100). Replaces Triton
+        # context_attention_fwd in chunked_prefill_paged_decode for the
+        # supported subset (fp16/bf16, head_size == 128, no quant /
+        # alibi / SW / sinks / FP8 / softcap, causal, key/value present).
+        if (
+            max_seqlen_q > 1
+            and attn_metadata.causal
+            and key is not None
+            and value is not None
+            and rdna3_prefill_is_available()
+            and rdna3_prefill_supports_shape(
+                self.head_size, value_cache.shape[3], query.dtype
+            )
+            and not is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.alibi_slopes is None
+            and self.sliding_window == (-1, -1)
+            and self.sinks is None
+            and output_scale is None
+            and self.logits_soft_cap == 0
+        ):
+            paged_prefill_attn_rdna3(
+                out=output[:num_actual_tokens],
+                query=query[:num_actual_tokens],
+                key=key[:num_actual_tokens],
+                value=value[:num_actual_tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_table=block_table,
+                cu_seqlens_q=cu_seqlens_q,
+                seq_lens=seqused_k,
+                sm_scale=self.scale,
+                causal=True,
             )
             return output
 
