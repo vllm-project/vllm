@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -214,15 +216,10 @@ class MulAndSilu(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        d = x.shape[-1] // 2
-        return x[..., :d] * F.silu(x[..., d:])
+        return ir.ops.mul_and_silu.impls["native"].impl_fn(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
-        return out
+        return ir.ops.mul_and_silu(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)

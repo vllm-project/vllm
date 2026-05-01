@@ -8,6 +8,13 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
+from vllm import ir
+from vllm.config import (
+    CompilationConfig,
+    VllmConfig,
+    get_cached_compilation_config,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.activation import (
     FastGELU,
     FatreluAndMul,
@@ -232,3 +239,41 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+def test_mul_and_silu_disabled_custom_op_uses_native_impl(monkeypatch):
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            backend="eager", custom_ops=["all", "-mul_and_silu"]
+        )
+    )
+    get_cached_compilation_config.cache_clear()
+
+    x = torch.randn(8, 16, dtype=torch.float32)
+    call_tracker = {"native": False, "dispatch": False}
+    native_impl = ir.ops.mul_and_silu.impls["native"]
+    original_native_impl = native_impl.impl_fn
+
+    def tracked_native_impl(x: torch.Tensor) -> torch.Tensor:
+        call_tracker["native"] = True
+        return original_native_impl(x)
+
+    def dispatch_should_not_run(*args, **kwargs) -> torch.Tensor:
+        call_tracker["dispatch"] = True
+        raise AssertionError(
+            "MulAndSilu.forward_native() should not call the dispatching IR op "
+            "when the custom op is disabled."
+        )
+
+    monkeypatch.setattr(native_impl, "impl_fn", tracked_native_impl)
+    monkeypatch.setattr(ir.ops.mul_and_silu, "torch_op", dispatch_should_not_run)
+
+    with set_current_vllm_config(vllm_config):
+        layer = MulAndSilu()
+
+        assert not layer.enabled()
+        out = layer(x)
+
+    torch.testing.assert_close(out, original_native_impl(x), atol=0.0, rtol=0.0)
+    assert call_tracker["native"]
+    assert not call_tracker["dispatch"]
