@@ -410,8 +410,8 @@ def rocm_fp8_mqa_logits(
     if rocm_aiter_ops.is_enabled():
         from aiter.ops.triton.attention.fp8_mqa_logits import fp8_mqa_logits
 
-        kv, scale = kv
-        return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+        k_fp8, scale = kv
+        return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
