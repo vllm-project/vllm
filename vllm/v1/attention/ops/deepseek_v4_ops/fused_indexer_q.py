@@ -571,7 +571,7 @@ class IndexerQMxFp4Kernel:
                 )
                 sin_vals = _ldg_vec(
                     cos_sin_cache,
-                    (pos, self.nope_dim // 2 + rope_idx),
+                    (pos, self.rope_dim // 2 + rope_idx),
                     8,
                     out_dtype=Float32,
                 )
