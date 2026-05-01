@@ -308,9 +308,16 @@ class LlamaDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        flashnorm_folded = getattr(config, "flashnorm_folded", False)
+        self.input_layernorm = RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            has_weight=not flashnorm_folded,
+        )
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            has_weight=not flashnorm_folded,
         )
 
     def forward(
@@ -381,7 +388,11 @@ class LlamaModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+                has_weight=not getattr(config, "flashnorm_folded", False),
+            )
         else:
             self.norm = PPMissingLayer()
 
