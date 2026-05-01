@@ -7,7 +7,6 @@ from itertools import islice
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -1456,14 +1455,25 @@ def hc_head(
     rms_norm_eps: float,
     hc_eps: float,
 ) -> torch.Tensor:
-    x = hidden_states
-    shape, dtype = x.size(), x.dtype
-    x = x.flatten(1).float()
-    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + rms_norm_eps)
-    mixes = F.linear(x, hc_fn) * rsqrt
-    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
-    return y.to(dtype)
+    hc_mult, hidden_size = hidden_states.shape[-2:]
+    outer_shape = hidden_states.shape[:-2]
+    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+    num_tokens = hs_flat.shape[0]
+    out = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+    )
+    torch.ops.vllm.hc_head_fused_kernel(
+        hs_flat,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_norm_eps,
+        hc_eps,
+        hc_mult,
+    )
+    return out.view(*outer_shape, hidden_size)
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:

@@ -59,11 +59,26 @@ if(DEEPGEMM_ARCHS)
   # Build the _C pybind11 extension from DeepGEMM's C++ source.
   # This is a CXX-only module — CUDA kernels are JIT-compiled at runtime.
   #
-  Python_add_library(_deep_gemm_C MODULE WITH_SOABI
-    "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  # Free-threaded Python doesn't yet support the stable ABI, so skip USE_SABI
+  # there. (The other vLLM extensions get this guard for free via
+  # define_extension_target; this target uses raw Python_add_library.)
+  run_python(IS_FREETHREADED_PYTHON
+    "import sysconfig; print(1 if sysconfig.get_config_var(\"Py_GIL_DISABLED\") else 0)"
+    "Failed to determine whether interpreter is free-threaded")
+  if (NOT IS_FREETHREADED_PYTHON)
+    Python_add_library(_deep_gemm_C MODULE WITH_SOABI USE_SABI 3
+      "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  else()
+    Python_add_library(_deep_gemm_C MODULE WITH_SOABI
+      "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  endif()
 
   # The pybind11 module name must be _C to match DeepGEMM's Python imports.
-  set_target_properties(_deep_gemm_C PROPERTIES OUTPUT_NAME "_C")
+  # Place the build artifact in a subdir so it doesn't collide with vLLM's own
+  # `_C.abi3.so` in the build tree (the install destination still differs).
+  set_target_properties(_deep_gemm_C PROPERTIES
+    OUTPUT_NAME "_C"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/deep_gemm")
 
   target_compile_definitions(_deep_gemm_C PRIVATE
     "-DTORCH_EXTENSION_NAME=_C")
@@ -75,11 +90,15 @@ if(DEEPGEMM_ARCHS)
     "${deepgemm_SOURCE_DIR}/third-party/cutlass/tools/util/include"
     "${deepgemm_SOURCE_DIR}/third-party/fmt/include")
 
+  # Keep Stable ABI for the module, but *not* for CUDA/C++ files.
+  # This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.
   target_compile_options(_deep_gemm_C PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
     $<$<COMPILE_LANGUAGE:CXX>:-O3>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-psabi>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>)
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>
+    $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API>
+    $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
 
   # torch_python is required because DeepGEMM uses pybind11 type casters
   # for at::Tensor (via PYBIND11_MODULE), unlike vLLM's own extensions which
