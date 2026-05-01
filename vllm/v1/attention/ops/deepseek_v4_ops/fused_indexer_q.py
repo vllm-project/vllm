@@ -249,7 +249,7 @@ def _fused_indexer_q_rope_mxfp4_kernel(
 
     half_off = tl.arange(0, HALF_BLOCK)
 
-    # NoPE blocks: direct load, pair as (even-index, odd-index) values.
+    # ---- NoPE blocks: direct load, pair as (even-index, odd-index) values ----
     for b in tl.static_range(NUM_NOPE_BLOCKS):
         base = b * MXFP4_BLOCK
         x_lo = tl.load(q_base + base + half_off * 2).to(tl.float32)
@@ -258,8 +258,8 @@ def _fused_indexer_q_rope_mxfp4_kernel(
         tl.store(out_base + base // 2 + half_off, packed)
         tl.store(scale_base + b, ue8m0)
 
-    # RoPE blocks: apply GPT-J interleaved RoPE to the block's 16 pairs,
-    # then quantize. Each block covers HALF_BLOCK (=16) cos/sin pairs.
+    # ---- RoPE blocks: apply GPT-J interleaved RoPE to the block's 16 pairs,
+    # then quantize. Each block covers HALF_BLOCK (=16) cos/sin pairs. ----
     rot_q_base = q_base + INDEX_Q_NOPE_DIM
     for b in tl.static_range(NUM_ROPE_BLOCKS):
         pair_off = b * HALF_BLOCK + half_off  # indices in [0, HALF_ROT_DIM)
@@ -290,7 +290,7 @@ def _fused_indexer_q_rope_mxfp4_kernel(
     # MXFP4 Q emits a separate ue8m0 scale tensor of shape
     # (T, H, HEAD_DIM // MXFP4_BLOCK) alongside the packed values, so each
     # per-block scale is applied by the downstream MXFP4 logits kernel when
-    # dequantizing Q. There is no per-token scalar to fold into `weights`.
+    # dequantizing Q — there is no per-token scalar to fold into `weights`.
     index_weights = tl.load(
         index_weights_ptr + tok_idx * index_weights_stride + head_idx
     ).to(tl.float32)
@@ -343,15 +343,17 @@ def fused_indexer_q_rope_quant(
     assert index_q.ndim == 3
     assert index_q_cos_sin_cache.ndim == 2
 
+    num_tokens = positions.shape[0]
+    num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
+
+    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
 
     if use_fp4:
         assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
             f"head_dim={index_q_head_dim} must be a multiple of MXFP4 block "
             f"size {MXFP4_BLOCK_SIZE}"
         )
-        num_tokens = positions.shape[0]
-        num_index_q_heads = index_q.shape[1]
         num_scale_blocks = index_q_head_dim // MXFP4_BLOCK_SIZE
         index_q_packed = torch.empty(
             (num_tokens, num_index_q_heads, index_q_head_dim // 2),
@@ -363,8 +365,6 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
-
         if fused_indexer_q_rope_quant_mxfp4_cutedsl is not None:
             fused_indexer_q_rope_quant_mxfp4_cutedsl(
                 positions,
@@ -377,9 +377,7 @@ def fused_indexer_q_rope_quant(
                 index_q_scale,
                 index_weights_out,
             )
-
         else:
-            # Triton fallback
             _fused_indexer_q_rope_mxfp4_kernel[(num_tokens, num_index_q_heads)](
                 positions,
                 index_q,
@@ -415,9 +413,6 @@ def fused_indexer_q_rope_quant(
             index_q_scale.view(torch.int32).squeeze(-1),
         ), index_weights_out
 
-    num_tokens = positions.shape[0]
-    num_index_q_heads = index_q.shape[1]
-    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
         positions,
