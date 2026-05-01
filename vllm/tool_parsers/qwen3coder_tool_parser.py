@@ -14,7 +14,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -685,8 +684,7 @@ class Qwen3CoderToolParser(ToolParser):
                 return result
 
         return None
-    
-    
+
     def get_structural_tag(
         self, request: ChatCompletionRequest
     ) -> StructuralTag | None:
@@ -698,6 +696,9 @@ class Qwen3CoderToolParser(ToolParser):
             if hasattr(tool, "dict"):
                 return tool.dict()
             raise TypeError(f"Unsupported tool type: {type(tool)}")
+
+        if not request.tools:
+            return None
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             converted_tool_choice = request.tool_choice.model_dump()
