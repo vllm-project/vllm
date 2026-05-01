@@ -541,7 +541,10 @@ class OpenAIServingRender:
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                tokenize=(
+                    is_mistral_tokenizer(renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
             ),
         )
 
