@@ -8,6 +8,7 @@ from torch import fx as fx
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.graph_dump import collect_graph_metadata, dump_graph
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -91,6 +92,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
     def __init__(self) -> None:
         self.passes: list[InductorPass] = []
         self.graph_dump_context: dict[str, str] = {}
+        self.graph_dump_metadata: dict[str, Any] = {}
+        self.graph_dump_path = None
 
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph) -> None:
@@ -99,7 +102,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
             if pass_.is_applicable_for_range(compile_range):
+                self.dump_custom_pass_graph(graph, pass_, "before")
                 pass_(graph)
+                self.dump_custom_pass_graph(graph, pass_, "after")
                 VllmInductorPass.dump_prefix += 1
             else:
                 logger.debug("Skipping %s with compile range %s", pass_, compile_range)
@@ -136,6 +141,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.graph_dump_context["prefix"] = prefix
         if function_name:
             self.graph_dump_context["function_name"] = function_name
+        self.graph_dump_path = config.compile_debug_dump_path()
+        self.graph_dump_metadata = collect_graph_metadata(
+            config, **self.graph_dump_context
+        )
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -198,6 +207,21 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
     def update_graph_dump_context(self, pass_: InductorPass) -> None:
         if isinstance(pass_, VllmInductorPass):
             pass_.set_graph_dump_context(**self.graph_dump_context)
+
+    def dump_custom_pass_graph(
+        self, graph: fx.Graph, pass_: InductorPass, stage: str
+    ) -> None:
+        if isinstance(pass_, VllmInductorPass) or not self.graph_dump_path:
+            return
+        pass_name = pass_.__class__.__name__
+        i = VllmInductorPass.dump_prefix
+        i_str = "" if i is None else f".{i}"
+        dump_graph(
+            f"post_grad{i_str}.{pass_name}.{stage}",
+            graph.owning_module,
+            self.graph_dump_path / "graphs",
+            dict(self.graph_dump_metadata, pass_name=pass_name, stage=stage),
+        )
 
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
