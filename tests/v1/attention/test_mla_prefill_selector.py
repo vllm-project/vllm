@@ -548,21 +548,11 @@ class TestDeprecatedFlagMigration:
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
-    def test_cudnn_takes_priority_over_trtllm(self):
-        """use_cudnn_prefill wins over use_trtllm_ragged_deepseek_prefill."""
-        config = AttentionConfig(
-            use_cudnn_prefill=True,
-            use_trtllm_ragged_deepseek_prefill=True,
-        )
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.CUDNN
-
-    def test_cudnn_takes_priority_over_disable_flashinfer(self):
-        """use_cudnn_prefill wins over disable_flashinfer_prefill."""
-        config = AttentionConfig(
-            use_cudnn_prefill=True,
-            disable_flashinfer_prefill=True,
-        )
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.CUDNN
+    def test_cudnn_raises_error(self):
+        """use_cudnn_prefill raises ValueError (cuDNN removed)."""
+        match = "cuDNN MLA prefill backend has been removed"
+        with pytest.raises(ValueError, match=match):
+            AttentionConfig(use_cudnn_prefill=True)
 
     def test_trtllm_takes_priority_over_disable_flashinfer(self):
         """use_trtllm_ragged takes priority over disable_flashinfer."""
