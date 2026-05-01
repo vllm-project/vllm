@@ -417,7 +417,12 @@ def _all_logprobs_match(req_a, req_b) -> bool:
     )
 
 
-def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> bool:
+def _logprobs_match(
+    lps_a: dict[int, Logprob] | None,
+    lps_b: dict[int, Logprob] | None,
+) -> bool:
+    if lps_a is None or lps_b is None:
+        return lps_a is lps_b
     rel_tol, abs_tol = 1e-3, 1e-6
     return (
         len(lps_a) == len(lps_b)
