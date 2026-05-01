@@ -303,12 +303,12 @@ class TestTransitionAwareCapacity:
             if currently_prefilling:
                 if req["prefill_hash"] != 0:
                     configs.add((req["prefill_hash"], "prefill"))
-                # Predict transition.
                 will_complete = (
                     req["num_computed_tokens"] + req["num_scheduled_tokens"]
                     >= req["num_prompt_tokens"]
                 )
-                if will_complete and req["decode_hash"] != 0:
+                needs_decode_reservation = will_complete or req["prefill_hash"] == 0
+                if needs_decode_reservation and req["decode_hash"] != 0:
                     configs.add((req["decode_hash"], "decode"))
             else:
                 if req["decode_hash"] != 0:
@@ -516,41 +516,41 @@ class TestTransitionAwareCapacity:
 
 class TestDecodeOnlyCapacityCheck:
     """Test that decode-only steering (prefill_hash=0, decode_hash!=0)
-    is NOT capacity-checked at the WAITING admission gate.
+    IS capacity-checked at the WAITING admission gate.
 
-    Decode-only requests do not occupy any steering row during prefill,
-    so they should be admitted freely.  Their decode row is reserved
-    later by the transition prediction in the running-request tracking
-    loop.  For full prefix-cache hits, there is a one-step window where
-    the decode row is not yet counted; the model runner handles this
-    gracefully by deferring registration when capacity is exhausted.
+    Decode-only requests need a decode row from the start and never
+    occupy a prefill row.  The admission gate checks the decode hash
+    via the `elif` branch when prefill_hash == 0.
     """
 
     @staticmethod
     def _should_skip(
         scheduled_configs: set[tuple[int, str]],
         prefill_hash: int,
-        decode_hash: int,  # noqa: ARG004 — kept for test clarity
+        decode_hash: int,
         max_configs: int,
     ) -> bool:
         """Reproduce the scheduler WAITING admission check.
 
-        Only the prefill hash is checked at admission time.
-        Decode-only requests (prefill_hash == 0) are always admitted.
+        The prefill hash is checked for requests that have one.
+        Decode-only requests (prefill_hash == 0, decode_hash != 0)
+        have their decode hash checked instead.
         """
         new_hashes: set[tuple[int, str]] = set()
         if prefill_hash != 0:
             new_hashes.add((prefill_hash, "prefill"))
+        elif decode_hash != 0:
+            new_hashes.add((decode_hash, "decode"))
         if not new_hashes:
             return False
         new_unique = new_hashes - scheduled_configs
         return len(scheduled_configs) + len(new_unique) > max_configs
 
-    def test_decode_only_always_admitted(self):
-        """A decode-only request (prefill_hash=0) is never blocked at
-        WAITING admission, even when steering capacity is full."""
+    def test_decode_only_blocked_at_capacity(self):
+        """A decode-only request (prefill_hash=0) is blocked at
+        WAITING admission when steering capacity is full."""
         scheduled = {(111, "prefill"), (222, "decode")}
-        assert not self._should_skip(scheduled, 0, 333, max_configs=2)
+        assert self._should_skip(scheduled, 0, 333, max_configs=2)
 
     def test_decode_only_admitted_when_capacity(self):
         """A decode-only request is admitted when there is capacity."""
@@ -559,7 +559,7 @@ class TestDecodeOnlyCapacityCheck:
 
     def test_decode_only_existing_hash_also_admitted(self):
         """A decode-only request whose decode hash is already scheduled
-        is still admitted (no prefill check needed)."""
+        is admitted (dedup means zero new slots needed)."""
         scheduled = {(111, "prefill"), (222, "decode")}
         assert not self._should_skip(scheduled, 0, 222, max_configs=2)
 
@@ -583,11 +583,23 @@ class TestDecodeOnlyCapacityCheck:
         assert not self._should_skip(scheduled, 0, 0, max_configs=2)
 
     def test_decode_only_single_slot(self):
-        """Decode-only with max_configs=1: always admitted regardless
-        of current capacity, since no prefill row is needed."""
+        """Decode-only with max_configs=1: admitted when empty, blocked
+        when full with new hash, admitted when hash already present."""
         assert not self._should_skip(set(), 0, 111, max_configs=1)
-        assert not self._should_skip({(222, "decode")}, 0, 111, max_configs=1)
+        assert self._should_skip({(222, "decode")}, 0, 111, max_configs=1)
         assert not self._should_skip({(111, "decode")}, 0, 111, max_configs=1)
+
+    def test_decode_only_dedup_with_existing_decode(self):
+        """Decode-only request whose decode hash is already in the set
+        passes even at capacity (dedup)."""
+        scheduled = {(333, "prefill"), (444, "decode")}
+        assert not self._should_skip(scheduled, 0, 444, max_configs=2)
+
+    def test_decode_only_new_hash_at_capacity_blocked(self):
+        """Decode-only request with a new decode hash at capacity is
+        blocked."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert self._should_skip(scheduled, 0, 999, max_configs=2)
 
 
 class TestWaitingTransitionPrediction:
@@ -614,15 +626,13 @@ class TestWaitingTransitionPrediction:
         num_prompt_tokens: int,
         num_new_tokens: int,
     ) -> None:
-        """Reproduce the fixed scheduler post-admission hash update
-        with transition prediction for WAITING requests."""
+        """Reproduce the fixed scheduler post-admission hash update."""
         if num_computed_tokens < num_prompt_tokens:
             if prefill_hash != 0:
                 scheduled_configs.add((prefill_hash, "prefill"))
-            # Predict transition: if this request will complete
-            # prefill this step, also reserve its decode row.
             will_complete = num_computed_tokens + num_new_tokens >= num_prompt_tokens
-            if will_complete and decode_hash != 0:
+            needs_decode_reservation = will_complete or prefill_hash == 0
+            if needs_decode_reservation and decode_hash != 0:
                 scheduled_configs.add((decode_hash, "decode"))
         else:
             if decode_hash != 0:
@@ -735,6 +745,46 @@ class TestWaitingTransitionPrediction:
 
         # Second request: new prefill hash -> would need a 3rd slot
         # but max is 2.
+        new_hashes: set[tuple[int, str]] = {(333, "prefill")}
+        new_unique = new_hashes - configs
+        assert len(configs) + len(new_unique) > max_configs
+
+    def test_decode_only_chunked_reserves_decode_row(self):
+        """A decode-only request (prefill_hash=0) NOT completing prefill
+        this step still reserves its decode row because
+        needs_decode_reservation is True when prefill_hash == 0."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=0,
+            decode_hash=222,
+            num_computed_tokens=50,
+            num_prompt_tokens=100,
+            num_new_tokens=10,  # 50+10=60 < 100, NOT completing prefill
+        )
+        assert (222, "decode") in configs
+        assert (0, "prefill") not in configs
+
+    def test_decode_only_chunked_blocks_subsequent(self):
+        """A decode-only request's decode reservation during chunked
+        prefill blocks a subsequent WAITING request from admission at
+        capacity."""
+        max_configs = 1
+        configs: set[tuple[int, str]] = set()
+
+        # First request: decode-only, chunked prefill, reserves decode row.
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=0,
+            decode_hash=222,
+            num_computed_tokens=50,
+            num_prompt_tokens=100,
+            num_new_tokens=10,
+        )
+        assert configs == {(222, "decode")}
+
+        # Second request: new prefill hash -> would need a 2nd slot
+        # but max is 1.
         new_hashes: set[tuple[int, str]] = {(333, "prefill")}
         new_unique = new_hashes - configs
         assert len(configs) + len(new_unique) > max_configs
