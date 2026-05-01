@@ -577,12 +577,9 @@ def validate_args(args):
     ):
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
-        random_input_len = getattr(args, "random_input_len", None)
-        if args.input_len is None and random_input_len is None:
-            raise ValueError(
-                "Either --input-len or --random-input-len must be provided "
-                "for a random dataset"
-            )
+        # Note: If --input-len and --random-input-len are both None,
+        # datasets.py will fall back to RandomDataset.DEFAULT_INPUT_LEN (1024)
+        # and DEFAULT_OUTPUT_LEN (128)
 
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
