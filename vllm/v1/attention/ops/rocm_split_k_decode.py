@@ -24,6 +24,7 @@ path for those.
 Cudagraph-safe: the three workspace tensors must be pre-allocated by the
 metadata builder; this entry point performs no allocations.
 """
+
 from dataclasses import dataclass
 from typing import Final
 
@@ -101,33 +102,33 @@ def get_split_k_arch_config() -> SplitKArchConfig | None:
 
 # Default for ``paged_decode_split_k``'s ``num_segments`` kwarg.  Derived
 # from gfx1100 to keep a single source of truth.
-_DEFAULT_NUM_SEGMENTS: Final[int] = (
-    _SPLIT_K_ARCH_CONFIGS["gfx1100"].num_par_softmax_segments
-)
+_DEFAULT_NUM_SEGMENTS: Final[int] = _SPLIT_K_ARCH_CONFIGS[
+    "gfx1100"
+].num_par_softmax_segments
 
 
 @triton.jit
 def _kernel_paged_decode_split_k(
-    segm_output_ptr,           # (num_seqs, num_query_heads, NUM_SEGMENTS, head_size_padded) f32
-    segm_max_ptr,              # (num_seqs, num_query_heads, NUM_SEGMENTS) f32
-    segm_expsum_ptr,           # (num_seqs, num_query_heads, NUM_SEGMENTS) f32
-    query_ptr,                 # (num_seqs, num_query_heads, head_size)
-    key_cache_ptr,             # (num_blocks, num_kv_heads, head_size//x, block_size, x)
-    value_cache_ptr,           # (num_blocks, num_kv_heads, head_size, block_size)
-    block_tables_ptr,          # (num_seqs, max_logical_blocks)
-    seq_lens_ptr,              # (num_seqs,)
-    scale,                     # float32
+    segm_output_ptr,  # (num_seqs, num_query_heads, NUM_SEGMENTS, head_size_padded) f32
+    segm_max_ptr,  # (num_seqs, num_query_heads, NUM_SEGMENTS) f32
+    segm_expsum_ptr,  # (num_seqs, num_query_heads, NUM_SEGMENTS) f32
+    query_ptr,  # (num_seqs, num_query_heads, head_size)
+    key_cache_ptr,  # (num_blocks, num_kv_heads, head_size//x, block_size, x)
+    value_cache_ptr,  # (num_blocks, num_kv_heads, head_size, block_size)
+    block_tables_ptr,  # (num_seqs, max_logical_blocks)
+    seq_lens_ptr,  # (num_seqs,)
+    scale,  # float32
     num_query_heads: tl.constexpr,
     num_queries_per_kv: tl.constexpr,
-    BLOCK_M: tl.constexpr,             # next_pow2(num_queries_per_kv) clamped to >= 16
+    BLOCK_M: tl.constexpr,  # next_pow2(num_queries_per_kv) clamped to >= 16
     block_table_stride: tl.int64,
     query_stride_0: tl.int64,
     query_stride_1: tl.int64,
-    TILE_SIZE: tl.constexpr,           # K-direction tile (e.g. 32)
-    PHYSICAL_BLOCK_SIZE: tl.constexpr, # cache block_size (may be non-pow2)
+    TILE_SIZE: tl.constexpr,  # K-direction tile (e.g. 32)
+    PHYSICAL_BLOCK_SIZE: tl.constexpr,  # cache block_size (may be non-pow2)
     HEAD_SIZE: tl.constexpr,
-    HEAD_SIZE_PADDED: tl.constexpr,    # next_pow2(head_size)
-    x: tl.constexpr,                   # K cache vec dim (innermost)
+    HEAD_SIZE_PADDED: tl.constexpr,  # next_pow2(head_size)
+    x: tl.constexpr,  # K cache vec dim (innermost)
     stride_k_cache_0: tl.int64,
     stride_k_cache_1: tl.int64,
     stride_k_cache_2: tl.int64,
@@ -148,7 +149,9 @@ def _kernel_paged_decode_split_k(
     # Each segment processes a contiguous K-range of `tiles_per_segment` tiles.
     # ceil so the last segment may be partial; segments past act_num_segments
     # short-circuit (their workspace slots are masked out by the reduce kernel).
-    tiles_per_segment = (seq_len + NUM_SEGMENTS * TILE_SIZE - 1) // (NUM_SEGMENTS * TILE_SIZE)
+    tiles_per_segment = (seq_len + NUM_SEGMENTS * TILE_SIZE - 1) // (
+        NUM_SEGMENTS * TILE_SIZE
+    )
     if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
         return
 
@@ -166,11 +169,7 @@ def _kernel_paged_decode_split_k(
     dim_mask = offs_d < HEAD_SIZE
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
-    q_offset = (
-        seq_idx * query_stride_0
-        + qh[:, None] * query_stride_1
-        + offs_d[None, :]
-    )
+    q_offset = seq_idx * query_stride_0 + qh[:, None] * query_stride_1 + offs_d[None, :]
     Q = tl.load(
         query_ptr + q_offset,
         mask=head_mask[:, None] & dim_mask[None, :],
@@ -224,7 +223,8 @@ def _kernel_paged_decode_split_k(
         S = scale * tl.dot(Q, K)
         S = tl.where(head_mask[:, None] & tile_mask[None, :], S, float("-inf"))
 
-        # qlen == 1: every key position 0..seq_len-1 is valid; tile_mask handles seq end.
+        # qlen == 1: every key position 0..seq_len-1 is valid;
+        # tile_mask handles seq end.
 
         m_j = tl.maximum(M, tl.max(S, axis=1))
         p = tl.exp(S - m_j[:, None])
@@ -262,7 +262,7 @@ def _kernel_paged_decode_split_k(
 
 @triton.jit
 def _kernel_reduce_segments(
-    output_ptr,           # (num_seqs, num_query_heads, head_size)
+    output_ptr,  # (num_seqs, num_query_heads, head_size)
     segm_output_ptr,
     segm_max_ptr,
     segm_expsum_ptr,
@@ -279,9 +279,13 @@ def _kernel_reduce_segments(
     qhead_idx = tl.program_id(1)
 
     seq_len = tl.load(seq_lens_ptr + seq_idx)
-    tiles_per_segment = (seq_len + NUM_SEGMENTS * TILE_SIZE - 1) // (NUM_SEGMENTS * TILE_SIZE)
+    tiles_per_segment = (seq_len + NUM_SEGMENTS * TILE_SIZE - 1) // (
+        NUM_SEGMENTS * TILE_SIZE
+    )
     # Number of segments that actually got data from the producer kernel.
-    act_num_segments = (seq_len + tiles_per_segment * TILE_SIZE - 1) // (tiles_per_segment * TILE_SIZE)
+    act_num_segments = (seq_len + tiles_per_segment * TILE_SIZE - 1) // (
+        tiles_per_segment * TILE_SIZE
+    )
 
     seg_offs = tl.arange(0, NUM_SEGMENTS)
     seg_mask = seg_offs < act_num_segments
@@ -315,11 +319,7 @@ def _kernel_reduce_segments(
     acc_sum = tl.sum(seg_out, axis=0)
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
 
-    out_offset = (
-        seq_idx * output_stride_0
-        + qhead_idx * output_stride_1
-        + seg_offs_d
-    )
+    out_offset = seq_idx * output_stride_0 + qhead_idx * output_stride_1 + seg_offs_d
     tl.store(output_ptr + out_offset, acc, mask=dim_mask)
 
 

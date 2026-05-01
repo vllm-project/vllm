@@ -56,9 +56,7 @@ def supports_shape(
         return False
     if block_size % KERNEL_K_TILE != 0:
         return False
-    if dtype not in (torch.float16, torch.bfloat16):
-        return False
-    return True
+    return dtype in (torch.float16, torch.bfloat16)
 
 
 def paged_prefill_attn_rdna3(
