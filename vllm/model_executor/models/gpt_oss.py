@@ -43,6 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_moe_expert_weights,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
@@ -379,7 +380,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_start = tp_rank * per_rank_intermediate_size
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
-        for name, weight in weights:
+        # Use centralized weight remapping for MoE expert parameters (Solution 7)
+        for name, weight in remap_moe_expert_weights(weights, params_dict):
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
@@ -682,7 +684,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 continue
 
             if (
-                all(key in name for key in ["input_scale", "mlp.experts"])  # XXXXX
+                all(key in name for key in ["input_scale", "mlp.experts"])
                 and expert_id is not None
             ):
                 assert loaded_weight.numel() == 1

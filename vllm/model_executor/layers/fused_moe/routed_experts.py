@@ -975,7 +975,6 @@ class RoutedExperts(torch.nn.Module):
                 topk_ids=topk_ids,
                 shared_experts=shared_experts,
                 shared_experts_input=shared_experts_input,
-                input_ids=input_ids,
             )
 
 

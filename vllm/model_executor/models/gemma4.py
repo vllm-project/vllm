@@ -1387,10 +1387,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         expert_params_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                "experts.w13_"
+                "moe.experts.routed_experts.w13_"
                 if proj_name in ["gate_proj", "up_proj"]
-                else "experts.w2_",
-                f"experts.{expert_id}.{proj_name}.",
+                else "moe.experts.routed_experts.w2_",
+                f"moe.experts.{expert_id}.{proj_name}.",
                 expert_id,
                 shard_id,
             )
@@ -1492,6 +1492,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     if name is None:
                         continue
                     if is_pp_missing_parameter(name, self):
+                        continue
+                    # Skip if name doesn't exist in params_dict (e.g., individual
+                    # expert weights that should have been handled above)
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(
