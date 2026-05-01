@@ -66,6 +66,7 @@ class Request:
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
+        prompt_is_token_ids: list[bool] | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
@@ -114,6 +115,10 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        # Per-position mask used in mixed-mode (chat completion with
+        # prompt_embeds). `None` except when both `prompt_token_ids` and
+        # `prompt_embeds` are set and their positions are interleaved.
+        self.prompt_is_token_ids = prompt_is_token_ids
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
@@ -184,6 +189,7 @@ class Request:
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
+            prompt_is_token_ids=request.prompt_is_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
