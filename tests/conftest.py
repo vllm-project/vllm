@@ -1439,6 +1439,12 @@ def pytest_addoption(parser):
         default=1000 + secrets.randbelow(9000),
         help="random seed for tests that opt in",
     )
+    parser.addoption(
+        "--intermittent",
+        action="store_true",
+        default=False,
+        help="include intermittent (noisy) benchmark cases",
+    )
 
 
 def pytest_report_header(config):

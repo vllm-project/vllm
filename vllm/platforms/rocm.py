@@ -865,6 +865,11 @@ class RocmPlatform(Platform):
         return _ON_GFX1151
 
     @classmethod
+    def get_gcn_arch(cls) -> str:
+        """Get the GCN architecture string for the current device."""
+        return _GCN_ARCH
+
+    @classmethod
     def is_navi(cls) -> bool:
         return "gfx1" in _GCN_ARCH
 
