@@ -131,8 +131,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         if self._split_k_cfg is not None:
             self.seq_threshold_3D = max(
                 1,
-                self._split_k_cfg.min_launch_grid_size_2d
-                // max(self.num_heads_kv, 1),
+                self._split_k_cfg.min_launch_grid_size_2d // max(self.num_heads_kv, 1),
             )
 
             self.decode_cudagraph_enabled = (
@@ -144,9 +143,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
                 )
             )
             if self.decode_cudagraph_enabled:
-                capture_sizes = (
-                    vllm_config.compilation_config.cudagraph_capture_sizes
-                )
+                capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
                 if capture_sizes:
                     # Snap to the nearest captured batch size so a single
                     # graph covers the 3-D path without re-capture.

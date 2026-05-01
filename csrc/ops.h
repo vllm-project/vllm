@@ -254,11 +254,13 @@ void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 // Triton context_attention_fwd path for ROCM_ATTN with a hand-tuned
 // WMMA implementation. fp16/bf16, head_size == 128 (v1).
 // See csrc/attention/paged_prefill_attn_rdna3.cu for details.
-void paged_prefill_attn_rdna3(
-    torch::Tensor& out, torch::Tensor q, torch::Tensor k_chunk,
-    torch::Tensor v_chunk, torch::Tensor k_cache, torch::Tensor v_cache,
-    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-    torch::Tensor seq_lens, int64_t max_query_len, double sm_scale, bool causal);
+void paged_prefill_attn_rdna3(torch::Tensor& out, torch::Tensor q,
+                              torch::Tensor k_chunk, torch::Tensor v_chunk,
+                              torch::Tensor k_cache, torch::Tensor v_cache,
+                              torch::Tensor block_table,
+                              torch::Tensor cu_seqlens_q,
+                              torch::Tensor seq_lens, int64_t max_query_len,
+                              double sm_scale, bool causal);
 
 void static_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,

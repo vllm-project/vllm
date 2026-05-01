@@ -451,8 +451,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor v_chunk, Tensor k_cache, Tensor v_cache, Tensor block_table, "
       "Tensor cu_seqlens_q, Tensor seq_lens, int max_query_len, "
       "float sm_scale, bool causal) -> ()");
-  ops.impl("paged_prefill_attn_rdna3", torch::kCUDA,
-           &paged_prefill_attn_rdna3);
+  ops.impl("paged_prefill_attn_rdna3", torch::kCUDA, &paged_prefill_attn_rdna3);
 
   // Compute FP8 quantized tensor for given scaling factor.
   // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
