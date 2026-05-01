@@ -1108,6 +1108,7 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
   - pytest -v -s tests/compile/passes/distributed/test_sequence_parallelism.py
+  - pytest -v -s tests/compile/passes/distributed/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
 
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
 
