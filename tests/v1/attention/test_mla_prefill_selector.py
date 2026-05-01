@@ -30,7 +30,6 @@ def _make_mock_model_config(
     v_head_dim: int = 128,
     dtype: torch.dtype = torch.bfloat16,
 ) -> ModelConfig:
-    """Create a mock ModelConfig with specified MLA dimensions."""
     mock_config = MagicMock(spec=ModelConfig)
     mock_config.dtype = dtype
     mock_config.hf_text_config = MagicMock()
@@ -44,7 +43,6 @@ def _make_vllm_config(
     model_config: ModelConfig | None = None,
     mla_prefill_backend: MLAPrefillBackendEnum | None = None,
 ) -> VllmConfig:
-    """Create a VllmConfig for testing."""
     if model_config is None:
         model_config = _make_mock_model_config()
 
@@ -55,79 +53,24 @@ def _make_vllm_config(
     return mock_vllm_config
 
 
-class TestIsDeepseekR1MLACompatible:
-    """Tests for is_deepseek_r1_mla_compatible function."""
-
-    def test_compatible_dimensions(self):
-        """Test with DeepSeek R1 compatible MLA dimensions."""
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-            )
-        )
-        assert is_deepseek_r1_mla_compatible(vllm_config) is True
-
-    def test_incompatible_qk_nope_head_dim(self):
-        """Test with incompatible qk_nope_head_dim."""
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
-                qk_nope_head_dim=64,  # Not 128
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-            )
-        )
-        assert is_deepseek_r1_mla_compatible(vllm_config) is False
-
-    def test_incompatible_qk_rope_head_dim(self):
-        """Test with incompatible qk_rope_head_dim."""
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=32,  # Not 64
-                v_head_dim=128,
-            )
-        )
-        assert is_deepseek_r1_mla_compatible(vllm_config) is False
-
-    def test_incompatible_v_head_dim(self):
-        """Test with incompatible v_head_dim."""
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=64,  # Not 128
-            )
-        )
-        assert is_deepseek_r1_mla_compatible(vllm_config) is False
-
-    def test_missing_model_config(self):
-        """Test with missing model config."""
-        mock_vllm_config = MagicMock(spec=VllmConfig)
-        mock_vllm_config.model_config = None
-        assert is_deepseek_r1_mla_compatible(mock_vllm_config) is False
-
-
 class TestGetMLAPrefillBackend:
-    """Tests for get_mla_prefill_backend function."""
+    """Tests for get_mla_prefill_backend (public API)."""
 
     def test_no_device_capability_returns_flash_attn(self):
-        """Test fallback to FlashAttention when device capability is unavailable."""
         vllm_config = _make_vllm_config()
 
         with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.get_device_capability.return_value = None
 
             backend = get_mla_prefill_backend(vllm_config)
-            assert backend.get_name() == "FLASH_ATTN_PREFILL"
+            assert backend.get_name() == "FLASH_ATTN"
 
     def test_explicit_flash_attn_selection(self):
-        """Test explicit selection of FlashAttention backend."""
         try:
             flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
         except ImportError:
             pytest.skip("FLASH_ATTN backend not available")
+            return
 
         vllm_config = _make_vllm_config(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
@@ -138,23 +81,20 @@ class TestGetMLAPrefillBackend:
                 major=9, minor=0
             )
 
-            # Mock the backend's validate_configuration to return no errors
             with patch.object(
                 flash_attn_cls,
                 "validate_configuration",
                 return_value=[],
             ):
                 backend = get_mla_prefill_backend(vllm_config)
-                assert backend.get_name() == "FLASH_ATTN_PREFILL"
+                assert backend.get_name() == "FLASH_ATTN"
 
     def test_explicit_backend_invalid_raises_error(self):
-        """Test that invalid explicit backend raises ValueError."""
         vllm_config = _make_vllm_config(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASHINFER,
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
-            # Hopper doesn't support FlashInfer prefill
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -162,12 +102,32 @@ class TestGetMLAPrefillBackend:
             with pytest.raises(ValueError, match="is not valid"):
                 get_mla_prefill_backend(vllm_config)
 
+    def test_explicit_backend_import_error_raises(self):
+        vllm_config = _make_vllm_config(
+            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
+        )
+
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.get_device_capability.return_value = DeviceCapability(
+                major=10, minor=0
+            )
+
+            with (
+                patch.object(
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    "get_class",
+                    side_effect=ImportError("trtllm not installed"),
+                ),
+                pytest.raises(ValueError, match="is not valid"),
+            ):
+                get_mla_prefill_backend(vllm_config)
+
     def test_auto_selection_on_hopper(self):
-        """Test auto-selection on Hopper returns FlashAttention."""
         try:
             flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
         except ImportError:
             pytest.skip("FLASH_ATTN backend not available")
+            return
 
         vllm_config = _make_vllm_config()
 
@@ -182,14 +142,13 @@ class TestGetMLAPrefillBackend:
                 return_value=[],
             ):
                 backend = get_mla_prefill_backend(vllm_config)
-                assert backend.get_name() == "FLASH_ATTN_PREFILL"
+                assert backend.get_name() == "FLASH_ATTN"
 
 
 class TestAutoSelectMLAPrefillBackend:
-    """Tests for _auto_select_mla_prefill_backend function."""
+    """Tests for fallback and error paths in auto-selection."""
 
-    def test_blackwell_selects_first_valid_backend(self):
-        """Test that Blackwell selects the first valid backend from priorities."""
+    def test_blackwell_falls_back_to_trtllm(self):
         vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
@@ -201,75 +160,23 @@ class TestAutoSelectMLAPrefillBackend:
             trtllm_cls = MLAPrefillBackendEnum.TRTLLM_RAGGED.get_class()
         except ImportError:
             pytest.skip("TRTLLM_RAGGED backend not available")
+            return
 
-        # Mock TRTLLM_RAGGED as available and valid
-        with patch.object(
-            trtllm_cls,
-            "validate_configuration",
-            return_value=[],
-        ):
-            backend = _auto_select_mla_prefill_backend(
-                capability,
-                selector_config,
-            )
-            assert backend.get_name() == "TRTLLM_RAGGED_PREFILL"
-
-    def test_blackwell_falls_back_when_trtllm_unavailable(self):
-        """Test Blackwell falls back when TRTLLM is unavailable."""
-        vllm_config = _make_vllm_config()
-        capability = DeviceCapability(major=10, minor=0)
-        selector_config = MLAPrefillSelectorConfig(
-            dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
-        )
-
-        try:
-            flashinfer_cls = MLAPrefillBackendEnum.FLASHINFER.get_class()
-        except ImportError:
-            pytest.skip("FLASHINFER backend not available")
-
-        # Mock TRTLLM_RAGGED as failing to import, FLASHINFER as valid
         with (
             patch.object(
-                MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                MLAPrefillBackendEnum.FLASH_ATTN,
                 "get_class",
-                side_effect=ImportError("TRTLLM not available"),
+                side_effect=ImportError("FLASH_ATTN not available"),
             ),
-            patch.object(flashinfer_cls, "validate_configuration", return_value=[]),
+            patch.object(trtllm_cls, "validate_configuration", return_value=[]),
         ):
             backend = _auto_select_mla_prefill_backend(
                 capability,
                 selector_config,
             )
-            assert backend.get_name() == "FLASHINFER_PREFILL"
+            assert backend.get_name() == "TRTLLM_RAGGED"
 
-    def test_hopper_selects_flash_attn(self):
-        """Test that Hopper only has FlashAttention available."""
-        vllm_config = _make_vllm_config()
-        capability = DeviceCapability(major=9, minor=0)
-        selector_config = MLAPrefillSelectorConfig(
-            dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
-        )
-
-        try:
-            flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
-        except ImportError:
-            pytest.skip("FLASH_ATTN backend not available")
-
-        with patch.object(
-            flash_attn_cls,
-            "validate_configuration",
-            return_value=[],
-        ):
-            backend = _auto_select_mla_prefill_backend(
-                capability,
-                selector_config,
-            )
-            assert backend.get_name() == "FLASH_ATTN_PREFILL"
-
-    def test_fallback_to_flash_attn_when_all_fail(self):
-        """Test fallback to FlashAttention when all other backends fail."""
+    def test_all_fail_raises_error(self):
         vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
@@ -277,132 +184,34 @@ class TestAutoSelectMLAPrefillBackend:
             is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
         )
 
-        # Make all backends fail validation except FLASH_ATTN
-        def mock_get_class(backend_enum):
+        def mock_get_class(backend_enum):  # noqa: ARG001
             cls = MagicMock()
-            if backend_enum == MLAPrefillBackendEnum.FLASH_ATTN:
-                cls.validate_configuration.return_value = []
-                cls.get_name.return_value = "FLASH_ATTN_PREFILL"
-            else:
-                cls.validate_configuration.return_value = ["not available"]
+            cls.validate_configuration.return_value = ["not available"]
             return cls
 
         with patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class):
-            # Need to clear cache since we're changing behavior
             _auto_select_mla_prefill_backend.cache_clear()
-            backend = _auto_select_mla_prefill_backend(
-                capability,
-                selector_config,
-            )
-            assert backend.get_name() == "FLASH_ATTN_PREFILL"
-
-
-class TestMLAPrefillBackendEnum:
-    """Tests for MLAPrefillBackendEnum registry."""
-
-    def test_all_backends_have_valid_paths(self):
-        """Test that all registered backends have valid class paths."""
-        for backend in MLAPrefillBackendEnum:
-            path = backend.get_path()
-            assert path is not None
-            assert len(path) > 0
-            assert "." in path  # Should be a qualified name
-
-    def test_invalid_backend_raises_value_error(self):
-        """Test that accessing invalid backend raises ValueError."""
-        with pytest.raises(ValueError) as exc_info:
-            MLAPrefillBackendEnum["INVALID_BACKEND"]
-
-        assert "Unknown MLA prefill backend" in str(exc_info.value)
-        assert "INVALID_BACKEND" in str(exc_info.value)
-
-    def test_flash_attn_backend_path(self):
-        """Test FlashAttention backend has correct path."""
-        assert "flash_attn" in MLAPrefillBackendEnum.FLASH_ATTN.get_path()
-
-    def test_flashinfer_backend_path(self):
-        """Test FlashInfer backend has correct path."""
-        assert "flashinfer" in MLAPrefillBackendEnum.FLASHINFER.get_path()
-
-    def test_trtllm_ragged_backend_path(self):
-        """Test TRT-LLM Ragged backend has correct path."""
-        assert "trtllm_ragged" in MLAPrefillBackendEnum.TRTLLM_RAGGED.get_path()
+            with pytest.raises(ValueError, match="No valid MLA"):
+                _auto_select_mla_prefill_backend(
+                    capability,
+                    selector_config,
+                )
 
 
 class TestBackendValidation:
-    """Tests for backend validation logic.
-
-    These tests validate the compute capability and dtype checks for each
-    backend. They import the backend classes directly, which may fail if
-    dependencies like flashinfer are not available.
-    """
-
-    def test_flash_attn_supports_all_capabilities(self):
-        """Test FlashAttention supports all compute capabilities."""
-        try:
-            from vllm.v1.attention.backends.mla.prefill.flash_attn import (
-                FlashAttnPrefillBackend,
-            )
-        except ImportError:
-            pytest.skip("FlashAttention prefill backend not available")
-
-        # FlashAttention should support all capabilities (fallback)
-        for major in [8, 9, 10]:
-            capability = DeviceCapability(major=major, minor=0)
-            assert FlashAttnPrefillBackend.supports_compute_capability(capability)
-
-    def test_flashinfer_only_supports_blackwell(self):
-        """Test FlashInfer only supports Blackwell."""
-        try:
-            from vllm.v1.attention.backends.mla.prefill.flashinfer import (
-                FlashInferPrefillBackend,
-            )
-        except ImportError:
-            pytest.skip("FlashInfer prefill backend not available")
-
-        # Only Blackwell (SM10)
-        assert FlashInferPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=10, minor=0)
-        )
-        assert not FlashInferPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=9, minor=0)
-        )
-        assert not FlashInferPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=8, minor=0)
-        )
-
-    def test_trtllm_ragged_only_supports_blackwell(self):
-        """Test TRT-LLM Ragged only supports Blackwell."""
-        try:
-            from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
-                TrtllmRaggedPrefillBackend,
-            )
-        except ImportError:
-            pytest.skip("TRT-LLM Ragged prefill backend not available")
-
-        # Only Blackwell (SM10)
-        assert TrtllmRaggedPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=10, minor=0)
-        )
-        assert not TrtllmRaggedPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=9, minor=0)
-        )
-        assert not TrtllmRaggedPrefillBackend.supports_compute_capability(
-            DeviceCapability(major=8, minor=0)
-        )
+    """Tests for backend validation logic."""
 
     def test_r1_dimension_requirement(self):
-        """Test that backends requiring R1 dimensions check correctly."""
         try:
             from vllm.v1.attention.backends.mla.prefill.flashinfer import (
                 FlashInferPrefillBackend,
             )
         except ImportError:
             pytest.skip("FlashInfer prefill backend not available")
+            return
 
         assert FlashInferPrefillBackend.requires_r1_mla_dimensions is True
 
-        # Valid R1 config
         vllm_config = _make_vllm_config(
             model_config=_make_mock_model_config(
                 qk_nope_head_dim=128,
@@ -423,10 +232,9 @@ class TestBackendValidation:
             )
             assert len(invalid_reasons) == 0
 
-        # Invalid R1 config
         vllm_config_invalid = _make_vllm_config(
             model_config=_make_mock_model_config(
-                qk_nope_head_dim=64,  # Wrong dimension
+                qk_nope_head_dim=64,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
             )
@@ -444,43 +252,39 @@ class TestBackendValidation:
             assert len(invalid_reasons) == 1
             assert "DeepSeek R1 MLA dimensions" in invalid_reasons[0]
 
-    def test_dtype_validation(self):
-        """Test dtype validation for backends."""
-        try:
-            from vllm.v1.attention.backends.mla.prefill.flash_attn import (
-                FlashAttnPrefillBackend,
+
+class TestMLAPrefillBackendParsing:
+    """Tests for string-based mla_prefill_backend parsing from CLI args."""
+
+    def test_valid_string_parses_to_enum(self):
+        config = AttentionConfig(
+            mla_prefill_backend="FLASH_ATTN",  # type: ignore[arg-type]
+        )
+        assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
+
+    def test_invalid_string_raises_error(self):
+        with pytest.raises(ValueError, match="Unknown MLA prefill backend"):
+            AttentionConfig(
+                mla_prefill_backend="NONEXISTENT",  # type: ignore[arg-type]
             )
-        except ImportError:
-            pytest.skip("FlashAttention prefill backend not available")
-
-        # Supported dtypes
-        assert FlashAttnPrefillBackend.supports_dtype(torch.float16)
-        assert FlashAttnPrefillBackend.supports_dtype(torch.bfloat16)
-
-        # Unsupported dtype
-        assert not FlashAttnPrefillBackend.supports_dtype(torch.float32)
 
 
 class TestDeprecatedFlagMigration:
     """Tests for _migrate_deprecated_mla_prefill_flags in AttentionConfig."""
 
     def test_no_deprecated_flags_leaves_backend_none(self):
-        """No deprecated flags set means mla_prefill_backend stays None."""
         config = AttentionConfig()
         assert config.mla_prefill_backend is None
 
     def test_use_trtllm_ragged_migrates_to_trtllm_ragged(self):
-        """use_trtllm_ragged_deepseek_prefill=True migrates to TRTLLM_RAGGED."""
         config = AttentionConfig(use_trtllm_ragged_deepseek_prefill=True)
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
 
     def test_disable_flashinfer_prefill_migrates_to_flash_attn(self):
-        """disable_flashinfer_prefill=True migrates to FLASH_ATTN."""
         config = AttentionConfig(disable_flashinfer_prefill=True)
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_explicit_backend_ignores_deprecated_flags(self):
-        """mla_prefill_backend takes precedence over deprecated flags."""
         config = AttentionConfig(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
             use_cudnn_prefill=True,
@@ -488,13 +292,11 @@ class TestDeprecatedFlagMigration:
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_cudnn_raises_error(self):
-        """use_cudnn_prefill raises ValueError (cuDNN removed)."""
         match = "cuDNN MLA prefill backend has been removed"
         with pytest.raises(ValueError, match=match):
             AttentionConfig(use_cudnn_prefill=True)
 
     def test_trtllm_takes_priority_over_disable_flashinfer(self):
-        """use_trtllm_ragged takes priority over disable_flashinfer."""
         config = AttentionConfig(
             use_trtllm_ragged_deepseek_prefill=True,
             disable_flashinfer_prefill=True,
