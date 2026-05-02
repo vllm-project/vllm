@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
+from .ir.clone_elimination import UnsafeCloneEliminationPass
 from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
@@ -115,6 +116,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
+        self.clone_elimination(graph)
+        VllmInductorPass.dump_prefix += 1
 
         # clean up after lowering again
         self.post_cleanup(graph)
@@ -149,11 +152,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [MiniMaxQKNormPass(config)]
 
             if self.pass_config.fuse_norm_quant:
-                self.passes += [RMSNormQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [
                         RocmAiterRMSNormQuantFusionPass(config),
                     ]
+                self.passes += [RMSNormQuantFusionPass(config)]
+
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
@@ -179,6 +183,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
+            self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
@@ -200,6 +205,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
+        passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
