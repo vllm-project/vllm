@@ -37,7 +37,13 @@ mkdir -p "$prefix"
 paths=""
 for V in "$@"; do
   venv="$prefix/$V"
-  [ -x "$venv/bin/python" ] || uv venv --python "$V" "$venv" --seed >/dev/null
+  # Force a managed (uv-downloaded) Python so dev headers are bundled.
+  # System Pythons on the build base may lack headers (manylinux's
+  # /opt/python/cpXY-cpXY are off PATH; an apt-installed python3.X often
+  # has no -dev), and the per-Python build needs Python.h.
+  [ -x "$venv/bin/python" ] || \
+    uv venv --python "$V" "$venv" --python-preference only-managed --seed \
+      >/dev/null
   paths="$paths:$venv/bin/python"
 done
 echo "${paths#:}"

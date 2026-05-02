@@ -68,6 +68,17 @@ if(DEEPGEMM_ARCHS)
   endif()
   message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
+  # Header set fed to add_custom_command's DEPENDS so a header-only edit
+  # (in upstream DeepGEMM or its vendored cutlass/fmt) re-triggers the
+  # rebuild. add_custom_command does no implicit header scanning, unlike
+  # add_library.
+  file(GLOB_RECURSE _dg_headers
+    "${deepgemm_SOURCE_DIR}/csrc/*.h"
+    "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.h"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.hpp"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh")
+
   set(_dg_markers)
   set(_dg_seen_soabis)
   foreach(_pybin IN LISTS _dg_pythons)
@@ -93,6 +104,7 @@ if(DEEPGEMM_ARCHS)
       COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
       DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
               "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
+              ${_dg_headers}
       COMMENT "Building DeepGEMM _C for ${_pybin}"
       VERBATIM)
     list(APPEND _dg_markers "${_dg_marker}")
