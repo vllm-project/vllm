@@ -146,7 +146,8 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 
 ## Tokenize APIs
 
-- `/tokenize` - Tokenize text
+- `/tokenize` - Return token IDs for raw completion prompts, chat-completion
+  messages, or Responses API input
 - `/detokenize` - Detokenize tokens
 - `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
 
