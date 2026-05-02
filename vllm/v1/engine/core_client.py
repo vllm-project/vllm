@@ -653,6 +653,9 @@ class MPClient(EngineCoreClient):
         if self._finalizer.detach() is not None:
             timeout_str = "default" if timeout is None else f"{timeout}s"
             logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
+            # Mark shutdown as intentional before tearing down child processes
+            # so the monitor thread can distinguish it from a real crash.
+            self.resources.engine_dead = True
             if self.resources.engine_manager is not None:
                 logger.info_once("[shutdown] MPClient: stopping engine manager")
                 self.resources.engine_manager.shutdown(timeout=timeout)
@@ -698,9 +701,16 @@ class MPClient(EngineCoreClient):
             _self = self_ref()
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
+            failed_proc_name = getattr(engine_manager, "failed_proc_name", None)
+            if failed_proc_name is None:
+                # The manager exited cleanly, but the client still owns sockets,
+                # tasks, and other background resources that must be released.
+                _self.shutdown()
+                return
             _self.resources.engine_dead = True
-            logger.warning_once(
-                "[shutdown] MPClient: engine core exited unexpectedly; starting cleanup"
+            logger.error(
+                "Engine core proc %s died unexpectedly, shutting down client.",
+                failed_proc_name,
             )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism

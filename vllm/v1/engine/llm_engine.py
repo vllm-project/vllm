@@ -35,6 +35,7 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
+from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.utils import record_function_or_nullcontext
@@ -442,7 +443,22 @@ class LLMEngine:
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
 
-    def __del__(self):
+    def shutdown(self, timeout: float | None = None) -> None:
+        shutdown_prometheus()
+
+        if renderer := getattr(self, "renderer", None):
+            if shutdown := getattr(renderer, "shutdown", None):
+                shutdown()
+            self.renderer = None
+
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown(timeout=timeout)
+            self.engine_core = None
+
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
+            self.dp_group = None
+
+    def __del__(self):
+        self.shutdown()
