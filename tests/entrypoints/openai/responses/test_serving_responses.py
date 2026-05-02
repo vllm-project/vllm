@@ -53,6 +53,8 @@ from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class MockConversationContext(ConversationContext):
     """Mock conversation context for testing"""
@@ -132,6 +134,113 @@ async def test_render_response_inputs_passes_skip_mm_cache():
         serving.openai_serving_render.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_render_response_inputs_builds_messages_from_list_input():
+    serving = _make_serving_responses_for_render_tests()
+    serving.openai_serving_render.preprocess_chat = AsyncMock(
+        return_value=(
+            [],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+
+    input_message = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "hi"}],
+    }
+    request = ResponsesRequest(
+        input=[input_message],
+        instructions="Be brief.",
+        tools=[],
+    )
+
+    result = await serving.render_response_inputs(request)
+
+    assert not isinstance(result, ErrorResponse)
+    assert serving.openai_serving_render.preprocess_chat.await_args.args[1] == [
+        {"role": "system", "content": "Be brief."},
+        input_message,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_render_response_inputs_uses_previous_response_context():
+    serving = _make_serving_responses_for_render_tests()
+    serving.openai_serving_render.preprocess_chat = AsyncMock(
+        return_value=(
+            [],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+
+    prev_response = MagicMock()
+    prev_response.id = "resp_previous"
+    prev_response.output = []
+    serving.response_store[prev_response.id] = prev_response
+    serving.msg_store[prev_response.id] = [
+        {"role": "system", "content": "old instructions"},
+        {"role": "user", "content": "old user"},
+    ]
+
+    request = ResponsesRequest(
+        input="new user",
+        instructions="new instructions",
+        previous_response_id=prev_response.id,
+        tools=[],
+    )
+
+    result = await serving.render_response_inputs(request)
+
+    assert not isinstance(result, ErrorResponse)
+    assert serving.openai_serving_render.preprocess_chat.await_args.args[1] == [
+        {"role": "system", "content": "new instructions"},
+        {"role": "user", "content": "old user"},
+        {"role": "user", "content": "new user"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_render_response_inputs_forwards_response_tools():
+    serving = _make_serving_responses_for_render_tests()
+    serving.openai_serving_render.preprocess_chat = AsyncMock(
+        return_value=(
+            [{"role": "user", "content": "weather"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+
+    request = ResponsesRequest(
+        input="weather",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                    },
+                },
+            }
+        ],
+    )
+
+    result = await serving.render_response_inputs(request)
+
+    assert not isinstance(result, ErrorResponse)
+    tool_dicts = serving.openai_serving_render.preprocess_chat.await_args.kwargs[
+        "tool_dicts"
+    ]
+    assert tool_dicts is not None
+    assert tool_dicts[0]["type"] == "function"
+    assert tool_dicts[0]["function"]["type"] == "function"
+    assert tool_dicts[0]["function"]["name"] == "get_weather"
+    assert tool_dicts[0]["function"]["parameters"]["properties"] == {
+        "location": {"type": "string"},
+    }
 
 
 @pytest.mark.asyncio

@@ -107,10 +107,9 @@ async def init_generate_state(
         if "generate" in supported_tasks
         else None
     )
-    if hasattr(state.openai_serving_tokenization, "set_openai_serving_responses"):
-        state.openai_serving_tokenization.set_openai_serving_responses(
-            state.openai_serving_responses
-        )
+    state.openai_serving_tokenization.set_openai_serving_responses(
+        state.openai_serving_responses
+    )
 
     _chat_kwargs = dict(
         engine_client=engine_client,

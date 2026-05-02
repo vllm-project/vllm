@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from fastapi import Request
 
@@ -22,11 +22,21 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponsesRequest,
     TokenizerInfoResponse,
 )
-from vllm.inputs import TokensPrompt, tokens_input
+from vllm.inputs import EngineInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
+
+
+class ResponsesInputRenderer(Protocol):
+    async def render_response_inputs(
+        self,
+        request: TokenizeResponsesRequest,
+        *,
+        skip_mm_cache: bool = False,
+        validate: bool = True,
+    ) -> tuple[list[Any], list[EngineInput]] | ErrorResponse: ...
 
 
 class OpenAIServingTokenization(OpenAIServing):
@@ -53,11 +63,11 @@ class OpenAIServingTokenization(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
-        self.openai_serving_responses: Any | None = None
+        self.openai_serving_responses: ResponsesInputRenderer | None = None
 
     def set_openai_serving_responses(
         self,
-        openai_serving_responses: Any | None,
+        openai_serving_responses: ResponsesInputRenderer | None,
     ) -> None:
         self.openai_serving_responses = openai_serving_responses
 

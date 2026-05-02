@@ -468,6 +468,35 @@ It consists of two endpoints:
   Responses API `input`, and returns the token IDs for the rendered model input.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
+For example, to tokenize a Responses-style input on a standard generate server:
+
+```bash
+curl http://localhost:8000/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": "Hello!",
+    "return_token_strs": true
+  }'
+```
+
+Responses list-form input is also accepted:
+
+```bash
+curl http://localhost:8000/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Hello!"}]
+      }
+    ]
+  }'
+```
+
 ### Generative Scoring API
 
 The `/generative_scoring` endpoint uses a CausalLM model (e.g., Llama, Qwen, Mistral) to compute the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
