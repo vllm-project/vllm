@@ -89,8 +89,9 @@ Commands:
               --node-rank=0
               --master-addr=$(ENTRY_ADDRESS)
               --port 8080
+        Worker:
 
-        # worker
+        ```yaml
         command:
           - sh
           - -c
