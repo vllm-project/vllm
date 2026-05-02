@@ -182,7 +182,7 @@ class TestFusedAddRMSNorm:
 
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
         )
         out, residual_out = fused_add_rms_norm_native(x, x_residual, weight, eps)
 
