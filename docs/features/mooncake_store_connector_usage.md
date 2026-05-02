@@ -162,7 +162,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1280mb
 
 ### kv_connector_extra_config
 
-- `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `false`.
+- `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
 - `enable_cross_layers_blocks` (bool): Enable cross-layer block packing for reduced store operations. Default: `false`.
 - `discard_partial_chunks` (bool): Discard partial block chunks during store. Default: `true`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
