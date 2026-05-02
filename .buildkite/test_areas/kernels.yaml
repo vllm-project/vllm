@@ -89,6 +89,16 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels KDA Test
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/model_executor/layers/fla/ops/kda.py
+  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - tests/kernels/test_kda.py
+  commands:
+    - pytest -v -s kernels/test_kda.py
+
 - label: Kernels DeepGEMM Test (H100)
   key: kernels-deepgemm-test-h100
   timeout_in_minutes: 45
