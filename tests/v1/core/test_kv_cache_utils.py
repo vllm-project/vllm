@@ -47,6 +47,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
+    TQSlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
@@ -138,6 +140,26 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+    )
+
+
+def new_tq_sliding_window_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    sliding_window=1,
+    tq_slot_size=80,
+):
+    return TQSlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        sliding_window=sliding_window,
+        tq_slot_size=tq_slot_size,
     )
 
 
@@ -2187,6 +2209,40 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_unify_hybrid_kv_cache_specs_preserves_tq_page_size():
+    before_spec_1 = new_kv_cache_spec()
+    before_spec_2 = new_tq_sliding_window_spec(
+        page_size_padded=32 * 1024,
+        sliding_window=1024,
+        tq_slot_size=80,
+    )
+    kv_cache_spec = {
+        "layer_1": before_spec_1,
+        "layer_2": before_spec_2,
+    }
+
+    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    expected_spec_2 = TQFullAttentionSpec(
+        block_size=before_spec_2.block_size,
+        num_kv_heads=before_spec_2.num_kv_heads,
+        head_size=before_spec_2.head_size,
+        head_size_v=before_spec_2.head_size_v,
+        dtype=before_spec_2.dtype,
+        kv_quant_mode=before_spec_2.kv_quant_mode,
+        sliding_window=before_spec_2.sliding_window,
+        page_size_padded=before_spec_2.page_size_padded,
+        tq_slot_size=before_spec_2.tq_slot_size,
+    )
+    assert kv_cache_spec["layer_1"] == before_spec_1
+    assert kv_cache_spec["layer_2"] == expected_spec_2
+    assert kv_cache_spec["layer_2"].real_page_size_bytes == (
+        before_spec_2.block_size
+        * before_spec_2.num_kv_heads
+        * before_spec_2.tq_slot_size
+    )
 
 
 def test_hma_not_disabled_when_kv_events_enabled():

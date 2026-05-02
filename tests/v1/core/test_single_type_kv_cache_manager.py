@@ -15,8 +15,13 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     SlidingWindowManager,
+    get_manager_for_kv_cache_spec,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    SlidingWindowSpec,
+    TQSlidingWindowSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -42,6 +47,33 @@ def get_chunked_local_attention_manager(
         kv_cache_group_id=0,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def test_tq_sliding_window_uses_sliding_window_manager():
+    spec = TQSlidingWindowSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4,
+        tq_slot_size=1,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=False,
+        hash_block_size=spec.block_size,
+    )
+
+    manager = get_manager_for_kv_cache_spec(
+        spec,
+        max_num_batched_tokens=4,
+        max_model_len=16,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+    )
+
+    assert isinstance(manager, SlidingWindowManager)
 
 
 def test_chunked_local_attention_possible_cached_prefix():
