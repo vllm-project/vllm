@@ -829,7 +829,6 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
-        block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
