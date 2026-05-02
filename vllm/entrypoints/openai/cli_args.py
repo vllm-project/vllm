@@ -16,20 +16,19 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-    validate_chat_template,
-)
 from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.validate_chat_template import validate_chat_template
 from vllm.logger import init_logger
-from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.tool_parser_registry import BUILTIN_TOOL_PARSERS
 
 logger = init_logger(__name__)
+
+ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
 
 class LoRAParserAction(argparse.Action):
@@ -188,8 +187,7 @@ class BaseFrontendArgs:
         frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
 
         # Special case: Tool call parser shows built-in options.
-        valid_tool_parsers = list(ToolParserManager.list_registered())
-        parsers_str = ",".join(valid_tool_parsers)
+        parsers_str = ",".join(sorted(BUILTIN_TOOL_PARSERS))
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
         )

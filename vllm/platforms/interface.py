@@ -8,12 +8,11 @@ import sys
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-import torch
-
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
+    import torch
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
@@ -147,8 +146,10 @@ class Platform:
         return "post_grad_custom_post_pass"
 
     @property
-    def supported_dtypes(self) -> list[torch.dtype]:
+    def supported_dtypes(self) -> "list[torch.dtype]":
         """Returns the supported dtypes for the current platform."""
+        import torch
+
         # Be careful with the order of the dtypes. The first dtype will
         # be used as the default dtype fallback for the current platform,
         # when encountering unsupported dtypes in "auto" dtype.
@@ -261,7 +262,7 @@ class Platform:
     def get_vit_attn_backend(
         cls,
         head_size: int,
-        dtype: torch.dtype,
+        dtype: "torch.dtype",
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         """
@@ -382,10 +383,12 @@ class Platform:
         do not support `torch.inference_mode`. In such a case, they will fall
         back to `torch.no_grad` by overriding this method.
         """
+        import torch
+
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def set_device(cls, device: torch.device) -> None:
+    def set_device(cls, device: "torch.device") -> None:
         """
         Set the device for the current platform.
         """
@@ -692,7 +695,7 @@ class Platform:
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: torch.types.Device | None = None
+        cls, device: "torch.types.Device | None" = None
     ) -> float:
         """
         Return the memory usage in bytes.
@@ -707,7 +710,7 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
+    def get_infinity_values(cls, dtype: "torch.dtype") -> tuple[float, float]:
         """
         Return the platform specific values for (-inf, inf)
         """
@@ -775,12 +778,14 @@ class Platform:
         return False
 
     @classmethod
-    def fp8_dtype(cls) -> torch.dtype:
+    def fp8_dtype(cls) -> "torch.dtype":
         """
         Returns the preferred FP8 type on the current platform.
 
         See the documentation for is_fp8_fnuz for details.
         """
+        import torch
+
         return torch.float8_e4m3fn
 
     @classmethod
@@ -816,6 +821,8 @@ class Platform:
     def __getattr__(self, key: str):
         # Pickle checks dunder methods like __getstate__. If we return None
         # for them, pickle treats it like a real value and tries to call it.
+        import torch
+
         if key.startswith("__") and key.endswith("__"):
             raise AttributeError(key)
 
@@ -865,7 +872,7 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def check_if_supports_dtype(cls, dtype: torch.dtype):
+    def check_if_supports_dtype(cls, dtype: "torch.dtype"):
         """
         Check if the dtype is supported by the current platform.
         """
@@ -913,6 +920,8 @@ class Platform:
         """
         Wrap the original weight loader to make it synced.
         """
+        import torch
+
         if not cls.use_sync_weight_loader():
             return original_weight_loader
 

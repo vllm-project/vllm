@@ -130,6 +130,10 @@ ignore-hidden = false
 
 [tool.typos.default]
 extend-ignore-identifiers-re = [".*[Uu][Ee][0-9][Mm][0-9].*"]
+extend-ignore-re = [
+  "(?Rm)^.*(#|//)\\s*typos:disable-line$",
+  "(#|//)\\s*typos:ignore-next-line\\n.*",
+]
 
 [tool.typos.default.extend-identifiers]
 bbc5b7ede = "bbc5b7ede"

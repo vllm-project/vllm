@@ -17,7 +17,6 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
-import torch
 from packaging.version import Version
 from pydantic import ConfigDict, Field, model_validator
 
@@ -711,6 +710,7 @@ class VllmConfig:
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
+        import torch
 
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
@@ -879,6 +879,8 @@ class VllmConfig:
             )
 
         from vllm.platforms import current_platform
+
+        self.compilation_config.apply_platform_defaults(current_platform)
 
         if (
             self.model_config is not None
@@ -1596,6 +1598,8 @@ class VllmConfig:
         """
         Set the compile ranges for the compilation config.
         """
+        import torch
+
         compilation_config = self.compilation_config
         computed_compile_ranges_endpoints = []
 

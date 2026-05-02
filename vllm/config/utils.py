@@ -15,7 +15,6 @@ from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
-import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 from pydantic.fields import Field as PydanticField
@@ -232,6 +231,8 @@ def normalize_value(x):
     Order: primitives, special types (Enum, callable, torch.dtype, Path), then
     generic containers (Mapping/Set/Sequence) with recursion.
     """
+    import torch
+
     # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
         return x

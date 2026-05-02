@@ -8,10 +8,6 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import (
-    is_quantized_kv_cache,
-    kv_cache_uses_per_token_head_scales,
-)
 
 logger = init_logger(__name__)
 
@@ -36,6 +32,18 @@ MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return (
+        kv_cache_dtype.startswith("fp8")
+        or kv_cache_dtype.endswith("per_token_head")
+        or kv_cache_dtype == "nvfp4"
+    )
+
+
+def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype.endswith("per_token_head")
 
 
 @config

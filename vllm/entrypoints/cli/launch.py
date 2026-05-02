@@ -5,19 +5,11 @@ import argparse
 
 import uvloop
 
-from vllm import envs
-from vllm.config import VllmConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (
-    build_and_serve_renderer,
-    setup_server,
+from vllm.entrypoints.cli_setup import (
+    VLLM_SUBCMD_PARSER_EPILOG,
+    is_cli_subcommand,
 )
-from vllm.entrypoints.openai.cli_args import (
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -38,6 +30,8 @@ class LaunchSubcommandBase(CLISubcommand):
         By default, adds the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         make_arg_parser(parser)
 
     @staticmethod
@@ -73,6 +67,8 @@ class LaunchSubcommand(CLISubcommand):
         args.launch_command(args)
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
@@ -84,6 +80,9 @@ class LaunchSubcommand(CLISubcommand):
             description=DESCRIPTION,
             usage=f"vllm {self.name} <component> [options]",
         )
+        if not is_cli_subcommand(self.name):
+            return launch_parser
+
         launch_subparsers = launch_parser.add_subparsers(
             required=True, dest="launch_component"
         )
@@ -110,6 +109,14 @@ def cmd_init() -> list[CLISubcommand]:
 
 async def run_launch_fastapi(args: argparse.Namespace) -> None:
     """Run the online serving layer with FastAPI (no GPU inference)."""
+    from vllm import envs
+    from vllm.config import VllmConfig
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.entrypoints.openai.api_server import (
+        build_and_serve_renderer,
+        setup_server,
+    )
+
     # 1. Socket binding
     listen_address, sock = setup_server(args)
 

@@ -7,7 +7,7 @@ import importlib.metadata
 import typing
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.cli_setup import VLLM_SUBCMD_PARSER_EPILOG, is_cli_subcommand
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
@@ -48,8 +48,6 @@ class RunBatchSubcommand(CLISubcommand):
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
-        from vllm.entrypoints.openai.run_batch import make_arg_parser
-
         run_batch_parser = subparsers.add_parser(
             self.name,
             help="Run batch prompts and write results to file.",
@@ -59,6 +57,11 @@ class RunBatchSubcommand(CLISubcommand):
             ),
             usage="vllm run-batch -i INPUT.jsonl -o OUTPUT.jsonl --model <model>",
         )
+        if not is_cli_subcommand(self.name):
+            return run_batch_parser
+
+        from vllm.entrypoints.openai.run_batch import make_arg_parser
+
         run_batch_parser = make_arg_parser(run_batch_parser)
         run_batch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return run_batch_parser

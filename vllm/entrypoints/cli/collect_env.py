@@ -4,7 +4,6 @@
 import argparse
 import typing
 
-from vllm.collect_env import main as collect_env_main
 from vllm.entrypoints.cli.types import CLISubcommand
 
 if typing.TYPE_CHECKING:
@@ -21,6 +20,8 @@ class CollectEnvSubcommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         """Collect information about the environment."""
+        from vllm.collect_env import main as collect_env_main
+
         collect_env_main()
 
     def subparser_init(
