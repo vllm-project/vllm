@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from functools import partial
 import importlib
 from importlib.util import find_spec
 
@@ -13,7 +14,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-
+from vllm.platforms.rocm import _ON_GFX942
 
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
@@ -379,30 +380,51 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        deepgemm_fp8_paged_mqa_logits = (
-            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
-        )
+        if _ON_GFX942:
+            deepgemm_fp8_paged_mqa_logits = (
+                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
+            )
+            batch_size, next_n, heads, _ = q_fp8.shape
+            out_logits = torch.full(
+                [batch_size * next_n, max_model_len],
+                float("-inf"),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            deepgemm_fp8_paged_mqa_logits(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                out_logits,
+                context_lens,
+                block_tables,
+                max_model_len,
+                ChunkK=256,
+                Preshuffle=block_size == 64,
+                KVBlockSize=block_size,
+                WavePerEU=2,
+            )
+            return out_logits
+        deepgemm_fp8_paged_mqa_logits_stage1 = (
+            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1)
         batch_size, next_n, heads, _ = q_fp8.shape
-        out_logits = torch.full(
-            [batch_size * next_n, max_model_len],
+        out_qk = torch.full(
+            (heads, batch_size * next_n, max_model_len),
             float("-inf"),
             device="cuda",
             dtype=torch.float32,
         )
-        deepgemm_fp8_paged_mqa_logits(
+        deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
             weights,
-            out_logits,
+            out_qk,
             context_lens,
             block_tables,
             max_model_len,
-            ChunkK=256,
-            Preshuffle=block_size == 64,
-            KVBlockSize=block_size,
-            WavePerEU=2,
+            ChunkQ=heads,
         )
-        return out_logits
+        return out_qk.sum(dim=0)
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -581,6 +603,7 @@ def rocm_aiter_sparse_attn_indexer_native(
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     from vllm.utils.torch_utils import _resolve_layer_name
+    from vllm import _custom_ops as ops
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
@@ -619,7 +642,11 @@ def rocm_aiter_sparse_attn_indexer_native(
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
     if not skip_k_cache_insert:
-        indexer_k_quant_and_cache_triton(
+        if _ON_GFX942:
+            cache_op = ops.indexer_k_quant_and_cache
+        else:
+            cache_op = indexer_k_quant_and_cache_triton
+        cache_op(
             k,
             kv_cache,
             slot_mapping,
@@ -642,13 +669,16 @@ def rocm_aiter_sparse_attn_indexer_native(
                 device=device,
                 dtype=torch.uint8,
             )
-            cp_gather_indexer_k_quant_cache_triton(
+            if _ON_GFX942:
+                fetch_op = ops.cp_gather_indexer_k_quant_cache
+            else:
+                fetch_op = partial(cp_gather_indexer_k_quant_cache_triton, token_to_seq=chunk.token_to_seq)
+            fetch_op(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
-                chunk.token_to_seq,
             )
 
             logits = rocm_fp8_mqa_logits(
