@@ -74,7 +74,7 @@ Image: `vllm/vllm-openai:latest` (matches upstream vLLM images).
 Commands:
 
 ??? code "Yaml"
-    === "MP Mode(default)"
+    === "Multiprocessing (default)"
         Leader:
 
         ```yaml
@@ -89,6 +89,8 @@ Commands:
               --node-rank=0
               --master-addr=$(ENTRY_ADDRESS)
               --port 8080
+        ```
+
         Worker:
 
         ```yaml
@@ -105,25 +107,29 @@ Commands:
               --headless
         ```
 
-    === "Ray Mode"
+    === "Ray"
+        Leader:
+
         ```yaml
-        # leader
         command:
           - sh
           - -c
           - >
-            bash /vllm-workspace/examples/online_serving/multi-node-serving.sh
+            bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
             leader --ray_cluster_size=2; python3 -m
             vllm.entrypoints.openai.api_server --port 8080 --model
             meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8
             --pipeline-parallel-size 2
+        ```
 
-        # worker
+        Worker:
+
+        ```yaml
         command:
           - sh
           - -c
           - >
-            bash /vllm-workspace/examples/online_serving/multi-node-serving.sh
+            bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
             worker --ray_address=$(ENTRY_ADDRESS)
         ```
 
@@ -146,7 +152,7 @@ kubectl create secret generic hf-token \
 Save one of the following manifests to `modelserving.yaml`:
 
 ??? code "Yaml"
-    === "MP (default)"
+    === "Multiprocessing (default)"
         ```yaml
         apiVersion: workload.serving.volcano.sh/v1alpha1
         kind: ModelServing
@@ -268,7 +274,7 @@ Save one of the following manifests to `modelserving.yaml`:
                         command:
                           - sh
                           - -c
-                          - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2; python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2; python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
                         resources:
                           limits:
                             nvidia.com/gpu: "8"
@@ -301,7 +307,7 @@ Save one of the following manifests to `modelserving.yaml`:
                         command:
                           - sh
                           - -c
-                          - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
                         resources:
                           limits:
                             nvidia.com/gpu: "8"
