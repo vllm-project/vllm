@@ -9,14 +9,13 @@ Run from a CI test job after vLLM is installed, e.g. the H100 deepgemm
 kernel tests in .buildkite/test_areas/kernels.yaml.
 """
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
 
 import regex as re
 import tomllib
-
-import vllm.third_party.deep_gemm as pkg
 
 SO_RE = re.compile(r"^_C\.cpython-(\d)(\d+)-")
 
@@ -30,7 +29,11 @@ def required_pythons() -> list[str]:
     return [f"3.{v}" for v in range(int(m[1]), int(m[2]))]
 
 
-pkg_dir = Path(pkg.__file__).parent
+spec = importlib.util.find_spec("vllm.third_party.deep_gemm")
+if spec is None or spec.origin is None:
+    sys.exit("vllm.third_party.deep_gemm not importable; is vllm installed?")
+pkg_dir = Path(spec.origin).parent
+
 found = {f"{m[1]}.{m[2]}" for f in os.listdir(pkg_dir) if (m := SO_RE.match(f))}
 required = required_pythons()
 missing = [v for v in required if v not in found]
