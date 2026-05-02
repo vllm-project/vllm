@@ -58,7 +58,10 @@ if(DEEPGEMM_ARCHS)
   # Unset → fall back to the build interpreter (editable / source builds).
   # The compile is delegated to tools/build_deepgemm_C.py and always runs
   # against the build interpreter's torch — target Pythons don't need torch.
-  if(DEFINED ENV{DEEPGEMM_PYTHON_INTERPRETERS})
+  # Note: empty-but-set env vars are still DEFINED in cmake; treat empty as
+  # unset so an empty interpreter list falls back to the build interpreter
+  # rather than silently skipping the per-Python build.
+  if(NOT "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}" STREQUAL "")
     string(REPLACE ":" ";" _dg_pythons "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}")
   else()
     set(_dg_pythons "${Python_EXECUTABLE}")

@@ -119,7 +119,7 @@ steps:
   - tests/kernels/attention/test_deepgemm_attention.py
   - tests/quantization/test_cutlass_w4a16.py
   commands:
-    - python ../tools/check_wheel_deepgemm.py
+    - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
