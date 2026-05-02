@@ -41,6 +41,13 @@ ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
+# OS family of BUILD_BASE_IMAGE. Controls package manager (apt vs dnf) and
+# Python bootstrap. Set to "manylinux" alongside a manylinux build base such
+# as pytorch/manylinux2_28-builder:cuda13.0 to produce wheels with a glibc
+# 2.28 floor (matches PyTorch's own published wheels). Default stays on
+# Ubuntu for backwards compatibility.
+ARG BUILD_OS=ubuntu
+
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
 # installation of the GPG key of the PPA, as done by add-apt-repository, so we
@@ -94,35 +101,64 @@ FROM ${BUILD_BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG BUILD_OS
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies including build tools
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        ccache \
-        software-properties-common \
-        git \
-        curl \
-        sudo \
-        python3-pip \
-        libibverbs-dev \
-        # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-        # as it was causing spam when compiling the CUTLASS kernels
-        gcc-10 \
-        g++-10 \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
-    # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
-    # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
-    # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
-    && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
+# Install system dependencies including build tools.
+# The Ubuntu path uses apt + deadsnakes-via-uv for Python; the manylinux path
+# (AlmaLinux 8, e.g. pytorch/manylinux2_28-builder) uses dnf and the Python
+# interpreters pre-installed at /opt/python/cpXY-cpXY/.
+RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
+        # rdma-core-devel provides libibverbs headers; ccache lives in EPEL,
+        # which the pytorch manylinux image already enables. git/curl/sudo
+        # are typically pre-installed but listed defensively.
+        dnf install -y --setopt=install_weak_deps=False \
+            ccache \
+            git \
+            curl \
+            sudo \
+            rdma-core-devel \
+        && dnf clean all \
+        && rm -rf /var/cache/dnf; \
+    else \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends \
+            ccache \
+            software-properties-common \
+            git \
+            curl \
+            sudo \
+            python3-pip \
+            libibverbs-dev \
+            # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
+            # as it was causing spam when compiling the CUTLASS kernels
+            gcc-10 \
+            g++-10 \
+        && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+        # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
+        # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
+        # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
+        && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install uv and bootstrap /opt/venv. Both paths converge on /opt/venv so all
+# downstream stages stay distro-agnostic.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && if [ "${BUILD_OS}" = "manylinux" ]; then \
+           # manylinux images ship Python at /opt/python/cpXY-cpXY/; point uv
+           # at the matching interpreter rather than letting it fetch one.
+           PYV_NODOT=$(echo ${PYTHON_VERSION} | tr -d '.') \
+           && MANYLINUX_PY=/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION} \
+           && $HOME/.local/bin/uv venv /opt/venv --python "$MANYLINUX_PY"; \
+       else \
+           $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION}; \
+       fi \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
-    && ln -s /opt/venv/bin/python3 /usr/bin/python3 \
-    && ln -s /opt/venv/bin/python3-config /usr/bin/python3-config \
-    && ln -s /opt/venv/bin/pip /usr/bin/pip \
+    && ln -sf /opt/venv/bin/python3 /usr/bin/python3 \
+    && ln -sf /opt/venv/bin/python3-config /usr/bin/python3-config \
+    && ln -sf /opt/venv/bin/pip /usr/bin/pip \
     && python3 --version && python3 -m pip --version
 
 # Activate virtual environment and add uv to PATH
@@ -433,6 +469,7 @@ FROM base AS dev
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG BUILD_OS
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -442,7 +479,11 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
+RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
+        dnf install -y numactl-devel && dnf clean all && rm -rf /var/cache/dnf; \
+    else \
+        apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 
 # We can specify the standard or nightly build of PyTorch
