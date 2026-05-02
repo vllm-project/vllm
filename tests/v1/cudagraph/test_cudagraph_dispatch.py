@@ -420,7 +420,7 @@ def test_capture_replay_bypass_logic():
     comp_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
         cudagraph_mode="FULL",
-        cudagraph_capture_sizes=[10, 20],
+        cudagraph_capture_sizes=[1, 2],
     )
     vllm_config = _create_vllm_config(comp_config)
     dispatcher = CudagraphDispatcher(vllm_config)
@@ -490,7 +490,7 @@ def test_nested_wrappers():
     comp_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
         cudagraph_mode="FULL",
-        cudagraph_capture_sizes=[10, 20],
+        cudagraph_capture_sizes=[1],
     )
     vllm_config = _create_vllm_config(comp_config)
     dispatcher = CudagraphDispatcher(vllm_config)
