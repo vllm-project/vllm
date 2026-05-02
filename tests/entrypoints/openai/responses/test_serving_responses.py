@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -83,6 +83,70 @@ class MockConversationContext(ConversationContext):
 
     async def cleanup_session(self) -> None:
         pass
+
+
+def _make_serving_responses_for_render_tests():
+    engine_client = MagicMock()
+
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+
+    engine_client.input_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    return OpenAIServingResponses(
+        engine_client=engine_client,
+        models=MagicMock(),
+        openai_serving_render=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+
+@pytest.mark.asyncio
+async def test_render_response_inputs_passes_skip_mm_cache():
+    serving = _make_serving_responses_for_render_tests()
+    serving.openai_serving_render.preprocess_chat = AsyncMock(
+        return_value=(
+            [{"role": "user", "content": "hi"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+
+    request = ResponsesRequest(input="hi", tools=[])
+
+    result = await serving.render_response_inputs(
+        request,
+        skip_mm_cache=True,
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    messages, engine_inputs = result
+    assert messages == [{"role": "user", "content": "hi"}]
+    assert engine_inputs == [{"prompt_token_ids": [1, 2, 3]}]
+    assert (
+        serving.openai_serving_render.preprocess_chat.call_args.kwargs["skip_mm_cache"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_render_response_inputs_missing_previous_response_id():
+    serving = _make_serving_responses_for_render_tests()
+    request = ResponsesRequest(
+        input="hi",
+        tools=[],
+        previous_response_id="resp_missing",
+    )
+
+    result = await serving.render_response_inputs(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.code == 404
 
 
 def test_serialize_message_pydantic_model_returns_dict() -> None:

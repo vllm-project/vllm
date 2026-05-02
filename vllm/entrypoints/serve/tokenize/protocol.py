@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
@@ -153,7 +154,18 @@ class TokenizeChatRequest(OpenAIBaseModel):
         )
 
 
-TokenizeRequest: TypeAlias = TokenizeCompletionRequest | TokenizeChatRequest
+class TokenizeResponsesRequest(ResponsesRequest):
+    return_token_strs: bool | None = Field(
+        default=False,
+        description=(
+            "If true, also return the token strings corresponding to the token ids."
+        ),
+    )
+
+
+TokenizeRequest: TypeAlias = (
+    TokenizeCompletionRequest | TokenizeChatRequest | TokenizeResponsesRequest
+)
 
 
 class TokenizeResponse(OpenAIBaseModel):

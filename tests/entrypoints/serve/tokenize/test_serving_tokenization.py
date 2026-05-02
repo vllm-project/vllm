@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import TypeAdapter
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -14,6 +15,8 @@ from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeChatRequest,
     TokenizeCompletionRequest,
+    TokenizeRequest,
+    TokenizeResponsesRequest,
 )
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -22,6 +25,17 @@ MODEL_NAME = "openai-community/gpt2"
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
 ]
+
+
+def test_tokenize_request_accepts_responses_input():
+    request = TypeAdapter(TokenizeRequest).validate_python(
+        {
+            "model": MODEL_NAME,
+            "input": "Test prompt",
+        }
+    )
+
+    assert isinstance(request, TokenizeResponsesRequest)
 
 
 @dataclass
@@ -138,3 +152,67 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
         ]
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_tokenize_responses_uses_responses_renderer_path():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+
+    serving = _build_serving_tokenization(mock_engine)
+    responses_handler = MagicMock()
+    responses_handler.render_response_inputs = AsyncMock(
+        return_value=(
+            [{"role": "user", "content": "Test prompt"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+    serving.set_openai_serving_responses(responses_handler)
+
+    request = TokenizeResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+    )
+
+    response = await serving.create_tokenize(request, MagicMock(headers={}))
+
+    assert response.tokens == [1, 2, 3]
+    responses_handler.render_response_inputs.assert_awaited_once_with(
+        request,
+        skip_mm_cache=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tokenize_responses_return_token_strs():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+    tokenizer = mock_engine.renderer.get_tokenizer.return_value
+    tokenizer.convert_ids_to_tokens.return_value = ["one", "two"]
+
+    serving = _build_serving_tokenization(mock_engine)
+    responses_handler = MagicMock()
+    responses_handler.render_response_inputs = AsyncMock(
+        return_value=(
+            [{"role": "user", "content": "Test prompt"}],
+            [{"prompt_token_ids": [1, 2]}],
+        )
+    )
+    serving.set_openai_serving_responses(responses_handler)
+
+    request = TokenizeResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        return_token_strs=True,
+    )
+
+    response = await serving.create_tokenize(request, MagicMock(headers={}))
+
+    assert response.tokens == [1, 2]
+    assert response.token_strs == ["one", "two"]

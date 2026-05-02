@@ -347,25 +347,13 @@ class OpenAIServingResponses(OpenAIServing):
             # value).
             request.store = False
 
-        # Handle the previous response ID.
-        prev_response_id = request.previous_response_id
-        if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
-            if prev_response is None:
-                return self._make_not_found_error(prev_response_id)
-        else:
-            prev_response = None
-
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
 
-        if self.use_harmony:
-            messages, engine_inputs = self._make_request_with_harmony(
-                request, prev_response
-            )
-        else:
-            messages, engine_inputs = await self._make_request(request, prev_response)
+        rendered_inputs = await self.render_response_inputs(request, validate=False)
+        if isinstance(rendered_inputs, ErrorResponse):
+            return rendered_inputs
+        messages, engine_inputs = rendered_inputs
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -574,10 +562,48 @@ class OpenAIServingResponses(OpenAIServing):
             request_metadata,
         )
 
+    async def render_response_inputs(
+        self,
+        request: ResponsesRequest,
+        *,
+        skip_mm_cache: bool = False,
+        validate: bool = True,
+    ) -> tuple[list[Any], list[EngineInput]] | ErrorResponse:
+        """Render a Responses API request into the model input tokens.
+
+        This is shared by the Responses API serving path and the tokenizer
+        endpoint so that `/tokenize` reports the same prompt tokens that a
+        `/v1/responses` request would send to the engine.
+        """
+        if validate:
+            maybe_validation_error = self._validate_create_responses_input(request)
+            if maybe_validation_error is not None:
+                return maybe_validation_error
+
+        prev_response_id = request.previous_response_id
+        if prev_response_id is not None:
+            async with self.response_store_lock:
+                prev_response = self.response_store.get(prev_response_id)
+            if prev_response is None:
+                return self._make_not_found_error(prev_response_id)
+        else:
+            prev_response = None
+
+        if self.use_harmony:
+            return self._make_request_with_harmony(request, prev_response)
+
+        return await self._make_request(
+            request,
+            prev_response,
+            skip_mm_cache=skip_mm_cache,
+        )
+
     async def _make_request(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        *,
+        skip_mm_cache: bool = False,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -597,6 +623,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_dicts=tool_dicts,
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
             reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
+            skip_mm_cache=skip_mm_cache,
         )
         return messages, engine_inputs
 
