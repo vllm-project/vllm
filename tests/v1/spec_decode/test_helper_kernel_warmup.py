@@ -96,7 +96,9 @@ def test_warmup_shapes_copy_expand_eagle(
     num_query_per_req = 1 + net_slots
     total_input = num_reqs * num_query_per_req
     total_output = num_reqs * (num_query_per_req + extra_slots)
-    block_size_tokens = min(256, next_power_of_2(total_output))
+    # Match production: BLOCK_SIZE keyed off max_query_len + net_new_slots
+    # (which equals num_query_per_req for a first-decode request).
+    block_size_tokens = min(256, next_power_of_2(num_query_per_req))
 
     target_token_ids = torch.zeros(total_input, dtype=torch.int32, device=DEVICE)
     target_positions = torch.zeros(total_input, dtype=torch.int64, device=DEVICE)
@@ -178,7 +180,9 @@ def test_warmup_shapes_copy_expand_dflash(
     block_size = 16
     max_model_len = 4096
     num_query_per_req = 1 + num_speculative_tokens
-    num_context = num_query_per_req
+    # Match production sizing: ``max_ctx_per_req == 1`` for the first request
+    # after server start (no prior context).
+    num_context = 1
     max_tokens_per_req = num_context + num_query_per_req
     block_size_kernel = min(256, next_power_of_2(max_tokens_per_req))
     num_blocks_grid = (max_tokens_per_req + block_size_kernel - 1) // block_size_kernel

@@ -318,10 +318,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         device = self.device
         num_reqs = 1
         num_query_per_req = 1 + self.num_speculative_tokens
-        # Match the production sizing in ``set_inputs_first_pass``: a single
-        # token of context + the query per request keeps the synthetic call
-        # minimal while exercising both the context and query branches.
-        num_context = num_query_per_req
+        # Match the production sizing in ``set_inputs_first_pass`` (line 124):
+        # ``max_ctx_per_req = cad.max_query_len`` is 1 for the first request
+        # after server start (no prior context). Using a larger value here
+        # would pick a different ``next_power_of_2`` bucket for ``BLOCK_SIZE``
+        # and miss the production JIT cache entry.
+        num_context = 1
         max_tokens_per_req = num_context + num_query_per_req
         # ``min(256, ...)`` mirrors the cap in production so we land on the
         # same JIT cache entry as the first real request.

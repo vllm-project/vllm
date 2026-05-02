@@ -1619,9 +1619,13 @@ class SpecDecodeBaseProposer:
             total_output_tokens = num_reqs * (
                 num_query_per_req + num_padding_slots_per_request
             )
-            # ``min(256, ...)`` mirrors the production cap so we hit the
-            # same JIT cache entry as the first real request.
-            block_size_tokens = min(256, next_power_of_2(total_output_tokens))
+            # Match production sizing in ``set_inputs_first_pass`` (line 700-703):
+            # ``BLOCK_SIZE_TOKENS = min(256, next_power_of_2(max_query_len +
+            # net_num_new_slots_per_request))``. For a first-decode request
+            # ``max_query_len == 1`` so ``num_query_per_req`` is the right key;
+            # using ``total_output_tokens`` here would pick a larger constexpr
+            # bucket and miss the production JIT cache entry.
+            block_size_tokens = min(256, next_power_of_2(num_query_per_req))
 
             target_token_ids = torch.zeros(
                 total_input_tokens, dtype=torch.int32, device=device
