@@ -52,6 +52,9 @@
     "SCCACHE_S3_NO_CREDENTIALS": {
       "default": "0"
     },
+    "DEEPGEMM_PYTHONS": {
+      "default": "3.10 3.11 3.12 3.13 3.14"
+    },
     "vllm_target_device": {
       "default": "cuda"
     },

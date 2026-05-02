@@ -105,7 +105,10 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
   - tools/install_deepgemm.sh
+  - tools/build_deepgemm_C.py
+  - tools/setup_deepgemm_pythons.sh
   - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
