@@ -473,6 +473,8 @@ def _support_torch_compile(
                     mark_dynamic(arg, dim_shape_pairs)
                 elif isinstance(arg, IntermediateTensors):
                     for tensor in arg.tensors.values():
+                        if not isinstance(tensor, torch.Tensor):
+                            continue
                         dim_shape_pairs = [
                             (tensor.ndim + d if d < 0 else d, dim_to_shape_id.get(d))
                             for d in dims

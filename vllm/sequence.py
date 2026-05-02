@@ -63,6 +63,23 @@ class IntermediateTensors:
     def __repr__(self) -> str:
         return f"IntermediateTensors(tensors={self.tensors})"
 
+    def consolidate_residual(self) -> None:
+        """Apply residual to hidden_states at a PP boundary in-place.
+
+        Fused residual+RMSNorm decoder layers carry ``residual`` alongside
+        ``hidden_states``, which doubles PP communication.  Call this once
+        right before the tensors leave the current PP stage to merge the
+        residual and avoid transmitting it.
+
+        ``hs = hs + res`` creates a new tensor — the persistent CUDA graph
+        buffer (if any) is not modified.
+        """
+        hs = self.tensors.get("hidden_states")
+        res = self.tensors.get("residual")
+        if hs is not None and res is not None and res.numel() > 0:
+            self.tensors["hidden_states"] = hs + res
+            self.tensors["residual"] = None  # type: ignore[assignment]
+
     @staticmethod
     def empty_like(
         intermediate_tensors: "IntermediateTensors",

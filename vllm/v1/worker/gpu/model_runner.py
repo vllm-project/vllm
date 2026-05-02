@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -1148,6 +1149,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
+            if not envs.VLLM_PP_DISABLE_RESIDUAL_CONSOLIDATION:
+                output_intermediate_tensors.consolidate_residual()
             output_intermediate_tensors.kv_connector_output = kv_connector_output
             return output_intermediate_tensors
         return None

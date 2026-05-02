@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -402,7 +403,10 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
-            return self.intermediate_tensors[: desc.num_tokens]
+            result = self.intermediate_tensors[: desc.num_tokens]
+            if not envs.VLLM_PP_DISABLE_RESIDUAL_CONSOLIDATION:
+                result.consolidate_residual()
+            return result
 
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]

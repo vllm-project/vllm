@@ -3114,6 +3114,12 @@ class GPUModelRunner(
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
+                if not isinstance(v, torch.Tensor):
+                    # Sender consolidated residual to None.  Zero the persistent
+                    # buffer so the local model receives a zero tensor instead
+                    # of None, which torch.compile / CUDA graphs expect.
+                    self.intermediate_tensors.tensors[k].zero_()
+                    continue
                 is_scattered = k == "residual" and is_rs
                 copy_len = num_tokens // tp if is_scattered else num_tokens
                 self.intermediate_tensors[k][:copy_len].copy_(
@@ -4108,6 +4114,8 @@ class GPUModelRunner(
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
+                    if not envs.VLLM_PP_DISABLE_RESIDUAL_CONSOLIDATION:
+                        hidden_states.consolidate_residual()
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     return hidden_states
@@ -4127,6 +4135,9 @@ class GPUModelRunner(
                 # Rare case.
                 assert not self.is_pooling_model
 
+                if isinstance(hidden_states, IntermediateTensors):
+                    if not envs.VLLM_PP_DISABLE_RESIDUAL_CONSOLIDATION:
+                        hidden_states.consolidate_residual()
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
                     all_gather_tensors = {
