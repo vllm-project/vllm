@@ -45,11 +45,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.deepseek_compressor import (
-    DeepseekCompressor,
-    apply_gptj_rope_ref,
-    hadamard_transform_ref,
-)
+from vllm.model_executor.layers.deepseek_compressor import DeepseekCompressor
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
@@ -1564,25 +1560,3 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4=self.use_fp4_kv,
         )
         return self.indexer_op(hidden_states, q_quant, k, weights)
-
-    def _quantize_indexer_q_torch(
-        self,
-        q: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        weights: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        q = apply_gptj_rope_ref(q, positions, cos_sin_cache, self.rope_dim).to(
-            torch.bfloat16
-        )
-        q = hadamard_transform_ref(q).to(torch.float32)
-        fp8_max = 224.0 if current_platform.is_fp8_fnuz() else 448.0
-        q_scale = torch.abs(q).amax(dim=-1).clamp(min=1e-12) / fp8_max
-        q_quant = (q / q_scale.unsqueeze(-1)).to(current_platform.fp8_dtype())
-        weights = (
-            weights.to(torch.float32)
-            * q_scale
-            * self.softmax_scale
-            * (self.n_head**-0.5)
-        )
-        return q_quant, weights
