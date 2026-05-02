@@ -19,8 +19,8 @@ class NgramProposer:
         self.min_n = vllm_config.speculative_config.prompt_lookup_min
         # Maximum length of the n-gram to match.
         self.max_n = vllm_config.speculative_config.prompt_lookup_max
-        # Number of tokens follow the match. If there are less than k
-        # tokens follow the match, we will return the maximum amount of
+        # Number of tokens following the match. If there are fewer than k
+        # tokens following the match, we will return the maximum amount of
         # tokens until the end.
         self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
@@ -209,7 +209,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
 
     If found, we will extract k right after the matched ngram.
     """
-    # Do not generate draft tokens is context is shorter than minimum n-gram
+    # Do not generate draft tokens if context is shorter than minimum n-gram
     total_token = origin_tokens.shape[0]
     if total_token < min_ngram:
         return np.empty((0,), dtype=origin_tokens.dtype)
