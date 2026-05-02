@@ -71,8 +71,7 @@ A simplified version of the example (`llama-multinode`) looks like:
 Key points from the example YAML:
 
 Image: `vllm/vllm-openai:latest` (matches upstream vLLM images).
-
-Command examples (Multi-Processing/Ray):
+Commands:
 
 ??? code "Yaml"
     === "MP Mode(default)"
