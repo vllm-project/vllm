@@ -45,7 +45,7 @@ This is especially valuable for the long tail of users running consumer GPUs, ol
 In recent months, contributors have repeatedly hit and fixed the same class of issue across different models. Each fix is currently bespoke:
 
 | Model | Constraint | Effect | Status |
-|-------|-----------|--------|--------|
+| ------- | ----------- | -------- | -------- |
 | MiniMax M2.5/M2.7 | `partial_rotary_factor=0.5` | Full WHT on KV vectors mixes RoPE and non-RoPE dims; ~10% quality loss on stateful tasks | Fixed via split-block Hadamard ([#39970 comment thread](https://github.com/vllm-project/vllm/pull/39970)) |
 | Nemotron-H hybrid | `slot_size_aligned` not divisible by Mamba page size | Hybrid models fail page-size unification | Fixed in [#41123](https://github.com/vllm-project/vllm/pull/41123)/[#39931](https://github.com/vllm-project/vllm/pull/39931) (competing approaches) |
 | Ling-2.6-flash | `tp_size > group_norm_size` | Asserts at startup; can't run at TP > 4 | **Pilot of this RFC** — patched and validated end-to-end |
@@ -254,7 +254,7 @@ Tell users to fall back to PP=N × TP=K when constraints don't fit.
 ### Technical risks
 
 | Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|-----------|
+| ------ | ----------- | -------- | ----------- |
 | Cross-rank reduce introduces correctness bug | Medium | High (silent quality loss) | Reference test against TP=K-satisfied baseline; logit-level KL tolerance. **Validated in pilot via standalone unit test (`test_cross_rank_norm.py`) — bit-exact match across 4 configurations.** |
 | Mitigation cost exceeds estimate by >2× | Medium | Medium | Benchmark every shipped constraint; document measured costs; flag when measurement diverges from estimate |
 | Pattern doesn't generalize to new constraint types | Medium | Low | Each constraint is independent; framework doesn't presume all future constraints fit the catalog |
@@ -265,7 +265,7 @@ Tell users to fall back to PP=N × TP=K when constraints don't fit.
 ### Social/maintenance risks
 
 | Risk | Mitigation |
-|------|-----------|
+| ------ | ----------- |
 | vLLM maintainers reject the framework approach | Land Phase 1 (Ling pilot) as a standalone fix first, then propose framework as refactor of the success. **Pilot is now a working artifact with measured cost, not a hypothetical.** |
 | Each future constraint requires negotiation about which pattern it fits | Constraint catalog is open — anyone can add. Framework is a contract, not a gatekeeper. |
 | Migration of existing implicit handlers breaks something | Phase 1 explicitly: "expose without behavior change." Regression-test against existing models. |
@@ -362,7 +362,7 @@ Total pilot patch: ~85 lines added, 6 lines deleted (asserts moved into a branch
 v2 replaces v1's mostly-estimated cost table with **pilot-measured numbers** wherever possible:
 
 | Cost figure | Source | Notes |
-|------------|--------|-------|
+| ------------ | -------- | ------- |
 | `ConstraintGroupedNorm` cross-rank-reduce overhead | **Measured** | ~3.3% per token at batch=1 on 8× A4000 PCIe. 28 linear-attn layers × ~50 µs all-reduce ≈ 1.4 ms per token vs ~42 ms total token time. Inside the original 5–15% estimate, on the low end. |
 | `ConstraintGroupedNorm` correctness | **Measured (bit-exact)** | Standalone unit test (`test_cross_rank_norm.py`) validates the wrapper produces bit-identical output to a single-rank reference across 4 configurations including the Ling-realistic shape (8 ranks, 4096 features, 4 groups). |
 | Total TP=8 patched throughput vs PP=2×TP=4 | **Measured** | -34% on 8× A4000 PCIe (Ling, batch=16). The TP collective tax dominates the cross-rank-reduce mitigation overhead. |
@@ -394,7 +394,8 @@ The Phase 1 pilot ran the proposed Universal Translator pattern through Ling-2.6
 ### Gate 2: lightning_attn kernel SMEM ceiling (CBLOCK=64 on Ampere)
 
 **Discovery surface:** After the gate-1 fix, Ling still failed to run on A4000 — but with a different error:
-```
+
+```text
 triton.runtime.errors.OutOfResources: out of resource: shared memory,
 Required: 131584, Hardware limit: 101376.
 ```
@@ -414,7 +415,8 @@ The lightning_attn `_fwd_kv_parallel` Triton kernel hardcodes `CBLOCK=64` which 
 ### Gate 4: FlashInfer dispatch routing (Ampere → XQA → SM120/121 + fp8)
 
 **Discovery surface:** With the vLLM gate relaxed, the run produced a clearer error:
-```
+
+```text
 RuntimeError: XQA MLA only supports fp8 operation on SM120/SM121 GPUs,
 got torch.bfloat16 and torch.bfloat16
 ```
@@ -442,7 +444,7 @@ But FlashInfer ALSO ships `BatchMLAPagedAttentionWrapper(backend="fa2")` — a s
 ### Combined throughput at TP=8 + FLASHINFER_MLA-fa2 + compaction + piecewise graphs
 
 | Config | batch=1 | batch=4 | batch=16 |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | TRITON_MLA piecewise (vLLM default on Ampere) | 23.84 | 90.94 | 349.70 |
 | FIMLA-fa2 + compact + piecewise (this work) | 14.29 | 54.93 | 209.61 |
 
@@ -547,6 +549,7 @@ For each constraint:
 ### Topology coverage
 
 Test on at least:
+
 - 4× and 8× datacenter (A100, H100)
 - 4× and 8× consumer (4090, 5090)
 - 8× professional (A4000) — the pilot's reference setup
@@ -581,6 +584,7 @@ Pilot ran on 8× A4000 PCIe, vLLM 0.20.1.dev0, FlashInfer 0.6.8.post1, Ling-2.6-
 **With Universal Translator (Phase 1):** Annotate `BailingMoELinearAttention` with `ConstraintGroupedNorm(group_size_attr='group_norm_size')`. The translator detects `tp_size=8 > group_norm_size=4`, wraps the RMS norm with cross-rank all-reduce. Model loads at TP=8.
 
 **Measured outcome (Ling at TP=8 with ConstraintGroupedNorm):**
+
 - Throughput at batch=16: ~349 t/s (TRITON_MLA with piecewise graphs) — **-34% vs PP=2×TP=4 baseline**
 - Per-token cross-rank-reduce overhead: ~3.3% per token at batch=1 — inside the 5-15% original estimate
 - Correctness: 3/8 exact-token match vs TP=4 reference; semantically coherent across the full prompt set; expected fp-reduction-order drift on remainder
@@ -595,7 +599,7 @@ Pilot ran on 8× A4000 PCIe, vLLM 0.20.1.dev0, FlashInfer 0.6.8.post1, Ling-2.6-
 ### Comparison to existing inference frameworks (revised)
 
 | Framework | TP-flexibility approach | Comparison to Universal Translator |
-|-----------|------------------------|-----------------------------------|
+| ----------- | ------------------------ | ----------------------------------- |
 | **DeepSpeed Inference** | Auto-replicates KV when needed; supports custom tensor splits via `replace_module` API | Similar in spirit; DeepSpeed's API is imperative, ours is declarative+registration. DeepSpeed handles fewer constraint types. |
 | **Megatron-LM** | TP-aware kernels for attention and FFN with hard-coded GQA replication | Closely tied to Megatron's specific kernel implementations; not a general framework. |
 | **TensorRT-LLM** | TP plugin system with limited topology configurations | Closed-source plugin model. |
@@ -631,7 +635,7 @@ Universal Translator is a force multiplier — every model author who adopts it 
 For reviewers not deep in vLLM internals:
 
 | Term | Meaning |
-|------|---------|
+| ------ | --------- |
 | **TP** | Tensor parallelism. Splits each layer's weights across multiple GPUs, with all-reduce or all-gather between layers. |
 | **PP** | Pipeline parallelism. Splits the model layer-wise; each token passes through stages serially. |
 | **EP** | Expert parallelism. For MoE models, splits experts across GPUs. |
@@ -661,13 +665,13 @@ For reviewers not deep in vLLM internals:
 - **Bench harness:** `./ling-pilot-bench.py` — covers TP=4-offload, PP=2×TP=4, TP=8 patched (eager + graphs)
 - **Bench outputs:** `./ling-bench-*.json`
 - **Step writeups:**
-  - `./ling-pilot-step0-diagnostic.md`
-  - `./ling-pilot-step1-blocker.md` — kernel SMEM finding
-  - `./ling-pilot-step2-correctness.md` — unit test results
-  - `./ling-pilot-results.md` — main throughput/correctness writeup
-  - `./flashinfer-mla-fa2-adapter-design.md`
-  - `./flashinfer-mla-fa2-results.md`
-  - `./flashinfer-mla-fa2-bug-localized.md`
+    - `./ling-pilot-step0-diagnostic.md`
+    - `./ling-pilot-step1-blocker.md` — kernel SMEM finding
+    - `./ling-pilot-step2-correctness.md` — unit test results
+    - `./ling-pilot-results.md` — main throughput/correctness writeup
+    - `./flashinfer-mla-fa2-adapter-design.md`
+    - `./flashinfer-mla-fa2-results.md`
+    - `./flashinfer-mla-fa2-bug-localized.md`
 - **Cross-LLM debug review thread:** `./flashinfer-mla-fa2-debug-report.md` (initial report sent to Grok/Gemini for round 2)
 - **Upstream FlashInfer issue draft:** `./flashinfer-mla-fa2-bug-issue.md`
 

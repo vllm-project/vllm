@@ -452,6 +452,7 @@ def _get_or_create_cross_rank_subgroup(tp_device_group, ranks: tuple):
     """
     if ranks not in _cross_rank_norm_subgroup_cache:
         import torch.distributed as dist
+
         _cross_rank_norm_subgroup_cache[ranks] = dist.new_group(
             ranks=list(ranks),
             backend=dist.get_backend(tp_device_group),
@@ -668,21 +669,33 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
             ranks_per_group = self.tp_size // self.group_norm_size
             my_subgroup_id = self.tp_rank // ranks_per_group
             from vllm.distributed import get_tp_group
-            tp_device_group = get_tp_group().device_group
+
+            tp_group = get_tp_group()
+            tp_device_group = tp_group.device_group
+            # `dist.new_group` expects GLOBAL ranks; map local TP indices
+            # via tp_group.ranks. Without this mapping the code only works
+            # when the TP group starts at global rank 0 (single-node
+            # TP-only); in multi-node TPxPP or TPxDP setups the TP group
+            # may start at a non-zero global rank and local==global no
+            # longer holds. Thanks to gemini-code-assist for catching this
+            # in PR review (vllm-project/vllm#41509).
+            #
             # PyTorch's dist.new_group is a collective: every rank in the
             # parent group must call it with the same `ranks` list, even
             # if the rank is not a member. We iterate over ALL subgroups
             # in deterministic order on every rank; the cache ensures
             # new_group is invoked exactly once per unique rank-tuple.
+            tp_global_ranks = tp_group.ranks
             subgroup = None
             for sgid in range(self.group_norm_size):
-                sg_ranks = tuple(range(
-                    sgid * ranks_per_group,
-                    (sgid + 1) * ranks_per_group,
-                ))
-                sg = _get_or_create_cross_rank_subgroup(
-                    tp_device_group, sg_ranks
+                sg_ranks = tuple(
+                    tp_global_ranks[i]
+                    for i in range(
+                        sgid * ranks_per_group,
+                        (sgid + 1) * ranks_per_group,
+                    )
                 )
+                sg = _get_or_create_cross_rank_subgroup(tp_device_group, sg_ranks)
                 if sgid == my_subgroup_id:
                     subgroup = sg
             assert subgroup is not None
