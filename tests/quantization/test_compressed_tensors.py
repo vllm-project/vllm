@@ -387,20 +387,22 @@ def _make_w4a16_fp4_args(observer: str | None = None) -> QuantizationArgs:
     return QuantizationArgs(**kwargs)
 
 
-def test_mixfp4_marlin_process_scales_rejects_odd_group_rows():
-    raw = torch.zeros((3, 8), dtype=torch.uint8)
+def test_mixfp4_marlin_process_scales_rejects_unaligned_n_dimension():
+    raw = torch.zeros((2, 6), dtype=torch.uint8)
 
-    with pytest.raises(ValueError, match="even number"):
+    with pytest.raises(ValueError, match="divisible by 4"):
         mixfp4_marlin_process_scales(raw.view(torch.float8_e4m3fn))
 
 
-def test_mixfp4_marlin_process_scales_preserves_even_shape():
-    raw = torch.arange(4 * 16, dtype=torch.uint8).reshape(4, 16)
+def test_mixfp4_marlin_process_scales_reorders_scale_lanes():
+    raw = torch.arange(3 * 8, dtype=torch.uint8).reshape(3, 8)
 
     processed = mixfp4_marlin_process_scales(raw.view(torch.float8_e4m3fn))
 
+    expected = raw.view(-1, 4)[:, [0, 2, 1, 3]].reshape_as(raw)
     assert processed.shape == raw.shape
     assert processed.dtype is torch.float8_e4m3fn
+    assert torch.equal(processed.view(torch.uint8), expected)
 
 
 @pytest.mark.parametrize(

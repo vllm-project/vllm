@@ -19,26 +19,19 @@ _GROUP_SIZE = 16
 
 
 def mixfp4_marlin_process_scales(marlin_scales: torch.Tensor) -> torch.Tensor:
-    """Permute FP8 scales while preserving the MixFP4 sign-bit flag."""
+    """Reorder FP8 scale byte lanes while preserving MixFP4 flags."""
     raw = marlin_scales.contiguous().view(torch.uint8)
     if raw.dim() != 2:
         raise ValueError(
             "MixFP4 Marlin scales must be a 2D tensor after permutation, "
             f"got shape {tuple(raw.shape)}."
         )
-    if raw.size(0) % 2 != 0:
-        raise ValueError(
-            "MixFP4 Marlin scale layout requires an even number of "
-            f"group rows, got {raw.size(0)}. This corresponds to size_k "
-            "being divisible by 32 for group_size=16."
-        )
-    if raw.size(1) % 8 != 0:
+    if raw.size(1) % 4 != 0:
         raise ValueError(
             "MixFP4 Marlin scale layout requires the N dimension to be "
-            f"divisible by 8 after permutation, got {raw.size(1)}."
+            f"divisible by 4 after permutation, got {raw.size(1)}."
         )
-    raw = raw.view(raw.size(0) // 2, 2, -1, 8)
-    raw = raw.permute(0, 2, 1, 3).reshape(raw.size(0) * 2, -1)
+
     raw = raw.view(-1, 4)[:, [0, 2, 1, 3]].reshape(raw.size(0), -1)
     return raw.contiguous().view(torch.float8_e4m3fn)
 

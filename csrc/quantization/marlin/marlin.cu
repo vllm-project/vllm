@@ -635,7 +635,7 @@ static torch::Tensor marlin_gemm_impl(
     TORCH_CHECK(
         size_k % (2 * MARLIN_NAMESPACE_NAME::tile_size) == 0, "size_k = ",
         size_k, " is not divisible by ", 2 * MARLIN_NAMESPACE_NAME::tile_size,
-        "; MixFP4 scale layout packs pairs of group-16 rows");
+        "; MixFP4 Marlin requires size_k divisible by 32");
   }
   TORCH_CHECK((size_k / MARLIN_NAMESPACE_NAME::tile_size) == b_q_weight.size(0),
               "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
