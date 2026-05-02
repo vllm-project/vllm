@@ -265,7 +265,7 @@ def run_tests(
             if reason is None:
                 logprobs_err = _all_logprobs_errors(base_logprobs, test_logprobs)
                 if logprobs_err:
-                    reason = "logprobs", logprobs_err
+                    reason = "logprobs", AssertionError(logprobs_err)
 
             if reason is None:
                 try:
