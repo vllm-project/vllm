@@ -11,6 +11,7 @@ Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> <TARGET_PY>
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +40,8 @@ info = json.loads(
 )
 
 cuda_home = cpp_extension.CUDA_HOME
+if cuda_home is None:
+    sys.exit("CUDA_HOME not found; cannot build DeepGEMM _C")
 # CCCL lives outside the standard CUDAToolkit search, mirroring DeepGEMM's
 # own setup.py.
 includes = [
@@ -54,7 +57,7 @@ includes = [
 ]
 
 cmd = [
-    "g++",
+    os.environ.get("CXX", "g++"),
     "-shared",
     "-fPIC",
     "-std=c++17",
