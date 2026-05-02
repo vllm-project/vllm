@@ -114,12 +114,12 @@ QUANT_ALGOS = [
     # MIXED_PRECISION,
     "MIXED_PRECISION",
 ]
-KV_CACHE_QUANT_ALGOS = ["FP8"]
+KV_CACHE_QUANT_ALGOS = ["FP8", "NVFP4"]
 
 
-class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
+class ModelOptKVCacheMethod(BaseKVCacheMethod):
     """
-    Supports loading kv-cache scaling factors from FP8 checkpoints.
+    Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints.
     """
 
     def __init__(self, quant_config: "ModelOptQuantConfigBase"):
@@ -517,6 +517,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -597,6 +598,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -948,6 +950,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -992,7 +995,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
 ModelOptFp8Config.FusedMoEMethodCls = ModelOptFp8MoEMethod
-ModelOptFp8Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+ModelOptFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
 class ModelOptNvFp4Config(ModelOptQuantConfigBase):
@@ -1440,6 +1443,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1484,7 +1488,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
-ModelOptNvFp4Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+ModelOptNvFp4Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
 class ModelOptMxFp8Config(ModelOptQuantConfigBase):
@@ -1918,6 +1922,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.fused_moe.core import (
             ActivationType,
@@ -2013,7 +2018,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 # Register the method classes for ModelOptMxFp8Config
 ModelOptMxFp8Config.LinearMethodCls = ModelOptMxFp8LinearMethod
 ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
-ModelOptMxFp8Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
@@ -2161,7 +2166,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         # KV-cache quantization
         if isinstance(layer, Attention):
             if self.kv_cache_quant_method:
-                return ModelOptFp8KVCacheMethod(self)
+                return ModelOptKVCacheMethod(self)
             return None
 
         # Excluded layers
