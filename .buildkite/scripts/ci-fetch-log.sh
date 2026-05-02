@@ -25,7 +25,7 @@ if [ $# -lt 1 ]; then usage; fi
 
 if [[ "$1" == https://* ]]; then
     BUILD=$(echo "$1" | sed -nE 's#.*/builds/([0-9]+).*#\1#p')
-    JOB=$(echo "$1" | sed -nE 's/.*[#?&]([0-9a-f]{8}-[0-9a-f-]+).*/\1/p')
+    JOB=$(echo "$1" | grep -oE '[0-9a-f]{8}-[0-9a-f-]+' | head -n 1)
     OUT="${2:-ci-${BUILD}-${JOB:0:8}.log}"
 else
     if [ $# -lt 2 ]; then usage; fi
