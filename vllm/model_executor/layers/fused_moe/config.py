@@ -254,6 +254,8 @@ class FusedMoEQuantConfig:
     gemm1_beta: float | None = None
     gemm1_clamp_limit: float | None = None
 
+    mx_alignment: int = 0
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -712,6 +714,7 @@ def mxfp4_mxfp8_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
+    mx_alignment: int = 0,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
@@ -724,6 +727,7 @@ def mxfp4_mxfp8_moe_quant_config(
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        mx_alignment=mx_alignment,
     )
 
 
