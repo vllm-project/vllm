@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 
 import torch
 
-from vllm.utils.hashing import sha256_cbor
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256_cbor
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (

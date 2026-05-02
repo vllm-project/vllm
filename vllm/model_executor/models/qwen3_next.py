@@ -24,7 +24,10 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -154,14 +157,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         else:
             self.shared_expert = None
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_expert,
             gate=self.gate,
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=getattr(config, "norm_topk_prob", True),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -181,29 +183,21 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
-            shared_out, fused_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
-            shared_out, fused_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
-
-        final_hidden_states = (
-            shared_out + fused_out if shared_out is not None else fused_out
-        )
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
-                final_hidden_states
-            )
 
         return final_hidden_states.view(orig_shape)
 
@@ -563,7 +557,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return SharedFusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

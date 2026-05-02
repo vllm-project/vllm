@@ -824,6 +824,9 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        max_steering_tokens, max_steering_configs = get_steering_buffer_config(
+            vllm_config
+        )
 
         self.altup_unembed_projections = nn.ModuleList(
             [

@@ -7,12 +7,6 @@ from typing import Any, TypeAlias
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.typing import (
-    OfflineInputsContext,
-    OfflineOutputsContext,
-    PoolingServeContext,
-)
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
@@ -20,6 +14,12 @@ from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
+from ..base.io_processor import PoolingIOProcessor
+from ..typing import (
+    OfflineInputsContext,
+    OfflineOutputsContext,
+    PoolingServeContext,
+)
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (

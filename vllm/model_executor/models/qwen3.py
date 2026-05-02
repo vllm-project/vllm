@@ -47,7 +47,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
-    get_steering_buffer_config,
     register_steering_buffers,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead

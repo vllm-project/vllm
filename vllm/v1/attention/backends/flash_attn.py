@@ -57,7 +57,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
-    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -103,6 +102,10 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @classmethod
     def supports_non_causal(cls) -> bool:
@@ -227,7 +230,6 @@ class FlashAttentionMetadata:
     #                                   |-- query_len ---|
 
     num_actual_tokens: int  # Number of tokens excluding padding.
-    num_decode_tokens: int
     max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
@@ -257,11 +259,16 @@ class FlashAttentionMetadata:
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
 ) -> set[tuple[int, int] | None]:
-    """Get the set of all sliding window configs used in the model."""
+    """Get the set of all sliding window configs used in the model.
+
+    Only inspects FlashAttentionImpl layers. Other backends (e.g.
+    TurboQuant, MLA) use their own metadata builders and are skipped.
+    """
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        assert isinstance(layer.impl, FlashAttentionImpl)
+        if not isinstance(layer.impl, FlashAttentionImpl):
+            continue
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
 
@@ -390,8 +397,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         """
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        _, _, num_decode_tokens, _ = split_decodes_and_prefills(
-            common_attn_metadata)
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
@@ -551,7 +556,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
-            num_decode_tokens=num_decode_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
@@ -642,7 +646,6 @@ class FlashAttentionImpl(AttentionImpl):
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
-            scope="local",
         )
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
@@ -1036,7 +1039,9 @@ class FlashAttentionImpl(AttentionImpl):
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale.expand(descale_shape),
+            q_descale=layer._q_scale.expand(descale_shape)
+            if self.supports_quant_query_input
+            else None,
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             num_splits=1 if self.batch_invariant_enabled else 0,

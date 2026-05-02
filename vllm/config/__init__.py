@@ -37,7 +37,7 @@ from vllm.config.profiler import ProfilerConfig
 from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.config.speech_to_text import SpeechToTextConfig
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.config.steering import SteeringConfig
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import (
@@ -114,6 +114,7 @@ __all__ = [
     "SpeculativeConfig",
     # From vllm.config.speech_to_text
     "SpeechToTextConfig",
+    "SpeechToTextParams",
     # From vllm.config.steering
     "SteeringConfig",
     # From vllm.config.structured_outputs

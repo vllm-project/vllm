@@ -275,6 +275,11 @@ class Base(
         )
         class SupportTorchCompileWrapper(cls): ...
 
+        # Preserve __module__ so transformers v5's source-file checks
+        # (e.g. _can_set_experts_implementation) read the original
+        # model's module instead of this file.
+        SupportTorchCompileWrapper.__module__ = cls.__module__
+
         # Patch the class in its module
         module = sys.modules[cls.__module__]
         setattr(module, cls.__name__, SupportTorchCompileWrapper)

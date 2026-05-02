@@ -188,6 +188,45 @@ class InputProcessor:
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
 
+    def inject_into_mm_cache(
+        self,
+        mm_hashes: dict[str, list[str]],
+        mm_kwargs: dict[str, list],
+    ) -> None:
+        """Inject pre-processed mm_kwargs into the processor cache.
+
+        Call this when mm_kwargs have already been through the HF processor
+        externally (e.g. by a frontend that transfers pre-processed tensors
+        to the backend).  This ensures MM cache hit rate metrics are reported
+        accurately and avoids redundant processing on subsequent requests
+        with the same images.
+
+        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        since token expansion has already been handled externally.
+        """
+        cache = self.renderer.mm_processor_cache
+        if cache is None:
+            return
+        try:
+            for modality, hashes in mm_hashes.items():
+                items = mm_kwargs.get(modality, [])
+                for i, mm_hash in enumerate(hashes):
+                    if i < len(items) and items[i] is not None:
+                        # Insert into cache via get_and_update_item.
+                        # Use the returned item (may be an address for SHM
+                        # cache or the original item for LRU cache).
+                        items[i], _ = cache.get_and_update_item(
+                            (items[i], []),
+                            mm_hash,
+                        )
+            # Update cache stats to reflect the externally processed items
+            self.renderer.update_mm_cache_stats()
+        except Exception:
+            logger.warning(
+                "Failed to inject mm_kwargs into processor cache",
+                exc_info=True,
+            )
+
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
@@ -270,11 +309,13 @@ class InputProcessor:
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_inputs["type"] == "embeds":
-            prompt_token_ids = None
             prompt_embeds = decoder_inputs["prompt_embeds"]
+            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
+            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
         else:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
+            prompt_is_token_ids = None
 
         sampling_params = None
         pooling_params = None
@@ -339,6 +380,7 @@ class InputProcessor:
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=prompt_is_token_ids,
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
