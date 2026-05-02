@@ -128,9 +128,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
 
         return (
-            rocm_aiter_ops.is_enabled()
-            and rocm_aiter_ops.is_rmsnorm_enabled()
-            and cfg.parallel_config.tensor_parallel_size > 1
+            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
         )
 
     return (
@@ -141,12 +139,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
-        # tp-dp combination broken:
-        # https://github.com/vllm-project/vllm/issues/34458
-        and cfg.parallel_config.data_parallel_size == 1
-        # tp-pp combination broken:
-        # https://github.com/vllm-project/vllm/issues/35426
-        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -168,10 +160,9 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        rocm_aiter_ops.is_rmsnorm_enabled()
+        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )

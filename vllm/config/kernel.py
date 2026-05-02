@@ -31,6 +31,9 @@ class IrOpPriorityConfig:
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
 
+    fused_add_rms_norm: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
+
     def compile_factors(self) -> CompileFactors:
         """
         Produces a hash unique to the pass configuration.
