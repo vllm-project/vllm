@@ -66,7 +66,7 @@ A simplified version of the example (`llama-multinode`) looks like:
     - `entryTemplate` – defines **leader** pods that run:
         - vLLM’s **multi-node cluster bootstrap script**.
         - vLLM **OpenAI-compatible API server**.
-    - `workerTemplate` – defines **worker** pods to join the leader’s Ray cluster(Ray backend) or to join same distributed process group(MP backend).
+    - `workerTemplate` – defines **worker** pods to join the leader’s Ray cluster (Ray backend) or to join same distributed process group (multiprocessing backend).
 
 Key points from the example YAML:
 
