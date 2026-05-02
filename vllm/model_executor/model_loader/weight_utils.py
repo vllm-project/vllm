@@ -852,7 +852,6 @@ def _prefetch_all_checkpoints(
     total_for_rank = len(paths_to_prefetch)
 
     async def _prefetch_all() -> None:
-        semaphore = asyncio.Semaphore(num_prefetch_threads)
         loop = asyncio.get_running_loop()
         completed = 0
         next_log_pct = 10
@@ -863,10 +862,9 @@ def _prefetch_all_checkpoints(
         ) -> None:
             nonlocal completed, next_log_pct
             try:
-                async with semaphore:
-                    await loop.run_in_executor(
-                        executor, _prefetch_checkpoint, path, block_size
-                    )
+                await loop.run_in_executor(
+                    executor, _prefetch_checkpoint, path, block_size
+                )
                 completed += 1
                 if total_for_rank > 0 and next_log_pct <= 100:
                     pct = 100 * completed / total_for_rank
