@@ -3114,14 +3114,13 @@ class GPUModelRunner(
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                if not isinstance(v, torch.Tensor):
-                    # Sender consolidated residual to None.  Zero the persistent
-                    # buffer so the local model receives a zero tensor instead
-                    # of None, which torch.compile / CUDA graphs expect.
-                    self.intermediate_tensors.tensors[k].zero_()
-                    continue
                 is_scattered = k == "residual" and is_rs
                 copy_len = num_tokens // tp if is_scattered else num_tokens
+                if not isinstance(v, torch.Tensor):
+                    # Sender consolidated residual to None.  Zero only the
+                    # active slice so torch.compile / CUDA graphs expect.
+                    self.intermediate_tensors[k][:copy_len].zero_()
+                    continue
                 self.intermediate_tensors[k][:copy_len].copy_(
                     v[:copy_len], non_blocking=True
                 )

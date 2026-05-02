@@ -730,7 +730,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # Disable PP residual consolidation (default: False = enabled).
-    # Set to "1" for A/B testing to measure the impact.
+    # Set to "1" to restore the previous behavior of transmitting residual.
     "VLLM_PP_DISABLE_RESIDUAL_CONSOLIDATION": lambda: bool(
         int(os.getenv("VLLM_PP_DISABLE_RESIDUAL_CONSOLIDATION", "0"))
     ),

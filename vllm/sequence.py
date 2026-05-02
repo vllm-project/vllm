@@ -23,12 +23,12 @@ class IntermediateTensors:
     Each stage also needs to handle its own kv_connector_output.
     """
 
-    tensors: dict[str, torch.Tensor]
+    tensors: dict[str, torch.Tensor | None]
     kv_connector_output: KVConnectorOutput | None
 
     def __init__(
         self,
-        tensors: dict[str, torch.Tensor],
+        tensors: dict[str, torch.Tensor | None],
         kv_connector_output: KVConnectorOutput | None = None,
     ) -> None:
         # manually define this function, so that
@@ -42,9 +42,14 @@ class IntermediateTensors:
         if isinstance(key, str):
             return self.tensors[key]
         elif isinstance(key, slice):
-            return self.__class__({k: v[key] for k, v in self.tensors.items()})
+            return self.__class__(
+                {
+                    k: v[key] if isinstance(v, torch.Tensor) else v
+                    for k, v in self.tensors.items()
+                }
+            )
 
-    def __setitem__(self, key: str, value: torch.Tensor):
+    def __setitem__(self, key: str, value: torch.Tensor | None):
         self.tensors[key] = value
 
     def items(self):
@@ -58,7 +63,14 @@ class IntermediateTensors:
             return False
         if self.tensors.keys() != other.tensors.keys():
             return False
-        return all(torch.equal(self.tensors[k], other.tensors[k]) for k in self.tensors)
+        for k in self.tensors:
+            a, b = self.tensors[k], other.tensors[k]
+            if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+                if not torch.equal(a, b):
+                    return False
+            elif a is not None or b is not None:
+                return False
+        return True
 
     def __repr__(self) -> str:
         return f"IntermediateTensors(tensors={self.tensors})"
@@ -84,7 +96,10 @@ class IntermediateTensors:
     def empty_like(
         intermediate_tensors: "IntermediateTensors",
     ) -> "IntermediateTensors":
-        tensors = {
-            k: torch.empty_like(v) for k, v in intermediate_tensors.tensors.items()
-        }
+        tensors: dict[str, torch.Tensor | None] = {}
+        for k, v in intermediate_tensors.tensors.items():
+            if isinstance(v, torch.Tensor):
+                tensors[k] = torch.empty_like(v)
+            else:
+                tensors[k] = None
         return IntermediateTensors(tensors)
