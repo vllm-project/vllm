@@ -629,9 +629,9 @@ def _hc_head_fused_reference(
     # hc_scale has shape (1,); hc_base has shape (hc_mult,)
     pre_mix = torch.sigmoid(mixes * rsqrt * hc_scale[0] + hc_base) + hc_eps
     # weighted sum over the hc_mult channel dim
-    result = torch.sum(
-        pre_mix.unsqueeze(-1) * hs_flat.to(torch.float32), dim=1
-    ).to(out.dtype)
+    result = torch.sum(pre_mix.unsqueeze(-1) * hs_flat.to(torch.float32), dim=1).to(
+        out.dtype
+    )
     out.copy_(result)
 
 
