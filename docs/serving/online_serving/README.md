@@ -151,6 +151,35 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/detokenize` - Detokenize tokens
 - `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
 
+For example, to tokenize a Responses-style input on a standard generate server:
+
+```bash
+curl http://localhost:8000/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": "Hello!",
+    "return_token_strs": true
+  }'
+```
+
+Responses list-form input is also accepted:
+
+```bash
+curl http://localhost:8000/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Hello!"}]
+      }
+    ]
+  }'
+```
+
 ## Elastic Expert Parallelism (EEP)
 
 - `/scale_elastic_ep` - Trigger scaling operations
