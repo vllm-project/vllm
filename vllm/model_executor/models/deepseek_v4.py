@@ -722,7 +722,7 @@ class DeepseekV4MoE(nn.Module):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
                 "Enable it with --enable-expert-parallel, or pick a different "
-                "--moe-backend."
+                "moe backend."
             )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
