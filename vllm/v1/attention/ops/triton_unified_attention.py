@@ -46,11 +46,16 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
       their scales separately on S/P inside the loop.
     - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
       tensor-wide scale.
+    - ``KV_QUANT_MODE == 5`` (INT8 per-tensor): plain cast.
+      Scale applied post-matmul via folding into softmax_scale / acc.
     """
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+    if KV_QUANT_MODE == 5:
+        # INT8 per-tensor: plain cast, scale folded into S and acc post-matmul
+        return data.to(Q.dtype)
     return data.to(Q.dtype)
 
 
@@ -131,7 +136,7 @@ def kernel_unified_attention(
     IS_3D: tl.constexpr,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3).
+    # FP8_PER_TOKEN_HEAD (3), INT8_PER_TENSOR (5).
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -141,7 +146,9 @@ def kernel_unified_attention(
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
 ):
-    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
+    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE == 2) or (
+        KV_QUANT_MODE == 3
+    )
 
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -227,6 +234,12 @@ def kernel_unified_attention(
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
     )
+
+    # INT8 per-tensor: fold k_scale into softmax scale, apply v_scale post-loop
+    if KV_QUANT_MODE == 5:
+        int8_k_scale_val = tl.load(k_scale)
+        int8_v_scale_val = tl.load(v_scale)
+        scale = scale * int8_k_scale_val
 
     # iterate through tiles (now limited to the sliding window range)
     for j in range(loop_lo, loop_hi):
@@ -338,6 +351,10 @@ def kernel_unified_attention(
             acc += tl.dot(P_v, V)
         else:
             acc += tl.dot(P.to(V.dtype), V)
+
+    # INT8 per-tensor: apply v_scale once on accumulated output
+    if KV_QUANT_MODE == 5:
+        acc = acc * int8_v_scale_val
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:

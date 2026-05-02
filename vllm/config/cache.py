@@ -28,6 +28,7 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "int8_per_tensor",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
@@ -256,6 +257,13 @@ class CacheConfig:
                 "memory footprint and boosts the performance. "
                 "Dynamic per-token-head scales will be computed at runtime.",
                 str(cache_dtype),
+            )
+        elif cache_dtype == "int8_per_tensor":
+            logger.info(
+                "Using int8_per_tensor data type to store kv cache. "
+                "It reduces the GPU memory footprint and boosts the "
+                "performance. Meanwhile, it may cause accuracy drop "
+                "without a proper scaling factor",
             )
         elif is_quantized_kv_cache(cache_dtype):
             logger.info(

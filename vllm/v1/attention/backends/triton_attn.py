@@ -276,6 +276,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "int8_per_tensor",
         "int8_per_token_head",
         "fp8_per_token_head",
     ]
@@ -574,10 +575,13 @@ class TritonAttentionImpl(AttentionImpl):
             v_descale = None
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
-        # FP8 per-tensor / auto path (original flow).
+        # FP8 per-tensor / INT8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if is_quantized_kv_cache(self.kv_cache_dtype):
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.kv_cache_dtype != "int8_per_tensor"
+            ):
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
@@ -719,7 +723,10 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "int8_per_tensor"
+        ):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
