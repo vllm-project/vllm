@@ -62,6 +62,7 @@ instanttensor>=0.1.5
 pydantic>=2.12 # 2.11 leads to error on python 3.13
 decord==0.6.0; platform_machine == "x86_64"
 terratorch >= 1.2.2 # Required for Prithvi tests
+lightning!=2.6.2,!=2.6.3 # CVE: versions 2.6.2 and 2.6.3 were compromised in a supply chain attack (GHSA-w37p-236h-pfx3)
 imagehash # Required for Prithvi tests
 segmentation-models-pytorch > 0.4.0 # Required for Prithvi tests
 
