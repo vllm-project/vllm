@@ -3,7 +3,6 @@
 import functools
 import importlib
 import math
-from functools import partial
 from importlib.util import find_spec
 
 import torch
@@ -646,16 +645,21 @@ def rocm_aiter_sparse_attn_indexer_native(
 
     if not skip_k_cache_insert:
         if _ON_GFX942:
-            cache_op = ops.indexer_k_quant_and_cache
+            ops.indexer_k_quant_and_cache(
+                k,
+                kv_cache,
+                slot_mapping,
+                quant_block_size,
+                scale_fmt,
+            )
         else:
-            cache_op = indexer_k_quant_and_cache_triton
-        cache_op(
-            k,
-            kv_cache,
-            slot_mapping,
-            quant_block_size,
-            scale_fmt,
-        )
+            indexer_k_quant_and_cache_triton(
+                k,
+                kv_cache,
+                slot_mapping,
+                quant_block_size,
+                scale_fmt,
+            )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -673,19 +677,22 @@ def rocm_aiter_sparse_attn_indexer_native(
                 dtype=torch.uint8,
             )
             if _ON_GFX942:
-                fetch_op = ops.cp_gather_indexer_k_quant_cache
+                ops.cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                )
             else:
-                fetch_op = partial(
-                    cp_gather_indexer_k_quant_cache_triton,
+                cp_gather_indexer_k_quant_cache_triton(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
                     token_to_seq=chunk.token_to_seq,
                 )
-            fetch_op(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-            )
 
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
