@@ -1,42 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Verify the wheel ships a `_C.cpython-X.Y-*.so` for every required Python
-under `vllm/third_party/deep_gemm/`. Wheels without the deep_gemm package
-(non-SM90/100 builds) are skipped.
+"""Assert the installed vLLM has a `_C.cpython-X.Y-*.so` for every CPython
+covered by `requires-python`. Fails closed if a Python's `.so` is missing
+from the wheel — i.e. the regression that surfaced in #41476/#41512.
+
+Run from a CI test job after vLLM is installed, e.g. the H100 deepgemm
+kernel tests in .buildkite/test_areas/kernels.yaml.
 """
 
-import argparse
+import os
 import sys
-import zipfile
 from pathlib import Path
 
 import regex as re
+import tomllib
 
-REQUIRED = ("3.10", "3.11", "3.12", "3.13", "3.14")
-SO_RE = re.compile(r"vllm/third_party/deep_gemm/_C\.cpython-(\d)(\d+)-")
-PKG_MARKER = "vllm/third_party/deep_gemm/__init__.py"
+import vllm.third_party.deep_gemm as pkg
 
-
-def check(wheel: Path, required: list[str]) -> int:
-    with zipfile.ZipFile(wheel) as z:
-        names = z.namelist()
-    if PKG_MARKER not in names:
-        print(f"  {wheel.name}: no DeepGEMM package — skipping")
-        return 0
-    found = {f"{m[1]}.{m[2]}" for n in names if (m := SO_RE.match(n))}
-    missing = [v for v in required if v not in found]
-    print(f"  {wheel.name}: found {sorted(found)}, missing {missing}")
-    return 1 if missing else 0
+SO_RE = re.compile(r"^_C\.cpython-(\d)(\d+)-")
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("directory", type=Path)
-    ap.add_argument("--required", default=",".join(REQUIRED))
-    args = ap.parse_args()
-    required = [v for v in args.required.split(",") if v]
-    rc = 0
-    for wheel in sorted(args.directory.glob("*.whl")):
-        rc |= check(wheel, required)
-    sys.exit(rc)
+def required_pythons() -> list[str]:
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    spec = tomllib.loads(pyproject.read_text())["project"]["requires-python"]
+    m = re.match(r">=3\.(\d+),<3\.(\d+)", spec)
+    if not m:
+        sys.exit(f"unexpected requires-python format: {spec!r}")
+    return [f"3.{v}" for v in range(int(m[1]), int(m[2]))]
+
+
+pkg_dir = Path(pkg.__file__).parent
+found = {f"{m[1]}.{m[2]}" for f in os.listdir(pkg_dir) if (m := SO_RE.match(f))}
+required = required_pythons()
+missing = [v for v in required if v not in found]
+print(f"deepgemm _C: found {sorted(found)}, required {required}, missing {missing}")
+sys.exit(1 if missing else 0)

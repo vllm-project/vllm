@@ -301,14 +301,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         python3 use_existing_torch.py --prefix; \
     fi
 
-# Provision a bare interpreter for each supported CPython so DeepGEMM `_C`
-# is built once per Python and bundled side-by-side in the wheel; cmake
-# reads DEEPGEMM_PYTHON_INTERPRETERS in the deepgemm.cmake foreach loop.
+# Provision a bare interpreter for each CPython covered by `requires-python`
+# so DeepGEMM `_C` is built once per Python and bundled side-by-side in the
+# wheel; cmake reads DEEPGEMM_PYTHON_INTERPRETERS in deepgemm.cmake's
+# foreach loop. The matrix is derived from pyproject.toml.
 COPY tools/setup_deepgemm_pythons.sh tools/build_deepgemm_C.py tools/
-ARG DEEPGEMM_PYTHONS="3.10 3.11 3.12 3.13 3.14"
 ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
 RUN --mount=type=cache,target=/root/.cache/uv \
-    tools/setup_deepgemm_pythons.sh $DEEPGEMM_PYTHONS > /tmp/dg_pythons.txt
+    tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
 
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
@@ -462,14 +462,12 @@ COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_work
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
-COPY tools/check_wheel_deepgemm.py check_wheel_deepgemm.py
 # sync the default value with .buildkite/check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
-        python3 check-wheel-size.py dist \
-        && python3 check_wheel_deepgemm.py dist; \
+        python3 check-wheel-size.py dist; \
     else \
         echo "Skipping wheel size check."; \
     fi
