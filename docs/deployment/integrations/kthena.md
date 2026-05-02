@@ -75,8 +75,9 @@ Commands:
 
 ??? code "Yaml"
     === "MP Mode(default)"
+        Leader:
+
         ```yaml
-        # leader
         command:
           - sh
           - -c
