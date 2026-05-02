@@ -351,8 +351,9 @@ class DeepseekV2MoE(nn.Module):
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
         ):
+            gate_out_dtype = self.gate.out_dtype or self.gate.weight.dtype
             self.gate.e_score_correction_bias.data = (
-                self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
+                self.gate.e_score_correction_bias.data.to(gate_out_dtype)
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
