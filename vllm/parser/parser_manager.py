@@ -159,7 +159,7 @@ class ParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                names = name  # type: ignore
             else:
                 names = [class_name]
 
@@ -262,46 +262,71 @@ class ParserManager:
         Returns:
             A Parser class, or None if neither parser is specified.
         """
-        from vllm.parser.abstract_parser import _WrappedParser
-
-        if not tool_parser_name and not reasoning_parser_name:
-            return None
-
-        # Strategy 1: If both names match, check for a unified parser with that name
-        if tool_parser_name and tool_parser_name == reasoning_parser_name:
-            try:
-                parser = cls.get_parser_internal(tool_parser_name)
-                logger.info(
-                    "Using unified parser '%s' for both reasoning and tool parsing.",
-                    tool_parser_name,
-                )
-                return parser
-            except KeyError:
-                pass  # No unified parser with this name
-
-        # Strategy 2: Check for parser with either name
-        for name in [tool_parser_name, reasoning_parser_name]:
-            if name:
-                try:
-                    parser = cls.get_parser_internal(name)
-                    logger.info(
-                        "Using unified parser '%s' for reasoning and tool parsing.",
-                        name,
-                    )
-                    return parser
-                except KeyError:
-                    pass
-
-        # Strategy 3: Create a DelegatingParser with the individual parser classes
         reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
         tool_parser_cls = cls.get_tool_parser(
             tool_parser_name, enable_auto_tools, model_name
         )
-
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
+        # Try specializing a specific reasoning and tool parsers.
+        for name in [tool_parser_name, reasoning_parser_name]:
+            if not name:
+                continue
+
+            try:
+                parser = cls.get_parser_internal(name)
+            except KeyError:
+                continue
+
+            if (
+                parser.reasoning_parser_cls is not None
+                and parser.reasoning_parser_cls != reasoning_parser_cls
+            ):
+                logger.warning(
+                    "Unified parser '%s' isn't used due to unsupported "
+                    "reasoning parser: expected %s but got %s",
+                    name,
+                    parser.reasoning_parser_cls,
+                    reasoning_parser_cls,
+                )
+                continue
+
+            if (
+                parser.tool_parser_cls is not None
+                and parser.tool_parser_cls != tool_parser_cls
+            ):
+                logger.warning(
+                    "Unified parser '%s' isn't used due to unsupported "
+                    "tool parser: expected %s but got %s",
+                    name,
+                    parser.tool_parser_cls,
+                    tool_parser_cls,
+                )
+                continue
+
+            if parser.reasoning_parser_cls is None:
+                logger.info(
+                    "Specializing unified parser '%s''s reasoning parser to %s",
+                    name,
+                    reasoning_parser_cls,
+                )
+                parser.reasoning_parser_cls = reasoning_parser_cls
+
+            if parser.tool_parser_cls is None:
+                logger.info(
+                    "Specializing unified parser '%s''s tool parser to %s",
+                    name,
+                    tool_parser_cls,
+                )
+                parser.tool_parser_cls = tool_parser_cls
+
+            return parser
+
+        # Fallback: Create a DelegatingParser with the individual parser classes
         # Set the class-level attributes on the imported _WrappedParser
+        from vllm.parser.abstract_parser import _WrappedParser
+
         _WrappedParser.reasoning_parser_cls = reasoning_parser_cls
         _WrappedParser.tool_parser_cls = tool_parser_cls
 
