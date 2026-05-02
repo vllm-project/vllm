@@ -263,10 +263,9 @@ def run_tests(
                 reason = "outputs ", e
 
             if reason is None:
-                try:
-                    assert _all_logprobs_match(base_logprobs, test_logprobs)
-                except AssertionError as e:
-                    reason = "logprobs", e
+                logprobs_err = _all_logprobs_errors(base_logprobs, test_logprobs)
+                if logprobs_err:
+                    reason = "logprobs", logprobs_err
 
             if reason is None:
                 try:
@@ -400,40 +399,49 @@ def run_test(
                     name_0=f"baseline params={params}",
                     name_1=f"other params={params}",
                 )
-                assert _all_logprobs_match(results[0][1], other_test_logprobs)
+                err = _all_logprobs_errors(results[0][1], other_test_logprobs)
+                assert err is None, err
 
     return test_config, results, acceptance_rates
 
 
-def _all_logprobs_match(req_a, req_b) -> bool:
-    return (
-        req_a == req_b
-        or len(req_a) == len(req_b)
-        and all(
-            len(seq_a) == len(seq_b)
-            and all(_logprobs_match(a, b) for a, b in zip(seq_a, seq_b))
-            for seq_a, seq_b in zip(req_a, req_b)
-        )
-    )
+def _all_logprobs_errors(req_a, req_b) -> str | None:
+    if req_a == req_b:
+        return None
+    if len(req_a) != len(req_b):
+        return f"sequence count mismatch: {len(req_a)} vs {len(req_b)}"
+    for seq_idx, (seq_a, seq_b) in enumerate(zip(req_a, req_b)):
+        if len(seq_a) != len(seq_b):
+            return f"seq {seq_idx}: length {len(seq_a)=} vs {len(seq_b)=}"
+        for pos, (a, b) in enumerate(zip(seq_a, seq_b)):
+            err = _logprobs_errors(a, b)
+            if err:
+                return f"seq {seq_idx} pos {pos}: {err}"
+    return None
 
 
-def _logprobs_match(
+def _logprobs_errors(
     lps_a: dict[int, Logprob] | None,
     lps_b: dict[int, Logprob] | None,
-) -> bool:
+) -> str | None:
     if lps_a is None or lps_b is None:
-        return lps_a is lps_b
+        if lps_a is not lps_b:
+            return f"None mismatch: {lps_a=} vs {lps_b=}"
+        return None
+    if len(lps_a) != len(lps_b):
+        return f"length mismatch: {len(lps_a)=} vs {len(lps_b)=}"
+    if lps_a.keys() != lps_b.keys():
+        return f"keys mismatch: {lps_a.keys()=} vs {lps_b.keys()=}"
     rel_tol, abs_tol = 1e-3, 1e-6
-    return (
-        len(lps_a) == len(lps_b)
-        and lps_a.keys() == lps_b.keys()
-        and all(
-            a.decoded_token == b.decoded_token
-            and a.rank == b.rank
-            and a.logprob == pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol)
-            for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
-        )
-    )
+    for x in lps_a:
+        a, b = lps_a[x], lps_b[x]
+        if a.decoded_token != b.decoded_token:
+            return f"token {x}: decoded_token {a.decoded_token=} vs {b.decoded_token=}"
+        if a.rank != b.rank:
+            return f"token {x}: rank {a.rank=} vs {b.rank=}"
+        if a.logprob != pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol):
+            return f"token {x}: logprob {a.logprob=} vs {b.logprob=}"
+    return None
 
 
 def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
