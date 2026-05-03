@@ -46,6 +46,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -192,6 +193,7 @@ class StablelmDecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
@@ -200,6 +202,7 @@ class StablelmDecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         self.self_attn = StablelmAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.self_attn"
@@ -265,6 +268,7 @@ class StableLMEpochModel(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )

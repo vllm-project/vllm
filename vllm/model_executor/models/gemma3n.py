@@ -48,6 +48,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -444,6 +445,7 @@ class Gemma3nDecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         assert isinstance(config, Gemma3nTextConfig)
@@ -453,6 +455,7 @@ class Gemma3nDecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         self.altup_active_idx = config.altup_active_idx
         assert config.altup_correct_scale
@@ -853,6 +856,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )

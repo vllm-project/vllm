@@ -45,6 +45,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -142,6 +143,7 @@ class OPTDecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.config = config
@@ -152,6 +154,7 @@ class OPTDecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         self.self_attn = OPTAttention(
             embed_dim=self.embed_dim,
@@ -231,6 +234,7 @@ class OPTDecoder(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.config = config
@@ -290,6 +294,7 @@ class OPTDecoder(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=steering_dtype,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -347,6 +352,7 @@ class OPTModel(nn.Module):
             prefix=f"{prefix}.decoder",
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            steering_dtype=get_steering_buffer_dtype(vllm_config),
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.hidden_size

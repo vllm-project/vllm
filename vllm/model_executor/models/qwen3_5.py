@@ -50,6 +50,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.steering import (
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -145,6 +146,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=get_steering_buffer_dtype(vllm_config),
         )
 
         if self.layer_type == "linear_attention":

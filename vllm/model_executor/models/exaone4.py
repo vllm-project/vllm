@@ -47,6 +47,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -235,6 +236,7 @@ class Exaone4DecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -244,6 +246,7 @@ class Exaone4DecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
@@ -352,6 +355,7 @@ class Exaone4Model(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )

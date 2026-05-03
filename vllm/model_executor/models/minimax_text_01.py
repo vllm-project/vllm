@@ -49,6 +49,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -294,6 +295,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         prefix: str = "decoder",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         self._ilayer = layer_id
         self._irank = get_tensor_model_parallel_rank()
@@ -308,6 +310,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
             self.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
 
         head_dim = getattr(config, "head_dim", None)
@@ -596,6 +599,7 @@ class MiniMaxText01Model(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

@@ -214,6 +214,7 @@ class MiniCPM3Model(MiniCPMModel):
         quant_config: QuantizationConfig | None,
         max_steering_tokens: int,
         max_steering_configs: int,
+        steering_dtype: torch.dtype | None = None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -224,6 +225,7 @@ class MiniCPM3Model(MiniCPMModel):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=steering_dtype,
             ),
             prefix=f"{prefix}.layers",
         )

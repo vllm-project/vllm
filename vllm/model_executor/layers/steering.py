@@ -58,12 +58,22 @@ def register_steering_buffers(
     *,
     max_steering_tokens: int,
     max_steering_configs: int,
+    dtype: torch.dtype | None = None,
 ) -> None:
-    """Attach per-hook steering buffers to a decoder layer."""
+    """Attach per-hook steering buffers to a decoder layer.
+
+    ``dtype`` controls the storage dtype of the steering table buffers.
+    When ``None`` (the default), the buffers fall back to fp32 to
+    preserve historical behaviour.  Callers in vLLM models pass the
+    model's compute dtype (typically bf16) so the indexed gather in
+    :func:`apply_steering` returns rows already aligned with the residual
+    tensor and no dtype cast is required at the gather site.
+    """
+    table_dtype = dtype if dtype is not None else torch.float32
     for hp in SteeringHookPoint:
         module.register_buffer(
             HOOK_POINT_TABLE_ATTR[hp],
-            torch.zeros(max_steering_configs + 3, hidden_size),
+            torch.zeros(max_steering_configs + 3, hidden_size, dtype=table_dtype),
             persistent=False,
         )
 
@@ -80,6 +90,16 @@ def get_steering_buffer_config(vllm_config: "VllmConfig") -> tuple[int, int]:
     steering_config = getattr(vllm_config, "steering_config", None)
     max_configs = steering_config.max_steering_configs if steering_config else 0
     return max_tokens, max_configs
+
+
+def get_steering_buffer_dtype(vllm_config: "VllmConfig") -> torch.dtype:
+    """Return the dtype that steering table buffers should be allocated in.
+
+    Mirrors :func:`get_steering_buffer_config`. Returns the resolved
+    ``torch.dtype`` that the model was loaded with so steering table
+    rows can be gathered into ``hidden_states`` without an extra cast.
+    """
+    return vllm_config.model_config.dtype
 
 
 def share_steering_index_across_layers(layers: list[nn.Module]) -> None:
@@ -124,9 +144,10 @@ def apply_steering(
     mapping each token position to its steering table row.  Updated
     in-place by the model runner before each forward pass.
     """
-    return hidden_states + steering_table[steering_index[: hidden_states.shape[0]]].to(
-        hidden_states.dtype
-    )
+    # ``steering_table`` is allocated in the model's compute dtype via
+    # :func:`register_steering_buffers`, so the gather already matches
+    # ``hidden_states.dtype`` and no cast is needed here.
+    return hidden_states + steering_table[steering_index[: hidden_states.shape[0]]]
 
 
 def apply_steering_fake(

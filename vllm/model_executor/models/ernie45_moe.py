@@ -61,6 +61,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -330,6 +331,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
         enable_eplb: bool = False,
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -356,6 +358,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
 
         # MoE
@@ -463,6 +466,7 @@ class Ernie4_5_MoeModel(nn.Module):
                 enable_eplb=enable_eplb,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )

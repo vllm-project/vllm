@@ -59,6 +59,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -330,6 +331,7 @@ class MiniCPMDecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -342,6 +344,7 @@ class MiniCPMDecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
@@ -451,6 +454,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
             quant_config,
             max_steering_tokens,
             max_steering_configs,
+            get_steering_buffer_dtype(vllm_config),
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -466,6 +470,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
         quant_config: QuantizationConfig | None,
         max_steering_tokens: int,
         max_steering_configs: int,
+        steering_dtype: torch.dtype | None = None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -476,6 +481,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=steering_dtype,
             ),
             prefix=f"{prefix}.layers",
         )

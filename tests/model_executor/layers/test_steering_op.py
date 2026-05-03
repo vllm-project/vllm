@@ -28,9 +28,13 @@ def _apply_steering(
     steering_table: torch.Tensor,
     steering_index: torch.Tensor,
 ) -> torch.Tensor:
-    """Reference implementation of the indexed-gather steering math."""
+    """Reference implementation of the indexed-gather steering math.
+
+    ``steering_table`` is expected to already be in ``hidden_states.dtype``
+    (the model's compute dtype), so no cast is performed at the gather.
+    """
     N = hidden_states.shape[0]
-    return hidden_states + steering_table[steering_index[:N]].to(hidden_states.dtype)
+    return hidden_states + steering_table[steering_index[:N]]
 
 
 class TestIndexedGatherSteering:

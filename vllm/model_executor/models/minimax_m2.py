@@ -58,6 +58,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -270,6 +271,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -288,6 +290,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
             self.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         self.self_attn = MiniMaxM2Attention(
             hidden_size=self.hidden_size,
@@ -380,6 +383,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                 quant_config=quant_config,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )
