@@ -484,6 +484,13 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
     std::tie(reg.val[2], reg.val[3]) = convert_bfloat16_float(v.reg.val[1]);
   };
 
+  explicit FP32Vec16(const BF16Vec32& v, int upper) {
+    int base = upper ? 2 : 0;
+    std::tie(reg.val[0], reg.val[1]) = convert_bfloat16_float(v.reg.val[base]);
+    std::tie(reg.val[2], reg.val[3]) =
+        convert_bfloat16_float(v.reg.val[base + 1]);
+  };
+
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
 
   explicit FP32Vec16(const FP16Vec16& v) {
