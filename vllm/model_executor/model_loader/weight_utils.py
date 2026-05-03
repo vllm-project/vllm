@@ -612,8 +612,7 @@ def download_weights_from_hf(
                 break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
-            # This log line is used for benchmarking
-            # Please maintain the format.
+            # This log line is used for benchmarking. Please maintain the format
             logger.info(
                 "Time spent downloading weights for %s: %.6f seconds",
                 model_name_or_path,
