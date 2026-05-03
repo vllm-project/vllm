@@ -85,6 +85,8 @@ def _pad_parameter_output_dim(
 
 class MarlinLinearKernel(MPLinearKernel):
     config: MPLinearLayerConfig
+    w_q_name: str
+    w_s_name: str
     w_zp_name: str | None
     w_gidx_name: str | None
     orig_output_size_per_partition: int
@@ -282,12 +284,10 @@ class MarlinLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
-        if (
-            hasattr(layer, "bias")
-            and layer.bias is not None
-            and self.orig_output_size_per_partition
-            == self.config.partition_weight_shape[1]
-        ):
+        is_output_padded = (
+            self.orig_output_size_per_partition != self.config.partition_weight_shape[1]
+        )
+        if hasattr(layer, "bias") and layer.bias is not None and not is_output_padded:
             layer.bias.data = marlin_permute_bias(layer.bias)
 
     def apply_weights(
@@ -309,7 +309,9 @@ class MarlinLinearKernel(MPLinearKernel):
             if bias.shape[-1] == orig_n:
                 bias = _pad_tensor_dim(bias, -1, padded_n - orig_n)
                 bias = marlin_permute_bias(bias)
-            elif bias.shape[-1] != padded_n:
+            elif bias.shape[-1] == padded_n:
+                bias = marlin_permute_bias(bias)
+            else:
                 raise ValueError(
                     "Marlin bias shape does not match original or padded output dim: "
                     f"bias={bias.shape[-1]}, orig_n={orig_n}, padded_n={padded_n}."

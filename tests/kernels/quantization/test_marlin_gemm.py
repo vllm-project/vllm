@@ -837,3 +837,13 @@ def test_marlin_output_padding_keeps_deferred_bias_unpadded(monkeypatch):
     assert permute_bias_shapes == [(64,)]
     assert output.shape == (2, 32)
     assert layer.bias.shape == (32,)
+
+    padded_bias = torch.ones(64, dtype=torch.float16)
+    output = kernel.apply_weights(
+        layer,
+        torch.zeros(2, 1024, dtype=torch.float16),
+        padded_bias,
+    )
+    assert captured_bias_shape == (64,)
+    assert permute_bias_shapes == [(64,), (64,)]
+    assert output.shape == (2, 32)
