@@ -32,6 +32,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
+    supports_required_and_named: bool = False
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -690,5 +692,7 @@ class Qwen3CoderToolParser(ToolParser):
             model="qwen_3_5",
             tools=request.tools,
             tool_choice=request.tool_choice,
-            reasoning=request.include_reasoning,
+            # The reasoning parser gates structured output until reasoning ends.
+            # Constrain only the post-reasoning tool-call suffix here.
+            reasoning=False,
         )
