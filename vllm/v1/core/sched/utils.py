@@ -60,26 +60,16 @@ class RollingHashState:
         self.n: int = 0
 
     def extend(self, token_ids: Sequence[int], up_to: int) -> None:
-        """Sync internal hashes to cover ``token_ids[:up_to]``.
+        """Sync internal hashes to cover ``token_ids[:up_to]`` (idempotent).
 
-        Idempotent. Two paths:
-
-        * ``up_to > self.n`` — append-only growth (the steady-state
-          decode case).
-        * ``up_to < self.n`` — truncation (rollback). Drop hash entries
-          past ``up_to`` so subsequent extends rebuild from the
-          surviving prefix. This is required for correctness under
-          speculative decoding: when speculative tokens are rejected,
-          ``request.output_token_ids`` shrinks, and we must not keep
-          hashes for those rolled-back tokens.
-
-        The surviving prefix is assumed unchanged — vLLM v1 commits
-        output tokens once, so positions ``[0, up_to)`` are stable.
+        Handles both growth and truncation. Truncation is needed for
+        speculative-decode rollback: when speculative tokens are rejected
+        ``request.output_token_ids`` shrinks, so stale hashes past
+        ``up_to`` must be dropped before the next append.
         """
         if up_to == self.n:
             return
         if up_to < self.n:
-            # Truncation path. ``del a[k:]`` is O(n - k) on array.array.
             keep = up_to + 1
             del self.h1[keep:]
             del self.h2[keep:]
@@ -125,18 +115,14 @@ def _has_repeating_pattern_rolling_hash(
     ``len(token_ids) // min_count``). Otherwise capped by
     ``min(max_pattern_size, len(token_ids) // min_count)``.
 
-    When ``state`` is provided, prefix hashes are reused across calls and
-    extended incrementally — total cost is O(1) per token plus O(L_max)
-    scan per step. When ``state`` is ``None`` (e.g. direct invocations
-    from tests), prefix hashes are recomputed locally.
+    A per-request ``state`` reuses prefix hashes across decode steps
+    (O(1) per new token). Direct test callers may omit it; in that case
+    a temporary state is built once locally.
     """
     n = len(token_ids)
-    # Keep the request-attached state consistent with the latest output
-    # tokens regardless of whether we end up scanning. ``n != state.n``
-    # also covers truncation (e.g. speculative-decode rejection); see
-    # ``RollingHashState.extend``.
-    if state is not None and n != state.n:
-        state.extend(token_ids, n)
+    if state is None:
+        state = RollingHashState()
+    state.extend(token_ids, n)
 
     if n == 0 or min_count < 2:
         return False
@@ -151,21 +137,8 @@ def _has_repeating_pattern_rolling_hash(
     if upper_l < min_pattern_size:
         return False
 
-    if state is not None:
-        h1, h2, p1, p2 = state.h1, state.h2, state.p1, state.p2
-    else:
-        h1 = [0] * (n + 1)
-        h2 = [0] * (n + 1)
-        p1 = [1] * (n + 1)
-        p2 = [1] * (n + 1)
-        for i in range(n):
-            t = token_ids[i] + 1
-            h1[i + 1] = (h1[i] * _RH_BASE1 + t) % _RH_MOD1
-            h2[i + 1] = (h2[i] * _RH_BASE2 + t) % _RH_MOD2
-            p1[i + 1] = p1[i] * _RH_BASE1 % _RH_MOD1
-            p2[i + 1] = p2[i] * _RH_BASE2 % _RH_MOD2
+    h1, h2, p1, p2 = state.h1, state.h2, state.p1, state.p2
 
-    # Hot loop: read into locals to avoid attribute lookups.
     mod1 = _RH_MOD1
     mod2 = _RH_MOD2
     last_token = token_ids[-1]
@@ -173,10 +146,8 @@ def _has_repeating_pattern_rolling_hash(
     h2_n = h2[n]
 
     for length in range(min_pattern_size, upper_l + 1):
-        # Stage 1: single-token prune. Eliminates most L cheaply.
         if token_ids[n - 1 - length] != last_token:
             continue
-        # Stage 2: hash equality across all min_count blocks.
         p1_l = p1[length]
         p2_l = p2[length]
         ref1 = (h1_n - h1[n - length] * p1_l) % mod1

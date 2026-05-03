@@ -7,7 +7,7 @@ import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -132,7 +132,7 @@ class RepetitionDetectionParams:
     detection. Must be >= 2. Example: 3 for detecting a phrase repeated
     3 times. Detection is disabled when min_count < 2."""
 
-    algorithm: str = "naive"
+    algorithm: Literal["naive", "rolling_hash"] = "naive"
     """Detection algorithm. One of:
 
     - ``"naive"``: per-step iterates pattern lengths in
@@ -144,10 +144,6 @@ class RepetitionDetectionParams:
       repetitions need to be caught."""
 
     def __post_init__(self):
-        if self.algorithm not in ("naive", "rolling_hash"):
-            raise ValueError(
-                f"algorithm must be 'naive' or 'rolling_hash', got {self.algorithm!r}."
-            )
         if self.max_pattern_size < 0 or self.min_pattern_size < 0 or self.min_count < 0:
             raise ValueError(
                 "max_pattern_size, min_pattern_size, min_count must be >= 0."
