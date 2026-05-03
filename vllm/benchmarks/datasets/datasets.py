@@ -1861,6 +1861,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
+            skip_chat_template=args.skip_chat_template,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
