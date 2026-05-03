@@ -9,10 +9,10 @@ from openai.types.responses.function_tool import FunctionTool
 from xgrammar import StructuralTag
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionNamedFunction,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -127,7 +127,8 @@ def _as_chat_completion_tools(
                         "description": tool.description,
                         "parameters": tool.parameters,
                     },
-                ))
+                )
+            )
     return normalized
 
 
@@ -1200,10 +1201,13 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
             messages=[],
             model="m",
             tools=request_tools,
-            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
+            tool_choice=ChatCompletionNamedToolChoiceParam(
+                function=ChatCompletionNamedFunction(name=tool.function.name)
+            ),
         )
         tag = qwen3_tool_parser.get_structural_tag(req)
         assert isinstance(tag, StructuralTag)
+
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
 def test_adjust_request_auto_uses_vllm_registry_structural_tag(

@@ -7,6 +7,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
+
 class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
     """
     DeepSeek V4 DSML tool parser.
@@ -17,10 +18,8 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
 
     tool_call_start_token: str = "<｜DSML｜tool_calls>"
     tool_call_end_token: str = "</｜DSML｜tool_calls>"
-    
-    def get_structural_tag(
-        self, request: ChatCompletionRequest
-    ):
+
+    def get_structural_tag(self, request: ChatCompletionRequest):
         return get_model_structural_tag(
             model="deepseek_v4",
             tools=request.tools,

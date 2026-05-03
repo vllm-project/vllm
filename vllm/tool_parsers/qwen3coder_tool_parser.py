@@ -685,9 +685,7 @@ class Qwen3CoderToolParser(ToolParser):
 
         return None
 
-    def get_structural_tag(
-        self, request: ChatCompletionRequest
-    ):
+    def get_structural_tag(self, request: ChatCompletionRequest):
         return get_model_structural_tag(
             model="qwen_3_5",
             tools=request.tools,

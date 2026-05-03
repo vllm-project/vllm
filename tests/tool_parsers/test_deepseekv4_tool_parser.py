@@ -5,17 +5,18 @@
 
 import json
 from unittest.mock import MagicMock
-import pytest
 
-from vllm.tool_parsers import ToolParserManager
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+import pytest
+from xgrammar import StructuralTag
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-    ChatCompletionNamedFunction,
 )
-from xgrammar import StructuralTag
+from vllm.tool_parsers import ToolParserManager
+from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
@@ -26,6 +27,7 @@ INV_START = '<｜DSML｜invoke name="'
 INV_END = "</｜DSML｜invoke>"
 PARAM_START = '<｜DSML｜parameter name="'
 PARAM_END = "</｜DSML｜parameter>"
+
 
 @pytest.fixture
 def sample_tools() -> list[ChatCompletionToolsParam]:
@@ -62,7 +64,6 @@ def sample_tools() -> list[ChatCompletionToolsParam]:
             },
         ),
     ]
-
 
 
 def make_parser(tools=None) -> DeepSeekV4ToolParser:
@@ -167,6 +168,7 @@ def test_streaming_extracts_complete_invokes():
     assert names == ["search"]
     assert json.loads(reconstruct_args(deltas)) == {"query": "deepseek v4"}
 
+
 def test_get_vllm_registry_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
@@ -179,7 +181,7 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
     )
     tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
-    
+
     req = ChatCompletionRequest(
         messages=[],
         model="m",
@@ -188,14 +190,16 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
     )
     tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
-    
+
     if sample_tools:
         tool = sample_tools[0]
         req = ChatCompletionRequest(
             messages=[],
             model="m",
             tools=sample_tools,
-            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
+            tool_choice=ChatCompletionNamedToolChoiceParam(
+                function=ChatCompletionNamedFunction(name=tool.function.name)
+            ),
         )
     tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)

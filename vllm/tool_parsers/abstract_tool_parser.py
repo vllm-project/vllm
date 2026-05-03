@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import json
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
-import json
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -14,9 +14,9 @@ from openai.types.responses import (
 from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-    ChatCompletionNamedToolChoiceParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -88,7 +88,6 @@ class ToolParser:
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-
         # If there are no tools, return the request as is.
         if not request.tools:
             return request
@@ -143,10 +142,8 @@ class ToolParser:
             return request
 
         return request
-    
-    def get_structural_tag(
-        self, request: ChatCompletionRequest
-    ):
+
+    def get_structural_tag(self, request: ChatCompletionRequest):
         return None
 
     def extract_tool_calls(
