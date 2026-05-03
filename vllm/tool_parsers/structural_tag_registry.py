@@ -257,6 +257,7 @@ def get_qwen_3_5_structural_tag(
                 triggers=[tool_call_trigger],
                 tags=tags,
                 excludes=think_exclude_tokens,
+                stop_after_first=True,
             )
         else:
             suffix_tag = AnyTextFormat(excludes=think_exclude_tokens)
