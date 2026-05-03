@@ -12,10 +12,23 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
 
 logger = init_logger(__name__)
+
+
+def _model_uses_sliding_window(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    if model_config is None or model_config.disable_sliding_window:
+        return False
+    sliding_window = model_config.get_sliding_window()
+    if sliding_window is not None:
+        return True
+
+    cache_config = vllm_config.cache_config
+    return cache_config is not None and cache_config.sliding_window is not None
 
 
 class DFlashProposer(SpecDecodeBaseProposer):
@@ -71,10 +84,23 @@ class DFlashProposer(SpecDecodeBaseProposer):
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
+        # Keep DFlash on FlashAttention by default. The FlashInfer DFlash
+        # path is opt-in because it does not support all sliding-window
+        # configurations yet.
+        backend = base.attention_config.backend or AttentionBackendEnum.FLASH_ATTN
+        if backend == AttentionBackendEnum.FLASHINFER and _model_uses_sliding_window(
+            self.vllm_config
+        ):
+            raise ValueError(
+                "DFlash with the FlashInfer attention backend does not support "
+                "sliding window attention yet. Use the default FlashAttention "
+                "backend for SWA models."
+            )
         return replace(
             base,
             attention_config=replace(
                 base.attention_config,
+                backend=backend,
                 use_non_causal=True,
             ),
         )
