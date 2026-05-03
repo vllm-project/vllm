@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# Model-specific structural tag builders adapted from XGrammar's
+# builtin structural tag implementations:
+# https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/builtin_structural_tag.py
+
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -106,18 +110,21 @@ def _get_function_parameters(function: Any) -> dict[str, Any] | bool:
     return function.parameters
 
 
-def _build_deepseek_dsml_structural_tag(
+@register_model_structural_tag("deepseek_v4")
+def get_deepseek_v4_structural_tag(
     tools: list[ChatCompletionToolsParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
-    function_calls_begin: str,
-    function_calls_end: str,
-    function_calls_trigger: str,
 ) -> StructuralTag:
+    """Build DeepSeek V4 structural tags."""
+
     invoke_begin_prefix = '<｜DSML｜invoke name="'
     invoke_begin_suffix = '">\n'
     invoke_end = "</｜DSML｜invoke>\n"
     tool_calls_prefix = "\n\n"
+    function_calls_begin = "<｜DSML｜tool_calls>\n"
+    function_calls_end = "</｜DSML｜tool_calls>"
+    function_calls_trigger = "<｜DSML｜tool_calls>"
     think_tag_end = "</think>"
     think_exclude_tokens = ["<think>", "</think>"]
     xml_style = "deepseek_xml"
@@ -212,30 +219,18 @@ def _build_deepseek_dsml_structural_tag(
     return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
 
 
-@register_model_structural_tag("deepseek_v4")
-def get_deepseek_v4_structural_tag(
+@register_model_structural_tag("qwen_3_5")
+def get_qwen_3_5_structural_tag(
     tools: list[ChatCompletionToolsParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
 ) -> StructuralTag:
-    """Build DeepSeek V4 structural tags."""
+    """Build Qwen XML structural tags.
 
-    return _build_deepseek_dsml_structural_tag(
-        tools=tools,
-        tool_choice=tool_choice,
-        reasoning=reasoning,
-        function_calls_begin="<｜DSML｜tool_calls>\n",
-        function_calls_end="</｜DSML｜tool_calls>",
-        function_calls_trigger="<｜DSML｜tool_calls>",
-    )
+    This format is used for Qwen3-Coder/Qwen3.5/Qwen3.6 and is compatible with
+    Qwen variants that use the same XML tool-call format.
+    """
 
-
-def _build_qwen_xml_structural_tag(
-    tools: list[ChatCompletionToolsParam],
-    tool_choice: SimplifiedToolChoice,
-    reasoning: bool,
-    include_reasoning_prefix: bool,
-) -> StructuralTag:
     tool_call_begin_prefix = "<tool_call>\n<function="
     tool_call_begin_suffix = ">\n"
     tool_call_end = "\n</function>\n</tool_call>"
@@ -297,7 +292,7 @@ def _build_qwen_xml_structural_tag(
             at_least_one=True,
         )
 
-    if not include_reasoning_prefix or not reasoning:
+    if not reasoning:
         return StructuralTag(format=suffix_tag)
 
     prefix_tag = SequenceFormat(
@@ -307,23 +302,3 @@ def _build_qwen_xml_structural_tag(
         ]
     )
     return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
-
-
-@register_model_structural_tag("qwen_3_5")
-def get_qwen_3_5_structural_tag(
-    tools: list[ChatCompletionToolsParam],
-    tool_choice: SimplifiedToolChoice,
-    reasoning: bool,
-) -> StructuralTag:
-    """Build Qwen XML structural tags.
-
-    This format is used for Qwen3-Coder/Qwen3.5/Qwen3.6 and is compatible with
-    Qwen variants that use the same XML tool-call format.
-    """
-
-    return _build_qwen_xml_structural_tag(
-        tools=tools,
-        tool_choice=tool_choice,
-        reasoning=reasoning,
-        include_reasoning_prefix=True,
-    )
