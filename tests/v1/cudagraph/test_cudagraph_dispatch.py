@@ -464,7 +464,7 @@ def test_capture_replay_bypass_logic():
 
     # 4. Replay second shape
     action = _run_and_monitor_call(
-        full_wrapper, input_2, CUDAGraphMode.FULL, desc_2, vllm_config
+        full_wrapper, input_2, CUDAGraphMode.FULL, key, vllm_config
     )
     assert action == "replay"
 
