@@ -125,7 +125,7 @@ def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
     if platform.system() == "Darwin":
         return cpu_list
 
-    global_allowed_cpu_id_list = os.sched_getaffinity(0)
+    global_allowed_cpu_id_list = os.sched_getaffinity(0)  # type: ignore[attr-defined]
     logical_cpu_list = [x for x in cpu_list if x.id in global_allowed_cpu_id_list]
 
     return logical_cpu_list
