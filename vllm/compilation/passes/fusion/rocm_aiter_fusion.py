@@ -13,7 +13,6 @@ import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -326,7 +325,12 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # quant matchers trace through QuantFP8's native implementation.
             # Registering both variants would create duplicate Inductor
             # patterns.
-            match_aiter_quant_options = [True, False] if QuantFP8.enabled() else [False]
+            is_quant_fp8_enabled = config.compilation_config.is_custom_op_enabled(
+                "quant_fp8"
+            )
+            match_aiter_quant_options = (
+                [True, False] if is_quant_fp8_enabled else [False]
+            )
 
             for match_aiter_quant in match_aiter_quant_options:
                 # Fuse aiter rms_norm + (aiter / vllm built-in)
