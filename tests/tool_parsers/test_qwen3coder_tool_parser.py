@@ -1171,7 +1171,7 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     assert '\\"hello world\\"' not in raw_arguments
 
 
-def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
+def test_get_vllm_registry_structural_tag_returns_structural_tag(
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
@@ -1206,7 +1206,7 @@ def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
         assert isinstance(tag, StructuralTag)
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
-def test_adjust_request_auto_structural_tag_is_json_string(
+def test_adjust_request_auto_uses_vllm_registry_structural_tag(
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
     include_reasoning: bool,

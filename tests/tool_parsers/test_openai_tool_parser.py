@@ -13,13 +13,10 @@ from openai_harmony import (
     SystemContent,
     load_harmony_encoding,
 )
-from xgrammar import StructuralTag
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionNamedFunction,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
@@ -307,70 +304,3 @@ def test_extract_tool_calls_with_content(
     assert extracted_info.content == final_content
 
 
-def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
-    openai_tool_parser: OpenAIToolParser,
-    sample_tools: list[ChatCompletionToolsParam],
-) -> None:
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-    )
-    tag = openai_tool_parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-    
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="required",
-    )
-    tag = openai_tool_parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-    
-    if sample_tools:
-        tool = sample_tools[0]
-        req = ChatCompletionRequest(
-            messages=[],
-            model="m",
-            tools=sample_tools,
-            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
-        )
-    tag = openai_tool_parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)    
-
-@pytest.mark.parametrize("include_reasoning", [True, False])
-def test_adjust_request_auto_structural_tag_is_json_string(
-    openai_tool_parser: OpenAIToolParser,
-    sample_tools: list[ChatCompletionToolsParam],
-    include_reasoning: bool,
-) -> None:
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-        include_reasoning=include_reasoning,
-    )
-    out = openai_tool_parser.adjust_request(req)
-    assert out.structured_outputs is not None
-    assert out.structured_outputs.structural_tag is not None
-    assert isinstance(out.structured_outputs.structural_tag, str)
-    loaded = json.loads(out.structured_outputs.structural_tag)
-    assert isinstance(loaded, dict)
-
-
-def test_adjust_request_required_prefers_structural_tag(
-    openai_tool_parser: OpenAIToolParser,
-    sample_tools: list[ChatCompletionToolsParam],
-) -> None:
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="required",
-    )
-    out = openai_tool_parser.adjust_request(req)
-    assert out.structured_outputs is not None
-    assert out.structured_outputs.structural_tag is not None

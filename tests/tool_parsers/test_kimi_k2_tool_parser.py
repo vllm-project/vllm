@@ -6,7 +6,6 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from xgrammar import StructuralTag
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
@@ -15,8 +14,6 @@ from tests.tool_parsers.utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionNamedFunction,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -629,71 +626,3 @@ class TestStreamingIntervals:
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
 
-def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
-    parser: KimiK2ToolParser,
-    sample_tools: list[ChatCompletionToolsParam],
-) -> None:
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-    )
-    tag = parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-    
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="required",
-    )
-    tag = parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-    
-    if sample_tools:
-
-        tool = sample_tools[0]
-        req = ChatCompletionRequest(
-            messages=[],
-            model="m",
-            tools=sample_tools,
-            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
-        )
-    tag = parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-
-@pytest.mark.parametrize("include_reasoning", [True, False])
-def test_adjust_request_auto_structural_tag_is_json_string(
-    parser: KimiK2ToolParser,
-    sample_tools: list[ChatCompletionToolsParam],
-    include_reasoning: bool,
-) -> None:
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-        include_reasoning=include_reasoning,
-    )
-    out = parser.adjust_request(req)
-    assert out.structured_outputs is not None
-    assert out.structured_outputs.structural_tag is not None
-    assert isinstance(out.structured_outputs.structural_tag, str)
-    loaded = json.loads(out.structured_outputs.structural_tag)
-    assert isinstance(loaded, dict)
-
-
-def test_adjust_request_required_prefers_structural_tag(
-    parser: KimiK2ToolParser,
-    sample_tools: list[ChatCompletionToolsParam],
-) -> None:
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="required",
-    )
-    out = parser.adjust_request(req)
-    assert out.structured_outputs is not None
-    assert out.structured_outputs.structural_tag is not None

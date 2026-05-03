@@ -7,12 +7,10 @@ from collections.abc import Sequence
 from typing import Any
 
 import regex as re
-from xgrammar import StructuralTag, get_model_structural_tag
+from xgrammar import StructuralTag
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -28,6 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
@@ -688,33 +687,9 @@ class Qwen3CoderToolParser(ToolParser):
     def get_structural_tag(
         self, request: ChatCompletionRequest
     ) -> StructuralTag | None:
-        def _tool_to_dict(tool: ChatCompletionToolsParam | dict) -> dict:
-            if isinstance(tool, dict):
-                return tool
-            if hasattr(tool, "model_dump"):
-                return tool.model_dump()
-            if hasattr(tool, "dict"):
-                return tool.dict()
-            raise TypeError(f"Unsupported tool type: {type(tool)}")
-
-        if not request.tools:
-            return None
-
-        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-            converted_tool_choice = request.tool_choice.model_dump()
-            converted_tools = []
-            for tool in request.tools:
-                tool_dict = _tool_to_dict(tool)
-                tool_name = tool_dict.get("function", {}).get("name")
-                if tool_name == request.tool_choice.function.name:
-                    converted_tools.append(tool_dict)
-        else:
-            converted_tool_choice = request.tool_choice
-            converted_tools = [_tool_to_dict(tool) for tool in request.tools]
-
         return get_model_structural_tag(
-            model="qwen_coder",
-            tools=converted_tools,
-            tool_choice=converted_tool_choice,
+            model="qwen_3_6",
+            tools=request.tools,
+            tool_choice=request.tool_choice,
             reasoning=request.include_reasoning,
         )

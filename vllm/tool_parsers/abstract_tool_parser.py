@@ -96,11 +96,8 @@ class ToolParser:
             return request
 
         # Step 1 (highest priority for ChatCompletionRequest): apply
-        # xgrammar's built-in structural tag support.
+        # vLLM-owned structural tag support for model-specific tool formats.
         if isinstance(request, ChatCompletionRequest):
-            # XGrammar will support tool_choice="none" in the future.
-            # Currently, we only support tool_choice="auto" and
-            # tool_choice="required".
             need_tool_calling = (
                 request.tool_choice == "auto"
                 or request.tool_choice == "required"

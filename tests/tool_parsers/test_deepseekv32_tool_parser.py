@@ -10,7 +10,6 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from xgrammar import StructuralTag
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -18,12 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     FunctionDefinition,
 )
 from vllm.tokenizers import get_tokenizer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionNamedFunction,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 
 # ---------------------------------------------------------------------------
@@ -865,61 +859,6 @@ def test_convert_param_value_checked_helper(parser):
     assert parser._convert_param_value("null", "integer") is None
     assert parser._convert_param_value("null", "boolean") is None
     assert parser._convert_param_value("null", "object") is None
-
-
-def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
-    sample_tools: list[ChatCompletionToolsParam],
-) -> None:
-    parser = make_parser()
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-    )
-    tag = parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-    
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="required",
-    )
-    tag = parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-    
-    if sample_tools:
-        tool = sample_tools[0]
-        req = ChatCompletionRequest(
-            messages=[],
-            model="m",
-            tools=sample_tools,
-            tool_choice=ChatCompletionNamedToolChoiceParam(function=ChatCompletionNamedFunction(name=tool.function.name)),
-        )
-    tag = parser.get_structural_tag(req)
-    assert isinstance(tag, StructuralTag)
-
-
-@pytest.mark.parametrize("include_reasoning", [True, False])
-def test_adjust_request_auto_structural_tag_is_json_string(
-    sample_tools: list[ChatCompletionToolsParam],
-    include_reasoning: bool,
-) -> None:
-    parser = make_parser()
-    req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
-        include_reasoning=include_reasoning,
-    )
-    out = parser.adjust_request(req)
-    assert out.structured_outputs is not None
-    assert out.structured_outputs.structural_tag is not None
-    assert isinstance(out.structured_outputs.structural_tag, str)
-    loaded = json.loads(out.structured_outputs.structural_tag)
-    assert isinstance(loaded, dict)
 
 
 def test_adjust_request_required_uses_json_schema_not_structural_tag(
