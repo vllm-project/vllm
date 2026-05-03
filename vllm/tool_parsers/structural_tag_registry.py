@@ -13,7 +13,6 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     JSONSchemaFormat,
-    OrFormat,
     QwenXMLParameterFormat,
     SequenceFormat,
     TagFormat,
@@ -303,19 +302,10 @@ def get_qwen_3_5_structural_tag(
             )
 
         if tags:
-            # In auto mode, allow either text-only output or exactly one XML
-            # tool call. TriggeredTagsFormat can permit free text after a tag,
-            # which allows repeated tool calls for Qwen3.5.
-            suffix_tag = OrFormat(
-                elements=[
-                    AnyTextFormat(excludes=think_exclude_tokens + ["<tool"]),
-                    TagsWithSeparatorFormat(
-                        tags=tags,
-                        separator="",
-                        at_least_one=True,
-                        stop_after_first=True,
-                    ),
-                ]
+            suffix_tag = TriggeredTagsFormat(
+                triggers=[tool_call_trigger],
+                tags=tags,
+                excludes=think_exclude_tokens,
             )
         else:
             suffix_tag = AnyTextFormat(excludes=think_exclude_tokens)
