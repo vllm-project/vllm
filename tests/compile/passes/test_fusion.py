@@ -441,3 +441,32 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
+
+
+@pytest.mark.skipif(
+    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    reason="Only test on ROCm with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_quant_without_quant_custom_op(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=[],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        RocmAiterRMSNormQuantFusionPass(vllm_config)
+
+    rocm_aiter_ops.refresh_env_variables()
