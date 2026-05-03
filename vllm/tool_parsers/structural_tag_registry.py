@@ -108,7 +108,56 @@ def _get_function_parameters(function: Any) -> dict[str, Any] | bool:
         return True
     if function.parameters is None:
         return True
-    return function.parameters
+    return _normalize_json_schema_for_xgrammar(function.parameters)
+
+
+def _normalize_json_schema_for_xgrammar(schema: Any) -> Any:
+    """Normalize common non-standard tool schema aliases to JSON Schema."""
+
+    if isinstance(schema, list):
+        return [_normalize_json_schema_for_xgrammar(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    metadata_keys = {
+        "description",
+        "default",
+        "examples",
+        "title",
+    }
+    normalized = {
+        key: _normalize_json_schema_for_xgrammar(value)
+        for key, value in schema.items()
+        if key not in metadata_keys
+    }
+
+    schema_type = normalized.get("type")
+    type_aliases = {
+        "dict": "object",
+        "map": "object",
+        "list": "array",
+        "tuple": "array",
+        "str": "string",
+        "int": "integer",
+        "float": "number",
+        "bool": "boolean",
+    }
+    if isinstance(schema_type, str):
+        normalized["type"] = type_aliases.get(schema_type, schema_type)
+    elif isinstance(schema_type, list):
+        normalized["type"] = [
+            type_aliases.get(item, item) if isinstance(item, str) else item
+            for item in schema_type
+        ]
+
+    enum_values = normalized.get("enum")
+    if isinstance(enum_values, list) and any(
+        isinstance(value, str) and ("/" in value or "\\" in value)
+        for value in enum_values
+    ):
+        normalized.pop("enum", None)
+
+    return normalized
 
 
 @register_model_structural_tag("deepseek_v4")
