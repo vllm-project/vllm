@@ -152,7 +152,10 @@ class Config:
         make env data for vllm launch.
         """
         vllm_config = VllmConfig()
-        vllm_config.model_config = SimpleNamespace(enforce_eager=False)
+        vllm_config.model_config = SimpleNamespace(
+            enforce_eager=False,
+            is_moe=True,
+        )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
 
