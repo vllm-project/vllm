@@ -31,6 +31,7 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
+import soundfile as sf
 from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
@@ -438,6 +439,27 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     raise ValueError(
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
+    )
+
+
+def process_audio(audio: Any) -> tuple:
+    """
+    Process a single audio input and return a (array, sample_rate) tuple.
+
+    Supports:
+    1. String: treated as a file path, loaded with soundfile.
+    2. Dict with 'array' and 'sampling_rate' keys: HuggingFace audio format.
+    3. Tuple (array, sr): passed through directly.
+    """
+    if isinstance(audio, str):
+        return sf.read(audio)
+    if isinstance(audio, dict) and "array" in audio and "sampling_rate" in audio:
+        return audio["array"], audio["sampling_rate"]
+    if isinstance(audio, tuple) and len(audio) == 2:
+        return audio
+    raise ValueError(
+        f"Invalid audio input {audio}. Must be a file path string, "
+        "a dict with 'array' and 'sampling_rate', or a (array, sr) tuple."
     )
 
 
@@ -1400,6 +1422,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "hf",
             "custom",
             "custom_mm",
+            "custom_audio",
             "prefix_repetition",
             "spec_bench",
             "speed_bench",
@@ -1823,6 +1846,18 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+
+    elif args.dataset_name == "custom_audio":
+        dataset = CustomAudioDataset(
+            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+        )
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2321,6 +2356,47 @@ class CustomMMDataset(CustomDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
 
+        return sampled_requests
+
+
+class CustomAudioDataset(CustomDataset):
+    """
+    Custom dataset for ASR benchmarking. Loads data from a JSONL file. E.g.,
+    {"prompt": "", "audio": "/path/to/audio.wav"}
+    """
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        output_len: int | None = None,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        self.num_available_samples = len(self.data)
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item.get("prompt", "")
+            prompt_len = len(tokenizer(prompt).input_ids)
+            y, sr = process_audio(item["audio"])
+            mm_content = {"audio": (y, sr)}
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len if output_len is not None else 256,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
         return sampled_requests
 
 
