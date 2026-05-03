@@ -4988,6 +4988,12 @@ class GPUModelRunner(
         ):
             self.eplb_state.start_async_loop()
 
+        # Initialise steering state once the model is fully loaded.
+        # Done before torch.compile / cudagraph wrapping but after
+        # comm-buffer setup; the manager only needs access to the
+        # registered steering buffers on each decoder layer.
+        self._init_steering_state()
+
         if (
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE

@@ -74,7 +74,6 @@ class FakeModelRunner(SteeringModelRunnerMixin):
     def __init__(self, model: nn.Module):
         self._model = model
         self._steering_manager: SteeringManager | None = None
-        self._pending_steering_globals = None
         self._steerable_layers_cache = None
 
     def get_model(self) -> nn.Module:
@@ -141,10 +140,8 @@ def worker(model):
 def worker_with_manager(model):
     """Worker whose FakeModelRunner has a live SteeringManager.
 
-    This allows ``_notify_manager_vectors`` to call
-    ``mgr.update_global_vectors`` directly instead of queuing
-    to ``_pending_steering_globals``, so ``get_steering_status``
-    can read phase-specific norms.
+    Mirrors the post-eager-init runtime state where
+    ``_init_steering_state`` has already constructed the manager.
     """
     w = FakeWorker(model)
     assert w.model_runner is not None
@@ -410,18 +407,6 @@ class TestSetSteeringVectorsThreeTier:
         # But all existing vectors should be cleared
         assert not mgr.global_base_vectors
 
-    def test_replace_with_no_new_vectors_clears_pending_globals(self, worker, model):
-        """replace=True with no vector arguments also clears pending globals."""
-        # Queue pending globals directly (simulates vectors set before manager init)
-        worker.model_runner._pending_steering_globals = [
-            ({"post_mlp": {0: torch.ones(1, 8)}}, "prefill"),
-        ]
-        # Call replace=True with NO vector arguments
-        result = worker.set_steering_vectors(replace=True)
-        assert result[2] == []
-        # Pending globals should be cleared
-        assert worker.model_runner._pending_steering_globals is None
-
     def test_base_vectors_go_to_manager(self, worker_with_manager):
         """When all three tiers target the same layer, base vectors go
         to the manager as phase='base'."""
@@ -470,29 +455,6 @@ class TestClearSteeringVectors:
         assert not mgr.global_base_vectors
         assert not mgr.global_prefill_vectors
         assert not mgr.global_decode_vectors
-
-    def test_clear_removes_pending_steering_globals(self, worker):
-        """Clearing should also discard any pending globals queued
-        before the SteeringManager was lazily initialized."""
-        # Simulate pending globals queued before manager init
-        worker.model_runner._pending_steering_globals = [
-            ({"post_mlp": {0: torch.ones(1, 8)}}, "base"),
-        ]
-        worker.clear_steering_vectors()
-        assert worker.model_runner._pending_steering_globals is None
-
-    def test_clear_removes_pending_globals_when_no_manager(self, worker):
-        """Even without a live SteeringManager, clear should remove
-        pending globals so they are not replayed on lazy init."""
-        # Ensure no live manager exists
-        assert worker.model_runner is not None
-        assert worker.model_runner._steering_manager is None
-        worker.model_runner._pending_steering_globals = [
-            ({"post_mlp": {1: torch.ones(1, 8)}}, "prefill"),
-            ({"post_mlp": {2: torch.ones(1, 8)}}, "decode"),
-        ]
-        worker.clear_steering_vectors()
-        assert worker.model_runner._pending_steering_globals is None
 
 
 # --- get_steering_status ---
@@ -567,49 +529,6 @@ class TestGetSteeringStatus:
         assert "norm" in status[0][_HP]
         assert "prefill_norm" not in status[0][_HP]
         assert "decode_norm" not in status[0][_HP]
-
-    def test_status_reports_pending_prefill_norm_before_manager_init(self, worker):
-        """Phase-specific vectors queued before manager init should be
-        visible in status via _pending_steering_globals."""
-        vec = [2.0] * 8
-        # Queue pending globals directly (simulates set_steering_vectors
-        # before manager init).
-        t = torch.tensor(vec, dtype=torch.float32)
-        worker.model_runner._pending_steering_globals = [
-            ({"post_mlp": {0: t}}, "prefill"),
-        ]
-        status = worker.get_steering_status()
-        assert 0 in status
-        assert "post_mlp" in status[0]
-        expected_norm = round(t.norm().item(), 6)
-        assert status[0]["post_mlp"]["prefill_norm"] == expected_norm
-
-    def test_status_reports_pending_decode_norm_before_manager_init(self, worker):
-        """Decode vectors queued before manager init should appear in status."""
-        vec = [3.0] * 8
-        t = torch.tensor(vec, dtype=torch.float32)
-        worker.model_runner._pending_steering_globals = [
-            ({"post_mlp": {1: t}}, "decode"),
-        ]
-        status = worker.get_steering_status()
-        assert 1 in status
-        assert "post_mlp" in status[1]
-        expected_norm = round(t.norm().item(), 6)
-        assert status[1]["post_mlp"]["decode_norm"] == expected_norm
-
-    def test_status_reports_base_pending_globals(self, worker):
-        """Base-phase pending globals should produce a ``norm`` key."""
-        t = torch.tensor([1.0] * 8, dtype=torch.float32)
-        worker.model_runner._pending_steering_globals = [
-            ({"post_mlp": {0: t}}, "base"),
-        ]
-        status = worker.get_steering_status()
-        assert 0 in status
-        hp_info = status[0].get("post_mlp", {})
-        expected_norm = round(t.norm().item(), 6)
-        assert hp_info["norm"] == expected_norm
-        assert "prefill_norm" not in hp_info
-        assert "decode_norm" not in hp_info
 
     def test_status_all_tiers(self, worker_with_manager):
         """All three tiers on the same layer produce all three norm keys."""
