@@ -366,6 +366,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 shared_experts=layer.shared_experts,
+                layer=layer,
             )
 
     def process_weights_after_loading(self, layer):
@@ -404,6 +405,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             gemm1_alpha=1.702,
             gemm1_beta=1.0,
             swiglu_limit=7.0,
+            layer=layer,
         )
 
     def select_gemm_impl(
@@ -692,6 +694,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 shared_experts=layer.shared_experts,
+                layer=layer,
             )
 
     def process_weights_after_loading(self, layer):
@@ -729,6 +732,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             swiglu_limit=swiglu_limit,
+            layer=layer,
         )
 
     def select_gemm_impl(
