@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import msgspec
-import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
@@ -181,7 +180,7 @@ class EngineCoreOutput(
 
     prefill_stats: PrefillStats | None = None
 
-    routed_experts: np.ndarray | None = None
+    routed_experts: tuple | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0

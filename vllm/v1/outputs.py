@@ -198,6 +198,9 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
+    # req_id -> routed experts data (shape, bytes) tuples
+    routed_experts_dict: dict[str, tuple] | None = None
+
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
