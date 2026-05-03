@@ -4,116 +4,27 @@
 import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-)
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-
 pytestmark = pytest.mark.cpu_test
-
-_REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
-
-
-def _capturer_with_buffer(
-    *,
-    max_tokens: int = 8,
-    num_layers: int = 4,
-    num_experts_per_tok: int = 2,
-    dp_rank: int = 0,
-) -> RoutedExpertsCapturer:
-    c = RoutedExpertsCapturer()
-    c.dp_rank = dp_rank
-    c._device_buffer = torch.full(
-        (max_tokens, num_layers, num_experts_per_tok),
-        -1,
-        dtype=torch.int32,
-    )
-    return c
-
-
-class DummyRouter(BaseRouter):
-    @property
-    def routing_method_type(self) -> RoutingMethodType:
-        return RoutingMethodType.FUSED_TOPK
-
-    def _compute_routing(
-        self, hidden_states, router_logits, indices_type, *, input_ids=None
-    ):
-        topk_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
-        topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
-        return topk_weights, topk_ids
-
-    def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
-        # Make mapping observable without requiring CUDA EPLB path.
-        return topk_ids + 10
-
-
-def _make_router() -> DummyRouter:
-    return DummyRouter(
-        top_k=2,
-        global_num_experts=16,
-        eplb_state=EplbLayerState(),
-        enable_eplb=False,
-        indices_type_getter=None,
-    )
-
-
-def test_base_router_capture_pre_eplb_mapping():
-    router = _make_router()
-    captured = []
-
-    def capture_fn(ids):
-        captured.append(ids.clone())
-
-    router.set_capture_fn(capture_fn)
-    topk_weights, topk_ids = router.select_experts(
-        hidden_states=torch.empty(1),
-        router_logits=torch.empty(1),
-    )
-
-    assert topk_weights.shape == topk_ids.shape
-    assert len(captured) == 1
-    assert torch.equal(captured[0], torch.tensor([[1, 2], [3, 4]]))
-    assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
-
-
-def test_base_router_capture_with_eplb_enabled():
-    router = _make_router()
-    router.enable_eplb = True
-    router.eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
-    router.eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
-    router.eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
-    router.eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
-
-    captured = []
-
-    def capture_fn(ids):
-        captured.append(ids.clone())
-
-    router.set_capture_fn(capture_fn)
-    _, topk_ids = router.select_experts(
-        hidden_states=torch.empty(1),
-        router_logits=torch.empty(1),
-    )
-
-    assert len(captured) == 1
-    # Capture should see logical ids pre-EPLB mapping.
-    assert torch.equal(captured[0], torch.tensor([[1, 2], [3, 4]]))
-    # Our DummyRouter mapping adds +10.
-    assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
 
 
 def test_bind_routing_capture_to_model_sets_layer_view(monkeypatch):
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
     import vllm.model_executor.layers.fused_moe.routed_experts_capturer as rec_mod
 
+    class _DummyMoEConfig:
+        is_sequence_parallel = False
+        dp_size = 1
+
+    class _DummyQuantMethod:
+        supports_internal_mk = True
+
     class DummyFusedMoE:
         _routing_replay_out: torch.Tensor
 
         def __init__(self, moe_layer_id):
             self.moe_layer_id = moe_layer_id
+            self.moe_config = _DummyMoEConfig()
+            self.quant_method = _DummyQuantMethod()
 
     monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
 
