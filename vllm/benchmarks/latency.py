@@ -11,7 +11,11 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    parse_metadata,
+    write_to_json,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
@@ -23,7 +27,11 @@ def save_to_pytorch_benchmark_format(
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={"latency": results["latencies"]},
-        extra_info={k: results[k] for k in ["avg_latency", "percentiles"]},
+        extra_info={
+            k: v
+            for k, v in results.items()
+            if k not in {"latencies"}
+        },
     )
     if pt_records:
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
@@ -62,6 +70,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Path to save the latency results in JSON format.",
     )
     parser.add_argument(
+        "--metadata",
+        metavar="KEY=VALUE",
+        nargs="*",
+        help="Key-value pairs (e.g, --metadata version=0.3.3 tp=1) "
+        "for metadata of this run to be saved in the result JSON file "
+        "for record keeping purposes.",
+    )
+    parser.add_argument(
         "--disable-detokenize",
         action="store_true",
         help=(
@@ -77,6 +93,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
+    metadata = parse_metadata(args.metadata)
     engine_args = EngineArgs.from_cli_args(args)
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
@@ -161,11 +178,16 @@ def main(args: argparse.Namespace):
 
     # Output JSON results if specified
     if args.output_json:
-        results = {
-            "avg_latency": np.mean(latencies),
-            "latencies": latencies.tolist(),
-            "percentiles": dict(zip(percentages, percentiles.tolist())),
-        }
+        results: dict[str, Any] = metadata.copy()
+        results.update(
+            {
+                "avg_latency": np.mean(latencies),
+                "latencies": latencies.tolist(),
+                "percentiles": dict(zip(percentages, percentiles.tolist())),
+            }
+        )
+
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
+
         save_to_pytorch_benchmark_format(args, results)
