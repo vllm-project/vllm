@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from typing import Any
 
 import regex as re
-from xgrammar import StructuralTag
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -686,7 +685,7 @@ class Qwen3CoderToolParser(ToolParser):
 
     def get_structural_tag(
         self, request: ChatCompletionRequest
-    ) -> StructuralTag | None:
+    ):
         return get_model_structural_tag(
             model="qwen_3_6",
             tools=request.tools,

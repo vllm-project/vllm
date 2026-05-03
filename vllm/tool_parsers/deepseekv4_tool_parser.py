@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from xgrammar import StructuralTag
-
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -22,7 +20,7 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
     
     def get_structural_tag(
         self, request: ChatCompletionRequest
-    ) -> StructuralTag | None:
+    ):
         return get_model_structural_tag(
             model="deepseek_v4",
             tools=request.tools,

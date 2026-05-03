@@ -7,8 +7,6 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 import json
 
-from xgrammar import StructuralTag
-
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
@@ -147,7 +145,7 @@ class ToolParser:
     
     def get_structural_tag(
         self, request: ChatCompletionRequest
-    ) -> StructuralTag | None:
+    ):
         return None
 
     def extract_tool_calls(
