@@ -1,0 +1,5 @@
+{
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {}
+}
+"ghcr.io/daniellindemann/dev-container-features/dotnet-usersecrets-persistence:0": {}
