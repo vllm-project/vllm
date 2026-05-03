@@ -145,22 +145,27 @@ class _HfExamplesInfo:
         # Only check the base version for the min/max version, otherwise preview
         # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
         if min_version and Version(cur_base_version) < Version(min_version):
-            is_version_valid = not check_min_version
+            is_version_valid = False
+            should_check_version = check_min_version
             msg += f">={min_version}` is required to run this model."
         elif max_version and Version(cur_base_version) > Version(max_version):
-            is_version_valid = not check_max_version
+            is_version_valid = False
+            should_check_version = check_max_version
             msg += f"<={max_version}` is required to run this model."
         else:
             is_version_valid = True
+            should_check_version = False
 
-        # check if Transformers version breaks the corresponding model runner,
-        # skip test when model runner not compatible
-        is_reason_valid = not (
-            check_version_reason
-            and self.transformers_version_reason
+        # Reasons only apply when the installed version misses the requested
+        # bound for the corresponding model runner.
+        is_reason_applicable = (
+            not is_version_valid
+            and self.transformers_version_reason is not None
             and check_version_reason in self.transformers_version_reason
         )
-        is_transformers_valid = is_version_valid and is_reason_valid
+        is_transformers_valid = is_version_valid or (
+            not should_check_version and not is_reason_applicable
+        )
         if is_transformers_valid:
             return None
         elif self.transformers_version_reason:
