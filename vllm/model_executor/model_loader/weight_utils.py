@@ -1063,7 +1063,7 @@ def runai_safetensors_weights_iterator(
         tensor_iter = tqdm(
             streamer.get_tensors(),
             total=total_tensors,
-            # This line is used for benchmarking. Please maintain the format:
+            # This line is used for benchmarking. Please maintain the format
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
             disable=not enable_tqdm(use_tqdm_on_load),
