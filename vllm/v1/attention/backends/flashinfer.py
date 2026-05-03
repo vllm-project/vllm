@@ -333,6 +333,7 @@ class FlashInferBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
     ]
 
     @staticmethod
@@ -389,13 +390,15 @@ class FlashInferBackend(AttentionBackend):
         return stride_order
 
     @staticmethod
-    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+    def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
+        elif kv_cache_dtype == "nvfp4":
+            return torch.uint8
         else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+            raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -623,9 +626,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
-                raise NotImplementedError("nvfp4 KV cache is not yet supported")
             else:
-                self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.kv_cache_dtype = FlashInferBackend.get_dtype_for_flashinfer(
                     self.cache_dtype
                 )
         else:
@@ -646,7 +648,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         ):
             if self.is_kvcache_nvfp4:
                 # NVFP4 KV cache uses FP8 quantized queries
-                self.q_data_type = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.q_data_type = FlashInferBackend.get_dtype_for_flashinfer(
                     "fp8_e4m3"
                 )
             else:
@@ -766,8 +768,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
+                # NVFP4 KV cache requires the trtllm-gen backend inside
+                # the wrapper; fa2/fa3 do not support nvfp4.
+                backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(), get_kv_cache_layout()
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                    backend=backend,
                 )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
@@ -787,6 +794,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr = None
                 paged_kv_indices = None
                 paged_kv_last_page_len = None
+            # NVFP4 KV cache requires the trtllm-gen backend inside
+            # the wrapper; fa2/fa3 do not support nvfp4.
+            backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 get_kv_cache_layout(),
@@ -798,6 +808,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # at least as good as cuda cores for all attention ops in latest
                 # gpus.
                 use_tensor_cores=True,
+                backend=backend,
             )
 
             # save the decode wrapper
@@ -1149,6 +1160,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         prefill_wrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                     )
+                    # NVFP4 trtllm kernel only supports FP8 output;
+                    # use FP8 o_data_type so the wrapper matches the
+                    # FP8 output buffer allocated in forward().
+                    o_dtype = (
+                        FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
+                    )
                     prefill_wrapper.plan(
                         qo_indptr=qo_indptr_prefill_cpu,
                         paged_kv_indptr=paged_kv_indptr_prefill_cpu,
@@ -1164,7 +1181,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
-                        o_data_type=self.model_config.dtype,
+                        o_data_type=o_dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
@@ -1198,6 +1215,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
                 # in atten_metadata when using cudagraph.
+                # NVFP4 trtllm kernel only supports FP8 output;
+                # use FP8 o_data_type so the wrapper matches the
+                # FP8 output buffer allocated in forward().
+                o_dtype = (
+                    FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
+                )
                 fast_plan_decode(
                     decode_wrapper,
                     indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
@@ -1216,7 +1239,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     logits_soft_cap=self.logits_soft_cap,
                     q_data_type=self.q_data_type,
                     kv_data_type=self.kv_cache_dtype,
-                    o_data_type=self.model_config.dtype,
+                    o_data_type=o_dtype,
                     fixed_split_size=self.decode_fixed_split_size,
                     disable_split_kv=self.disable_split_kv,
                 )
@@ -1300,6 +1323,17 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+
+        # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
+        if self.is_kvcache_nvfp4 and vllm_config is not None:
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self._nvfp4_fp8_out = torch.empty(
+                (max_num_tokens, num_heads, head_size),
+                dtype=FP8_DTYPE,
+                device="cuda",
+            )
+        else:
+            self._nvfp4_fp8_out = None
 
         dcp_a2a = (
             vllm_config is not None
@@ -1421,7 +1455,7 @@ class FlashInferImpl(AttentionImpl):
         if self.kv_sharing_target_layer_name is None and is_quantized_kv_cache(
             self.kv_cache_dtype
         ):
-            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+            torch_dtype = FlashInferBackend.get_dtype_for_flashinfer(
                 self.kv_cache_dtype
             )
             kv_cache = kv_cache.view(torch_dtype)
@@ -1516,13 +1550,37 @@ class FlashInferImpl(AttentionImpl):
                     )
                     assert prefill_wrapper._sm_scale == self.scale
                     assert prefill_wrapper._causal
+
+                    if self.is_kvcache_nvfp4:
+                        kv_cache_permute = nvfp4_kv_data
+                    kv_cache_sf = (
+                        nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                    )
+
+                    # NVFP4 trtllm kernel only supports FP8 output.
+                    # Use a pre-allocated FP8 buffer and dequantize
+                    # afterwards.
+                    needs_fp8_out_prefill = (
+                        self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                    )
+                    if needs_fp8_out_prefill:
+                        out_prefill = self._nvfp4_fp8_out[:num_prefill_tokens]
+                    else:
+                        out_prefill = output[num_decode_tokens:]
+
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
-                        out=output[num_decode_tokens:],
+                        out=out_prefill,
+                        kv_cache_sf=kv_cache_sf,
                     )
+
+                    if needs_fp8_out_prefill:
+                        output[
+                            num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                        ].copy_(out_prefill.to(output.dtype))
             else:
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
                 # prefill_query may be non-contiguous or have degenerate strides
@@ -1554,6 +1612,12 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
+                # NVFP4 trtllm kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out = self._nvfp4_fp8_out[:num_prefill_tokens]
+
                 prefill_kv_block_scales = None
                 if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
@@ -1564,7 +1628,7 @@ class FlashInferImpl(AttentionImpl):
                     )
                     mock_kv_cache = nvfp4_kv_data
                     mock_block_table = block_tables_prefill
-                    prefill_kv_block_scales = nvfp4_kv_block_scales  # noqa: F841
+                    prefill_kv_block_scales = nvfp4_kv_block_scales
                 elif (
                     attn_metadata.q_data_type != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
@@ -1613,7 +1677,13 @@ class FlashInferImpl(AttentionImpl):
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
+                    kv_cache_sf=prefill_kv_block_scales,
                 )
+
+                if needs_fp8_out:
+                    output[
+                        num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                    ].copy_(out[:num_prefill_tokens].to(output.dtype))
 
         if num_decode_tokens > 0:
             decode_query = query[:num_decode_tokens]
@@ -1626,6 +1696,18 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._window_left == self.window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
+
+                if self.is_kvcache_nvfp4:
+                    kv_cache_permute = nvfp4_kv_data
+                kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+
+                # NVFP4 kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out_decode = self._nvfp4_fp8_out[:num_decode_tokens]
+                else:
+                    out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
                     decode_query = get_dcp_group().all_gather(
@@ -1645,6 +1727,7 @@ class FlashInferImpl(AttentionImpl):
                         out=output_tmp,
                         lse=lse,
                         return_lse=True,
+                        kv_cache_sf=kv_cache_sf,
                     )
                     output[:num_decode_tokens] = self.dcp_combine(
                         output_tmp,
@@ -1657,8 +1740,12 @@ class FlashInferImpl(AttentionImpl):
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
-                        out=output[:num_decode_tokens],
+                        out=out_decode,
+                        kv_cache_sf=kv_cache_sf,
                     )
+
+                if needs_fp8_out:
+                    output[:num_decode_tokens].copy_(out_decode.to(output.dtype))
             else:
                 assert isinstance(attn_metadata.decode, TRTLLMDecode)
                 # decode_query may be non-contiguous or have degenerate strides
@@ -1698,6 +1785,12 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[:num_decode_tokens]
 
+                # NVFP4 trtllm kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out = self._nvfp4_fp8_out[:num_decode_tokens]
+
                 if num_decode_tokens % attn_metadata.num_decodes != 0:
                     # This gets triggered when the dummy_run forces
                     # attention to be initialized with q_len = 0
@@ -1707,9 +1800,9 @@ class FlashInferImpl(AttentionImpl):
 
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
-                    kv_cache=nvfp4_kv_data
-                    if self.is_kvcache_nvfp4
-                    else kv_cache_permute,
+                    kv_cache=(
+                        nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_permute
+                    ),
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
@@ -1721,7 +1814,13 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     q_len_per_req=q_len_per_req,
+                    kv_cache_sf=(
+                        nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                    ),
                 )
+
+                if needs_fp8_out:
+                    output[:num_decode_tokens].copy_(out.to(output.dtype))
         return output_padded
 
     def do_kv_cache_update(
