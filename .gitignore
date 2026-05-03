@@ -196,6 +196,7 @@ cython_debug/
 .claude/
 
 # Codex
+.codex
 .codex/
 
 # Cursor
