@@ -687,7 +687,7 @@ class Qwen3CoderToolParser(ToolParser):
         self, request: ChatCompletionRequest
     ):
         return get_model_structural_tag(
-            model="qwen_3_6",
+            model="qwen_3_5",
             tools=request.tools,
             tool_choice=request.tool_choice,
             reasoning=request.include_reasoning,

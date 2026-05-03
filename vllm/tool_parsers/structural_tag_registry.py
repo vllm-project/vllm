@@ -86,9 +86,7 @@ def _normalize_tool_choice(
 
     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
         tool_name = tool_choice.function.name
-        filtered_tools = [
-            tool for tool in tools if tool.function.name == tool_name
-        ]
+        filtered_tools = [tool for tool in tools if tool.function.name == tool_name]
         if not filtered_tools:
             raise ValueError(
                 f"The tool with name '{tool_name}' is not found in the tools list."
@@ -311,13 +309,17 @@ def _build_qwen_xml_structural_tag(
     return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
 
 
-@register_model_structural_tag("qwen_3_6")
-def get_qwen_3_6_structural_tag(
+@register_model_structural_tag("qwen_3_5")
+def get_qwen_3_5_structural_tag(
     tools: list[ChatCompletionToolsParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
 ) -> StructuralTag:
-    """Build Qwen3.6 structural tags."""
+    """Build Qwen XML structural tags.
+
+    This format is used for Qwen3-Coder/Qwen3.5/Qwen3.6 and is compatible with
+    Qwen variants that use the same XML tool-call format.
+    """
 
     return _build_qwen_xml_structural_tag(
         tools=tools,
