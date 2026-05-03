@@ -812,15 +812,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if quant_key is not None:
-            # MQA tokens were quantized inside _v_up_proj; handle the MHA
-            # (prefill) tokens here.
-            if num_mqa_tokens < num_actual_toks:
+            # NVFP4 isn't fused in this PR — its scale tensor uses a packed
+            # tile layout where shape[0] doesn't track tokens, so the MQA/MHA
+            # split breaks `output_block_scale[: fp4_scales.shape[0]].copy_(...)`.
+            # Quantize the whole output in one shot like the original code did,
+            # and skip MQA quantization inside _v_up_proj for this case.
+            # Other quant keys: _v_up_proj already handled MQA, so we only
+            # cover MHA (prefill) tokens here.
+            start = 0 if quant_key == kNvfp4Dynamic else num_mqa_tokens
+            if start < num_actual_toks:
                 self._quantize_tokens(
-                    output[num_mqa_tokens:num_actual_toks],
+                    output[start:num_actual_toks],
                     quant_key,
-                    quant_output[num_mqa_tokens:num_actual_toks],
+                    quant_output[start:num_actual_toks],
                     output_scale,
-                    output_block_scale[num_mqa_tokens:num_actual_toks]
+                    output_block_scale[start:num_actual_toks]
                     if output_block_scale is not None
                     else None,
                     quant_group_size,
@@ -1055,8 +1061,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             out.copy_(out_new)
 
         # AITER paths + unfused fallback: bf16 output in `out`. Quantize now
-        # so the caller only deals with MHA prefill tokens.
-        if quant_key is not None:
+        # so the caller only deals with MHA prefill tokens. NVFP4 is the
+        # exception — its packed scale tile layout breaks per-slice writes,
+        # so we leave the whole output bf16 and let forward_impl quantize
+        # MQA + MHA together, matching the original (pre-fusion) behavior.
+        if quant_key is not None and quant_key != kNvfp4Dynamic:
             assert quant_output is not None
             out_2d = out.view(-1, self.num_heads * self.v_head_dim)
             self._quantize_tokens(
