@@ -150,6 +150,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dim() == 2
         and (
             10 <= n <= 128
             and k % 8 == 0

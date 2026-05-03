@@ -28,9 +28,11 @@ def rms_norm(
         # Kernel requires weight tensor, pass ones
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
-    output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+    original_shape = x.shape
+    x = x.reshape(-1, original_shape[-1])
+    output = torch.empty_like(x)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
-    return output
+    return output.reshape(original_shape)
 
 
 rms_add_no_var_size = (
@@ -59,5 +61,9 @@ def fused_add_rms_norm(
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
 
     assert variance_size is None
+    original_shape = x.shape
+    if x.dim() > 2:
+        x = x.reshape(-1, original_shape[-1])
+        x_residual = x_residual.reshape(-1, original_shape[-1])
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
-    return x, x_residual
+    return x.reshape(original_shape), x_residual.reshape(original_shape)

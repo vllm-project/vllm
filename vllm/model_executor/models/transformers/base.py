@@ -30,7 +30,10 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    initialize_torch_compile,
+    support_torch_compile,
+)
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -169,6 +172,7 @@ class Base(
         # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+        self._initialize_decoder_torch_compile()
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
@@ -300,6 +304,18 @@ class Base(
                 input_ids=1,  # shape: [1, seq_len]
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+            ),
+            enable_if=can_enable_torch_compile,
+            is_encoder=False,
+        )
+
+    def _initialize_decoder_torch_compile(self):
+        initialize_torch_compile(
+            self.model.get_decoder(),
+            dynamic_arg_dims=dict[str, int](
+                input_ids=1,
+                inputs_embeds=1,
+                position_ids=-1,
             ),
             enable_if=can_enable_torch_compile,
             is_encoder=False,

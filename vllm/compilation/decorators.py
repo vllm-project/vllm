@@ -721,6 +721,58 @@ def _support_torch_compile(
     return cls
 
 
+def initialize_torch_compile(
+    module: _T,
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]],
+    mark_unbacked_dims: dict[str, int | list[int]] | None = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
+    is_encoder: bool = False,
+) -> None:
+    """Initialize torch.compile support for an already-created module.
+
+    Most model classes are decorated before instantiation, but Hugging Face
+    remote-code models can be materialized from a fresh dynamic class that is
+    not reachable through the module attribute patched before `from_config`.
+    This helper applies the same support_torch_compile setup to the actual
+    instance that vLLM will execute.
+    """
+    cls = module.__class__
+    if TorchCompileWithNoGuardsWrapper not in cls.__bases__:
+        _support_torch_compile(
+            cls,
+            dynamic_arg_dims=dynamic_arg_dims,
+            mark_unbacked_dims=mark_unbacked_dims,
+            enable_if=enable_if,
+            is_encoder=is_encoder,
+        )
+
+    if hasattr(module, "do_not_compile"):
+        return
+
+    vllm_config = get_current_vllm_config()
+    module.vllm_config = vllm_config  # type: ignore[attr-defined]
+    module.compilation_config = vllm_config.compilation_config  # type: ignore[attr-defined]  # noqa: E501
+    enable_compile = enable_if is None or enable_if(vllm_config)
+    module.do_not_compile = (  # type: ignore[attr-defined]
+        module.compilation_config.mode  # type: ignore[attr-defined]
+        in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
+        or _should_ignore_torch_compile(cls)
+        or not enable_compile
+    )
+    if module.do_not_compile:  # type: ignore[attr-defined]
+        return
+
+    module._dynamic_arg_dims = dynamic_arg_dims  # type: ignore[attr-defined]
+    module.was_aot_compile_fn_loaded_from_disk = False  # type: ignore[attr-defined]
+    module.compiled = False  # type: ignore[attr-defined]
+    compilation_counter.num_models_seen += 1
+    TorchCompileWithNoGuardsWrapper.__init__(
+        module,
+        compile_prefix=cls.__name__ if is_encoder else "",
+        is_encoder=is_encoder,
+    )
+
+
 @contextlib.contextmanager
 def maybe_use_cudagraph_partition_wrapper(
     vllm_config: VllmConfig,
