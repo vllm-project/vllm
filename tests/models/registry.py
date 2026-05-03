@@ -335,6 +335,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "HF remote code indexes ROPE_INIT_FUNCTIONS['default']; "
+            "Transformers v5 supports default RoPE but handles it outside "
+            "ROPE_INIT_FUNCTIONS."
+        },
         trust_remote_code=True,
     ),
     "InternLMForCausalLM": _HfExamplesInfo(
@@ -419,7 +425,15 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+        "openbmb/MiniCPM4.1-8B",
+        min_transformers_version="4.56",
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "HF remote code imports removed `is_torch_fx_available`; "
+            "the upstream compatibility shim request was closed as not planned: "
+            "https://github.com/huggingface/transformers/issues/44561"
+        },
+        trust_remote_code=True,
     ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
