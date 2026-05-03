@@ -59,39 +59,47 @@ def normalize_layer_entry(entry: SteeringLayerEntry) -> tuple[list[float], float
     )
 
 
-def _scale_vector(vec: list[float], scale: float) -> list[float]:
-    """Multiply each element of *vec* by *scale*."""
-    return [v * scale for v in vec]
+def _scale_vector(vec: list[float] | np.ndarray, scale: float) -> np.ndarray:
+    """Multiply *vec* by *scale*, returning a float64 numpy array.
+
+    Arithmetic is performed in float64 to match the legacy Python-list path
+    bit-for-bit at the float64→float32 boundary in ``hash_steering_config``.
+    """
+    arr = np.asarray(vec, dtype=np.float64)
+    return arr * scale
 
 
-def _add_vectors(a: list[float], b: list[float]) -> list[float]:
-    """Element-wise addition of two equal-length vectors."""
-    if len(a) != len(b):
+def _add_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Element-wise addition of two equal-length float64 vectors."""
+    if a.shape != b.shape:
         raise ValueError(
-            f"Cannot add steering vectors of different lengths: {len(a)} vs {len(b)}"
+            f"Cannot add steering vectors of different lengths: "
+            f"{a.shape[0]} vs {b.shape[0]}"
         )
-    return [x + y for x, y in zip(a, b)]
+    return a + b
 
 
 def resolve_effective_vectors(
     base: SteeringVectorSpec | None,
     phase_specific: SteeringVectorSpec | None,
-) -> dict[str, dict[int, list[float]]] | None:
+) -> dict[str, dict[int, np.ndarray]] | None:
     """Merge *base* and *phase_specific* steering specs additively.
 
     For each ``(hook, layer)`` pair, both the base and phase-specific entries
     are pre-scaled and then summed.  Non-overlapping entries pass through
     unchanged (pre-scaled).
 
-    Returns pre-scaled flat vectors (``list[float]``, no scale wrapper).
-    Returns ``None`` if both inputs are ``None`` or empty.
+    Returns pre-scaled flat vectors as 1-D ``np.float64`` arrays. The
+    float64 dtype is required for hash-determinism parity with the legacy
+    Python-list path (``hash_steering_config`` casts to float32 once at the
+    SHA boundary).  Returns ``None`` if both inputs are ``None`` or empty.
     """
     base_empty = not base
     phase_empty = not phase_specific
     if base_empty and phase_empty:
         return None
 
-    result: dict[str, dict[int, list[float]]] = {}
+    result: dict[str, dict[int, np.ndarray]] = {}
 
     # Collect all hook points from both specs
     all_hooks: set[str] = set()
@@ -113,7 +121,7 @@ def resolve_effective_vectors(
         if not all_layer_idxs:
             continue
 
-        hook_result: dict[int, list[float]] = {}
+        hook_result: dict[int, np.ndarray] = {}
         for layer_idx in all_layer_idxs:
             base_entry = base_layers.get(layer_idx)
             phase_entry = phase_layers.get(layer_idx)
@@ -236,7 +244,7 @@ def merge_steering_specs(
 
 
 def hash_steering_config(
-    effective_vectors: dict[str, dict[int, list[float]]] | None,
+    effective_vectors: dict[str, dict[int, list[float] | np.ndarray]] | None,
     module_ref: tuple[str, float] | None = None,
 ) -> int:
     """Deterministic SHA-256 hash of pre-resolved steering vectors.
@@ -253,12 +261,11 @@ def hash_steering_config(
     function reduces to the original "hash inline-only vectors" behavior
     bit-for-bit, preserving prefix-cache reuse for existing requests.
 
-    Hashes the binary representation of each layer vector (via
-    ``np.asarray(...).tobytes()``) instead of stringifying the raw Python
-    floats. The previous ``str(sorted(...))`` approach took ~28 ms per call
-    on Gemma-3-4B (87K floats) because ``str`` invokes ``float.__repr__``
-    on every element; this version is ~30x faster because ``tobytes`` is a
-    memcpy and ``hashlib.sha256.update`` is hardware-accelerated.
+    Accepts entries as either ``list[float]`` (legacy callers) or
+    ``np.ndarray`` (the float64 arrays produced by
+    :func:`resolve_effective_vectors`).  In both cases the float→float32
+    cast happens exactly once at the ``tobytes`` boundary, so hashes are
+    bit-for-bit identical regardless of the input container.
     """
     if not effective_vectors and module_ref is None:
         return 0
@@ -269,11 +276,10 @@ def hash_steering_config(
             layer_dict = effective_vectors[hook]
             for layer_idx in sorted(layer_dict.keys()):
                 entry = layer_dict[layer_idx]
-                # An entry is either a bare list/array of floats or a dict
-                # ``{"vector": [...], "scale": float}``. By the time we get
-                # here the resolver has flattened the dict form into a plain
-                # list, so we expect the bare form — but handle both for
-                # safety.
+                # An entry is either a list/ndarray of floats or a dict
+                # ``{"vector": [...], "scale": float}``. By the time we get here
+                # the resolver has flattened the dict form into a plain
+                # array — but handle both for safety.
                 if isinstance(entry, dict):
                     vec = entry.get("vector", entry)
                     scale = float(entry.get("scale", 1.0))
