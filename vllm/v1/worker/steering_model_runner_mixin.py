@@ -5,7 +5,7 @@ Define activation steering functionality mixin for model runners.
 """
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -110,7 +110,7 @@ class SteeringModelRunnerMixin:
         so per-step ``_update_steering_buffers`` and the public API
         methods can short-circuit cheaply.
         """
-        steerable: dict[int, nn.Module] = {}
+        steerable: dict = {}
         if hasattr(self, "get_model"):
             for mod in self.get_model().modules():
                 if not hasattr(mod, "layer_idx"):
@@ -517,7 +517,8 @@ class SteeringModelRunnerMixin:
         ):
             if self._steering_index_dirty:
                 any_layer = next(iter(self._steerable_layers_cache.values()))
-                any_layer.steering_index.zero_()
+                steering_index = cast(torch.Tensor, any_layer.steering_index)
+                steering_index.zero_()
                 self._steering_index_dirty = False
             return
 
@@ -536,7 +537,7 @@ class SteeringModelRunnerMixin:
         # 2. Build steering index
         # Get the shared steering_index buffer (all layers share one tensor)
         any_layer = next(iter(self._steerable_layers_cache.values()))
-        steering_index = any_layer.steering_index
+        steering_index = cast(torch.Tensor, any_layer.steering_index)
 
         num_reqs = self.input_batch.num_reqs
         req_ids = self.input_batch.req_ids

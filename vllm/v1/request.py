@@ -170,12 +170,8 @@ class Request:
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
-        self.block_hash_prefill_steering_config_hash = (
-            self.prefill_steering_config_hash
-        )
-        self.block_hash_decode_steering_config_hash = (
-            self.decode_steering_config_hash
-        )
+        self.block_hash_prefill_steering_config_hash = self.prefill_steering_config_hash
+        self.block_hash_decode_steering_config_hash = self.decode_steering_config_hash
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -247,9 +243,7 @@ class Request:
         0 for that phase rather than the deferred per-request hash.
         """
         new_prefill_hash = (
-            self.prefill_steering_config_hash
-            if prefill_hash is None
-            else prefill_hash
+            self.prefill_steering_config_hash if prefill_hash is None else prefill_hash
         )
         new_decode_hash = (
             self.decode_steering_config_hash if decode_hash is None else decode_hash

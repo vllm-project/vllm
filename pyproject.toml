@@ -92,6 +92,7 @@ ignore = [
 
 [tool.ruff.format]
 docstring-code-format = true
+exclude = ["vllm/third_party/**"]
 
 [tool.mypy]
 plugins = ['pydantic.mypy']
@@ -124,8 +125,8 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
     "examples/pooling/token_embed/*", "tests/models/language/pooling/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", "tests/entrypoints/openai/speech_to_text/test_transcription_validation.py",
-    "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
-    "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
+    "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html",
+    "tests/v1/engine/test_fast_incdec_prefix_err.py", "upstream/RFC.md", "upstream/prior.md", ".git/*"]
 ignore-hidden = false
 
 [tool.typos.default]

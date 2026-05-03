@@ -30,9 +30,7 @@ def _apply_steering(
 ) -> torch.Tensor:
     """Reference implementation of the indexed-gather steering math."""
     N = hidden_states.shape[0]
-    return hidden_states + steering_table[steering_index[:N]].to(
-        hidden_states.dtype
-    )
+    return hidden_states + steering_table[steering_index[:N]].to(hidden_states.dtype)
 
 
 class TestIndexedGatherSteering:

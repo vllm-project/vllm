@@ -37,6 +37,7 @@ EXCLUDE = [
     "vllm/model_executor/layers/fla/ops",
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
+    "vllm/model_executor/layers/fused_moe/runner/moe_runner_base.py",
 ]
 
 
