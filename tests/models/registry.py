@@ -238,6 +238,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
+    "CohereMoeForCausalLM": _HfExamplesInfo(
+        "/host/engines/cohere-moe",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     # FIXME: databricks/dbrx-instruct has been deleted
     "DbrxForCausalLM": _HfExamplesInfo(
@@ -1117,6 +1122,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
     ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
+    "HfMoondream": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
     "Molmo2ForConditionalGeneration": _HfExamplesInfo(
         "allenai/Molmo2-8B",
         extras={"olmo": "allenai/Molmo2-O-7B"},
@@ -1391,9 +1406,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     # [Encoder-decoder]
     "CohereAsrForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/cohere-transcribe-03-2026",
-        trust_remote_code=True,
-        is_available_online=False,  # TODO (ekagra): revert after asr release
+        "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True

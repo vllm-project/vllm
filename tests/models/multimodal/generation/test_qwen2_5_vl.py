@@ -3,6 +3,7 @@
 
 import pytest
 
+from vllm.assets.image import ImageAsset
 from vllm.multimodal.video import sample_frames_from_video
 
 from ....conftest import VIDEO_ASSETS
@@ -11,6 +12,7 @@ models = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 target_dtype = "bfloat16"
 
 VIDEO_PLACEHOLDER = "<|vision_start|><|video_pad|><|vision_end|>"
+IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 
 
 def qwen2_5_vl_chat_template(*query):
@@ -26,6 +28,25 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
         ),
     }
 )
+
+
+WINDOW_ATTN_IMAGE_PROMPT = qwen2_5_vl_chat_template(
+    IMAGE_PLACEHOLDER,
+    "Describe the image.",
+)
+
+
+def _window_attention_regression_image():
+    # image from regression issue: https://github.com/vllm-project/vllm/issues/15122
+    image = ImageAsset("hato").pil_image
+    return image.resize((image.width // 2, image.height // 2))
+
+
+def _encoder_cudagraph_config(*, max_vision_items: int) -> dict:
+    return {
+        "cudagraph_mm_encoder": True,
+        "encoder_cudagraph_max_vision_items_per_batch": max_vision_items,
+    }
 
 
 @pytest.mark.core_model
@@ -145,4 +166,78 @@ def test_qwen2_5_vl_evs_batched_videos(
             assert len(output_text) > 0
 
             # Ensure the output is a string
+            assert isinstance(output_text, str)
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", [target_dtype])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+def test_qwen2_5_vl_window_attention_image(
+    vllm_runner,
+    model,
+    dtype: str,
+    max_tokens: int,
+    use_bytecode_hook: bool,
+    monkeypatch,
+) -> None:
+    """Regression test for Qwen2.5 window-attention image path."""
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
+
+    prompt = [WINDOW_ATTN_IMAGE_PROMPT]
+    images = [[_window_attention_regression_image()]]
+
+    with vllm_runner(
+        model,
+        runner="generate",
+        max_model_len=4096,
+        dtype=dtype,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=_encoder_cudagraph_config(max_vision_items=1),
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(prompt, max_tokens, images=images)
+
+        assert len(outputs) == 1
+        output_ids, output_text = outputs[0]
+        assert len(output_ids) > 0
+        assert len(output_text) > 0
+        assert isinstance(output_text, str)
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", [target_dtype])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+def test_qwen2_5_vl_window_attention_image_batch(
+    vllm_runner,
+    model,
+    dtype: str,
+    max_tokens: int,
+    use_bytecode_hook: bool,
+    monkeypatch,
+) -> None:
+    """Regression test window-attention with a small image batch."""
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
+
+    image = _window_attention_regression_image()
+    prompts = [WINDOW_ATTN_IMAGE_PROMPT, WINDOW_ATTN_IMAGE_PROMPT]
+    images = [[image], [image]]
+
+    with vllm_runner(
+        model,
+        runner="generate",
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype=dtype,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=_encoder_cudagraph_config(max_vision_items=2),
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
+
+        assert len(outputs) == 2
+        for output_ids, output_text in outputs:
+            assert len(output_ids) > 0
+            assert len(output_text) > 0
             assert isinstance(output_text, str)

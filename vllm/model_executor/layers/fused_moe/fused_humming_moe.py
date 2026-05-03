@@ -4,7 +4,7 @@
 
 import json
 import math
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from humming import dtypes
@@ -16,7 +16,11 @@ from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -34,21 +38,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.v1.worker.workspace import current_workspace_manager
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
-
-
 logger = init_logger(__name__)
 
 
 def get_humming_moe_gemm_type() -> str:
     env_gemm_type: str = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
     env_gemm_type = env_gemm_type.lower()
-    if env_gemm_type in ["indexed", "grouped"]:
+    if env_gemm_type == "indexed":
         gemm_type = env_gemm_type
-    elif current_platform.has_device_capability(90):
-        # for device that supports TMA, use grouped gemm
-        gemm_type = "grouped"
+    elif env_gemm_type in ["grouped_contiguous", "grouped"]:
+        gemm_type = "grouped_contiguous"
     else:
         gemm_type = "indexed"
 
@@ -60,49 +59,44 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         layer: torch.nn.Module,
-        quant_method: "HummingMoEMethod",
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular | None = None,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
         self.layer = layer
         self.num_experts = self.layer.num_experts
         self.global_num_experts = self.layer.global_num_experts
         self.init_humming_moe()
 
-        if prepare_finalize is not None:
-            max_num_tokens: int | None = None
-            num_dispatchers: int | None = None
-            if self.is_batched:
-                max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-                num_dispatchers = prepare_finalize.num_dispatchers()
+        if self.is_batched():
+            assert max_num_tokens is not None and num_dispatchers is not None
 
-            assert quant_method.moe_quant_config is not None
-            super().__init__(
-                moe_config=quant_method.moe,
-                quant_config=quant_method.moe_quant_config,
-                max_num_tokens=max_num_tokens,
-                num_dispatchers=num_dispatchers,
-            )
-        else:
-            assert not self.is_batched
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
 
     def init_humming_moe(self):
         self.compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
-            "gemm_type": self.humming_gemm_type.value,
+            "gemm_type": self.humming_gemm_type().value,
         }
         self.w13_tuning_config = HummingMethod.get_default_tuning_configs(
             layer=self.layer,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
-            gemm_type=self.humming_gemm_type,
+            gemm_type=self.humming_gemm_type(),
             sublayer_name="w13",
         )
         self.w2_tuning_config = HummingMethod.get_default_tuning_configs(
             layer=self.layer,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
-            gemm_type=self.humming_gemm_type,
+            gemm_type=self.humming_gemm_type(),
             sublayer_name="w2",
         )
         self.compute_config_str = json.dumps(self.compute_config)
@@ -124,13 +118,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         global_num_experts = self.global_num_experts
         return math.ceil(global_valid_shape_m * num_experts / global_num_experts)
 
-    @property
-    def humming_gemm_type(self) -> HummingGemmType:
+    @staticmethod
+    def humming_gemm_type() -> HummingGemmType:
         raise NotImplementedError
 
-    @property
-    def is_batched(self) -> bool:
-        return self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+    @classmethod
+    def is_batched(cls) -> bool:
+        return cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
 
     @staticmethod
     def _supports_quant_scheme(
@@ -189,7 +183,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         assert w1.size(0) == num_experts
         assert w2.size(0) == num_experts
 
-        if not self.is_batched:
+        if not self.is_batched():
             num_tokens = a1.size(0)
             assert topk_ids.size(0) == num_tokens
         else:
@@ -201,7 +195,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
         num_experts = self.num_experts
-        N = self.layer.intermediate_size
+        N = self.layer.intermediate_size_per_partition
         K = self.layer.hidden_size
         assert isinstance(num_experts, int)
         assert isinstance(N, int)
@@ -218,7 +212,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         # The output must be derived from workspace1.
 
         output_shape: tuple[int, ...]
-        if self.is_batched:
+        if self.is_batched():
             max_num_tokens = self.max_num_tokens
             num_dispatchers = self.num_dispatchers
             assert max_num_tokens is not None and num_dispatchers is not None
@@ -227,7 +221,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             output_shape = (num_experts, max_num_tokens * num_dispatchers, K)
         else:
             input_shape_m = M
-            if self.humming_gemm_type != HummingGemmType.INDEXED:
+            if self.humming_gemm_type() != HummingGemmType.INDEXED:
                 input_shape_m = M * topk
             real_shape_m = M * topk
             output_shape = (M, K)
@@ -262,7 +256,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 "dtype": torch_dtype_map[a_dtype],
             },
             "down_output": {
-                "shape": output_shape if self.is_batched else (real_shape_m, K),
+                "shape": output_shape if self.is_batched() else (real_shape_m, K),
                 "dtype": torch_dtype_map[c_dtype],
             },
             "output": {
@@ -288,7 +282,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             ]
 
         # batched moe use down_output as output
-        if not self.is_batched:
+        if not self.is_batched():
             required_buffers.append("output")
 
         return buffer_metas, required_buffers
@@ -308,7 +302,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             else:
                 workspace2_nbytes = max(workspace2_nbytes, nbytes)
 
-        output_key = "down_output" if self.is_batched else "output"
+        output_key = "down_output" if self.is_batched() else "output"
         output_shape = buffer_metas[output_key]["shape"]
 
         return (workspace1_nbytes // 2,), (workspace2_nbytes // 2,), output_shape
@@ -395,6 +389,33 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     ):
         raise NotImplementedError
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            supported = cls.activation_format() == activation_format
+            reason = "activation_format mismatched"
+        elif activation_format == mk.FusedMoEActivationFormat.Standard:
+            if cls.activation_format() != mk.FusedMoEActivationFormat.Standard:
+                supported = False
+                reason = "activation_format mismatched"
+            else:
+                assert hasattr(cls, "humming_gemm_type")
+                gemm_type = cls.humming_gemm_type().value.lower()
+                preferred_gemm_type = get_humming_moe_gemm_type().lower()
+                supported = preferred_gemm_type == gemm_type
+                reason = "preferred gemm type mismatched"
+        else:
+            supported = False
+            reason = "unsupported activation_format"
+
+        return supported, None if supported else reason
+
 
 class HummingIndexedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -404,8 +425,8 @@ class HummingIndexedExperts(HummingExpertsBase):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    @property
-    def humming_gemm_type(self) -> HummingGemmType:
+    @staticmethod
+    def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.INDEXED
 
     def prepare_humming_moe_kwargs(
@@ -526,8 +547,8 @@ class HummingGroupedExperts(HummingExpertsBase):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    @property
-    def humming_gemm_type(self) -> HummingGemmType:
+    @staticmethod
+    def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.GROUPED_CONTIGUOUS
 
     def main_apply(
@@ -619,8 +640,8 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
-    @property
-    def humming_gemm_type(self) -> HummingGemmType:
+    @staticmethod
+    def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.GROUPED_MASKED
 
     def main_apply(
