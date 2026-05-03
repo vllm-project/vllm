@@ -352,7 +352,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 return torch.mm(
                     hidden_states,
                     compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
+                    out_dtype=torch.bfloat16,
                 )
 
             aux_fns[0] = compressor_kv_score
@@ -369,7 +369,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 return torch.mm(
                     hidden_states,
                     indexer.compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
+                    out_dtype=torch.bfloat16,
                 )
 
             aux_fns[1] = indexer_weights_proj
