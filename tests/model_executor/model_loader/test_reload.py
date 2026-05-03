@@ -59,6 +59,34 @@ def test_reload_lifecycle():
         assert tensor.__dict__ == materialized_tensor.__dict__
 
 
+def test_materialize_layer_preserves_non_meta_tensors():
+    """Ensure that materialize_layer does not overwrite non meta tensors."""
+    layer = torch.nn.Linear(2, 3, bias=True)
+
+    # Create a non meta bias tensor and meta weight, which can happen with FP8
+    bias_values = torch.ones(3)
+    layer.bias.data.copy_(bias_values)
+    layer.weight = torch.nn.Parameter(layer.weight.data.to("meta"))
+
+    assert layer.weight.is_meta
+    assert not layer.bias.is_meta
+
+    # materialize the layer weights after the bias is initialized
+    info = LayerReloadingInfo(
+        restore_metadata=({}, {}),
+        restore_device=torch.device("cpu"),
+    )
+    materialize_layer(layer, info)
+
+    # Ensure the weight materialized off meta
+    assert not layer.weight.is_meta
+    assert layer.weight.device.type == "cpu"
+
+    # Ensure that the bias is (still) not meta and values are unchanged
+    assert not layer.bias.is_meta
+    assert torch.equal(layer.bias.data, bias_values)
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
