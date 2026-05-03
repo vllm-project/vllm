@@ -535,6 +535,13 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        assert isinstance(self.bad_words, list)
+        if any(not bad_word for bad_word in self.bad_words):
+            raise VLLMValidationError(
+                "bad_words cannot contain an empty string.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
