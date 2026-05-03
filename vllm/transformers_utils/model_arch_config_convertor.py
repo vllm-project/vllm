@@ -267,6 +267,7 @@ class ModelArchConfigConvertorBase:
             "bagel",
             "gemma3",
             "molmo2",
+            "moondream3",
             "paligemma",
             "umm",
         )
