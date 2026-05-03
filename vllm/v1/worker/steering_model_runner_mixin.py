@@ -170,10 +170,15 @@ class SteeringModelRunnerMixin:
         # so per-request vectors are allocated on the same device,
         # avoiding CPU->GPU copies each step.
         table_device: torch.device | None = None
+        table_dtype: torch.dtype | None = None
+        hidden_size: int | None = None
         for mod in steerable.values():
             for attr in HOOK_POINT_TABLE_ATTR.values():
                 if hasattr(mod, attr):
-                    table_device = getattr(mod, attr).device
+                    table_buf = getattr(mod, attr)
+                    table_device = table_buf.device
+                    table_dtype = table_buf.dtype
+                    hidden_size = table_buf.shape[1]
                     break
             if table_device is not None:
                 break
@@ -205,6 +210,29 @@ class SteeringModelRunnerMixin:
                 # Pinned memory unavailable (e.g. CPU-only test
                 # environment); fall back to a regular CPU tensor.
                 self._steering_index_pinned = torch.zeros(max_tokens, dtype=torch.long)
+
+        # Warm the fused-apply Triton kernel so first-call JIT cost
+        # happens before any captured forward pass. Without this, the
+        # initial CUDA-graph capture step could trigger a Triton compile
+        # and fail capture.
+        if (
+            table_device is not None
+            and table_device.type == "cuda"
+            and table_dtype is not None
+            and hidden_size is not None
+        ):
+            from vllm.model_executor.layers.steering_kernel import (
+                warmup_apply_steering_kernel,
+            )
+
+            compute_dtype = getattr(self.vllm_config.model_config, "dtype", table_dtype)
+            warmup_apply_steering_kernel(
+                hidden_size=hidden_size,
+                table_rows=steering_config.max_steering_configs + 3,
+                table_dtype=table_dtype,
+                compute_dtype=compute_dtype,
+                device=table_device,
+            )
 
     # -----------------------------------------------------------------------
     # Steerable-layer discovery and vector-spec validation
