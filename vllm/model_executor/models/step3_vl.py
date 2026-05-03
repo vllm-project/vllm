@@ -46,7 +46,12 @@ from vllm.transformers_utils.processors.step3_vl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -473,8 +478,13 @@ class Step3VisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ):
         hidden_states = self.embeddings(pixel_values)
+        # TODO(Soya):
+        if encoder_metadata is None:
+            encoder_metadata = self.prepare_encoder_metadata(pixel_values)
+
         if self.use_data_parallel:
             hidden_states = run_dp_sharded_vision_model(hidden_states, self.transformer)
         else:
@@ -487,13 +497,29 @@ class Step3VisionTransformer(nn.Module):
     info=Step3VLProcessingInfo,
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
-class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Step3VLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
         }
     )
+
+    # TODO(Soya): need to implement these func
+    # get_encoder_cudagraph_config
+    # get_input_modality
+    # get_max_frames_per_video
+    # get_encoder_cudagraph_budget_range
+    # get_encoder_cudagraph_num_items
+    # get_encoder_cudagraph_per_item_output_tokens
+    # get_encoder_cudagraph_per_item_input_sizes
+    # select_encoder_cudagraph_items
+    # prepare_encoder_cudagraph_capture_inputs
+    # prepare_encoder_cudagraph_replay_buffers
+    # encoder_cudagraph_forward
+    # encoder_eager_forward
 
     supports_encoder_tp_data = True
 
@@ -569,6 +595,19 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     @property
     def dtype(self):
         return next(self.parameters()).dtype
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key_by_modality={"image": "pixel_values"},
+            buffer_keys=[],
+            out_hidden_size=self.config.vison_config.output_hidden_size,
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "image"
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
