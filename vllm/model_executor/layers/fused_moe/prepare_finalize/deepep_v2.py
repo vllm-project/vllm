@@ -174,74 +174,45 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
-            parts = [
-                torch.full(
-                    (count,),
-                    i + self.rank_expert_offset,
+            total_tokens = sum(recv_expert_num_tokens)
+            if total_tokens > 0:
+                recv_topk_idx = torch.empty(
+                    total_tokens,
                     dtype=torch.int64,
                     device=expert_x.device,
                 )
-                for i, count in enumerate(recv_expert_num_tokens)
-                if count > 0
-            ]
-            recv_topk_idx = (
-                torch.cat(parts)
-                if parts
-                else torch.empty(
+                offset = 0
+                for i, count in enumerate(recv_expert_num_tokens):
+                    if count > 0:
+                        recv_topk_idx[offset:offset + count].fill_(
+                            i + self.rank_expert_offset)
+                        offset += count
+            else:
+                recv_topk_idx = torch.empty(
                     0, dtype=torch.int64, device=expert_x.device,
                 )
-            )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
             # do_expand=False (decode/cudagraph mode): recv_topk_idx has
-            # LOCAL expert IDs (-1 for non-local). Sanitize padding rows
-            # from worst-case allocation, then convert to global IDs.
-            total_rows = expert_x.shape[0]
-            num_real = psum_recv_per_rank[-1]  # GPU scalar tensor
-            row_indices = torch.arange(
-                total_rows, device=expert_x.device, dtype=num_real.dtype,
-            )
-            is_padding = (row_indices >= num_real).unsqueeze(1)
-
-            expert_x = torch.where(
-                is_padding, torch.zeros_like(expert_x), expert_x)
-            if expert_x_scale is not None:
-                expert_x_scale = torch.where(
-                    is_padding, torch.ones_like(expert_x_scale),
-                    expert_x_scale)
-            if recv_topk_weights is not None:
-                recv_topk_weights = torch.where(
-                    is_padding, torch.zeros_like(recv_topk_weights),
-                    recv_topk_weights)
-
-            # dispatch(do_expand=False) returns LOCAL expert IDs (-1 for
-            # non-local, -1 for padding after the where above).
-            # Convert valid local IDs to global. Keep -1 as -1 so
-            # DeepGemm's is_computation_valid skips those rows.
-            is_invalid = (recv_topk_idx < 0) | is_padding
+            # LOCAL expert IDs (-1 for non-local and padding rows).
+            # Convert valid local IDs to global. Rows with -1 are
+            # skipped by expert kernels (TrtLLM tile-level skipping,
+            # DeepGemm is_computation_valid), so no need to zero
+            # hidden states, scales, or weights for padding rows.
+            valid_mask = recv_topk_idx >= 0
             recv_topk_idx = torch.where(
-                is_invalid,
-                -1,
+                valid_mask,
                 recv_topk_idx + self.rank_expert_offset,
+                recv_topk_idx,
             )
-            if recv_topk_weights is not None:
-                recv_topk_weights = torch.where(
-                    is_invalid,
-                    torch.zeros_like(recv_topk_weights),
-                    recv_topk_weights,
-                )
 
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        if recv_topk_idx is not None and not self.use_cudagraph:
-            # do_expand=True: we have exact per-expert counts
-            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-                recv_expert_num_tokens, device=expert_x.device,
-            )
-        else:
-            expert_tokens_meta = None
+        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+            recv_expert_num_tokens, device=expert_x.device,
+        )
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None

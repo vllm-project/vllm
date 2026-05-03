@@ -85,6 +85,18 @@ def _get_priority_backends(
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
 
+    # With DeepEP v2 contiguous layout (do_expand=False), tensors are
+    # worst-case allocated with padding. TrtLLM's tile-level skipping
+    # avoids wasted compute on padding rows; other backends process all rows.
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and moe_config.moe_parallel_config.use_deepep_v2_kernels
+        and activation_key == kFp8Dynamic128Sym
+        and weight_key == kFp8Static128BlockSym
+    ):
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_TRTLLM)
+
     # On Hopper for Block Fp8, prefer Triton for TP and FI CUTLASS for EP.
     if (
         current_platform.is_cuda()

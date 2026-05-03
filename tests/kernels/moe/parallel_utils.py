@@ -221,6 +221,7 @@ def make_deepep_v2_a2a(
     pgi: ProcessGroupInfo,
     dp_size: int,
     v2_args: DeepEPV2Args,
+    use_cudagraph: bool = False,
 ):
     import deep_ep
 
@@ -240,4 +241,5 @@ def make_deepep_v2_a2a(
         num_experts=v2_args.num_experts,
         num_topk=v2_args.num_topk,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
+        use_cudagraph=use_cudagraph,
     )
