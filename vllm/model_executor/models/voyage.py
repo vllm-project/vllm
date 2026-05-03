@@ -50,8 +50,8 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             bias=False,
         )
 
-    def forward(self, *args, **kwargs):
-        out = super().forward(*args, **kwargs)
+    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None):
+        out = super().forward(input_ids, positions, intermediate_tensors, inputs_embeds)
         return self.linear(out)
 
     def _fuse_qkv_proj(self, weights: Iterable[WeightItem]) -> Iterable[WeightItem]:
