@@ -31,7 +31,10 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
-import soundfile as sf
+try:
+    import soundfile as sf
+except ImportError:
+    sf = PlaceholderModule("soundfile")
 from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
