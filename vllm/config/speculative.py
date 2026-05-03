@@ -258,8 +258,7 @@ class SpeculativeConfig:
     token, and the draft probabilities are treated as one-hot during rejection
     sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
     draft logits are used for the probability ratio test during rejection
-    sampling. This comes at the cost of additional GPU memory usage. This
-    parameter currently only applies to Model Runner V2."""
+    sampling. This comes at the cost of additional GPU memory usage."""
 
     def compute_hash(self) -> str:
         """

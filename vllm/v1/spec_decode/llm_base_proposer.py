@@ -225,8 +225,9 @@ class SpecDecodeBaseProposer:
             device=device,
             with_numpy=True,
         )
-        self._enable_probabilistic_draft_probs = (
-            self.speculative_config.rejection_sample_method == "probabilistic"
+        self._enable_full_draft_probs = (
+            self.speculative_config.rejection_sample_method == "standard"
+            and self.speculative_config.draft_sample_method == "gumbel"
         )
         self._last_draft_probs: torch.Tensor | None = None
 
@@ -398,7 +399,7 @@ class SpecDecodeBaseProposer:
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if not self._enable_probabilistic_draft_probs:
+        if not self._enable_full_draft_probs:
             return logits.argmax(dim=-1), None
         if sampling_metadata.all_greedy:
             return logits.argmax(dim=-1), None
@@ -409,7 +410,7 @@ class SpecDecodeBaseProposer:
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
+        if not self._enable_full_draft_probs or sampling_metadata.all_greedy:
             return self._greedy_sample(hidden_states), None
         logits = self.model.compute_logits(hidden_states)
         return self._sample_from_logits(logits, sampling_metadata)
