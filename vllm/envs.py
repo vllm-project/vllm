@@ -245,7 +245,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
-    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 4096
+    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1686,10 +1686,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tokens the FP8 main GEMM has idle SMs to share with the bf16 aux GEMMs
     # and overlap is a 5-45% win; above it the FP8 GEMM saturates the device
     # and the cross-stream sync becomes pure overhead. Set to 0 to disable
-    # the multi-stream path entirely. Empirical crossover on B300 (148 SMs)
-    # is ~4096; B200 (132 SMs) is expected ~3072.
+    # the multi-stream path entirely. See #PR 41526 for the empirical result
+    # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
-        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "4096")
+        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
