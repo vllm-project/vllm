@@ -261,6 +261,7 @@ class XPUPlatform(Platform):
                     "Using AWQ quantization with XPU, but VLLM_USE_TRITON_AWQ"
                     " is not set, enabling VLLM_USE_TRITON_AWQ."
                 )
+                envs.VLLM_USE_TRITON_AWQ = True
             os.environ["VLLM_USE_TRITON_AWQ"] = "1"
 
     @classmethod
