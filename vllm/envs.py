@@ -1686,8 +1686,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tokens the FP8 main GEMM has idle SMs to share with the bf16 aux GEMMs
     # and overlap is a 5-45% win; above it the FP8 GEMM saturates the device
     # and the cross-stream sync becomes pure overhead. Set to 0 to disable
-    # the multi-stream path entirely. Empirical crossover on B300 (148 SMs)
-    # is ~4096; B200 (132 SMs) is expected ~3072.
+    # the multi-stream path entirely. See #PR 41526 for the empirical result
+    # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
