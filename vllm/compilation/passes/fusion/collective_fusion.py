@@ -8,6 +8,7 @@ import torch
 import torch._inductor.pattern_matcher as pm
 import torch.distributed.distributed_c10d as c10d
 import torch.fx as fx
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
@@ -32,6 +33,9 @@ from ..vllm_inductor_pass import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 logger = init_logger(__name__)
+
+if hasattr(torch.ops._C, "scaled_fp4_quant"):
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 
 def _flashinfer_scaled_mm_out(
@@ -71,6 +75,84 @@ def _flashinfer_scaled_mm_out(
         scale_b,
         out=out,
         out_dtype=out_dtype or out.dtype,
+    )
+
+
+def _flashinfer_fp4_mm_out(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    *,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+    use_8x4_sf_layout: bool = False,
+    backend: str = "cutlass",
+) -> None:
+    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm_out
+
+    assert A.ndim == 2 and B.ndim == 2 and out.ndim == 2, (
+        "FlashInfer FP4 symm_mem adapter expects 2D inputs and output"
+    )
+    flashinfer_scaled_fp4_mm_out(
+        A,
+        B,
+        scale_a,
+        scale_b,
+        alpha,
+        out=out,
+        out_dtype=out_dtype or out.dtype,
+        use_8x4_sf_layout=use_8x4_sf_layout,
+        backend=backend,
+    )
+
+
+def _flashinfer_quant_fp4_mm_out(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    *,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+    is_sf_swizzled_layout: bool = True,
+    backend: str = "cutlass",
+) -> None:
+    from vllm._custom_ops import scaled_fp4_quant
+    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm_out
+
+    assert A.ndim == 2 and B.ndim == 2 and out.ndim == 2, (
+        "FlashInfer FP4 symm_mem adapter expects 2D inputs and output"
+    )
+    quant_backend = f"flashinfer-{backend}"
+    A_fp4, A_block_scale = scaled_fp4_quant(
+        A,
+        scale_a,
+        is_sf_swizzled_layout=is_sf_swizzled_layout,
+        backend=quant_backend,
+    )
+
+    if A_fp4.shape[1] != B.shape[0]:
+        assert A_fp4.shape[1] < B.shape[0], (
+            "FlashInfer FP4 symm_mem adapter only supports activation K padding"
+        )
+        A_fp4 = torch.nn.functional.pad(
+            A_fp4, (0, B.shape[0] - A_fp4.shape[1])
+        ).contiguous()
+
+    use_8x4_sf_layout = backend == "trtllm" and A.shape[0] <= 32
+    flashinfer_scaled_fp4_mm_out(
+        A_fp4,
+        B,
+        A_block_scale,
+        scale_b,
+        alpha,
+        out=out,
+        out_dtype=out_dtype or out.dtype,
+        use_8x4_sf_layout=use_8x4_sf_layout,
+        backend=backend,
     )
 
 
@@ -143,6 +225,80 @@ def fused_flashinfer_scaled_matmul_reduce_scatter(
     )
 
 
+def fused_flashinfer_fp4_matmul_reduce_scatter_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    out_dtype: torch.dtype | None = None,
+    use_8x4_sf_layout: bool = False,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    world_size = c10d._resolve_process_group(group_name).size()
+    result_shape = list(output_shape)
+    result_shape[orig_scatter_dim] //= world_size
+    return torch.empty(
+        result_shape,
+        dtype=out_dtype or torch.bfloat16,
+        device=A.device,
+    )
+
+
+def fused_flashinfer_fp4_matmul_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    out_dtype: torch.dtype | None = None,
+    use_8x4_sf_layout: bool = False,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    assert orig_scatter_dim == 0 and scatter_dim_after_maybe_reshape == 0, (
+        "FlashInfer FP4 symm_mem adapter currently only supports scatter_dim=0"
+    )
+    world_size = c10d._resolve_process_group(group_name).size()
+    assert A.ndim == 2 and B.ndim == 2, (
+        "FlashInfer FP4 symm_mem adapter expects 2D inputs"
+    )
+    assert A.is_contiguous(), "FlashInfer FP4 symm_mem adapter expects contiguous A"
+    assert A.shape[0] % world_size == 0, (
+        "FlashInfer FP4 symm_mem adapter expects M divisible by world size"
+    )
+
+    kwargs = {
+        "scale_b": B_scale,
+        "alpha": alpha,
+        "out_dtype": out_dtype,
+        "use_8x4_sf_layout": use_8x4_sf_layout,
+        "backend": backend,
+    }
+    return torch.distributed._symmetric_memory._fused_scaled_matmul_reduce_scatter_impl(
+        mm_out_op=_flashinfer_fp4_mm_out,
+        A=A,
+        B=B,
+        A_scale=A_scale,
+        kwargs=kwargs,
+        out_dtype=out_dtype,
+        reduce_op=reduce_op,
+        orig_scatter_dim=orig_scatter_dim,
+        scatter_dim_after_maybe_reshape=scatter_dim_after_maybe_reshape,
+        group_name=group_name,
+        output_shape=output_shape,
+    )
+
+
 def fused_all_gather_flashinfer_scaled_matmul_fake(
     A_shard: torch.Tensor,
     B: torch.Tensor,
@@ -197,6 +353,66 @@ def fused_all_gather_flashinfer_scaled_matmul(
     return outputs[0]
 
 
+def fused_all_gather_flashinfer_fp4_matmul_fake(
+    A_shard: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    gather_dim: int,
+    group_name: str,
+    out_dtype: torch.dtype | None = None,
+    is_sf_swizzled_layout: bool = True,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    world_size = c10d._resolve_process_group(group_name).size()
+    output_shape = list(A_shard.shape)
+    output_shape[gather_dim] *= world_size
+    output_shape[-1] = B.shape[1]
+    return torch.empty(
+        output_shape,
+        dtype=out_dtype or torch.bfloat16,
+        device=A_shard.device,
+    )
+
+
+def fused_all_gather_flashinfer_fp4_matmul(
+    A_shard: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    gather_dim: int,
+    group_name: str,
+    out_dtype: torch.dtype | None = None,
+    is_sf_swizzled_layout: bool = True,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    assert gather_dim == 0, (
+        "FlashInfer FP4 symm_mem adapter currently only supports gather_dim=0"
+    )
+    _, outputs = torch.distributed._symmetric_memory._fused_all_gather_matmul_impl(
+        mm_out_op=_flashinfer_quant_fp4_mm_out,
+        A_shard=A_shard,
+        Bs=[B],
+        A_scale=A_scale,
+        kwargs_list=[
+            {
+                "scale_b": B_scale,
+                "alpha": alpha,
+                "out_dtype": out_dtype,
+                "is_sf_swizzled_layout": is_sf_swizzled_layout,
+                "backend": backend,
+            }
+        ],
+        out_dtypes=[out_dtype],
+        gather_dim=gather_dim,
+        group_name=group_name,
+        return_A=False,
+    )
+    return outputs[0]
+
+
 direct_register_custom_op(
     op_name="fused_flashinfer_scaled_matmul_reduce_scatter",
     op_func=fused_flashinfer_scaled_matmul_reduce_scatter,
@@ -207,6 +423,18 @@ direct_register_custom_op(
     op_name="fused_all_gather_flashinfer_scaled_matmul",
     op_func=fused_all_gather_flashinfer_scaled_matmul,
     fake_impl=fused_all_gather_flashinfer_scaled_matmul_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_flashinfer_fp4_matmul_reduce_scatter",
+    op_func=fused_flashinfer_fp4_matmul_reduce_scatter,
+    fake_impl=fused_flashinfer_fp4_matmul_reduce_scatter_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_all_gather_flashinfer_fp4_matmul",
+    op_func=fused_all_gather_flashinfer_fp4_matmul,
+    fake_impl=fused_all_gather_flashinfer_fp4_matmul_fake,
 )
 
 
@@ -682,6 +910,181 @@ class FlashInferAllGatherBMMFP8Pattern(
         return _replacement
 
 
+class FlashInferFP4ReduceScatterPattern(
+    BasePattern, VllmPatternReplacement[..., torch.Tensor]
+):
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        device: str | None,
+        backend: str,
+        use_8x4_sf_layout: bool,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.backend = backend
+        self.use_8x4_sf_layout = use_8x4_sf_layout
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        a_2d = torch.empty([16, 8], device=self.device, dtype=torch.uint8)
+        b_2d = torch.empty([8, 16], device=self.device, dtype=torch.uint8)
+        a_scale = torch.empty([128, 4], device=self.device, dtype=torch.uint8)
+        b_scale = torch.empty([4, 128], device=self.device, dtype=torch.uint8)
+        alpha = torch.empty([], device=self.device, dtype=torch.float32)
+        return [a_2d, b_2d, a_scale, b_scale, alpha]
+
+    @property
+    def pattern(self) -> Callable[..., torch.Tensor]:
+        def _pattern(
+            a_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            a_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            mm = torch.ops.vllm.flashinfer_mm_fp4.default(
+                a_2d,
+                b_2d,
+                a_scale,
+                b_scale,
+                alpha,
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+            return torch.ops.vllm.reduce_scatter.default(
+                mm,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., torch.Tensor]:
+        def _replacement(
+            a_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            a_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.ops.vllm.fused_flashinfer_fp4_matmul_reduce_scatter.default(
+                a_2d,
+                b_2d,
+                a_scale,
+                b_scale,
+                alpha,
+                "sum",
+                0,
+                0,
+                self.tp.device_group.group_name,
+                [a_2d.shape[0], b_2d.shape[1]],
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+
+        return _replacement
+
+
+class FlashInferAllGatherFP4Pattern(
+    BasePattern, VllmPatternReplacement[..., torch.Tensor]
+):
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        device: str | None,
+        backend: str,
+        use_8x4_sf_layout: bool,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.backend = backend
+        self.use_8x4_sf_layout = use_8x4_sf_layout
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        a_shard_2d = torch.empty([8, 16], device=self.device, dtype=self.dtype)
+        b_2d = torch.empty([8, 16], device=self.device, dtype=torch.uint8)
+        input_scale = torch.empty([1, 1], device=self.device, dtype=torch.float32)
+        quant_output = torch.empty([16, 8], device=self.device, dtype=torch.uint8)
+        output_scale = torch.empty([128, 4], device=self.device, dtype=torch.uint8)
+        b_scale = torch.empty([4, 128], device=self.device, dtype=torch.uint8)
+        alpha = torch.empty([], device=self.device, dtype=torch.float32)
+        return [
+            a_shard_2d,
+            b_2d,
+            input_scale,
+            quant_output,
+            output_scale,
+            b_scale,
+            alpha,
+        ]
+
+    @property
+    def pattern(self) -> Callable[..., torch.Tensor]:
+        def _pattern(
+            a_shard_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            input_scale: torch.Tensor,
+            quant_output: torch.Tensor,
+            output_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                a_shard_2d,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+            quant = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=all_gather,
+                input_scale=input_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_output,
+                output_scale=output_scale,
+            )
+            return torch.ops.vllm.flashinfer_mm_fp4.default(
+                quant[1],
+                b_2d,
+                quant[2],
+                b_scale,
+                alpha,
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., torch.Tensor]:
+        def _replacement(
+            a_shard_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            input_scale: torch.Tensor,
+            quant_output: torch.Tensor,
+            output_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.ops.vllm.fused_all_gather_flashinfer_fp4_matmul.default(
+                a_shard_2d,
+                b_2d,
+                input_scale,
+                b_scale,
+                alpha,
+                0,
+                self.tp.device_group.group_name,
+                self.dtype,
+                True,
+                self.backend,
+            )
+
+        return _replacement
+
+
 class AsyncTPPass(VllmFusionPatternMatcherPass):
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
@@ -718,6 +1121,44 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                 self.register(
                     FlashInferBMMFP8ReduceScatterPattern(self.model_dtype, self.device)
                 )
+            if (
+                hasattr(torch.ops.vllm, "flashinfer_mm_fp4")
+                and "STATIC_FP4_QUANT_OP" in globals()
+            ):
+                for backend in ("cutlass", "cudnn"):
+                    self.register(
+                        FlashInferAllGatherFP4Pattern(
+                            self.model_dtype,
+                            self.device,
+                            backend,
+                            use_8x4_sf_layout=False,
+                        )
+                    )
+                    self.register(
+                        FlashInferFP4ReduceScatterPattern(
+                            self.model_dtype,
+                            self.device,
+                            backend,
+                            use_8x4_sf_layout=False,
+                        )
+                    )
+                for use_8x4_sf_layout in (False, True):
+                    self.register(
+                        FlashInferAllGatherFP4Pattern(
+                            self.model_dtype,
+                            self.device,
+                            "trtllm",
+                            use_8x4_sf_layout=use_8x4_sf_layout,
+                        )
+                    )
+                    self.register(
+                        FlashInferFP4ReduceScatterPattern(
+                            self.model_dtype,
+                            self.device,
+                            "trtllm",
+                            use_8x4_sf_layout=use_8x4_sf_layout,
+                        )
+                    )
 
         self.dump_patterns(config, self.pm_pass)
 
