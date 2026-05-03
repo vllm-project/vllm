@@ -214,6 +214,233 @@ class TestExtractToolCalls:
 
 
 # ---------------------------------------------------------------------------
+# Tests: legacy nested-arguments unwrap
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyArgumentsUnwrap:
+    """Tests for the OpenAI-legacy nested-arguments shape normalization.
+
+    DeepSeek-V4-Flash is multi-paradigm trained and occasionally emits a
+    single DSML parameter literally named ``arguments`` whose value is the
+    entire arg payload as a JSON string -- a leak from training data that
+    included OpenAI's legacy function-call format. ``_maybe_unwrap_legacy_arguments``
+    detects this shape and unwraps it transparently so downstream
+    consumers (which parse ``function.arguments`` once and then access
+    fields) get the expected flat shape rather than a doubly-wrapped one.
+
+    The unwrap is gated on four conditions to avoid clobbering legitimate
+    uses; all are exercised below.
+    """
+
+    @pytest.fixture
+    def parser(self):
+        return make_parser()
+
+    # --- Non-streaming path ---------------------------------------------
+
+    def test_unwraps_legacy_nested_arguments(self, parser):
+        """Single ``arguments`` param containing JSON object -> unwrapped."""
+        nested = json.dumps({"command": "echo hello"})
+        model_output = build_tool_call("exec", {"arguments": nested})
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hello"}
+        assert "arguments" not in args
+
+    def test_normal_flat_args_untouched(self, parser):
+        model_output = build_tool_call("exec", {"command": "echo hello"})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hello"}
+
+    def test_multi_key_with_arguments_untouched(self, parser):
+        """Unwrap requires ``arguments`` to be the SOLE key.
+
+        If the model emits ``arguments`` alongside other parameters, the
+        ``arguments`` name is most likely coincidental — leave alone.
+        """
+        nested = json.dumps({"a": 1})
+        model_output = build_tool_call("exec", {"arguments": nested, "other": "x"})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"arguments": nested, "other": "x"}
+
+    def test_tool_with_arguments_in_schema_untouched(self):
+        """Tool's own schema declares ``arguments`` -> leave the payload alone.
+
+        This is the key safety gate: a tool that legitimately accepts an
+        ``arguments`` parameter should not have its payload mangled. Uses
+        ``ChatCompletionToolsParam`` (not the MagicMock helper) so the
+        parent ``ToolParser.__init__`` actually retains the tool in
+        ``self.tools`` (it filters out non-isinstance entries).
+        """
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="custom_eval",
+                parameters={
+                    "type": "object",
+                    "properties": {"arguments": {"type": "string"}},
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        nested = json.dumps({"command": "echo hello"})
+        model_output = build_tool_call("custom_eval", {"arguments": nested})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"arguments": nested}
+
+    def test_function_tool_shape_safety_gate(self):
+        """The safety gate must also recognize ``FunctionTool``-shaped tools.
+
+        ``self.tools`` can contain either ``ChatCompletionToolsParam`` (Chat
+        Completions API; schema under ``.function.parameters``) OR
+        ``FunctionTool`` (Responses API, ``openai.types.responses``;
+        ``name`` and ``parameters`` at top level). The previous version of
+        ``_tool_schema_property_names`` only inspected the former, so a
+        ``FunctionTool`` whose schema legitimately declared an
+        ``arguments`` property would have its payload incorrectly
+        unwrapped.
+
+        Regression case: the legacy-args unwrap should NOT fire when the
+        ``FunctionTool`` schema declares ``arguments`` as a real property.
+        """
+        from openai.types.responses import FunctionTool
+
+        tool = FunctionTool(
+            type="function",
+            name="custom_eval",
+            parameters={
+                "type": "object",
+                "properties": {"arguments": {"type": "string"}},
+            },
+            strict=False,
+        )
+        parser = make_parser(tools=[tool])
+        nested = json.dumps({"command": "echo hello"})
+        model_output = build_tool_call("custom_eval", {"arguments": nested})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        # Must NOT be unwrapped — the tool schema legitimately declares
+        # an ``arguments`` property.
+        assert args == {"arguments": nested}
+
+    def test_arguments_value_not_json_untouched(self, parser):
+        model_output = build_tool_call("exec", {"arguments": "plain text not json"})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"arguments": "plain text not json"}
+
+    def test_arguments_value_json_array_untouched(self, parser):
+        """Unwrap fires only for objects, not arrays.
+
+        Arrays as the entire payload don't match the OpenAI-legacy
+        nested-args pattern this normalization corrects.
+        """
+        model_output = build_tool_call("exec", {"arguments": "[1, 2, 3]"})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"arguments": "[1, 2, 3]"}
+
+    def test_arguments_value_empty_object_untouched(self, parser):
+        """Empty object -> no useful content to unwrap; leave alone."""
+        model_output = build_tool_call("exec", {"arguments": "{}"})
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"arguments": "{}"}
+
+    def test_legacy_and_flat_round_trip_to_same_args(self):
+        """Demonstrates end-to-end equivalence after type coercion.
+
+        Whether the model emits the legacy nested form or the canonical
+        flat form, downstream consumers should observe the same
+        ``function.arguments`` payload.
+        """
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="toggle",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {"type": "boolean"},
+                        "count": {"type": "integer"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+
+        nested = json.dumps({"enabled": True, "count": 42})
+        legacy_output = build_tool_call("toggle", {"arguments": nested})
+        legacy_args = json.loads(
+            parser.extract_tool_calls(legacy_output, None)
+            .tool_calls[0]
+            .function.arguments
+        )
+
+        flat_output = build_tool_call("toggle", {"enabled": "true", "count": "42"})
+        flat_args = json.loads(
+            parser.extract_tool_calls(flat_output, None)
+            .tool_calls[0]
+            .function.arguments
+        )
+
+        assert legacy_args == flat_args == {"enabled": True, "count": 42}
+
+    # --- Streaming path -------------------------------------------------
+
+    def test_unwraps_in_streaming_path(self, parser):
+        """The unwrap fires in the streaming extract path too.
+
+        Reuses the streaming harness from TestExtractToolCallsStreaming
+        for fidelity to how vLLM actually drives the parser at runtime.
+        """
+        nested = json.dumps({"command": "echo hello"})
+        full_text = build_tool_call("exec", {"arguments": nested})
+
+        # Reuse the line-chunked streaming driver via a fresh helper.
+        request = make_request()
+        chunks: list[str] = []
+        remaining = full_text
+        while remaining:
+            nl = remaining.find("\n")
+            if nl == -1:
+                chunks.append(remaining)
+                break
+            chunks.append(remaining[: nl + 1])
+            remaining = remaining[nl + 1 :]
+
+        deltas = []
+        prev = ""
+        for chunk in chunks:
+            curr = prev + chunk
+            result = parser.extract_tool_calls_streaming(
+                previous_text=prev,
+                current_text=curr,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            prev = curr
+            if result is not None:
+                deltas.append(result)
+
+        # Reconstruct the streamed arguments fragment by fragment.
+        args_str = "".join(
+            tc.function.arguments
+            for d in deltas
+            if d.tool_calls
+            for tc in d.tool_calls
+            if tc.function and tc.function.arguments
+        )
+        assert json.loads(args_str) == {"command": "echo hello"}
+
+
+# ---------------------------------------------------------------------------
 # Tests: extract_tool_calls_streaming
 # ---------------------------------------------------------------------------
 

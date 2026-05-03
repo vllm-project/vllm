@@ -147,18 +147,26 @@ class DeepSeekV32ToolParser(ToolParser):
         function_name: str,
         param_dict: dict[str, str],
     ) -> dict[str, Any]:
-        """Convert raw string param values using the tool schema types."""
+        """Convert raw string param values using the tool schema types.
+
+        Handles both supported tool shapes (``ChatCompletionToolsParam`` and
+        ``FunctionTool``); see ``_tool_schema_property_names`` for the
+        shape-distinction rationale.
+        """
         param_config: dict = {}
         if self.tools:
             for tool in self.tools:
-                if (
-                    hasattr(tool, "function")
-                    and tool.function.name == function_name
-                    and hasattr(tool.function, "parameters")
-                ):
-                    schema = tool.function.parameters
-                    if isinstance(schema, dict) and "properties" in schema:
-                        param_config = schema["properties"]
+                # ChatCompletionToolsParam: schema under .function
+                if hasattr(tool, "function"):
+                    name = getattr(tool.function, "name", None)
+                    parameters = getattr(tool.function, "parameters", None)
+                # FunctionTool: schema at top level
+                else:
+                    name = getattr(tool, "name", None)
+                    parameters = getattr(tool, "parameters", None)
+                if name == function_name:
+                    if isinstance(parameters, dict) and "properties" in parameters:
+                        param_config = parameters["properties"]
                     break
 
         converted: dict[str, Any] = {}
@@ -168,6 +176,84 @@ class DeepSeekV32ToolParser(ToolParser):
                 param_type = param_config[name].get("type", "string")
             converted[name] = self._convert_param_value(value, param_type)
         return converted
+
+    def _tool_schema_property_names(self, function_name: str) -> set:
+        """Return parameter names declared by the tool's schema, or empty set.
+
+        Handles both supported tool shapes that may appear in ``self.tools``:
+
+        - ``ChatCompletionToolsParam`` (Chat Completions API) — schema
+          wrapped under ``tool.function.{name,parameters}``.
+        - ``FunctionTool`` (Responses API, ``openai.types.responses``) —
+          ``name`` and ``parameters`` live at the top level of the tool.
+
+        Same shape distinction is handled in
+        ``vllm.tool_parsers.utils._extract_tool_info``.
+        """
+        if not self.tools:
+            return set()
+        for tool in self.tools:
+            # ChatCompletionToolsParam: name/parameters under .function
+            if hasattr(tool, "function"):
+                name = getattr(tool.function, "name", None)
+                parameters = getattr(tool.function, "parameters", None)
+            # FunctionTool: name/parameters at top level
+            else:
+                name = getattr(tool, "name", None)
+                parameters = getattr(tool, "parameters", None)
+            if name == function_name:
+                if isinstance(parameters, dict) and isinstance(
+                    parameters.get("properties"), dict
+                ):
+                    return set(parameters["properties"].keys())
+                break
+        return set()
+
+    def _maybe_unwrap_legacy_arguments(
+        self, param_dict: dict, function_name: str
+    ) -> dict:
+        """Defensively unwrap an OpenAI-legacy nested-arguments shape.
+
+        DeepSeek-V4-Flash occasionally emits a single DSML parameter
+        literally named "arguments" whose value is the entire arg payload
+        as a JSON string -- a leak from training data that included
+        OpenAI's legacy function-call format. Without this unwrap, clients
+        see {"arguments": "{\"command\":\"...\"}"} instead of the
+        expected {"command": "..."}, which breaks tool dispatchers that
+        expect flat per-tool parameters.
+
+        Applied at both extract_tool_calls (non-streaming) and
+        _extract_delta_tool_calls (streaming) entry points so both shapes
+        of consumer get the same normalized payload.
+
+        Gated to avoid clobbering legitimate uses:
+          1. exactly one key in param_dict
+          2. that key is named "arguments"
+          3. the value parses to a non-empty JSON object
+          4. the tool's own schema does NOT declare "arguments" as a
+             property (so a tool that legitimately accepts an "arguments"
+             parameter is left alone)
+        """
+        if len(param_dict) != 1 or "arguments" not in param_dict:
+            return param_dict
+        if "arguments" in self._tool_schema_property_names(function_name):
+            return param_dict
+        raw = param_dict["arguments"]
+        if not isinstance(raw, str):
+            return param_dict
+        try:
+            unwrapped = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return param_dict
+        if isinstance(unwrapped, dict) and unwrapped:
+            # Stringify non-string inner values to preserve the
+            # _parse_invoke_params output contract; downstream
+            # _convert_params_with_schema still handles type coercion.
+            return {
+                k: v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                for k, v in unwrapped.items()
+            }
+        return param_dict
 
     def extract_tool_calls(
         self,
@@ -191,6 +277,9 @@ class DeepSeekV32ToolParser(ToolParser):
                     tool_call_match
                 ):
                     param_dict = self._parse_invoke_params(invoke_content)
+                    param_dict = self._maybe_unwrap_legacy_arguments(
+                        param_dict, invoke_name
+                    )
                     params = self._convert_params_with_schema(invoke_name, param_dict)
                     tool_calls.append(
                         ToolCall(
@@ -244,6 +333,7 @@ class DeepSeekV32ToolParser(ToolParser):
         while len(complete_invokes) > self.current_tool_index:
             invoke_name, invoke_body = complete_invokes[self.current_tool_index]
             param_dict = self._parse_invoke_params(invoke_body)
+            param_dict = self._maybe_unwrap_legacy_arguments(param_dict, invoke_name)
 
             converted = self._convert_params_with_schema(invoke_name, param_dict)
             args_json = json.dumps(converted, ensure_ascii=False)
