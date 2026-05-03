@@ -96,8 +96,10 @@ The model runner assembles:
 - token-to-row steering index buffers
 - per-layer steering tables
 
-It also handles deferred registration when decode registration cannot happen
-immediately because the batch is at steering capacity.
+It assumes the scheduler has already reserved a row for any per-request
+steering hash that flows through. If the worker ever sees a hash it has not
+registered, that is a scheduler accounting bug and the worker raises rather
+than silently substituting global rows.
 
 ## Table and Index Layout
 
@@ -157,41 +159,34 @@ When that happens, the request must refresh all APC-related state:
 
 If those are not refreshed together, cache hits and misses become incorrect.
 
-## Deferred and Pending Registration
+## Strict Capacity Contract
 
-Decode registration can be deferred when a request transitions phases but the
-worker has no free steering rows at that moment.  New-request registrations
-can also be deferred on capacity exhaustion during admission.
+Capacity bookkeeping is owned by the scheduler. Before a request that uses
+per-request steering can be dispatched, the scheduler must reserve a row for
+its phase-specific hash in the running set; if no row is available, the
+request stays in the waiting queue.
 
-The runtime uses a two-queue priority model:
+The worker enforces the contract loudly:
 
-1. **Transitions queue** (`_pending_steering_transitions`): prefill→decode
-   transitions for in-flight requests that have already consumed KV cache.
-   This queue is drained first (FIFO).
-2. **Registrations queue** (`_pending_steering_registrations`): new-request
-   deferrals.  Only processed once the transitions queue is empty.
+- `SteeringManager.register_config` raises `RuntimeError` when called past
+  `max_steering_configs`. The scheduler should never let this fire — when it
+  does, that is a scheduler bug and the exception propagates up through the
+  runner.
+- `SteeringManager.get_row_for_config` raises `RuntimeError` for unregistered
+  nonzero hashes for the same reason. There is no silent fallback to row 1/2
+  ("global"); a worker miss can no longer mask itself as the request running
+  with global-only steering.
 
-A third deferral mechanism handles the lazy-init case: when the HTTP API sets
-global vectors before the `SteeringManager` has been constructed (the manager
-is lazily created on the first steering-relevant step), those vectors are
-queued on `_pending_steering_globals` at the model runner and replayed during
-manager init. This is distinct from the two queues above: those handle
-capacity exhaustion after the manager exists; `_pending_steering_globals`
-handles the case where the manager doesn't exist yet.
+The runner has no pending-registration retry loop and no pending-globals
+queue. State is initialised eagerly during `load_model`, so by the time the
+HTTP API or the scheduler can talk to the runner the manager already exists,
+and `set_steering_vectors` writes straight through.
 
-This priority ordering ensures that requests already consuming resources get
-steering table rows before newly admitted requests that haven't started yet.
-
-The runtime has to preserve these invariants:
-
-- active requests keep running even if decode registration is deferred
-- transitions are retried before new-request registrations
-- new-request registrations are only attempted when no transitions are pending
-- stale pending entries are dropped if the request finishes or changes phase
-- fallback behavior must remain correct if a request temporarily uses a global row
-
-This is one of the places where scheduler capacity logic and worker state must
-match exactly.
+This is the place where scheduler capacity logic and worker state are most
+tightly coupled. The scheduler tracks `scheduled_steering_configs` for both
+the running set (including transition reservations for requests about to
+finish prefill) and the waiting admission check; reaching the worker without
+that reservation now crashes loudly rather than degrading silently.
 
 ## Continuous Batching
 
