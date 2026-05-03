@@ -674,7 +674,12 @@ class GPUModelRunner(
             )
 
         # NOTE(yxing): sink token related
-        self.num_sink_tokens = self.model_config.get_num_sink_tokens()
+        self.enable_sink_attention = self.model_config.get_enable_sink_attention()
+        if self.enable_sink_attention:
+            self.num_sink_tokens = 1
+        else:
+            self.num_sink_tokens = self.model_config.get_num_sink_tokens()
+
         if self.num_sink_tokens:
             self.sink_seq_lens = torch.full(
                 (self.max_num_reqs,),

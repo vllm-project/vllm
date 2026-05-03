@@ -1274,8 +1274,12 @@ class ModelConfig:
     def get_oe_eos_token_id(self) -> int:
         return getattr(self.hf_text_config, "eos_token_id", 151645)
 
+    # NOTE(yxing): configuration for sink attention
     def get_num_sink_tokens(self) -> int:
         return getattr(self.hf_text_config, "num_sink_tokens", 0)
+
+    def get_enable_sink_attention(self) -> bool:
+        return getattr(self.hf_text_config, "enable_sink_attention", False)
 
     def get_oe_vocab_size(self) -> int:
         return getattr(self.hf_text_config, "oe_vocab_size", 0)
