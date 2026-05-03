@@ -112,4 +112,3 @@ class OpenAIToolParser(ToolParser):
         raise NotImplementedError(
             "Not being used, manual parsing in serving_chat.py"  # noqa: E501
         )
-

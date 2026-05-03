@@ -13,52 +13,11 @@ from tests.tool_parsers.utils import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 
 MODEL = "moonshotai/Kimi-K2-Instruct"
-
-
-@pytest.fixture
-def sample_tools() -> list[ChatCompletionToolsParam]:
-    return [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "get_current_weather",
-                "description": "Get the current weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string", "description": "The city name"},
-                        "state": {"type": "string", "description": "The state code"},
-                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
-                    },
-                    "required": ["city", "state"],
-                },
-            },
-        ),
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "calculate_area",
-                "description": "Calculate area of a shape",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "shape": {"type": "string"},
-                        "dimensions": {"type": "object"},
-                        "precision": {"type": "integer"},
-                    },
-                },
-            },
-        ),
-    ]
 
 
 @pytest.fixture(scope="module")
@@ -504,7 +463,6 @@ class TestAdjustRequest:
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = [{"type": "function", "function": {"name": "test"}}]
         request.tool_choice = "auto"
-        request.include_reasoning = True
         request.skip_special_tokens = True
 
         result = parser.adjust_request(request)
@@ -514,7 +472,6 @@ class TestAdjustRequest:
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = [{"type": "function", "function": {"name": "test"}}]
         request.tool_choice = "none"
-        request.include_reasoning = True
         request.skip_special_tokens = True
 
         result = parser.adjust_request(request)
@@ -524,7 +481,6 @@ class TestAdjustRequest:
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = None
         request.tool_choice = "auto"
-        request.include_reasoning = False
         request.skip_special_tokens = True
 
         result = parser.adjust_request(request)
@@ -624,5 +580,3 @@ class TestStreamingIntervals:
         assert len(rec.tool_calls) == 1
         assert rec.tool_calls[0].function.name == "get_weather"
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
-
-

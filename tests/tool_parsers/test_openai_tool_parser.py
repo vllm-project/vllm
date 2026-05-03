@@ -14,10 +14,6 @@ from openai_harmony import (
     load_harmony_encoding,
 )
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.openai_tool_parser import OpenAIToolParser
@@ -39,43 +35,6 @@ def openai_tool_parser(openai_tokenizer):
 @pytest.fixture(scope="module")
 def harmony_encoding():
     return load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-
-
-@pytest.fixture
-def sample_tools() -> list[ChatCompletionToolsParam]:
-    return [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "get_current_weather",
-                "description": "Get the current weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string", "description": "The city name"},
-                        "state": {"type": "string", "description": "The state code"},
-                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
-                    },
-                    "required": ["city", "state"],
-                },
-            },
-        ),
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "calculate_area",
-                "description": "Calculate area of a shape",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "shape": {"type": "string"},
-                        "dimensions": {"type": "object"},
-                        "precision": {"type": "integer"},
-                    },
-                },
-            },
-        ),
-    ]
 
 
 def assert_tool_calls(
@@ -302,5 +261,3 @@ def test_extract_tool_calls_with_content(
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content == final_content
-
-
