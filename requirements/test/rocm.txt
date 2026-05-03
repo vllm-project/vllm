@@ -42,6 +42,8 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
+apache-tvm-ffi==0.1.10
+    # via xgrammar
 arctic-inference==0.1.1
     # via -r requirements/test/rocm.in
 argcomplete==3.6.3
@@ -1264,6 +1266,7 @@ typing-extensions==4.15.0
     #   alembic
     #   anthropic
     #   anyio
+    #   apache-tvm-ffi
     #   azure-core
     #   azure-identity
     #   azure-storage-blob
