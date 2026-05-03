@@ -253,6 +253,17 @@ class XPUPlatform(Platform):
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        super().verify_quantization(quant)
+        if quant == "awq":
+            if not envs.VLLM_USE_TRITON_AWQ:
+                logger.warning(
+                    "Using AWQ quantization with XPU, but VLLM_USE_TRITON_AWQ"
+                    " is not set, enabling VLLM_USE_TRITON_AWQ."
+                )
+            os.environ["VLLM_USE_TRITON_AWQ"] = "1"
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
         from vllm.config.vllm import get_layers_from_vllm_config

@@ -610,8 +610,7 @@ def maybe_override_with_speculators(
         kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
     elif is_remote_gguf(model):
-        repo_id, _ = split_remote_gguf(model)
-        gguf_model_repo = Path(repo_id)
+        gguf_model_repo, _ = split_remote_gguf(model)
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
