@@ -10,6 +10,7 @@ from tests.reasoning.utils import (
     run_reasoning_extraction_streaming,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.abstract_parser import _WrappedParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "qwen3"
@@ -373,3 +374,77 @@ def test_reasoning_thinking_disabled(
 
     assert reasoning == expected_reasoning
     assert content == expected_content
+
+
+# --- Tests for prompt_is_reasoning_end (streaming, DelegatingParser path) ---
+
+
+@pytest.mark.parametrize(
+    "content_deltas",
+    [
+        pytest.param(
+            ["Hello", " world", "!"],
+            id="short_answer",
+        ),
+        pytest.param(
+            ["The answer is 42."],
+            id="single_delta",
+        ),
+        pytest.param(
+            ["Line one\n", "Line two\n", "Line three"],
+            id="multiline",
+        ),
+    ],
+)
+def test_prompt_is_reasoning_end_routes_to_content(
+    content_deltas: list[str],
+    qwen3_tokenizer,
+):
+    """Regression test for: Qwen3.6 streaming emits final answer in
+    delta.reasoning when enable_thinking=False (vllm-project/vllm#40816).
+
+    When </think> is present in the prompt (enable_thinking=False), the
+    serving layer sets reasoning_ended=True via prompt_is_reasoning_end
+    before any output tokens arrive. DelegatingParser.parse_delta must
+    route all subsequent deltas as content, not reasoning.
+    """
+
+    class _Qwen3Parser(_WrappedParser):
+        reasoning_parser_cls = ReasoningParserManager.get_reasoning_parser("qwen3")
+        tool_parser_cls = None
+
+    parser = _Qwen3Parser(qwen3_tokenizer)
+
+    # Build a fake prompt_token_ids that contains the </think> end token,
+    # simulating the token sequence injected by the chat template when
+    # enable_thinking=False.
+    end_token_id = parser._reasoning_parser.end_token_id
+    prompt_token_ids: list[int] | None = [1, 2, end_token_id, 3]
+
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    reconstructor = StreamingReasoningReconstructor()
+
+    for delta in content_deltas:
+        token_ids = [
+            qwen3_tokenizer.get_vocab().get(tok)
+            for tok in qwen3_tokenizer.tokenize(delta)
+            if tok in qwen3_tokenizer.get_vocab()
+        ]
+        delta_message = parser.parse_delta(
+            delta_text=delta,
+            delta_token_ids=token_ids,
+            request=request,
+            prompt_token_ids=prompt_token_ids,
+        )
+        # Only pass prompt_token_ids on the first call (as the serving layer does).
+        prompt_token_ids = None
+        if delta_message is not None:
+            reconstructor.append_delta(delta_message)
+
+    expected_content = "".join(content_deltas)
+    assert reconstructor.reasoning is None, (
+        f"Expected no reasoning, got: {reconstructor.reasoning!r}"
+    )
+    assert reconstructor.other_content == expected_content, (
+        f"Expected content {expected_content!r}, got: {reconstructor.other_content!r}"
+    )
