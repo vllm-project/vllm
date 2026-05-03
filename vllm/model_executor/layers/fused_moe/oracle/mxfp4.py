@@ -68,6 +68,8 @@ class Mxfp4MoeBackend(Enum):
     XPU = "XPU"
     # Emulation
     EMULATION = "EMULATION"
+    # Humming
+    HUMMING = "HUMMING"
 
 
 # Backends that share the same TRTLLM weight format
@@ -130,6 +132,19 @@ def backend_to_kernel_cls(
 
         return [UnfusedOAITritonExperts]
 
+    elif backend == Mxfp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
+
+        return [
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        ]
+
     elif backend == Mxfp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
@@ -177,6 +192,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         "flashinfer_cutlass_afp8": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         "triton": Mxfp4MoeBackend.TRITON,
         "triton_unfused": Mxfp4MoeBackend.TRITON_UNFUSED,
+        "humming": Mxfp4MoeBackend.HUMMING,
         "marlin": Mxfp4MoeBackend.MARLIN,
         "aiter": Mxfp4MoeBackend.AITER,
         "xpu": Mxfp4MoeBackend.XPU,
@@ -573,7 +589,21 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     sf_block_size = 32  # mxfp4 block size
 
-    if mxfp4_backend in (
+    if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            prepare_humming_moe_layer,
+        )
+
+        prepare_humming_moe_layer(layer, {"quant_method": "gpt_oss_mxfp4"})
+        return (
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
+        )
+    elif mxfp4_backend in (
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
     ):
@@ -970,6 +1000,21 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            prepare_humming_moe_layer,
+        )
+
+        prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
+        return (
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
+        )
+
     if mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
             prepare_moe_mxfp4_layer_for_marlin,
@@ -1175,6 +1220,7 @@ def make_mxfp4_moe_quant_config(
     swiglu_limit: float | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
@@ -1234,6 +1280,14 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            get_humming_moe_quant_config,
+        )
+
+        assert isinstance(layer, FusedMoE)
+        return get_humming_moe_quant_config(layer)
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
@@ -1254,6 +1308,7 @@ def make_mxfp4_moe_kernel(
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
@@ -1269,6 +1324,11 @@ def make_mxfp4_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    extra_kwargs = {}
+    if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+        assert layer is not None
+        extra_kwargs["layer"] = layer
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -1278,11 +1338,13 @@ def make_mxfp4_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(
