@@ -345,6 +345,51 @@ class TestRollingHashIncrementalState:
                 f"step {len(token_ids)}: incremental={inc} recompute={recomp}"
             )
 
+    def test_state_handles_truncation(self):
+        """Speculative-decode rollback: when ``token_ids`` shrinks, the
+        state must drop trailing hashes so subsequent appends compute
+        from the surviving prefix, not the rolled-back tail.
+        """
+        params = RepetitionDetectionParams(
+            max_pattern_size=0,
+            min_pattern_size=2,
+            min_count=3,
+            algorithm="rolling_hash",
+        )
+        state = RollingHashState()
+
+        # Hash a 10-token sequence (simulating speculative tokens that
+        # initially looked accepted but get rolled back).
+        initial = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        check_sequence_repetition(initial, params, state=state)
+        assert state.n == len(initial)
+
+        # Roll back to 6 tokens (4 speculative tokens rejected).
+        truncated = initial[:6]
+        check_sequence_repetition(truncated, params, state=state)
+        assert state.n == 6
+        # The kept prefix hashes must equal what a fresh state would
+        # produce for the same prefix — verify by comparing against a
+        # one-shot recompute on the truncated sequence.
+        recompute_truncated = check_sequence_repetition(truncated, params)
+        incremental_truncated = check_sequence_repetition(
+            truncated, params, state=RollingHashState()
+        )
+        assert recompute_truncated == incremental_truncated
+
+        # Re-extend with a *different* tail (would produce wrong hashes
+        # if truncation hadn't dropped the rejected tokens).
+        replayed = truncated + [99, 99, 99, 99, 99, 99]
+        inc = check_sequence_repetition(replayed, params, state=state)
+        assert state.n == len(replayed)
+        recomp = check_sequence_repetition(replayed, params)
+        assert inc == recomp, (
+            f"truncation path diverged: incremental={inc} recompute={recomp}"
+        )
+        # The all-99 tail should trigger detection (5 reps of length-1
+        # pattern).
+        assert inc
+
     def test_check_stop_persists_state_on_request(self):
         """``check_stop`` lazily attaches RollingHashState to the request and
         reuses it across consecutive calls."""

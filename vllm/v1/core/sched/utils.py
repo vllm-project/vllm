@@ -60,12 +60,32 @@ class RollingHashState:
         self.n: int = 0
 
     def extend(self, token_ids: Sequence[int], up_to: int) -> None:
-        """Extend internal hashes to cover ``token_ids[:up_to]``.
+        """Sync internal hashes to cover ``token_ids[:up_to]``.
 
-        Idempotent and append-only: callers may pass the entire output
-        sequence each step; only tokens beyond ``self.n`` are processed.
+        Idempotent. Two paths:
+
+        * ``up_to > self.n`` — append-only growth (the steady-state
+          decode case).
+        * ``up_to < self.n`` — truncation (rollback). Drop hash entries
+          past ``up_to`` so subsequent extends rebuild from the
+          surviving prefix. This is required for correctness under
+          speculative decoding: when speculative tokens are rejected,
+          ``request.output_token_ids`` shrinks, and we must not keep
+          hashes for those rolled-back tokens.
+
+        The surviving prefix is assumed unchanged — vLLM v1 commits
+        output tokens once, so positions ``[0, up_to)`` are stable.
         """
-        if up_to <= self.n:
+        if up_to == self.n:
+            return
+        if up_to < self.n:
+            # Truncation path. ``del a[k:]`` is O(n - k) on array.array.
+            keep = up_to + 1
+            del self.h1[keep:]
+            del self.h2[keep:]
+            del self.p1[keep:]
+            del self.p2[keep:]
+            self.n = up_to
             return
         h1, h2, p1, p2 = self.h1, self.h2, self.p1, self.p2
         last_h1 = h1[-1]
@@ -112,10 +132,10 @@ def _has_repeating_pattern_rolling_hash(
     """
     n = len(token_ids)
     # Keep the request-attached state consistent with the latest output
-    # tokens regardless of whether we end up scanning. The per-token
-    # cost is amortized O(1), and downstream callers (and tests) can
-    # assume ``state.n == len(token_ids)`` after this function returns.
-    if state is not None and n > state.n:
+    # tokens regardless of whether we end up scanning. ``n != state.n``
+    # also covers truncation (e.g. speculative-decode rejection); see
+    # ``RollingHashState.extend``.
+    if state is not None and n != state.n:
         state.extend(token_ids, n)
 
     if n == 0 or min_count < 2:
