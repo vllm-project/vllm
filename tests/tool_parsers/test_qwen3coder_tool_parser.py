@@ -1201,9 +1201,9 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
             messages=[],
             model="m",
             tools=request_tools,
-            tool_choice=ChatCompletionNamedToolChoiceParam(
-                function=ChatCompletionNamedFunction(name=tool.function.name)
-            ),
+        )
+        req.tool_choice = ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=tool.function.name)
         )
         tag = qwen3_tool_parser.get_structural_tag(req)
         assert isinstance(tag, StructuralTag)

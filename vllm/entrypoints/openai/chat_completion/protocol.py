@@ -739,12 +739,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
-            if (
-                data["tool_choice"] not in ["auto", "required"]
-                and not isinstance(data["tool_choice"], dict)
-                and not isinstance(
-                    data["tool_choice"], ChatCompletionNamedToolChoiceParam
-                )
+            if data["tool_choice"] not in ["auto", "required"] and not isinstance(
+                data["tool_choice"], dict
             ):
                 raise ValueError(
                     f"Invalid value for `tool_choice`: {data['tool_choice']}! "
