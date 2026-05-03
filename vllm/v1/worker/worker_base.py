@@ -185,6 +185,16 @@ class WorkerBase:
     def get_steering_status(self) -> dict:
         raise NotImplementedError
 
+    def register_steering_modules(
+        self,
+        modules: dict[str, dict],
+        replace: bool = False,
+    ) -> None:
+        raise NotImplementedError
+
+    def unregister_steering_modules(self, names: list[str]) -> None:
+        raise NotImplementedError
+
     @property
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""

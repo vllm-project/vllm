@@ -138,6 +138,39 @@ def resolve_effective_vectors(
     return result if result else None
 
 
+def scale_steering_spec(
+    spec: SteeringVectorSpec | None,
+    scale: float,
+) -> SteeringVectorSpec | None:
+    """Apply a uniform multiplier to every entry in *spec*.
+
+    Returns a new spec where each layer entry's effective magnitude has
+    been multiplied by *scale*.  Per-layer ``{"vector": ..., "scale": ...}``
+    entries have their inner ``scale`` field multiplied; bare-list entries
+    are wrapped in the dict form with the new scale.
+
+    Used by the worker-side named-module resolver to apply the
+    request's module-level scale before merging with inline overrides.
+    Returns ``None`` if *spec* is ``None`` or empty.  When *scale* equals
+    ``1.0`` the input is returned unchanged.
+    """
+    if not spec:
+        return None
+    if scale == 1.0:
+        return spec
+    result: SteeringVectorSpec = {}
+    for hook, layer_dict in spec.items():
+        if not layer_dict:
+            continue
+        scaled_layers: dict[int, SteeringLayerEntry] = {}
+        for layer_idx, entry in layer_dict.items():
+            vec, sc = normalize_layer_entry(entry)
+            scaled_layers[layer_idx] = {"vector": vec, "scale": sc * scale}
+        if scaled_layers:
+            result[hook] = scaled_layers
+    return result if result else None
+
+
 def merge_steering_specs(
     a: SteeringVectorSpec | None,
     b: SteeringVectorSpec | None,
@@ -204,11 +237,21 @@ def merge_steering_specs(
 
 def hash_steering_config(
     effective_vectors: dict[str, dict[int, list[float]]] | None,
+    module_ref: tuple[str, float] | None = None,
 ) -> int:
     """Deterministic SHA-256 hash of pre-resolved steering vectors.
 
-    Returns 0 if *effective_vectors* is ``None`` or empty.
-    The hash is masked to fit in ``np.int64``.
+    Returns 0 if both *effective_vectors* and *module_ref* are ``None``
+    or empty.  The hash is masked to fit in ``np.int64``.
+
+    *module_ref* is an optional ``(name, scale)`` reference to a
+    worker-side named steering module.  When set, the reference is
+    incorporated into the hash so that two requests with the same
+    ``(name, scale)`` reference plus identical inline overrides produce
+    the same hash, while different references (or different scales)
+    produce different hashes.  When ``module_ref`` is ``None`` this
+    function reduces to the original "hash inline-only vectors" behavior
+    bit-for-bit, preserving prefix-cache reuse for existing requests.
 
     Hashes the binary representation of each layer vector (via
     ``np.asarray(...).tobytes()``) instead of stringifying the raw Python
@@ -217,27 +260,39 @@ def hash_steering_config(
     on every element; this version is ~30x faster because ``tobytes`` is a
     memcpy and ``hashlib.sha256.update`` is hardware-accelerated.
     """
-    if not effective_vectors:
+    if not effective_vectors and module_ref is None:
         return 0
     h = hashlib.sha256()
-    for hook in sorted(effective_vectors.keys()):
-        h.update(hook.encode())
-        layer_dict = effective_vectors[hook]
-        for layer_idx in sorted(layer_dict.keys()):
-            entry = layer_dict[layer_idx]
-            # An entry is either a bare list/array of floats or a dict
-            # ``{"vector": [...], "scale": float}``. By the time we get here
-            # the resolver has flattened the dict form into a plain list, so
-            # we expect the bare form — but handle both for safety.
-            if isinstance(entry, dict):
-                vec = entry.get("vector", entry)
-                scale = float(entry.get("scale", 1.0))
-            else:
-                vec = entry
-                scale = 1.0
-            arr = np.asarray(vec, dtype=np.float32)
-            h.update(layer_idx.to_bytes(4, "little", signed=True))
-            h.update(arr.tobytes())
-            if scale != 1.0:
-                h.update(np.float64(scale).tobytes())
+    if effective_vectors:
+        for hook in sorted(effective_vectors.keys()):
+            h.update(hook.encode())
+            layer_dict = effective_vectors[hook]
+            for layer_idx in sorted(layer_dict.keys()):
+                entry = layer_dict[layer_idx]
+                # An entry is either a bare list/array of floats or a dict
+                # ``{"vector": [...], "scale": float}``. By the time we get
+                # here the resolver has flattened the dict form into a plain
+                # list, so we expect the bare form — but handle both for
+                # safety.
+                if isinstance(entry, dict):
+                    vec = entry.get("vector", entry)
+                    scale = float(entry.get("scale", 1.0))
+                else:
+                    vec = entry
+                    scale = 1.0
+                arr = np.asarray(vec, dtype=np.float32)
+                h.update(layer_idx.to_bytes(4, "little", signed=True))
+                h.update(arr.tobytes())
+                if scale != 1.0:
+                    h.update(np.float64(scale).tobytes())
+    if module_ref is not None:
+        # Domain-separator byte ensures a request with only a module_ref
+        # cannot collide with an inline-vector request whose hook name
+        # happens to match the module name.  Inline vectors are written
+        # before this block, so the separator unambiguously demarcates
+        # the module-ref segment of the digest.
+        name, scale = module_ref
+        h.update(b"\x00module_ref\x00")
+        h.update(name.encode("utf-8"))
+        h.update(np.float64(scale).tobytes())
     return int(h.hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF

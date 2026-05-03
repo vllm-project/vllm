@@ -10,12 +10,19 @@ from typing import TYPE_CHECKING, cast
 import torch
 import torch.nn as nn
 
+from vllm.config.steering_types import (
+    SteeringVectorSpec,
+    merge_steering_specs,
+    resolve_effective_vectors,
+    scale_steering_spec,
+)
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
 from vllm.model_executor.layers.steering import (
     HOOK_POINT_TABLE_ATTR,
     SteeringHookPoint,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.steering_manager import SteeringManager
 
 
@@ -74,6 +81,19 @@ class SteeringModelRunnerMixin:
     ]
     _req_steering_phase: dict[str, str]
     _steering_index_dirty: bool
+    # Worker-side mirror of the API server's named steering module
+    # registry.  Populated via ``register_steering_modules`` RPC during
+    # API server bootstrap and on every /v1/steering/modules/{register,
+    # unregister} call.  Per-process, per-worker — collective_rpc
+    # guarantees identical state across TP × PP ranks.
+    _steering_module_registry: dict[
+        str,
+        tuple[
+            SteeringVectorSpec | None,
+            SteeringVectorSpec | None,
+            SteeringVectorSpec | None,
+        ],
+    ]
     # Set of layer indices physically owned by this worker.  Under PP,
     # this is a contiguous subset of ``[0, num_layers)``; under single-
     # worker and under TP (which replicates all layers per rank), it
@@ -126,6 +146,7 @@ class SteeringModelRunnerMixin:
         self._steering_index_dirty = False
         self._pending_steering_transitions = []
         self._pending_steering_registrations = []
+        self._steering_module_registry = {}
 
         steering_config = getattr(self.vllm_config, "steering_config", None)
         if steering_config is None or not steerable:
@@ -415,6 +436,158 @@ class SteeringModelRunnerMixin:
         return result
 
     # -----------------------------------------------------------------------
+    # Worker-side named steering module registry
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _module_payload_to_specs(
+        payload: dict,
+    ) -> tuple[
+        SteeringVectorSpec | None,
+        SteeringVectorSpec | None,
+        SteeringVectorSpec | None,
+    ]:
+        """Normalize a broadcast payload entry into three tier specs.
+
+        Layer keys may arrive as strings (when the payload round-tripped
+        through JSON) or ints (when it was constructed in-process).  We
+        coerce to int here so subsequent comparisons against the worker's
+        layer-owned set are consistent.
+        """
+
+        def _coerce(spec):
+            if spec is None:
+                return None
+            coerced: SteeringVectorSpec = {}
+            for hook, layer_dict in spec.items():
+                converted: dict[int, object] = {}
+                for layer_key, entry in layer_dict.items():
+                    converted[int(layer_key)] = entry
+                if converted:
+                    coerced[hook] = converted  # type: ignore[assignment]
+            return coerced or None
+
+        return (
+            _coerce(payload.get("vectors")),
+            _coerce(payload.get("prefill_vectors")),
+            _coerce(payload.get("decode_vectors")),
+        )
+
+    def register_steering_modules(
+        self,
+        modules: dict[str, dict],
+        replace: bool = False,
+    ) -> None:
+        """Worker-side handler for the named-module broadcast.
+
+        *modules* maps module name to a dict with optional ``vectors``,
+        ``prefill_vectors`` and ``decode_vectors`` (the same shape that
+        :class:`SteeringModuleRegistry.dump_for_broadcast` emits).  When
+        *replace* is ``True`` the worker's registry is cleared before the
+        new entries are stored — used during API-server startup to push
+        the initial registry state.
+
+        Mirrors the strict-capacity contract of the rest of the steering
+        runtime: requests referencing a name that has not yet been
+        broadcast raise loudly in :meth:`_resolve_request_steering`
+        rather than silently falling back to inline-only behaviour.
+        """
+        if replace:
+            self._steering_module_registry.clear()
+        for name, payload in modules.items():
+            if not isinstance(payload, dict):
+                raise SteeringVectorError(
+                    f"Steering module '{name}' broadcast payload is not a dict"
+                )
+            self._steering_module_registry[name] = self._module_payload_to_specs(
+                payload
+            )
+        if modules:
+            logger.debug(
+                "Worker received %d steering module(s) (replace=%s)",
+                len(modules),
+                replace,
+            )
+
+    def unregister_steering_modules(self, names: list[str]) -> None:
+        """Drop the listed names from the worker-side registry."""
+        for name in names:
+            self._steering_module_registry.pop(name, None)
+        if names:
+            logger.debug(
+                "Worker unregistered %d steering module(s)",
+                len(names),
+            )
+
+    def _resolve_request_steering(
+        self,
+        sp: SamplingParams,
+        phase: str,
+    ) -> dict[str, dict[int, list[float]]] | None:
+        """Resolve the effective steering for a request in the given *phase*.
+
+        Encapsulates the two cases:
+
+        - **Inline-only** (``sp.steering_module_ref`` is ``None``):
+          returns the existing ``effective_prefill_steering`` /
+          ``effective_decode_steering`` cached property — bit-for-bit
+          identical to today.
+        - **Named module (+ optional inline overrides)**: looks up the
+          named module in ``self._steering_module_registry``, applies
+          the request's module-level scale uniformly via
+          :func:`scale_steering_spec`, merges the result with any inline
+          tier specs via :func:`merge_steering_specs`, then collapses to
+          pre-scaled flat vectors via
+          :func:`resolve_effective_vectors`.  The merge order matches the
+          original server-side ``resolve_for_request`` so semantics are
+          preserved.
+
+        Raises :class:`RuntimeError` when the request references a name
+        that is missing from the worker's registry.  This matches the
+        strict-capacity contract elsewhere in the steering runtime —
+        silent fall-through to inline-only would change the request
+        payload after the scheduler has already committed to a hash.
+        """
+        if phase not in ("prefill", "decode"):
+            raise ValueError(f"phase must be 'prefill' or 'decode', got {phase!r}")
+
+        ref = sp.steering_module_ref
+        if ref is None:
+            return (
+                sp.effective_prefill_steering
+                if phase == "prefill"
+                else sp.effective_decode_steering
+            )
+
+        name, scale = ref
+        module_specs = self._steering_module_registry.get(name)
+        if module_specs is None:
+            available = sorted(self._steering_module_registry.keys())
+            raise RuntimeError(
+                f"Steering module '{name}' is not registered on this worker. "
+                f"Available: {available or 'none'}.  This indicates the "
+                "module-registry RPC has not been broadcast yet, or the "
+                "module was unregistered after the request was scheduled."
+            )
+
+        base_spec, prefill_spec, decode_spec = module_specs
+        scaled_base = scale_steering_spec(base_spec, scale)
+        phase_module_spec = (
+            scale_steering_spec(prefill_spec, scale)
+            if phase == "prefill"
+            else scale_steering_spec(decode_spec, scale)
+        )
+        inline_phase_spec = (
+            sp.prefill_steering_vectors
+            if phase == "prefill"
+            else sp.decode_steering_vectors
+        )
+
+        merged_base = merge_steering_specs(scaled_base, sp.steering_vectors)
+        merged_phase = merge_steering_specs(phase_module_spec, inline_phase_spec)
+        return resolve_effective_vectors(merged_base, merged_phase)
+
+    # -----------------------------------------------------------------------
     # Per-step buffer / index maintenance
     # -----------------------------------------------------------------------
 
@@ -628,11 +801,12 @@ class SteeringModelRunnerMixin:
             req_state = self.requests.get(req_id)
             if req_state is not None and req_state.sampling_params is not None:
                 sp = req_state.sampling_params
-                if sp.effective_decode_steering:
+                effective_decode = self._resolve_request_steering(sp, "decode")
+                if effective_decode:
                     try:
                         mgr.register_config(
                             decode_hash,
-                            sp.effective_decode_steering,
+                            effective_decode,
                             phase="decode",
                             locally_owned_layers=self._locally_owned_layers,
                         )
@@ -641,7 +815,7 @@ class SteeringModelRunnerMixin:
                             (
                                 req_id,
                                 decode_hash,
-                                sp.effective_decode_steering,
+                                effective_decode,
                                 "decode",
                             )
                         )
@@ -696,18 +870,21 @@ class SteeringModelRunnerMixin:
 
         sp = req_state.sampling_params
         prefill_hash = req_state.prefill_steering_config_hash
-        if prefill_hash == 0 or sp is None or not sp.effective_prefill_steering:
+        if prefill_hash == 0 or sp is None:
+            return
+        effective_prefill = self._resolve_request_steering(sp, "prefill")
+        if not effective_prefill:
             return
         try:
             mgr.register_config(
                 prefill_hash,
-                sp.effective_prefill_steering,
+                effective_prefill,
                 phase="prefill",
                 locally_owned_layers=self._locally_owned_layers,
             )
         except RuntimeError:
             self._pending_steering_registrations.append(
-                (req_id, prefill_hash, sp.effective_prefill_steering, "prefill")
+                (req_id, prefill_hash, effective_prefill, "prefill")
             )
             logger.warning(
                 "Deferred prefill steering config (hash=%d) on resumption "
@@ -783,14 +960,12 @@ class SteeringModelRunnerMixin:
         sp = new_req_data.sampling_params
         if new_req_data.num_computed_tokens >= req_state.num_prompt_tokens:
             # Already past prefill — register decode config.
-            if (
-                new_req_data.decode_steering_config_hash != 0
-                and sp.effective_decode_steering
-            ):
+            effective_decode = self._resolve_request_steering(sp, "decode")
+            if new_req_data.decode_steering_config_hash != 0 and effective_decode:
                 try:
                     mgr.register_config(
                         new_req_data.decode_steering_config_hash,
-                        sp.effective_decode_steering,
+                        effective_decode,
                         phase="decode",
                         locally_owned_layers=self._locally_owned_layers,
                     )
@@ -799,7 +974,7 @@ class SteeringModelRunnerMixin:
                         (
                             req_id,
                             new_req_data.decode_steering_config_hash,
-                            sp.effective_decode_steering,
+                            effective_decode,
                             "decode",
                         )
                     )
@@ -813,14 +988,12 @@ class SteeringModelRunnerMixin:
         else:
             # Normal: start in prefill; decode registered
             # on transition in _update_steering_buffers.
-            if (
-                new_req_data.prefill_steering_config_hash != 0
-                and sp.effective_prefill_steering
-            ):
+            effective_prefill = self._resolve_request_steering(sp, "prefill")
+            if new_req_data.prefill_steering_config_hash != 0 and effective_prefill:
                 try:
                     mgr.register_config(
                         new_req_data.prefill_steering_config_hash,
-                        sp.effective_prefill_steering,
+                        effective_prefill,
                         phase="prefill",
                         locally_owned_layers=self._locally_owned_layers,
                     )
@@ -829,7 +1002,7 @@ class SteeringModelRunnerMixin:
                         (
                             req_id,
                             new_req_data.prefill_steering_config_hash,
-                            sp.effective_prefill_steering,
+                            effective_prefill,
                             "prefill",
                         )
                     )
@@ -887,11 +1060,14 @@ class SteeringModelRunnerMixin:
         # Register new prefill config (streaming re-adds start
         # in prefill).
         sp = new_req_data.sampling_params
-        if new_prefill_hash != 0 and sp is not None and sp.effective_prefill_steering:
+        effective_prefill = (
+            self._resolve_request_steering(sp, "prefill") if sp is not None else None
+        )
+        if new_prefill_hash != 0 and sp is not None and effective_prefill:
             try:
                 mgr.register_config(
                     new_prefill_hash,
-                    sp.effective_prefill_steering,
+                    effective_prefill,
                     phase="prefill",
                     locally_owned_layers=self._locally_owned_layers,
                 )
@@ -900,7 +1076,7 @@ class SteeringModelRunnerMixin:
                     (
                         req_id,
                         new_prefill_hash,
-                        sp.effective_prefill_steering,
+                        effective_prefill,
                         "prefill",
                     )
                 )
