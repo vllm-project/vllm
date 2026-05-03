@@ -91,6 +91,7 @@ from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -1338,6 +1339,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.req_states.num_computed_tokens_np[idx_mapping_np] += (
             input_batch.num_scheduled_tokens
         )
+
+    def shutdown(self) -> None:
+        """Release GPU tensors (model weights, KV caches, workspace) so that
+        memory is reclaimable when running in the same process."""
+        torch.accelerator.synchronize()
+        if hasattr(self, "kv_caches"):
+            self.kv_caches.clear()
+        if hasattr(self, "attn_groups"):
+            self.attn_groups.clear()
+        if hasattr(self, "kv_cache_config"):
+            del self.kv_cache_config
+        free_before_shutdown(self.vllm_config)
+        if hasattr(self, "model"):
+            del self.model
+
+        gc.collect()
+        torch.accelerator.empty_cache()
+        logger.debug("Cleaned up model weights, KV caches, and workspace")
 
     ########### EPLB methods start ###########
     @property
