@@ -153,7 +153,7 @@ class Config:
         """
         vllm_config = VllmConfig()
         vllm_config.model_config = SimpleNamespace(
-            enforce_eager=False,
+            enforce_eager=True,
             is_moe=True,
         )
         vllm_config.parallel_config.data_parallel_size = self.world_size
