@@ -245,7 +245,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
-    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 4096
+    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1689,7 +1689,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the multi-stream path entirely. Empirical crossover on B300 (148 SMs)
     # is ~4096; B200 (132 SMs) is expected ~3072.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
-        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "4096")
+        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
