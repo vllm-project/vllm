@@ -183,8 +183,11 @@ class SteeringModuleRegistry:
             )
             merged_decode = merge_steering_specs(module.decode_vectors, inline_decode)
         except ValueError as exc:
-            return None, None, None, (
-                f"Invalid steering composition for module '{steering_name}': {exc}"
+            return (
+                None,
+                None,
+                None,
+                (f"Invalid steering composition for module '{steering_name}': {exc}"),
             )
 
         return merged_vectors, merged_prefill, merged_decode, None
@@ -225,9 +228,7 @@ class SteeringModuleRegistry:
                     f"got {type(value).__name__}."
                 )
             if not math.isfinite(value):
-                raise ValueError(
-                    f"{value_prefix}[{i}] must be finite, got {value}."
-                )
+                raise ValueError(f"{value_prefix}[{i}] must be finite, got {value}.")
 
     def _validate_layer_index(self, name: str, layer_idx: int) -> None:
         """Validate layer indices against the loaded model when available."""

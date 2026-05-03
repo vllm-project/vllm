@@ -11,9 +11,7 @@ class TestSetSteeringRequest:
     """Validate SetSteeringRequest Pydantic model."""
 
     def test_basic_vectors(self):
-        req = SetSteeringRequest(
-            vectors={"post_mlp": {0: [1.0, 2.0], 5: [3.0, 4.0]}}
-        )
+        req = SetSteeringRequest(vectors={"post_mlp": {0: [1.0, 2.0], 5: [3.0, 4.0]}})
         assert req.vectors is not None
         assert req.vectors["post_mlp"][0] == [1.0, 2.0]
         assert req.prefill_vectors is None

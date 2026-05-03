@@ -95,9 +95,7 @@ def _build_decoder_layer_kwargs(
 ) -> dict[str, object]:
     """Pass steering sizes only to decoder layers that accept them."""
     return {
-        name: value
-        for name, value in kwargs.items()
-        if name in decoder_layer_params
+        name: value for name, value in kwargs.items() if name in decoder_layer_params
     }
 
 

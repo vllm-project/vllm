@@ -5,7 +5,7 @@ Define activation steering functionality mixin for model runners.
 """
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -59,24 +59,13 @@ class SteeringModelRunnerMixin:
     """
 
     # --- class-level attribute declarations --------------------------------
-    # These back the mixin's stateful methods.  Attributes that are
-    # unconditionally read (possibly before lazy init) have
-    # class-level defaults so the mixin can use plain attribute
-    # access without ``hasattr``/``getattr`` guards.
-    #
-    # ``_steering_manager`` intentionally does NOT have a default:
-    # ``_update_steering_buffers`` uses ``hasattr(self, "_steering_manager")``
-    # as the lazy-init trigger, so assigning a class-level default would
-    # make initialisation skip permanently.
+    # All steering state is initialised eagerly by ``_init_steering_state``
+    # at the end of ``GPUModelRunner.load_model``.  The class-level
+    # defaults below cover the pre-init window (e.g. unit tests that
+    # construct the mixin without going through load_model) so plain
+    # attribute access is safe without ``hasattr`` guards.
+    _steering_manager: SteeringManager | None = None
     _steerable_layers_cache: dict[int, nn.Module] | None = None
-    _pending_steering_globals: (
-        list[tuple[dict[str, dict[int, torch.Tensor]], str]] | None
-    ) = None
-    # The attributes below are populated by the lazy init in
-    # ``_update_steering_buffers`` and are only read after that path
-    # has run.  Test fixtures that exercise the mixin in isolation
-    # must set them explicitly.
-    _steering_manager: SteeringManager | None
     _pending_steering_transitions: list[
         tuple[str, int, dict[str, dict[int, list[float]]], str]
     ]
@@ -88,8 +77,7 @@ class SteeringModelRunnerMixin:
     # Set of layer indices physically owned by this worker.  Under PP,
     # this is a contiguous subset of ``[0, num_layers)``; under single-
     # worker and under TP (which replicates all layers per rank), it
-    # equals the full model's layer set.  Populated during lazy init
-    # from ``_steerable_layers_cache`` and threaded into
+    # equals the full model's layer set.  Threaded into
     # ``SteeringManager`` calls so non-local tensors are never
     # materialized on this rank.
     _locally_owned_layers: frozenset[int]
@@ -103,6 +91,63 @@ class SteeringModelRunnerMixin:
         requests: dict[str, CachedRequestState]
 
         def get_model(self) -> nn.Module: ...
+
+    # -----------------------------------------------------------------------
+    # Eager initialisation
+    # -----------------------------------------------------------------------
+
+    def _init_steering_state(self) -> None:
+        """Initialise steering state at the end of model load.
+
+        Walks the loaded model for layers that registered steering
+        buffers, captures the buffer device, and constructs the
+        ``SteeringManager``.  Must be called exactly once — typically
+        from ``GPUModelRunner.load_model`` after the model is fully
+        loaded.
+
+        When steering is disabled (no ``SteeringConfig``) or the model
+        has no steerable layers, ``_steering_manager`` stays ``None``
+        so per-step ``_update_steering_buffers`` and the public API
+        methods can short-circuit cheaply.
+        """
+        steerable: dict = {}
+        if hasattr(self, "get_model"):
+            for mod in self.get_model().modules():
+                if not hasattr(mod, "layer_idx"):
+                    continue
+                has_any_table = any(
+                    hasattr(mod, attr) for attr in HOOK_POINT_TABLE_ATTR.values()
+                )
+                if has_any_table:
+                    steerable[mod.layer_idx] = mod
+        self._steerable_layers_cache = steerable
+        self._locally_owned_layers = frozenset(steerable.keys())
+        self._req_steering_phase = {}
+        self._steering_index_dirty = False
+        self._pending_steering_transitions = []
+        self._pending_steering_registrations = []
+
+        steering_config = getattr(self.vllm_config, "steering_config", None)
+        if steering_config is None or not steerable:
+            self._steering_manager = None
+            return
+
+        # Resolve device from the first steerable layer's table buffer
+        # so per-request vectors are allocated on the same device,
+        # avoiding CPU->GPU copies each step.
+        table_device: torch.device | None = None
+        for mod in steerable.values():
+            for attr in HOOK_POINT_TABLE_ATTR.values():
+                if hasattr(mod, attr):
+                    table_device = getattr(mod, attr).device
+                    break
+            if table_device is not None:
+                break
+
+        self._steering_manager = SteeringManager(
+            steering_config.max_steering_configs,
+            device=table_device,
+        )
 
     # -----------------------------------------------------------------------
     # Steerable-layer discovery and vector-spec validation
@@ -218,44 +263,10 @@ class SteeringModelRunnerMixin:
         them to the manager.  This avoids reading from shared buffers,
         which would silently use stale or overwritten data for
         phase-specific tiers.
-
-        When the manager has not been lazily initialized yet, the
-        converted tensors are stored in ``self._pending_steering_globals``
-        for replay during lazy init in ``_update_steering_buffers``.
         """
-        # Use getattr to preserve the ``hasattr(self, "_steering_manager")``
-        # lazy-init sentinel used by _update_steering_buffers — a
-        # class-level default would defeat it.
-        mgr = getattr(self, "_steering_manager", None)
+        mgr = self._steering_manager
         if mgr is None:
-            # Manager not yet initialized -- capture current vectors
-            # for replay during lazy init.
-            captured: dict[str, dict[int, torch.Tensor]] = {}
-            for hook_point_str, layer_vecs in vectors_data.items():
-                table_attr = HOOK_POINT_TABLE_ATTR[SteeringHookPoint(hook_point_str)]
-                captured_layers: dict[int, torch.Tensor] = {}
-                for idx, vec_values in layer_vecs.items():
-                    if idx not in valid_indices or idx not in steerable:
-                        continue
-                    mod = steerable[idx]
-                    if hasattr(mod, table_attr):
-                        buf = getattr(mod, table_attr)
-                        captured_layers[idx] = torch.tensor(
-                            vec_values, dtype=buf.dtype, device=buf.device
-                        )
-                if captured_layers:
-                    captured[hook_point_str] = captured_layers
-            if captured:
-                pending = self._pending_steering_globals
-                if pending is None:
-                    self._pending_steering_globals = []
-                    pending = self._pending_steering_globals
-                pending.append((captured, phase))
             return
-        # ``_locally_owned_layers`` is set during lazy init in
-        # ``_update_steering_buffers``. Callers that construct a manager
-        # directly (e.g. unit tests) skip that path, so fall back to
-        # ``None`` (no filtering — manager already stored the full set).
         locally_owned = getattr(self, "_locally_owned_layers", None)
         for hook_point_str, layer_vecs in vectors_data.items():
             table_attr = HOOK_POINT_TABLE_ATTR[SteeringHookPoint(hook_point_str)]
@@ -371,13 +382,9 @@ class SteeringModelRunnerMixin:
 
     def clear_steering_vectors(self) -> None:
         """Clear all tiers (base, prefill, decode) in the SteeringManager."""
-        # getattr preserves the hasattr lazy-init sentinel.
-        mgr = getattr(self, "_steering_manager", None)
+        mgr = self._steering_manager
         if mgr is not None:
             mgr.clear_global_vectors()
-        # Also clear any pending globals queued before manager init,
-        # so they are not replayed on lazy initialization.
-        self._pending_steering_globals = None
 
     def get_steering_status(self) -> dict:
         """Return per-hook-point status for active layers.
@@ -385,46 +392,26 @@ class SteeringModelRunnerMixin:
         Returns ``{layer_idx: {hook_point: {"norm": float,
         "prefill_norm"?: float, "decode_norm"?: float}}}`` for
         layers/hook-points that have a non-zero steering vector.
-
-        All norms (base, prefill, decode) are read from the
-        SteeringManager when it exists, or from
-        ``_pending_steering_globals`` before manager initialization.
         """
         result: dict = {}
-        # getattr preserves the hasattr lazy-init sentinel.
-        mgr = getattr(self, "_steering_manager", None)
-        if mgr is not None:
-            # Read all norms from manager
-            for phase_name, phase_dict in [
-                ("base", mgr.global_base_vectors),
-                ("prefill", mgr.global_prefill_vectors),
-                ("decode", mgr.global_decode_vectors),
-            ]:
-                norm_key = "norm" if phase_name == "base" else f"{phase_name}_norm"
-                for hp_str, layer_vecs in phase_dict.items():
-                    for layer_idx, vec in layer_vecs.items():
-                        norm = vec.norm().item()
-                        if norm > 0.0:
-                            if layer_idx not in result:
-                                result[layer_idx] = {}
-                            if hp_str not in result[layer_idx]:
-                                result[layer_idx][hp_str] = {}
-                            result[layer_idx][hp_str][norm_key] = round(norm, 6)
-        else:
-            # Read from pending globals (all phases including base)
-            pending = self._pending_steering_globals
-            if pending:
-                for captured_vectors, phase in pending:
-                    norm_key = "norm" if phase == "base" else f"{phase}_norm"
-                    for hp_str, layer_vecs in captured_vectors.items():
-                        for layer_idx, vec in layer_vecs.items():
-                            norm = vec.norm().item()
-                            if norm > 0.0:
-                                if layer_idx not in result:
-                                    result[layer_idx] = {}
-                                if hp_str not in result[layer_idx]:
-                                    result[layer_idx][hp_str] = {}
-                                result[layer_idx][hp_str][norm_key] = round(norm, 6)
+        mgr = self._steering_manager
+        if mgr is None:
+            return result
+        for phase_name, phase_dict in [
+            ("base", mgr.global_base_vectors),
+            ("prefill", mgr.global_prefill_vectors),
+            ("decode", mgr.global_decode_vectors),
+        ]:
+            norm_key = "norm" if phase_name == "base" else f"{phase_name}_norm"
+            for hp_str, layer_vecs in phase_dict.items():
+                for layer_idx, vec in layer_vecs.items():
+                    norm = vec.norm().item()
+                    if norm > 0.0:
+                        if layer_idx not in result:
+                            result[layer_idx] = {}
+                        if hp_str not in result[layer_idx]:
+                            result[layer_idx][hp_str] = {}
+                        result[layer_idx][hp_str][norm_key] = round(norm, 6)
         return result
 
     # -----------------------------------------------------------------------
@@ -434,169 +421,18 @@ class SteeringModelRunnerMixin:
     def _update_steering_buffers(self, scheduler_output: "SchedulerOutput") -> None:
         """Update per-layer steering tables and the shared steering index.
 
-        Lazily initializes the SteeringManager on first call.  Each step:
-        1. Populate each layer's per-hook steering_table from the manager
-        2. Build the steering_index mapping tokens to table rows
-        3. Detect prefill->decode phase transitions and swap configs
+        Each step:
+        1. Drain any deferred steering registrations
+        2. Populate each layer's per-hook steering_table from the manager
+        3. Build the steering_index mapping tokens to table rows
+
+        The ``SteeringManager`` is constructed eagerly during model
+        load by ``_init_steering_state``.  When steering is disabled
+        or no steerable layers exist, the manager is ``None`` and this
+        function short-circuits — model code (e.g. Gemma3) registers
+        per-layer steering_table buffers unconditionally so the forward
+        path stays branch-free.
         """
-        # Short-circuit when steering is disabled.  Steerable models
-        # (e.g. Gemma3) unconditionally register per-layer steering_table
-        # buffers so the forward path can stay branch-free, but when
-        # --enable-steering is off there is no SteeringConfig and no work
-        # to do — populating tables and building the index every step is
-        # pure overhead.
-        if getattr(self.vllm_config, "steering_config", None) is None:
-            if not hasattr(self, "_steering_manager"):
-                self._steering_manager = None
-                self._steerable_layers_cache = {}
-            return
-
-        # Lazy init
-        if not hasattr(self, "_steering_manager"):
-            steerable: dict = {}
-            model = self.get_model()
-            for mod in model.modules():
-                if not hasattr(mod, "layer_idx"):
-                    continue
-                has_any_table = any(
-                    hasattr(mod, attr) for attr in HOOK_POINT_TABLE_ATTR.values()
-                )
-                if has_any_table:
-                    steerable[mod.layer_idx] = mod
-            self._steerable_layers_cache = steerable
-            # Snapshot the set of layer indices this worker physically
-            # owns.  Used to skip tensor materialization for non-local
-            # layers when passing vectors into the SteeringManager.
-            # Under PP this is a contiguous subset; under TP/single-
-            # worker it's the full set.  Row allocation in the manager
-            # stays rank-oblivious so row IDs remain identical across
-            # ranks — only the stored tensors are filtered.
-            self._locally_owned_layers = frozenset(steerable.keys())
-
-            if steerable:
-                steering_config = getattr(self.vllm_config, "steering_config", None)
-                max_configs = (
-                    steering_config.max_steering_configs if steering_config else 0
-                )
-
-                # Resolve device from the first steerable layer's table
-                # buffer so per-request vectors are allocated on the same
-                # device, avoiding CPU->GPU copies each step.
-                table_device: torch.device | None = None
-                for mod in steerable.values():
-                    for attr in HOOK_POINT_TABLE_ATTR.values():
-                        if hasattr(mod, attr):
-                            table_device = getattr(mod, attr).device
-                            break
-                    if table_device is not None:
-                        break
-
-                self._steering_manager = SteeringManager(
-                    max_configs, device=table_device
-                )
-                # Each entry: (req_id, config_hash, vectors, phase).
-                # Transitions (prefill→decode) are retried before new
-                # admissions; the transitions queue must be fully
-                # drained before any registration entry is attempted.
-                self._pending_steering_transitions: list[
-                    tuple[str, int, dict[str, dict[int, list[float]]], str]
-                ] = []
-                self._pending_steering_registrations: list[
-                    tuple[str, int, dict[str, dict[int, list[float]]], str]
-                ] = []
-                self._req_steering_phase: dict[str, str] = {}
-                # Tracks whether steering_index has been written with non-zero
-                # row references. Used by the no-active-state short-circuit
-                # to know if it needs to zero the index on transition.
-                self._steering_index_dirty: bool = False
-
-                # Replay any pending phase-specific global vectors that
-                # were set via set_steering_vectors() before the manager
-                # existed.
-                pending = getattr(self, "_pending_steering_globals", None)
-                if pending:
-                    for captured_vectors, phase in pending:
-                        for hook_point_str, layer_vecs in captured_vectors.items():
-                            for layer_idx, vec in layer_vecs.items():
-                                self._steering_manager.update_global_vectors(
-                                    hook_point_str,
-                                    layer_idx,
-                                    vec,
-                                    phase=phase,
-                                    locally_owned_layers=(self._locally_owned_layers),
-                                )
-                    self._pending_steering_globals = None
-                # Register any configs that were added to the batch
-                # before the manager existed (first-step race).
-                for i in range(self.input_batch.num_reqs):
-                    rid = self.input_batch.req_ids[i]
-                    rs = self.requests.get(rid)
-                    if rs is None or rs.sampling_params is None:
-                        continue
-                    ri = self.input_batch.req_id_to_index.get(rid)
-                    if ri is None:
-                        continue
-
-                    num_computed = int(self.input_batch.num_computed_tokens_cpu[ri])
-                    num_prompt = int(self.input_batch.num_prompt_tokens[ri])
-
-                    if num_computed < num_prompt:
-                        # In prefill — register prefill config
-                        ph = int(self.input_batch.request_prefill_steering_hash[ri])
-                        if ph != 0:
-                            eff = rs.sampling_params.effective_prefill_steering
-                            if eff:
-                                try:
-                                    self._steering_manager.register_config(
-                                        ph,
-                                        eff,
-                                        phase="prefill",
-                                        locally_owned_layers=(
-                                            self._locally_owned_layers
-                                        ),
-                                    )
-                                except RuntimeError:
-                                    self._pending_steering_registrations.append(
-                                        (rid, ph, eff, "prefill")
-                                    )
-                                    logger.warning(
-                                        "Deferred prefill steering config "
-                                        "(hash=%d) during init -- capacity "
-                                        "full, will retry next step",
-                                        ph,
-                                    )
-                        self._req_steering_phase[rid] = "prefill"
-                    else:
-                        # In decode (full prefix-cache hit) — register
-                        # decode config
-                        dh = int(self.input_batch.request_decode_steering_hash[ri])
-                        if dh != 0:
-                            eff = rs.sampling_params.effective_decode_steering
-                            if eff:
-                                try:
-                                    self._steering_manager.register_config(
-                                        dh,
-                                        eff,
-                                        phase="decode",
-                                        locally_owned_layers=(
-                                            self._locally_owned_layers
-                                        ),
-                                    )
-                                except RuntimeError:
-                                    self._pending_steering_registrations.append(
-                                        (rid, dh, eff, "decode")
-                                    )
-                                    logger.warning(
-                                        "Deferred decode steering config "
-                                        "(hash=%d) during init -- capacity "
-                                        "full, will retry next step",
-                                        dh,
-                                    )
-                        self._req_steering_phase[rid] = "decode"
-            else:
-                self._steering_manager = None
-                self._steerable_layers_cache = {}
-
         if self._steering_manager is None or not self._steerable_layers_cache:
             return
 
@@ -681,7 +517,8 @@ class SteeringModelRunnerMixin:
         ):
             if self._steering_index_dirty:
                 any_layer = next(iter(self._steerable_layers_cache.values()))
-                any_layer.steering_index.zero_()
+                steering_index = cast(torch.Tensor, any_layer.steering_index)
+                steering_index.zero_()
                 self._steering_index_dirty = False
             return
 
@@ -700,7 +537,7 @@ class SteeringModelRunnerMixin:
         # 2. Build steering index
         # Get the shared steering_index buffer (all layers share one tensor)
         any_layer = next(iter(self._steerable_layers_cache.values()))
-        steering_index = any_layer.steering_index
+        steering_index = cast(torch.Tensor, any_layer.steering_index)
 
         num_reqs = self.input_batch.num_reqs
         req_ids = self.input_batch.req_ids

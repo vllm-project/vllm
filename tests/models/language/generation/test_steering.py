@@ -288,6 +288,7 @@ _HUNYUAN_DENSE_OVERRIDES = {
     "mlp_bias": False,
 }
 
+
 def _mimo_v2_flash_overrides(config):
     """Callable override: shrink dims and strip block-scaled fp8 quant.
 
@@ -309,6 +310,7 @@ def _mimo_v2_flash_overrides(config):
     if hasattr(config, "quantization_config"):
         delattr(config, "quantization_config")
     return config
+
 
 def _param2moe_overrides(config):
     """Callable override: shrink dims, force MoE on layer 1, strip fp8."""
@@ -333,6 +335,7 @@ def _param2moe_overrides(config):
     if hasattr(config, "quantization_config"):
         delattr(config, "quantization_config")
     return config
+
 
 _TRUST_REMOTE_EAGER = {"trust_remote_code": True, "enforce_eager": True}
 _EAGER_ONLY = {"enforce_eager": True}

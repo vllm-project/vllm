@@ -32,7 +32,7 @@ Full docs live in the repo:
 
 Steering uses a three-tier additive composition:
 
-```
+```text
 effective_prefill = global_base + global_prefill + request_base + request_prefill
 effective_decode  = global_base + global_decode  + request_base + request_decode
 ```
