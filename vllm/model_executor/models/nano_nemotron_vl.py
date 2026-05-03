@@ -1504,9 +1504,7 @@ class NemotronH_Nano_VL_V2(
             mm_config.get_limit_per_prompt(modality) == 0
             for modality in ("image", "video", "audio")
         )
-        adapter_dict = (
-            dict(self.mlp1.named_parameters()) if load_multimodal_weights else {}
-        )
+        adapter_dict = dict(self.mlp1.named_parameters())
 
         def is_llm(name: str) -> bool:
             return name.startswith("language_model")
@@ -1544,9 +1542,9 @@ class NemotronH_Nano_VL_V2(
                 hf_key = name[len("vision_model.") :]  # Remove "vision_model." prefix
                 vision_weights.append((hf_key, w))
             elif is_sound_weights(name):
-                assert self.sound_encoder is not None
                 if not load_multimodal_weights:
                     continue
+                assert self.sound_encoder is not None
                 sound_weights.append((name, w))
 
         self.language_model.load_weights(llm_weights)

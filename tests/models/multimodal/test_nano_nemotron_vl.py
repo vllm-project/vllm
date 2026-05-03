@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.model_executor.models.nano_nemotron_vl import NemotronH_Nano_VL_V2
 
 
@@ -62,9 +64,9 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     language_model = _LanguageModel()
     object.__setattr__(model, "model_config", _ModelConfig())
     object.__setattr__(model, "language_model", language_model)
-    object.__setattr__(model, "mlp1", _MissingMultiModalModule())
+    object.__setattr__(model, "mlp1", _AdapterModule())
     object.__setattr__(model, "vision_model", _MissingMultiModalModule())
-    object.__setattr__(model, "sound_encoder", _MissingMultiModalModule())
+    object.__setattr__(model, "sound_encoder", None)
 
     language_weight = object()
     model.load_weights(
@@ -79,7 +81,7 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
 
 
-def test_nano_nemotron_vl_skips_sound_weights_without_sound_encoder():
+def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     model = object.__new__(NemotronH_Nano_VL_V2)
     language_model = _LanguageModel()
     vision_model = _VisionModel()
@@ -95,9 +97,22 @@ def test_nano_nemotron_vl_skips_sound_weights_without_sound_encoder():
         [
             ("language_model.layers.0.weight", language_weight),
             ("vision_model.radio_model.encoder.weight", vision_weight),
-            ("sound_encoder.encoder.weight", object()),
         ]
     )
 
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
     assert vision_model.loaded_weights == [("radio_model.encoder.weight", vision_weight)]
+
+
+def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    language_model = _LanguageModel()
+    vision_model = _VisionModel()
+    object.__setattr__(model, "model_config", _ImageOnlyModelConfig())
+    object.__setattr__(model, "language_model", language_model)
+    object.__setattr__(model, "mlp1", _AdapterModule())
+    object.__setattr__(model, "vision_model", vision_model)
+    object.__setattr__(model, "sound_encoder", None)
+
+    with pytest.raises(AssertionError):
+        model.load_weights([("sound_encoder.encoder.weight", object())])
