@@ -376,7 +376,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.parallel_config.tensor_parallel_size,
             self.kv_cache_config,
             self.max_num_reqs,
-            self.scheduler_config,
+            scheduler_config=self.scheduler_config,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
