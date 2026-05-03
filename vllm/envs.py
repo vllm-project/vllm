@@ -1231,8 +1231,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if 1, force use indexed gemm
     # if 0, force use grouped gemm
     # if None, choose better gemm type automatically
-    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: maybe_convert_bool(
-        os.environ.get("VLLM_HUMMING_MOE_GEMM_TYPE", None)
+    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: os.environ.get(
+        "VLLM_HUMMING_MOE_GEMM_TYPE", None
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with
