@@ -37,6 +37,7 @@ def _fused_inv_rope_fp8_quant_per_head(
     ROPE_START: tl.constexpr,
     HALF_ROPE: tl.constexpr,
     TMA_ALIGNED_SCALES: tl.constexpr,
+    IS_FNUZ: tl.constexpr = False,
 ):
     # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
     pid_token = tl.program_id(0).to(tl.int64)
@@ -105,7 +106,9 @@ def _fused_inv_rope_fp8_quant_per_head(
         ),
         (HEAD_DIM,),
     )
-    x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+    x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(
+        tl.float8e4b8 if IS_FNUZ else tl.float8e4nv
+    )
 
     fp8_base = (
         fp8_ptr
@@ -179,7 +182,7 @@ def fused_inv_rope_fp8_quant(
     num_scale_blocks = d // quant_group_size
     chunks_per_head = head_dim // quant_group_size
 
-    fp8_dtype = torch.float8_e4m3fn
+    fp8_dtype = current_platform.fp8_dtype()
     fp8_max = torch.finfo(fp8_dtype).max
 
     tma_aligned_T = get_tma_aligned_size(num_tokens, 4)
@@ -266,6 +269,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         ROPE_START=rope_start,
         HALF_ROPE=half_rope,
         TMA_ALIGNED_SCALES=tma_aligned_scales,
+        IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         num_stages=1,
         **pdl_kwargs,
         num_warps=1,
