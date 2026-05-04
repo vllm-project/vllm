@@ -228,13 +228,18 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
-        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        # llm-compressor mdls need to set cache_dtype manually based on
+        # the kv_cache_scheme type (float → fp8, int → int8_per_tensor).
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
         if kv_cache_scheme is not None:
-            kv_cache_dtype = "fp8"
+            scheme_type = kv_cache_scheme.get("type", "float")
+            if scheme_type == "int":
+                kv_cache_dtype = "int8_per_tensor"
+            else:
+                kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
-                cache_config.cache_dtype = "fp8"
+                cache_config.cache_dtype = kv_cache_dtype
                 cache_config.calculate_kv_scales = False
 
         # Check if per-head quant scales are required based on kv_cache_scheme

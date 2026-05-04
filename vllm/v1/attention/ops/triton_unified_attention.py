@@ -46,11 +46,16 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
       their scales separately on S/P inside the loop.
     - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
       tensor-wide scale.
+    - ``KV_QUANT_MODE == 5`` (INT8 per-tensor): plain cast.
+      Scale applied post-matmul via folding into softmax_scale / acc.
     """
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+    if KV_QUANT_MODE == 5:
+        # INT8 per-tensor: plain cast, scale folded into softmax_scale
+        return data.to(Q.dtype)
     return data.to(Q.dtype)
 
 
@@ -228,6 +233,12 @@ def kernel_unified_attention(
         CHUNK_SIZE,
     )
 
+    # INT8 per-tensor: fold k_scale into softmax scale, apply v_scale post-loop
+    if KV_QUANT_MODE == 5:
+        int8_k_scale_val = tl.load(k_scale)
+        int8_v_scale_val = tl.load(v_scale)
+        scale = scale * int8_k_scale_val
+
     # iterate through tiles (now limited to the sliding window range)
     for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
@@ -338,6 +349,10 @@ def kernel_unified_attention(
             acc += tl.dot(P_v, V)
         else:
             acc += tl.dot(P.to(V.dtype), V)
+
+    # INT8 per-tensor: apply v_scale once on accumulated output
+    if KV_QUANT_MODE == 5:
+        acc = acc * int8_v_scale_val
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
