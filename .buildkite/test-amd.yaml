@@ -139,19 +139,6 @@ steps:
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
-#--------------------------------------------------------  mi250 · benchmarks  ---------------------------------------------------------#
-
-- label: Benchmarks # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace/.buildkite"
-  source_file_dependencies:
-  - benchmarks/
-  - vllm/platforms/rocm.py
-  commands:
-  - bash scripts/run-benchmarks.sh
-
 #----------------------------------------------------------  mi250 · compile  ----------------------------------------------------------#
 
 - label: PyTorch Compilation Unit Tests # TBD
@@ -1001,18 +988,6 @@ steps:
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
-
-- label: Benchmarks # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/.buildkite"
-  source_file_dependencies:
-  - benchmarks/
-  - vllm/platforms/rocm.py
-  commands:
-  - bash scripts/run-benchmarks.sh
 
 - label: Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
