@@ -482,6 +482,99 @@ You can pass pre-computed audio embeddings similar to image embeddings:
         print(generated_text)
     ```
 
+### Preprocessed Multimodal Inputs (Direct Engine Contract)
+
+For RL frameworks and other clients that already run the HuggingFace processor outside vLLM,
+you can pass a fully-rendered `MultiModalInput` directly to the engine via the `mm_input`
+factory (`from vllm.inputs import mm_input`). This bypasses vLLM's own MM processor entirely —
+useful when you need exact tensor reuse across train and rollout, or want to avoid
+retokenization drift in token-in-token-out workflows.
+
+!!! warning
+    This is an advanced API. The caller owns the model-specific contract: `prompt_token_ids`
+    must already include the placeholder positions, `mm_kwargs` must match what the model
+    expects, and `mm_hashes` must be stable strings (non-string hashes are rejected).
+    Mismatches surface as silent prompt corruption, not loud errors.
+
+??? code
+
+    ```python
+    import asyncio
+    import torch
+    from vllm import SamplingParams
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.inputs import mm_input
+    from vllm.multimodal.inputs import (
+        MultiModalFieldConfig,
+        MultiModalKwargsItems,
+        PlaceholderRange,
+    )
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    engine = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(model="Qwen/Qwen2.5-VL-3B-Instruct")
+    )
+
+    # 1) Run the HF processor (or your own preprocessing) outside vLLM to obtain
+    #    prompt_token_ids (with placeholder tokens already inserted) and the modality
+    #    tensors that vLLM's model would otherwise compute internally.
+    inputs = ...  # dict[str, torch.Tensor] from HF processor: pixel_values, image_grid_thw, ...
+    prompt_token_ids = ...  # list[int]
+
+    # 2) Wrap the HF outputs in MultiModalKwargsItems with a per-field config.
+    mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
+        inputs,
+        {
+            "pixel_values": MultiModalFieldConfig.flat_from_sizes(
+                "image", inputs["image_grid_thw"].prod(-1)
+            ),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        },
+    )
+
+    # 3) Build the MultiModalInput payload. Placeholder offsets/lengths must match the
+    #    placeholder token runs the model expects in prompt_token_ids; is_embed marks the
+    #    positions that consume vision-encoder embeddings (vs. surrounding text tokens).
+    payload = mm_input(
+        prompt_token_ids=prompt_token_ids,
+        mm_kwargs=mm_kwargs,
+        mm_hashes={"image": ["sha256-or-uuid-1"]},  # stable string per item
+        mm_placeholders={
+            "image": [PlaceholderRange(offset=10, length=64)],
+        },
+        cache_salt="optional-prefix-cache-key",
+    )
+
+    # 4) AsyncLLM.generate accepts the payload directly. `vllm.LLM` (sync) does not yet
+    #    expose MultiModalInput in its PromptType union, so use AsyncLLM today.
+    async def run():
+        async for out in engine.generate(
+            prompt=payload,
+            sampling_params=SamplingParams(temperature=0.0, max_tokens=64, seed=0),
+            request_id="req-1",
+        ):
+            if out.finished:
+                return out
+    outputs = asyncio.run(run())
+    ```
+
+For a production reference, see verl's `build_vllm_preprocessed_multimodal_input` in
+[verl-project/verl#6203][verl-pr] — it constructs Qwen2.5-VL image / video and Qwen3-VL
+timestamp-aware video payloads against this contract.
+
+[verl-pr]: https://github.com/verl-project/verl/pull/6203
+
+!!! note "Online Serving status"
+    The direct `MultiModalInput` contract is currently exposed **only through the Python
+    SDK** (`vllm.LLM` / `vllm.v1.engine.async_llm.AsyncLLM`). The OpenAI-compatible HTTP
+    endpoints (`/v1/chat/completions`, `/v1/completions`) do not yet provide a way to pass
+    a fully-rendered preprocessed payload — server-side requests still go through vLLM's
+    MM processor. For the OpenAI-compatible side, only pre-computed embeddings have a
+    bypass today (see the **Image Embedding Inputs** subsection under Online Serving below,
+    which uses `tensor2base64`-encoded `image_embeds` and requires `enable_mm_embeds=True`).
+    A general OpenAI-compatible bypass for raw pixel/tensor payloads is tracked in
+    [vllm-project/vllm#33311](https://github.com/vllm-project/vllm/issues/33311).
+
 ### Cached Inputs
 
 When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
