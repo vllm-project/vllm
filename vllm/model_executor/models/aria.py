@@ -216,9 +216,9 @@ class AriaProjector(nn.Module):
         return out
 
 
-# XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXx
 class AriaFusedMoE(torch.nn.Module):
     def __init__(self, *args, **kwargs):
+        super().__init__()
         self.moe = FusedMoE(*args, **kwargs)
 
     def forward(
@@ -226,6 +226,7 @@ class AriaFusedMoE(torch.nn.Module):
     ) -> torch.Tensor:
         return self.moe(hidden_states, router_logits)
 
+    # TODO(bnell): this probably requires a subclass of RoutedExperts
     def weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:
@@ -234,13 +235,14 @@ class AriaFusedMoE(torch.nn.Module):
         # up weights for each expert.
         # Note: Loading expert weights with quantization is not supported
         tp_rank = get_tensor_model_parallel_rank()
+        tp_size = self.moe.moe_config.tp_size
         if shard_id == "w13":
             # the shape of loaded_weight is
             # (num_experts, hidden_size, 2 * moe_intermediate_size)
-            if self.tp_size > 1:
+            if tp_size > 1:
                 up, gate = loaded_weight.chunk(2, dim=-1)
-                up_current_rank = up.chunk(self.tp_size, dim=-1)[tp_rank]
-                gate_current_rank = gate.chunk(self.tp_size, dim=-1)[tp_rank]
+                up_current_rank = up.chunk(tp_size, dim=-1)[tp_rank]
+                gate_current_rank = gate.chunk(tp_size, dim=-1)[tp_rank]
                 up_and_gate = torch.cat(
                     [up_current_rank, gate_current_rank], dim=-1
                 ).transpose(1, 2)
@@ -250,8 +252,8 @@ class AriaFusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             # the shape of loaded_weight is
             # (num_experts, moe_intermediate_size, hidden_size)
-            if self.tp_size > 1:
-                down_current_rank = loaded_weight.chunk(self.tp_size, dim=1)[tp_rank]
+            if tp_size > 1:
+                down_current_rank = loaded_weight.chunk(tp_size, dim=1)[tp_rank]
                 param.data.copy_(down_current_rank.transpose(1, 2))
             else:
                 param.data.copy_(loaded_weight.transpose(1, 2))
@@ -360,8 +362,8 @@ class AriaTextModel(LlamaModel, SupportsQuant):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            ("experts.w13_weight", "experts.fc1.weight", "w13"),
-            ("experts.w2_weight", "experts.fc2.weight", "w2"),
+            ("experts.moe.routed_experts.w13_weight", "experts.fc1.weight", "w13"),
+            ("experts.moe.routed_experts.w2_weight", "experts.fc2.weight", "w2"),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
