@@ -121,7 +121,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     block IDs when kernel block size != logical block size.
 
     The hot path always calls _logical_to_remote_kernel_block_ids with
-    plan.remote_expansion_stride (model-agnostic).
+    remote_info.remote_physical_blocks_per_logical (model-agnostic).
     """
     from unittest.mock import MagicMock
 
@@ -129,7 +129,7 @@ def test_read_blocks_for_req_expands_remote_ids(
         NixlConnectorMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
-        EngineTransferPlan,
+        TPMapping,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -160,13 +160,15 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker.transfer_topo = MagicMock()
     worker.transfer_topo.tp_ratio.return_value = 1
+    remote_info = MagicMock()
+    remote_info.remote_physical_blocks_per_logical = expansion_stride
+    worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
 
-    mock_plan = MagicMock(spec=EngineTransferPlan)
-    mock_plan.remote_expansion_stride = expansion_stride
+    mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
-    worker._transfer_plans = {remote_engine_id: mock_plan}
+    worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -311,29 +313,46 @@ def test_nixl_metadata_hma_block_ids_structure():
     assert list(req_meta.remote.block_ids[1]) == [18, 19, 20, 21]
 
 
+def _make_mock_worker_for_desc_ids(
+    num_regions: int,
+    has_mamba: bool,
+    group_spec_types: tuple,
+    block_len_per_layer: list[int] | None = None,
+):
+    """Build a mock NixlConnectorWorker with attrs needed by _compute_desc_ids."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker.num_regions = num_regions
+    worker._has_mamba = has_mamba
+    worker._group_spec_types = group_spec_types
+    worker.block_len_per_layer = block_len_per_layer or [100]
+    worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
+        worker, NixlConnectorWorker
+    )
+    return worker
+
+
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _compute_desc_ids uses per-group strides for hybrid
     FA+SSM when ratio=1 (no kernel block size mismatch)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
-    from .test_transfer_plan import _make_mamba_plan_for_desc_ids
-
-    plan = _make_mamba_plan_for_desc_ids(
-        num_fa_regions=2,
-        num_ssm_regions=4,
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=True,
         group_spec_types=(FullAttentionSpec, MambaSpec),
-        fa_num_blocks=100,
-        ssm_num_blocks=100,
+        block_len_per_layer=[100],
     )
 
     fa_blocks = [3, 5]
     ssm_blocks = [1, 2]
-    result = NixlConnectorWorker._compute_desc_ids_from_plan(
-        plan,
+    result = worker._compute_desc_ids(
         block_ids=(fa_blocks, ssm_blocks),
         dst_num_blocks=100,
         block_size_ratio=None,
@@ -348,29 +367,22 @@ def test_get_block_descs_ids_hybrid_ssm():
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
-
-    from .test_transfer_plan import _make_mamba_plan_for_desc_ids
 
     ratio = 4
     logical_blocks = 100
     num_blocks = logical_blocks * ratio  # 400 kernel blocks
 
-    plan = _make_mamba_plan_for_desc_ids(
-        num_fa_regions=2,
-        num_ssm_regions=4,
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=True,
         group_spec_types=(FullAttentionSpec, MambaSpec),
-        fa_num_blocks=num_blocks,
-        ssm_num_blocks=logical_blocks,
+        block_len_per_layer=[100],
     )
 
     fa_blocks = [3, 7]
     ssm_blocks = [1, 2]
-    result = NixlConnectorWorker._compute_desc_ids_from_plan(
-        plan,
+    result = worker._compute_desc_ids(
         block_ids=(fa_blocks, ssm_blocks),
         dst_num_blocks=num_blocks,
         block_size_ratio=None,
