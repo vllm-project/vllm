@@ -26,6 +26,10 @@ from vllm.tokenizers import get_tokenizer
 from ....models.registry import HF_EXAMPLE_MODELS
 from ....utils import RemoteOpenAIServer
 
+# Tuned to prevent OOM on 18GB GPUs in transcription correctness tests.
+MAX_SEQS_FOR_TRANSCRIPTION_TEST = 8
+GPU_UTIL_FOR_TRANSCRIPTION_TEST = 0.5
+
 
 def to_bytes(y, sr):
     buffer = io.BytesIO()
@@ -184,6 +188,8 @@ def test_wer_correctness(
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
+        f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
+        f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}",
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
