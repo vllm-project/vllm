@@ -898,6 +898,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -943,6 +944,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -1417,9 +1419,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.moe_kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
+            backend=self.nvfp4_backend,
             experts_cls=self.experts_cls,
             shared_experts=layer.shared_experts,
             routing_tables=layer._maybe_init_expert_routing_tables(),
+            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -1432,6 +1436,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            layer=layer,
         )
 
     @property

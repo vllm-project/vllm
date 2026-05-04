@@ -133,16 +133,12 @@ def backend_to_kernel_cls(
         return [UnfusedOAITritonExperts]
 
     elif backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
-        )
+        import vllm.model_executor.layers.fused_moe.fused_humming_moe as humming_moe
 
         return [
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
+            humming_moe.BatchedHummingGroupedExperts,
+            humming_moe.HummingGroupedExperts,
+            humming_moe.HummingIndexedExperts,
         ]
 
     elif backend == Mxfp4MoeBackend.MARLIN:
@@ -594,7 +590,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             prepare_humming_moe_layer,
         )
 
-        prepare_humming_moe_layer(layer, {"quant_method": "gpt_oss_mxfp4"})
+        layer.w13_weight.data = w13_weight.view(torch.int8)
+        layer.w2_weight.data = w2_weight.view(torch.int8)
+        layer.w13_weight_scale.data = w13_weight_scale.view(torch.float8_e8m0fnu)
+        layer.w2_weight_scale.data = w2_weight_scale.view(torch.float8_e8m0fnu)
+
+        prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
         return (
             layer.w13_weight,
             layer.w2_weight,

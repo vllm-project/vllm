@@ -18,11 +18,13 @@ logger = init_logger(__name__)
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.MARLIN,
+    Fp8MoeBackend.HUMMING,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
     "marlin": Fp8MoeBackend.MARLIN,
+    "humming": Fp8MoeBackend.HUMMING,
 }
 
 

@@ -762,6 +762,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
+            backend=self.wna16_moe_backend,
             experts_cls=self.experts_cls,
             layer=layer,
             is_k_full=self.is_k_full,

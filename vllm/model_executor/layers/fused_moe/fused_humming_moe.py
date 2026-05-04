@@ -65,7 +65,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         num_dispatchers: int | None = None,
     ):
         self.layer = layer
-        self.num_experts = self.layer.num_experts
+        self.num_experts = self.layer.local_num_experts
         self.global_num_experts = self.layer.global_num_experts
         self.init_humming_moe()
 

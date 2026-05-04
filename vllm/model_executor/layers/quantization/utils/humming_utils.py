@@ -151,7 +151,7 @@ def prepare_humming_moe_layer(layer: FusedMoE, quant_config: dict):
             input_schema=input_schema,
             weight_schema=weight_schema_new,
             has_bias=layer.moe_config.has_bias,
-            num_experts=layer.num_experts,
+            num_experts=layer.local_num_experts,
             torch_dtype=layer.params_dtype,
             sublayer_name=sublayer_name,
         )

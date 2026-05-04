@@ -1348,6 +1348,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 shared_experts=layer.shared_experts,
+                layer=layer,
             )
 
     def get_fused_moe_quant_config(

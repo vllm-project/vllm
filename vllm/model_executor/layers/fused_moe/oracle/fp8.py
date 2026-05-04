@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -49,6 +50,7 @@ class Fp8MoeBackend(Enum):
     DEEPGEMM = "DEEPGEMM"
     BATCHED_DEEPGEMM = "BATCHED_DEEPGEMM"
     MARLIN = "MARLIN"
+    HUMMING = "HUMMING"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
     AITER = "AITER"
@@ -76,6 +78,7 @@ def _get_priority_backends(
         Fp8MoeBackend.VLLM_CUTLASS,
         Fp8MoeBackend.TRITON,
         Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.HUMMING,
         Fp8MoeBackend.BATCHED_DEEPGEMM,
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
@@ -136,6 +139,15 @@ def backend_to_kernel_cls(
         )
 
         return [BatchedDeepGemmExperts]
+
+    elif backend == Fp8MoeBackend.HUMMING:
+        import vllm.model_executor.layers.fused_moe.fused_humming_moe as humming_moe
+
+        return [
+            humming_moe.BatchedHummingGroupedExperts,
+            humming_moe.HummingGroupedExperts,
+            humming_moe.HummingIndexedExperts,
+        ]
 
     elif backend == Fp8MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
@@ -199,6 +211,7 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
         "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": Fp8MoeBackend.FLASHINFER_CUTLASS,
         "marlin": Fp8MoeBackend.MARLIN,
+        "humming": Fp8MoeBackend.HUMMING,
         "aiter": Fp8MoeBackend.AITER,
     }
     if backend := mapping.get(runner_backend):
@@ -430,6 +443,34 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            prepare_humming_moe_layer,
+        )
+
+        quant_config: dict[str, Any]
+        weight_block_size = getattr(layer, "weight_block_size", None)
+        quant_method_name = layer.quant_method.__class__.__name__
+        if "CompressedTensors" in quant_method_name:
+            from compressed_tensors.quantization import QuantizationArgs
+
+            weight_quant = getattr(layer.quant_method, "weight_quant", None)
+            assert isinstance(weight_quant, QuantizationArgs)
+            quant_config = weight_quant.model_dump()
+            quant_config["quant_method"] = "compressed-tensors"
+            quant_config["format"] = "float-quantized"
+        elif "ModelOptMxfp8" in quant_method_name:
+            quant_config = {"quant_method": "modelopt", "quant_algo": "mxfp8"}
+        else:
+            quant_config = {"quant_method": "fp8"}
+            if weight_block_size is not None:
+                quant_config["weight_block_size"] = weight_block_size
+
+        prepare_humming_moe_layer(layer, quant_config)
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         weight_block_size = getattr(layer, "weight_block_size", None)
         if weight_block_size == [1, 32]:
@@ -494,6 +535,7 @@ def make_fp8_moe_quant_config(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
+    layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specified FP8 Backend.
@@ -515,6 +557,14 @@ def make_fp8_moe_quant_config(
             w2_scale=w2_scale,
             block_shape=block_shape,
         )
+    elif fp8_backend == Fp8MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            get_humming_moe_quant_config,
+        )
+
+        assert isinstance(layer, FusedMoE)
+        return get_humming_moe_quant_config(layer)
 
     # Flashinfer CUTLASS per-tensor uses single dq scale
     # (alpha = w_scale * a_scale) and inverse a2 scale.
@@ -564,6 +614,7 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: SharedExperts | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -577,6 +628,11 @@ def make_fp8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    extra_kwargs = {}
+    if fp8_backend == Fp8MoeBackend.HUMMING:
+        assert layer is not None
+        extra_kwargs = {"layer": layer}
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -586,11 +642,13 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+            **extra_kwargs,
         )
 
     # NOTE(rob): we only want the mk to control the shared_expert

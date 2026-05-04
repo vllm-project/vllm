@@ -48,6 +48,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    HUMMING = "HUMMING"
     EMULATION = "EMULATION"
 
 
@@ -116,6 +117,15 @@ def backend_to_kernel_cls(
 
         return [CutlassExpertsFp4]
 
+    elif backend == NvFp4MoeBackend.HUMMING:
+        import vllm.model_executor.layers.fused_moe.fused_humming_moe as humming_moe
+
+        return [
+            humming_moe.BatchedHummingGroupedExperts,
+            humming_moe.HummingGroupedExperts,
+            humming_moe.HummingIndexedExperts,
+        ]
+
     elif backend == NvFp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
@@ -140,6 +150,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "marlin": NvFp4MoeBackend.MARLIN,
+        "humming": NvFp4MoeBackend.HUMMING,
         "emulation": NvFp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
@@ -168,6 +179,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
 
@@ -358,6 +370,42 @@ def convert_to_nvfp4_moe_kernel_format(
             a2_scale=a2_scale,
             is_act_and_mul=is_act_and_mul,
         )
+    elif nvfp4_backend == NvFp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            prepare_humming_moe_layer,
+        )
+
+        quant_method_name = layer.quant_method.__class__.__name__
+        if "CompressedTensor" in quant_method_name:
+            from compressed_tensors.quantization import QuantizationArgs
+
+            weight_quant = getattr(layer.quant_method, "weight_quant", None)
+            assert isinstance(weight_quant, QuantizationArgs)
+            quant_config = weight_quant.model_dump()
+            quant_config["quant_method"] = "compressed-tensors"
+            quant_config["format"] = "nvfp4-pack-quantized"
+
+            # CompressedTensorsW4A4Nvfp4MoEMethod rename weight_packed to weight
+            # we need to rename it back to match the checkpoint name
+            w13_weight = torch.nn.Parameter(layer.w13_weight.data, requires_grad=False)
+            w2_weight = torch.nn.Parameter(layer.w2_weight.data, requires_grad=False)
+            layer.w13_weight_packed = w13_weight
+            layer.w2_weight_packed = w2_weight
+            delattr(layer, "w13_weight")
+            delattr(layer, "w2_weight")
+        else:
+            quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
+
+        prepare_humming_moe_layer(layer, quant_config)
+
+        a13_scale = None
+        a2_scale = None
+        w13 = layer.w13_weight
+        w13_scale = layer.w13_weight_scale
+        w13_scale_2 = layer.w13_global_scale
+        w2 = layer.w2_weight
+        w2_scale = layer.w2_weight_scale
+        w2_scale_2 = layer.w2_global_scale
     elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
         a13_scale = None
         a2_scale = None
@@ -429,8 +477,17 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
+    layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    if backend == NvFp4MoeBackend.MARLIN:
+    if backend == NvFp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            get_humming_moe_quant_config,
+        )
+
+        assert isinstance(layer, FusedMoE)
+        return get_humming_moe_quant_config(layer)
+    elif backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
@@ -475,8 +532,10 @@ def make_nvfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
+    backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: SharedExperts | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -490,6 +549,11 @@ def make_nvfp4_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    extra_kwargs = {}
+    if "Humming" in experts_cls.__name__:
+        assert layer is not None
+        extra_kwargs["layer"] = layer
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -499,11 +563,13 @@ def make_nvfp4_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+            **extra_kwargs,
         )
 
     # NOTE(rob): we only want the mk to control the shared_expert

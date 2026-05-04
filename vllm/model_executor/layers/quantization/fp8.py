@@ -759,8 +759,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_input_scale=w2_input_scale,
         )
 
-        # Replace parameters with updated versions. Note that this helper
-        # function ensures the replacement is compatible with RL weight reloads.
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
@@ -776,6 +774,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 shared_experts=layer.shared_experts,
+                layer=layer,
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -845,6 +844,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
+            layer=layer,
         )
 
         # Inject biases into the quant config if the model has them
