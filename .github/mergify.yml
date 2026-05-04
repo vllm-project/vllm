@@ -308,8 +308,7 @@ pull_request_rules:
       - files=benchmarks/benchmark_serving_structured_output.py
       - files=benchmarks/run_structured_output_benchmark.sh
       - files=docs/features/structured_outputs.md
-      - files=examples/offline_inference/structured_outputs.py
-      - files=examples/online_serving/structured_outputs/structured_outputs.py
+      - files=^examples/features/structured_outputs/
       - files~=^tests/v1/structured_output/
       - files=tests/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
@@ -325,7 +324,7 @@ pull_request_rules:
     - or:
       - files~=^vllm/v1/spec_decode/
       - files~=^tests/v1/spec_decode/
-      - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
+      - files=^examples/features/speculative_decoding/
       - files~=^vllm/model_executor/models/.*eagle.*\.py
       - files=vllm/model_executor/models/mlp_speculator.py
       - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
@@ -389,11 +388,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
       - files=docs/features/tool_calling.md
-      - files~=^examples/tool_chat_*
-      - files=examples/offline_inference/chat_with_tools.py
-      - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
-      - files=examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py
-      - files=examples/online_serving/openai_chat_completion_client_with_tools.py
+      - files~=^examples/tool_calling/
   actions:
     label:
       add:

@@ -4,6 +4,7 @@ import functools
 from math import prod
 
 import torch
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -207,11 +208,12 @@ def _mxfp8_e4m3_quantize(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_sf_swizzled_layout: bool = False,
+    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None or block_shape == [1, 32]
-    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
+    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout, mx_alignment)
 
 
 def _mxfp6_e3m2_quantize(
@@ -257,6 +259,7 @@ def moe_kernel_quantize_input(
     is_fp4_scale_swizzled: bool = True,
     ocp_mx_scheme: str | None = None,
     quantization_emulation: bool = False,
+    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
     if ocp_mx_scheme is not None:
@@ -297,7 +300,8 @@ def moe_kernel_quantize_input(
                 A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled
             )
         else:
-            return ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
+            A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
+            return A, None
     elif quant_dtype == "mxfp4":
         if not quantization_emulation:
             raise NotImplementedError(
@@ -318,7 +322,8 @@ def moe_kernel_quantize_input(
             A_scale,
             per_act_token_quant,
             block_shape,
-            is_sf_swizzled_layout=is_fp4_scale_swizzled,
+            is_sf_swizzled_layout=False,
+            mx_alignment=mx_alignment,
         )
     elif quant_dtype == "mxfp6_e3m2":
         if not quantization_emulation:
@@ -384,3 +389,20 @@ def trtllm_moe_pack_topk_ids_weights(
     return (topk_ids.to(torch.int32) << 16) | topk_weights.to(torch.bfloat16).view(
         torch.int16
     )
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def swiglu_limit_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    swiglu_limit: float = 0.0,
+) -> None:
+    d = input.shape[1] // 2
+    gate = input[:, :d]
+    up = input[:, d:]
+
+    if swiglu_limit > 0:
+        gate = torch.clamp(gate, max=swiglu_limit)
+        up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
+
+    output.copy_(F.silu(gate) * up)
