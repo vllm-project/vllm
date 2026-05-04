@@ -564,16 +564,34 @@ timestamp-aware video payloads against this contract.
 
 [verl-pr]: https://github.com/verl-project/verl/pull/6203
 
-!!! note "Online Serving status"
-    The direct `MultiModalInput` contract is currently exposed **only through the Python
-    SDK** (`vllm.LLM` / `vllm.v1.engine.async_llm.AsyncLLM`). The OpenAI-compatible HTTP
-    endpoints (`/v1/chat/completions`, `/v1/completions`) do not yet provide a way to pass
-    a fully-rendered preprocessed payload — server-side requests still go through vLLM's
-    MM processor. For the OpenAI-compatible side, only pre-computed embeddings have a
-    bypass today (see the **Image Embedding Inputs** subsection under Online Serving below,
-    which uses `tensor2base64`-encoded `image_embeds` and requires `enable_mm_embeds=True`).
-    A general OpenAI-compatible bypass for raw pixel/tensor payloads is tracked in
+!!! note "Online Serving (HTTP) equivalent"
+    The same direct contract is exposed over HTTP through vLLM's **disaggregated serving**
+    endpoint pair (rather than `/v1/chat/completions`):
+
+    - `POST /v1/chat/completions/render` — runs the chat template + HF processor and returns
+      `{token_ids, features: {mm_hashes, mm_placeholders, kwargs_data}, ...}`. `kwargs_data`
+      is base64-encoded `MultiModalKwargsItem` per modality item, so the response is an
+      already-rendered preprocessed payload.
+    - `POST /inference/v1/generate` — accepts that payload directly (the `GenerateRequest`
+      schema in [`vllm/entrypoints/serve/disagg/protocol.py`](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/serve/disagg/protocol.py))
+      and runs token-in-token-out generation, bypassing the MM processor.
+
+    A worked example is in
+    [`examples/online_serving/disaggregated_serving/example_mm_serve.py`](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/disaggregated_serving/example_mm_serve.py).
+    Callers that preprocessed outside vLLM (e.g. RL frameworks reusing HF processor outputs
+    from training) can also post directly to `/inference/v1/generate` without going through
+    `/render`.
+
+    Caveat: `PlaceholderRangeInfo` in the disagg protocol does not yet carry `is_embed`
+    (see the TODO at `protocol.py:27-29`), so Qwen3-VL sparse video placeholder masks
+    cannot be transported over the HTTP side end-to-end yet — for that case the SDK path
+    above is the only complete option. General `is_embed` support and a wider OpenAI-
+    standard-endpoint bypass are tracked in
     [vllm-project/vllm#33311](https://github.com/vllm-project/vllm/issues/33311).
+
+    Pre-computed embeddings (the narrower `image_embeds`-via-`tensor2base64` path) over the
+    standard `/v1/chat/completions` endpoint is a separate older feature, documented in the
+    **Image Embedding Inputs** subsection further below.
 
 ### Cached Inputs
 
