@@ -5,7 +5,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -21,7 +21,7 @@ class JobMetadata:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
-    keys: Sequence[OffloadKey]
+    keys: Collection[OffloadKey]
     block_ids: np.ndarray
     req_context: ReqContext = field(default_factory=ReqContext)
 
@@ -146,7 +146,7 @@ class SecondaryTierManager(ABC):
         """
         return
 
-    def touch(self, keys: Sequence[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey]):
         """
         Mark blocks as recently used for eviction policy.
 

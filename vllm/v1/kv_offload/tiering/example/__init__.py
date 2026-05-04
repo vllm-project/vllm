@@ -10,7 +10,7 @@ requiring actual storage or network backends.
 """
 
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
@@ -27,7 +27,7 @@ class _JobMetadata:
     """Internal metadata for tracking job details."""
 
     job_id: JobId
-    keys: Sequence[OffloadKey]
+    keys: Collection[OffloadKey]
     is_store: bool  # True for store jobs, False for load jobs
 
 
@@ -222,14 +222,14 @@ class ExampleSecondaryTier(SecondaryTierManager):
         # Return simplified JobResult (only job_id and success)
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def touch(self, keys: Sequence[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey]):
         """
         Mark blocks as recently used (move to end of LRU list).
 
         Args:
             keys: Blocks to mark as recently used.
         """
-        for key in reversed(keys):
+        for key in reversed(list(keys)):
             if key in self.blocks:
                 self.blocks.move_to_end(key)
 
