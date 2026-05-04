@@ -436,14 +436,16 @@ MIOpen(HIP): Error [...] Could not open metadata file: .../gfx1151_ConvHipImplic
 The process then hangs forever because MIOpen has no pre-compiled solver database for
 gfx1151, causing an exhaustive kernel search that never finishes.
 
-**Workaround:** Set `VLLM_SKIP_MM_PROFILING=1` to skip the encoder profiling step.
-Text-only inference will work normally; only the encoder cache pre-profiling is
-disabled.
+**Workaround:** Use the `--skip-mm-profiling` CLI flag to skip the encoder profiling
+step.  Text-only inference will work normally; only the encoder cache pre-profiling is
+disabled:
 
-If your vLLM version does not yet support that environment variable, you can work
-around the issue by serving a text-only model or by setting the `--enforce-eager`
-flag together with `--limit-mm-per-prompt '{"image": 0}'` so that vLLM never exercises
-the vision encoder path during init.
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B --skip-mm-profiling --enforce-eager ...
+```
+
+Alternatively, set `--limit-mm-per-prompt '{"image": 0}'` to avoid the encoder
+entirely if you only need text output from the model.
 
 **Affected platforms:** All AMD gfx1151 / Ryzen AI MAX+ 395 (Strix Halo) machines when
 running vision-language models. See [#37472](https://github.com/vllm-project/vllm/issues/37472).
