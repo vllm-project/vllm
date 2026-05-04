@@ -156,18 +156,24 @@ def response_input_to_harmony(
         if isinstance(content, str):
             msg = Message.from_role_and_content(role, text_prefix + content)
         else:
+            _SUPPORTED_TEXT_TYPES = ("input_text", "text", "output_text")
             contents = []
             for i, c in enumerate(content):
-                text = c.get("text")
-                if text is None:
-                    item_type = c.get("type", "<missing>")
+                item_type = c.get("type", "<missing>")
+                if item_type not in _SUPPORTED_TEXT_TYPES:
                     raise VLLMValidationError(
-                        f"Content item of type {item_type!r} is missing "
-                        f"required 'text' field",
+                        f"Content item type {item_type!r} is not supported "
+                        f"by the Harmony Responses path; supported types: "
+                        f"{', '.join(repr(t) for t in _SUPPORTED_TEXT_TYPES)}",
                         parameter="input",
                     )
-                # Only prepend the developer "Instructions:" prefix to the
-                # first content item; otherwise it is repeated per-item.
+                text = c.get("text")
+                if not isinstance(text, str):
+                    raise VLLMValidationError(
+                        f"Content item type {item_type!r} requires a string "
+                        f"'text' field",
+                        parameter="input",
+                    )
                 prefix = text_prefix if i == 0 else ""
                 contents.append(TextContent(text=prefix + text))
             msg = Message.from_role_and_contents(role, contents)

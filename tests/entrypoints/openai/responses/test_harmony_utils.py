@@ -470,15 +470,16 @@ class TestResponseInputToHarmony:
     """
     Tests for response_input_to_harmony with multi-part chat-format content.
 
-    Regression coverage for the previous unconditional ``c["text"]`` indexing
-    that crashed with ``KeyError: 'text'`` -> HTTP 500 on valid OpenAI
-    multimodal content items such as ``input_image`` or ``input_file`` (which
-    do not carry a ``text`` field). These now raise
-    :class:`VLLMValidationError` -> HTTP 400 with a sanitized message.
+    The OpenAI Responses API spec defines several content item types
+    (input_text, input_image, input_file, etc.). gpt-oss is a text-only
+    model so the Harmony adapter only supports text-bearing types. Other
+    types raise :class:`VLLMValidationError` -> HTTP 400 with a clear
+    "not supported" message, replacing the previous unconditional
+    ``c["text"]`` access that crashed with ``KeyError: 'text'`` -> HTTP 500.
     """
 
     def test_input_text_only_content_accepted(self):
-        """Single text content item should round-trip without error."""
+        """Single input_text content item should round-trip without error."""
         chat_msg = {
             "role": "user",
             "content": [
@@ -492,8 +493,34 @@ class TestResponseInputToHarmony:
         assert len(msg.content) == 1
         assert msg.content[0].text == "Summarize this letter."
 
-    def test_input_file_without_text_raises_validation_error(self):
-        """Content item without 'text' (e.g. input_file) -> 400, not 500."""
+    def test_text_type_alias_accepted(self):
+        """The legacy 'text' type alias is also accepted."""
+        chat_msg = {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert msg.content[0].text == "hello"
+
+    def test_output_text_type_accepted(self):
+        """output_text (echoed assistant content) is also accepted."""
+        chat_msg = {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "answer"}],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert msg.content[0].text == "answer"
+
+    def test_input_file_rejected_as_unsupported_type(self):
+        """input_file is a valid Responses-API type but the Harmony adapter
+        does not support file inputs. Reject with a clear 400 citing the
+        unsupported type, not a misleading 'missing text' message."""
         chat_msg = {
             "role": "user",
             "content": [
@@ -505,9 +532,13 @@ class TestResponseInputToHarmony:
             response_input_to_harmony(chat_msg, [])
 
         assert exc_info.value.parameter == "input"
+        message = str(exc_info.value)
+        assert "input_file" in message
+        assert "not supported" in message
 
-    def test_input_image_without_text_raises_validation_error(self):
-        """Content item input_image (image_url, no text) -> 400, not 500."""
+    def test_input_image_rejected_as_unsupported_type(self):
+        """input_image is a valid Responses-API type but the Harmony adapter
+        does not support image inputs (gpt-oss is text-only)."""
         chat_msg = {
             "role": "user",
             "content": [
@@ -519,9 +550,14 @@ class TestResponseInputToHarmony:
             response_input_to_harmony(chat_msg, [])
 
         assert exc_info.value.parameter == "input"
+        message = str(exc_info.value)
+        assert "input_image" in message
+        assert "not supported" in message
 
-    def test_mixed_text_and_file_content_raises_on_non_text_item(self):
-        """Mixed input_text + input_file is rejected on the non-text item."""
+    def test_mixed_text_and_file_content_rejected_on_non_text_item(self):
+        """Mixed input_text + input_file is rejected on the non-text item.
+        The presence of a valid text item earlier in the list does not
+        excuse a later unsupported item; the whole request is rejected."""
         chat_msg = {
             "role": "user",
             "content": [
@@ -534,8 +570,25 @@ class TestResponseInputToHarmony:
             response_input_to_harmony(chat_msg, [])
 
         assert exc_info.value.parameter == "input"
+        assert "input_file" in str(exc_info.value)
 
-    def test_validation_error_message_includes_type_not_payload(self):
+    def test_input_text_with_missing_text_field_rejected(self):
+        """If type is supported but the text field is missing or non-string,
+        raise a separate clear error rather than a generic crash."""
+        chat_msg = {
+            "role": "user",
+            "content": [{"type": "input_text"}],  # no text field
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+        message = str(exc_info.value)
+        assert "input_text" in message
+        assert "string 'text'" in message
+
+    def test_validation_error_message_does_not_leak_payload_fields(self):
         """The 400 error must cite the item type without echoing url/data
         fields, which can be customer-sensitive (signed URLs, base64 file
         contents, etc.)."""
