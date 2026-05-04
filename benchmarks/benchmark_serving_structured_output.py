@@ -135,7 +135,7 @@ def sample_requests(
         for req in requests:
             prompt_ids = tokenizer(req.prompt, add_special_tokens=False).input_ids
             full_ids = prefix_token_ids + prompt_ids
-            full_prompt = tokenizer.decode(full_ids, add_special_tokens=False)
+            full_prompt = tokenizer.decode(full_ids, skip_special_tokens=False)
             out.append(
                 SampleRequest(
                     prompt=full_prompt,
