@@ -8,7 +8,7 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
 """
 
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable
 
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
@@ -79,7 +79,7 @@ class FilterReusedOffloadingManager(OffloadingManager):
         return self._backing.lookup(key, req_context)
 
     def prepare_store(
-        self, keys: Sequence[OffloadKey], req_context: ReqContext
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         """Filter out blocks below threshold, then delegate to backing.
 
@@ -101,17 +101,19 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # ------------------------------------------------------------------
 
     def prepare_load(
-        self, keys: Sequence[OffloadKey], req_context: ReqContext
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         return self._backing.prepare_load(keys, req_context)
 
-    def touch(self, keys: Sequence[OffloadKey]) -> None:
+    def touch(self, keys: Collection[OffloadKey]) -> None:
         return self._backing.touch(keys)
 
-    def complete_load(self, keys: Iterable[OffloadKey]) -> None:
+    def complete_load(self, keys: Collection[OffloadKey]) -> None:
         return self._backing.complete_load(keys)
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True) -> None:
+    def complete_store(
+        self, keys: Collection[OffloadKey], success: bool = True
+    ) -> None:
         return self._backing.complete_store(keys, success)
 
     def take_events(self) -> Iterable[OffloadingEvent]:

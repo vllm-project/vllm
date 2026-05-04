@@ -13,7 +13,6 @@ from .common import (
     AttentionBackendCase,
     Matches,
     custom_ops_combos,
-    is_blackwell,
 )
 from .models import (
     FLASHINFER_ATTN,
@@ -46,26 +45,8 @@ def test_tp2_async_tp_fp8_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
     matches = matches_fn(n_layers)
-
-    # Llama-4-Scout-17B FP8 + TP=2 warmup peaks at ~75 GiB on the 80 GiB H100
-    # CI agent (only ~5 GiB free for cudagraph capture). The same case passes
-    # on B200; rely on the B200 variant of this test for coverage.
-    if (
-        "Llama-4-Scout" in model_name
-        and "fp8" in model_name.lower()
-        and not is_blackwell()
-    ):
-        pytest.skip(
-            "OOM on H100 80GB (TP=2 FP8 17B model exceeds GPU memory budget); "
-            "covered by the B200 variant of this test."
-        )
-
-    if is_blackwell():
-        # Disable FlashInfer scaled_mm FP8 as it's not supported in async tp patterns
-        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
@@ -186,26 +167,8 @@ def test_tp2_sp_ar_rms_fp8_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
     matches = matches_fn(n_layers)
-
-    # Llama-4-Scout-17B FP8 + TP=2 warmup peaks at ~75 GiB on the 80 GiB H100
-    # CI agent (only ~5 GiB free for cudagraph capture). The same case passes
-    # on B200; rely on the B200 variant of this test for coverage.
-    if (
-        "Llama-4-Scout" in model_name
-        and "fp8" in model_name.lower()
-        and not is_blackwell()
-    ):
-        pytest.skip(
-            "OOM on H100 80GB (TP=2 FP8 17B model exceeds GPU memory budget); "
-            "covered by the B200 variant of this test."
-        )
-
-    if is_blackwell():
-        # Disable FlashInfer scaled_mm FP8 as it's not supported in async tp patterns
-        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
