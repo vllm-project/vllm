@@ -141,6 +141,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        is_eagle: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -235,6 +236,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             dtype=torch.uint8,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
+            is_eagle=is_eagle,
         )
 
         self.mla_attn = DeepseekV4MLAAttention(
