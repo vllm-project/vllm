@@ -190,13 +190,17 @@ class OpenAIServingChat(OpenAIServing):
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
     ) -> dict[str, Any]:
-        return (
+        chat_template_kwargs = (
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
+        )
+        return request.apply_chat_template_kwargs(
+            chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     async def render_chat_request(
@@ -300,6 +304,8 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     max_tokens,
                     self.default_sampling_params,
+                    chat_template_kwargs=chat_template_kwargs,
+                    model_config=self.model_config,
                 )
 
             self._log_inputs(

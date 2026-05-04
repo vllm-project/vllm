@@ -399,6 +399,12 @@ class ConversationMessage(TypedDict, total=False):
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
 
+    prefix: bool
+    """Whether this assistant message is a prefix for continuation."""
+
+    wo_eos: bool
+    """Whether this message should be rendered without an EOS marker."""
+
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
 
@@ -1751,6 +1757,8 @@ def _parse_chat_message_content(
     role = message["role"]
     content = message.get("content")
     reasoning = message.get("reasoning")
+    if reasoning is None:
+        reasoning = message.get("reasoning_content")
 
     if content is None:
         content = []
@@ -1780,6 +1788,9 @@ def _parse_chat_message_content(
                 result_msg["reasoning_content"] = cast(
                     str, reasoning
                 )  # keep compatibility
+            if parsed_msg.get("prefix"):
+                result_msg["prefix"] = True
+                result_msg["wo_eos"] = True
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:

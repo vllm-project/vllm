@@ -159,8 +159,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 self.override_max_tokens,
             )
             single_request = single_requests[i]
+            chat_template_kwargs = self._effective_chat_template_kwargs(single_request)
             sampling_params = single_request.to_sampling_params(
-                max_tokens, self.default_sampling_params
+                max_tokens,
+                self.default_sampling_params,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=self.model_config,
             )
             self._log_inputs(
                 sub_request_id,

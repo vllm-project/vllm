@@ -4,14 +4,33 @@
 import pytest
 from transformers import AutoTokenizer
 
+from vllm.config.reasoning import ReasoningConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
-from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import (
+    DeepSeekV3ReasoningParser,
+    DeepSeekV3ReasoningWithThinkingParser,
+)
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
+
+
+class FakeReasoningTokenizer:
+
+    def get_vocab(self) -> dict[str, int]:
+        return {"<think>": 100, "</think>": 101}
+
+    def encode(
+        self,
+        text: str,
+        add_special_tokens: bool = False,
+        **kwargs,
+    ) -> list[int]:
+        assert add_special_tokens is False
+        return [self.get_vocab()[text]]
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +56,22 @@ def test_parser_selection(tokenizer, thinking, expected_parser_type):
 def test_deepseek_v4_reasoning_parser_alias():
     parser_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v4")
 
-    assert parser_cls is DeepSeekV3ReasoningParser
+    assert parser_cls is DeepSeekV3ReasoningWithThinkingParser
+
+
+def test_deepseek_v4_auto_reasoning_config_initializes_budget_tokens(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.config.reasoning.cached_tokenizer_from_config",
+        lambda model_config: FakeReasoningTokenizer(),
+    )
+
+    config = ReasoningConfig(reasoning_parser="deepseek_v4")
+
+    config.initialize_token_ids(model_config=None)
+
+    assert config.enabled is True
+    assert config.reasoning_start_token_ids == [100]
+    assert config.reasoning_end_token_ids == [101]
 
 
 def test_identity_reasoning_parser_basic(tokenizer):
