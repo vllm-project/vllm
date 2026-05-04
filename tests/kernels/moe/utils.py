@@ -402,6 +402,7 @@ def make_test_quant_config(
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
     make_gate: bool = True,
+    is_nvfp4_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
     (_, w1, w1_s, w1_gs), (_, w2, w2_s, w2_gs) = make_test_weights(
         e,
@@ -442,6 +443,7 @@ def make_test_quant_config(
             # TODO: make sure this is handled properly
             g1_alphas=(1 / w1_gs) if w1_gs is not None else None,
             g2_alphas=(1 / w2_gs) if w2_gs is not None else None,
+            is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
         ),
     )
 

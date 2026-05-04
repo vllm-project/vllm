@@ -6,6 +6,7 @@ from collections.abc import Iterable
 import torch
 
 from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -15,8 +16,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 
 
-# Pluggable?
-class MoERunnerInterface(torch.nn.Module):
+class MoERunnerInterface(PluggableLayer):
     """
     Abstract base class for Mixture of Experts (MoE) runners.
 
