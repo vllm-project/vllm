@@ -209,6 +209,26 @@ class OffloadingConnectorScheduler:
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
 
+        # Hybrid Mamba/attention models declare a MambaSpec KV cache group.
+        # The connector currently only persists attention KV — the Mamba
+        # recurrent state is not snapshot or restored across requests, so
+        # claiming external prefix-cache hits whose corresponding Mamba
+        # state is unrecoverable would either trip the assertion in
+        # Scheduler._mamba_block_aligned_split or, if that assertion is
+        # bypassed, livelock the scheduler waiting for an async KV load
+        # that is never initiated.
+        self._has_mamba_groups = any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in spec.kv_cache_config.kv_cache_groups
+        )
+        if self._has_mamba_groups:
+            logger.warning_once(
+                "OffloadingConnector: model has Mamba/hybrid KV groups; "
+                "external prefix-cache hits via this connector are disabled. "
+                "Single-request attention KV is still offloaded to CPU; only "
+                "cross-request prefix reuse is suppressed for hybrid models."
+            )
+
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
         self._current_batch_jobs_to_flush: set[int] = set()
@@ -462,6 +482,11 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
+        if self._has_mamba_groups:
+            # See __init__: Mamba recurrent state is not offloaded; refuse
+            # to claim external hits to avoid scheduler livelock.
+            return 0, False
+
         is_new_request = False
         if req_status := self._req_status.get(request.request_id):
             # make sure block IDs are cleared
