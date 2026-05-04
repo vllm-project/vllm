@@ -372,6 +372,7 @@ def _test_async_transfer_layer_without_mtp_worker(
                 ep_group=ep_group,
                 communicator=communicator,
                 cuda_stream=cuda_stream,
+                layer_idx=layer_idx,
             )
             cuda_stream.synchronize()
             move_from_buffer(

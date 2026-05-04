@@ -236,13 +236,7 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
 
 class NixlEplbCommunicator(EplbCommunicator):
-    """EPLB communicator backed by zero-copy NIXL READ transfers.
-
-    Registers all expert weight tensors (send side) and the pre-allocated
-    expert_buffer (recv side) with NIXL at init time.  Remote ranks pull
-    directly from expert_weights via RDMA READs -- no intermediate
-    send/recv buffers or pack/unpack copies.
-    """
+    """EPLB communicator backed by NIXL READ transfers."""
 
     def __init__(
         self,
@@ -322,19 +316,20 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    # ------------------------------------------------------------------
-    # add_send / set_transfer_context / add_recv
-    # ------------------------------------------------------------------
-
     def add_send(
         self,
         tensors: list[torch.Tensor],
         dst_rank: int,
         expert_id: int,
     ) -> None:
+        # No-op: NIXL READ is receiver-initiated. The sender's expert
+        # weights are pre-registered and always readable in-place.
         pass
 
     def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+        # Pre-compute expert_id -> src_row mapping for every rank so that
+        # add_recv can immediately issue NIXL READs without deferring to
+        # execute().
         assert not self._xfer_entries, (
             f"set_transfer_context() called with {len(self._xfer_entries)} "
             f"pending transfers from layer {self._layer_idx}; "
@@ -354,6 +349,9 @@ class NixlEplbCommunicator(EplbCommunicator):
         src_rank: int,
         expert_id: int,
     ) -> None:
+        # Build NIXL descriptors and issue the RDMA READ immediately,
+        # overlapping the transfer with the remaining Python loop in
+        # move_to_buffer. execute() only waits for completion.
         assert self._expert_to_src_row is not None and self._layer_idx is not None, (
             "set_transfer_context() must be called before add_recv()"
         )
@@ -441,6 +439,9 @@ class NixlEplbCommunicator(EplbCommunicator):
                     self._cuda_device_id,
                 )
 
+        # Per-rank map: (layer_idx, tensor_idx) -> (base_ptr, bytes_per_expert, dev_id).
+        # add_recv uses base_ptr + src_row * bytes_per_expert to compute
+        # the remote RDMA address for each expert.
         gathered_meta: list[dict[tuple[int, int], tuple[int, int, int]] | None] = [
             None
         ] * self._world_size
@@ -470,7 +471,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._remote_send_meta[peer] = peer_meta
 
     # ------------------------------------------------------------------
-    # Transfer helpers (unchanged)
+    # Transfer helpers
     # ------------------------------------------------------------------
 
     def _wait_for_all_transfers(self, handles: list[int]) -> None:
@@ -538,31 +539,14 @@ class NixlEplbCommunicator(EplbCommunicator):
             "if any add_recv() calls were made"
         )
         try:
-            # Wait for all transfers issued by add_recv.
-            # No stream.synchronize() needed. NIXL transfers bypass CUDA
-            # streams (UCX/RDMA path). The UCX backend's prepXfer appends a
-            # flushEp() as the final request in each transfer handle.
-            # check_xfer_state returns "DONE" only after ALL requests
-            # including the flush have completed, which for ucp_get_nbx
-            # (RDMA READ) guarantees data is visible in local GPU memory.
             self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
 
             # Post-READ barrier.
             # Correctness fence for zero-copy: prevents overwrite-while-
-            # remote-read race. Without it, a fast rank could exit execute()
-            # and start move_from_buffer() (overwriting expert_weights) while
-            # a slow rank is still RDMA-reading from those same weights.
-            # CPU-only, which is safe: _wait_for_all_transfers already
-            # guarantees data is landed in GPU memory (see above).
-            t0 = time.monotonic()
+            # remote-read race.
             torch.distributed.monitored_barrier(
                 group=self._cpu_group,
                 timeout=timedelta(minutes=5),
-            )
-            logger.debug(
-                "post-READ barrier for layer %d took %.3f s",
-                self._layer_idx,
-                time.monotonic() - t0,
             )
         finally:
             for local_h, remote_h, xfer_h in self._xfer_entries:
