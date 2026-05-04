@@ -31,6 +31,9 @@ class IrOpPriorityConfig:
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
 
+    fused_add_rms_norm: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
@@ -50,7 +53,7 @@ class IrOpPriorityConfig:
             name: {
                 provider: IrOp.registry[name].impls[provider].uuid() for provider in p
             }
-            for name, p in asdict(self).items()
+            for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
         return hash_factors(factors)
@@ -77,7 +80,7 @@ class IrOpPriorityConfig:
         current_platform.import_ir_kernels()
 
         with contextlib.ExitStack() as stack:
-            for field in fields(self):
+            for field in fields(self):  # type: ignore[arg-type]
                 op_priority = getattr(self, field.name)
                 assert op_priority is not None, (
                     f"IR op priority for {field.name} must be set"
@@ -98,7 +101,7 @@ class IrOpPriorityConfig:
         A helper to create an IrOpPriorityConfig where fields not specified in kwargs
         use the given default list.
         """
-        for field in fields(cls):
+        for field in fields(cls):  # type: ignore[arg-type]
             if field.name not in kwargs:
                 kwargs[field.name] = list(default)
 
@@ -109,11 +112,13 @@ MoEBackend = Literal[
     "auto",
     "triton",
     "deep_gemm",
+    "deep_gemm_mega_moe",
     "cutlass",
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "marlin",
+    "humming",
     "aiter",
     "emulation",
 ]
@@ -136,13 +141,15 @@ class KernelConfig:
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
-    - "triton": Use Triton-based fused MoE kernels
+    - "triton": Use Triton-based fused MoE kernels 
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
+    - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "marlin": Use Marlin kernels (weight-only quantization)
+    - "humming": Use Humming Mixed Precision kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.

@@ -121,6 +121,13 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return (
+            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
+        )
+
     return (
         cfg.parallel_config.tensor_parallel_size > 1
         and current_platform.is_cuda()
@@ -129,12 +136,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
-        # tp-dp combination broken:
-        # https://github.com/vllm-project/vllm/issues/34458
-        and cfg.parallel_config.data_parallel_size == 1
-        # tp-pp combination broken:
-        # https://github.com/vllm-project/vllm/issues/35426
-        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -156,10 +157,9 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        rocm_aiter_ops.is_rmsnorm_enabled()
+        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -209,7 +209,9 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "enable_flashinfer_autotune": True,
+        # Disabled for now due to correctness issues:
+        # https://github.com/flashinfer-ai/flashinfer/issues/3197
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -229,7 +231,9 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "enable_flashinfer_autotune": True,
+        # Disabled for now due to correctness issues:
+        # https://github.com/flashinfer-ai/flashinfer/issues/3197
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -900,6 +904,13 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
+            logger.warning(
+                "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
+                "This is equivalent to setting -cc.mode=none"
+            )
+            self.compilation_config.mode = CompilationMode.NONE
+
         if self.compilation_config.backend == "eager" or (
             self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
@@ -976,19 +987,16 @@ class VllmConfig:
             )
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # async tp is built on top of sequence parallelism
-        # and requires it to be enabled.
-        if self.compilation_config.pass_config.fuse_gemm_comms:
-            self.compilation_config.pass_config.enable_sp = True
-        if self.compilation_config.pass_config.enable_sp:
+        # async tp is built on top of sequence parallelism and requires it.
+        pass_config = self.compilation_config.pass_config
+        if pass_config.fuse_gemm_comms:
+            pass_config.enable_sp = True
+        if pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
-                self.compilation_config.pass_config.enable_sp = False
-                self.compilation_config.pass_config.fuse_gemm_comms = False
+                pass_config.enable_sp = False
+                pass_config.fuse_gemm_comms = False
             else:
-                # Compute SP threshold early; disable if None (model too
-                # small for SP to be beneficial).
-                pass_config = self.compilation_config.pass_config
                 if pass_config.sp_min_token_num is None:
                     from vllm.compilation.passes.fusion.sequence_parallelism import (
                         get_sequence_parallelism_threshold,
@@ -1008,8 +1016,8 @@ class VllmConfig:
                         "threshold heuristic, disabling. To force SP, "
                         "set pass_config.sp_min_token_num manually."
                     )
-                    self.compilation_config.pass_config.enable_sp = False
-                    self.compilation_config.pass_config.fuse_gemm_comms = False
+                    pass_config.enable_sp = False
+                    pass_config.fuse_gemm_comms = False
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
@@ -1091,6 +1099,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
+
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1164,8 +1173,8 @@ class VllmConfig:
         )
 
         if self.compilation_config.pass_config.enable_sp:
-            # With pipeline parallelism or dynamo partitioning,
-            # native rms norm tracing errors due to incorrect residual shape.
+            # With pipeline parallelism, native rms norm tracing errors due to
+            # incorrect residual shape.
             # Use custom rms norm to unblock. In the future,
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
@@ -1176,24 +1185,15 @@ class VllmConfig:
                     self.compilation_config.mode,
                 )
 
-            is_fullgraph = (
-                self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops or []) == 0
-            )
-            if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
+            if self.parallel_config.pipeline_parallel_size > 1:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
                     self.compilation_config.custom_ops.append("+rms_norm")
                 else:
-                    regime = (
-                        "Dynamo partition"
-                        if not is_fullgraph
-                        else "pipeline parallelism"
-                    )
                     logger.warning_once(
                         "Sequence parallelism not supported with "
                         "native rms_norm when using %s, "
                         "this will likely lead to an error.",
-                        regime,
+                        "pipeline parallelism",
                     )
 
         # final check of cudagraph mode after all possible updates
@@ -1205,9 +1205,9 @@ class VllmConfig:
                 and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
             ):
                 logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention."
-                    " Will fall back to eager execution if a batch runs "
-                    "into cascade attentions."
+                    "No piecewise cudagraph for executing cascade attention. "
+                    "Will fall back to eager execution if a batch runs into "
+                    "cascade attentions."
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
@@ -1436,6 +1436,10 @@ class VllmConfig:
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
             range(256, max_graph_size + 1, 16))
 
+        `max_num_batched_tokens` is also appended to the list if it fits
+        within `max_cudagraph_capture_size`, so the max batch size is captured
+        even when off-stride.
+
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
 
@@ -1524,6 +1528,12 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
+                # ensure max_num_tokens is captured if within max capture size
+                if (
+                    max_num_tokens <= max_cudagraph_capture_size
+                    and max_num_tokens not in cudagraph_capture_sizes
+                ):
+                    cudagraph_capture_sizes.append(max_num_tokens)
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
@@ -1598,10 +1608,15 @@ class VllmConfig:
         if compile_range_end is not None:
             computed_compile_ranges_endpoints.append(compile_range_end)
 
-        # Add the compile ranges for flashinfer
+        # Add the compile ranges for flashinfer/aiter.
         if compilation_config.pass_config.fuse_allreduce_rms:
             tp_size = self.parallel_config.tensor_parallel_size
-            max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled():
+                max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+            else:
+                max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
             if max_size is not None:
                 assert isinstance(self.model_config.dtype, torch.dtype)
                 max_token_num = max_size // (
@@ -1877,6 +1892,18 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
+
+    @model_validator(mode="after")
+    def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
+        if self.model_config is None:
+            return self
+        if self.cache_config.cache_dtype == "nvfp4" and self.model_config.use_mla:
+            raise ValueError(
+                "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
+                "Attention) backends. Please use a different --kv-cache-dtype "
+                "(e.g., 'fp8' or 'auto') for MLA models such as DeepSeek."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":
