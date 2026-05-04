@@ -245,6 +245,12 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/workflows/scripts
+          fetch-depth: 1
+
       - name: Download wheel artifact
         uses: actions/download-artifact@v4
         with:
@@ -260,15 +266,7 @@ jobs:
       - name: Upload wheel to S3
         run: |
           pip install boto3
-          python - <<'PYEOF'
-          import boto3, glob
-
-          s3 = boto3.client("s3")
-          bucket = "aig-embd-gfx11-wheels"
-
-          for whl in glob.glob("dist/*.whl"):
-              key = whl.split("/")[-1]
-              print(f"Uploading {key} to s3://{bucket}/{key}")
-              s3.upload_file(whl, bucket, key)
-              print(f"  Done")
-          PYEOF
+          python .github/workflows/scripts/upload_wheel_s3.py \
+            --bucket aig-embd-gfx11-wheels \
+            --package vllm \
+            --wheel-dir dist/
