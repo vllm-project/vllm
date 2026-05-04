@@ -1215,6 +1215,17 @@ class MLACommonBackend(AttentionBackend):
     def is_mla(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        # The non-causal capability is consulted engine-wide whenever
+        # speculative_config.method == "dflash" (see attention/selector.py).
+        # MLA target layers always run causal attention themselves; only the
+        # DFlash drafter's non-MLA attention actually exercises the non-causal
+        # path. Reporting True here unblocks backend selection for DeepSeek-V3
+        # / Kimi-K2.5 style targets without changing target-side runtime
+        # behavior. See vllm-project/vllm#40632.
+        return True
+
 
 @dataclass
 class MLACommonPrefillMetadata:
