@@ -258,7 +258,7 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
 
-    tok = cached_get_tokenizer(
+    return cached_get_tokenizer(
         model_config.tokenizer,
         runner_type=model_config.runner_type,
         tokenizer_mode=model_config.tokenizer_mode,
@@ -266,5 +266,3 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
-
-    return tok
