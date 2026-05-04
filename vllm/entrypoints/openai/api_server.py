@@ -405,6 +405,17 @@ async def init_app_state(
                 steering_registry.list_modules(),
             )
         state.steering_module_registry = steering_registry
+
+        # Broadcast the initial registry to every worker so they can
+        # resolve named-module references locally (eliminating per-request
+        # serialization of large vector blobs across the multiprocessing
+        # boundary). Mirrors the pattern used by /v1/steering/set.
+        broadcast_payload = steering_registry.dump_for_broadcast()
+        if broadcast_payload:
+            await engine_client.collective_rpc(
+                "register_steering_modules",
+                kwargs=dict(modules=broadcast_payload, replace=True),
+            )
     elif hasattr(state, "steering_module_registry"):
         delattr(state, "steering_module_registry")
 

@@ -329,6 +329,26 @@ class SamplingParams(
     """Phase-specific steering vectors added to base during decode only.
     Same format as ``steering_vectors``."""
 
+    steering_module_ref: tuple[str, float] | None = None
+    """Optional ``(module_name, scale)`` reference to a worker-side
+    named steering module.  When set, the worker resolves the named
+    module against its broadcast registry and merges it with any
+    inline ``steering_vectors`` / ``prefill_steering_vectors`` /
+    ``decode_steering_vectors`` overrides via
+    :func:`vllm.config.steering_types.merge_steering_specs` before
+    calling ``SteeringManager.register_config``.  The reference, not
+    the resolved vectors, is what crosses the multiprocessing boundary
+    — eliminating per-request serialization of large vector blobs for
+    requests that use named modules.
+
+    Hash determinism: the request hash incorporates the
+    ``(name, scale)`` tuple via :func:`hash_steering_config`, so two
+    requests with the same reference and identical inline overrides
+    produce the same hash regardless of when the named module was
+    registered.  Inline-only requests (``steering_module_ref is None``)
+    hash bit-for-bit identically to today, preserving prefix-cache
+    reuse."""
+
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
@@ -371,6 +391,7 @@ class SamplingParams(
         steering_vectors: SteeringVectorSpec | None = None,
         prefill_steering_vectors: SteeringVectorSpec | None = None,
         decode_steering_vectors: SteeringVectorSpec | None = None,
+        steering_module_ref: tuple[str, float] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -415,6 +436,7 @@ class SamplingParams(
             steering_vectors=steering_vectors,
             prefill_steering_vectors=prefill_steering_vectors,
             decode_steering_vectors=decode_steering_vectors,
+            steering_module_ref=steering_module_ref,
         )
 
     def __post_init__(self) -> None:
@@ -575,6 +597,25 @@ class SamplingParams(
         where ``SteeringLayerEntry`` is either ``list[float]`` (scale=1.0)
         or ``{"vector": list[float], "scale": float}``.
         """
+        if self.steering_module_ref is not None:
+            ref = self.steering_module_ref
+            # Accept tuple or list (msgspec / JSON round-trips may emit
+            # the latter); coerce to tuple post-validation.
+            if (
+                not isinstance(ref, (tuple, list))
+                or len(ref) != 2
+                or not isinstance(ref[0], str)
+                or not isinstance(ref[1], (int, float))
+                or not math.isfinite(float(ref[1]))
+            ):
+                raise ValueError(
+                    "steering_module_ref must be a "
+                    "(name: str, scale: finite float) tuple, got "
+                    f"{ref!r}."
+                )
+            if not isinstance(ref, tuple):
+                self.steering_module_ref = (ref[0], float(ref[1]))
+
         fields_to_check: list[tuple[str, SteeringVectorSpec | None]] = [
             ("steering_vectors", self.steering_vectors),
             ("prefill_steering_vectors", self.prefill_steering_vectors),
@@ -743,20 +784,35 @@ class SamplingParams(
 
     @cached_property
     def prefill_steering_config_hash(self) -> int:
-        """Cached hash of ``effective_prefill_steering``.
+        """Cached hash of ``effective_prefill_steering`` plus
+        ``steering_module_ref``.
 
         Lives on ``SamplingParams`` (not ``Request``) so that many requests
         sharing the same ``SamplingParams`` object — the common case for
         batched ``llm.generate(prompts, [sp]*N)`` — only pay the hashing
         cost once across the whole batch instead of once per request.
+
+        When ``steering_module_ref`` is ``None`` this reduces to the
+        original inline-only hash bit-for-bit, preserving prefix-cache
+        reuse for requests that don't reference a named module.  When set,
+        the ``(name, scale)`` tuple is folded into the digest so two
+        requests with the same reference + identical inline overrides
+        produce the same hash regardless of when the named module was
+        registered worker-side.
         """
-        return hash_steering_config(self.effective_prefill_steering)
+        return hash_steering_config(
+            self.effective_prefill_steering,
+            module_ref=self.steering_module_ref,
+        )
 
     @cached_property
     def decode_steering_config_hash(self) -> int:
-        """Cached hash of ``effective_decode_steering``. See
-        ``prefill_steering_config_hash``."""
-        return hash_steering_config(self.effective_decode_steering)
+        """Cached hash of ``effective_decode_steering`` plus
+        ``steering_module_ref``. See ``prefill_steering_config_hash``."""
+        return hash_steering_config(
+            self.effective_decode_steering,
+            module_ref=self.steering_module_ref,
+        )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

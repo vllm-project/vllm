@@ -264,7 +264,14 @@ class OpenAIServingChat(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
-        # Resolve named steering module if specified
+        # Named steering module: validate name exists, then pass a
+        # ``(name, scale)`` reference through to ``SamplingParams`` so
+        # the worker resolves against its broadcast registry instead of
+        # the server materializing the full vector spec into the
+        # multiprocessing payload (perf optimization, see PR 7 of
+        # the activation-steering plan).  Inline overrides ride along
+        # unmodified on ``request.steering_vectors`` etc.
+        steering_module_ref: tuple[str, float] | None = None
         if request.steering_name is not None:
             steering_registry = (
                 None
@@ -277,20 +284,15 @@ class OpenAIServingChat(OpenAIServing):
                     "Ensure the server was started with steering enabled.",
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
-            vectors, prefill, decode, error = steering_registry.resolve_for_request(
-                request.steering_name,
-                request.steering_vectors,
-                request.prefill_steering_vectors,
-                request.decode_steering_vectors,
-            )
-            if error is not None:
+            if steering_registry.get(request.steering_name) is None:
                 return self.create_error_response(
-                    error,
+                    (
+                        f"Unknown steering module '{request.steering_name}'. "
+                        f"Available: {steering_registry.list_modules() or 'none'}"
+                    ),
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
-            request.steering_vectors = vectors
-            request.prefill_steering_vectors = prefill
-            request.decode_steering_vectors = decode
+            steering_module_ref = (request.steering_name, 1.0)
 
         model_name = self.models.model_name(lora_request)
 
@@ -329,6 +331,12 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                # Attach the named-module reference (validated above).
+                # Worker resolves the (name, scale) tuple against its
+                # broadcast registry; we never serialize the resolved
+                # vectors over multiprocessing.
+                if steering_module_ref is not None:
+                    sampling_params.steering_module_ref = steering_module_ref
 
             self._log_inputs(
                 sub_request_id,

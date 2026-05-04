@@ -957,6 +957,16 @@ class Worker(WorkerBase):
     def get_steering_status(self) -> dict:
         return self.model_runner.get_steering_status()
 
+    def register_steering_modules(
+        self,
+        modules: dict[str, dict],
+        replace: bool = False,
+    ) -> None:
+        return self.model_runner.register_steering_modules(modules, replace=replace)
+
+    def unregister_steering_modules(self, names: list[str]) -> None:
+        return self.model_runner.unregister_steering_modules(names)
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return

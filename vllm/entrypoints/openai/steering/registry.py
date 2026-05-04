@@ -104,6 +104,33 @@ class SteeringModuleRegistry:
         """Return sorted list of registered module names."""
         return sorted(self._modules.keys())
 
+    def dump_for_broadcast(self) -> dict[str, dict[str, Any]]:
+        """Return a JSON-safe view of every registered module.
+
+        Used by the API server to broadcast the full registry to workers
+        via ``collective_rpc`` so every worker holds an identical
+        ``_steering_module_registry``.  The returned mapping is keyed by
+        module name; each value is a ``dict`` with ``vectors``,
+        ``prefill_vectors`` and ``decode_vectors`` entries (any of which
+        may be ``None``).  All structures are plain Python collections
+        suitable for cloudpickle serialization across the engine
+        multiprocess boundary.
+
+        Note: this returns the *unresolved* :class:`SteeringVectorSpec`
+        form — per-layer entries may still be in
+        ``{"vector": [...], "scale": float}`` form.  The worker-side
+        merge step normalizes scales just like the original
+        ``resolve_for_request`` did on the server.
+        """
+        return {
+            name: {
+                "vectors": module.vectors,
+                "prefill_vectors": module.prefill_vectors,
+                "decode_vectors": module.decode_vectors,
+            }
+            for name, module in self._modules.items()
+        }
+
     async def load_from_file(self, name: str, path: str) -> None:
         """Load a steering module from a JSON file and register it.
 

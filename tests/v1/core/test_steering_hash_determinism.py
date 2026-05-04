@@ -21,14 +21,16 @@ import sys
 from vllm.config.steering_types import hash_steering_config
 
 
-def _hash(spec) -> int:
-    return hash_steering_config(spec)
+def _hash(spec, module_ref=None) -> int:
+    return hash_steering_config(spec, module_ref=module_ref)
 
 
 class TestHashDeterminism:
     def test_empty_and_none_hash_zero(self):
         assert _hash(None) == 0
         assert _hash({}) == 0
+        assert _hash(None, module_ref=None) == 0
+        assert _hash({}, module_ref=None) == 0
 
     def test_identical_specs_hash_equal(self):
         a = {"post_mlp": {0: [1.0, 2.0, 3.0]}}
@@ -67,6 +69,49 @@ class TestHashDeterminism:
         a = {"post_mlp": {0: [1.0] * 1024}}
         h = _hash(a)
         assert 0 <= h < 2**63, f"Hash {h} outside signed int64 range"
+
+    def test_module_ref_changes_hash(self):
+        """A module ref folds into the hash; same vectors + different
+        ``(name, scale)`` tuples must produce different hashes."""
+        a = {"post_mlp": {0: [1.0, 2.0, 3.0]}}
+        h_no_ref = _hash(a)
+        h_ref_foo = _hash(a, module_ref=("foo", 1.0))
+        h_ref_bar = _hash(a, module_ref=("bar", 1.0))
+        h_ref_foo_scaled = _hash(a, module_ref=("foo", 0.5))
+        assert h_no_ref != h_ref_foo
+        assert h_ref_foo != h_ref_bar
+        assert h_ref_foo != h_ref_foo_scaled
+
+    def test_module_ref_only_is_deterministic(self):
+        """A module ref alone (no inline vectors) hashes deterministically."""
+        ref = ("creativity", 1.0)
+        first = _hash(None, module_ref=ref)
+        second = _hash(None, module_ref=ref)
+        assert first == second
+        assert first != 0
+
+    def test_module_ref_default_matches_explicit_none(self):
+        """``module_ref=None`` must reduce to the original inline-only hash
+        bit-for-bit so existing prefix-cache reuse is preserved.
+        """
+        a = {"post_mlp": {0: [1.0, 2.0, 3.0], 1: [4.0, 5.0, 6.0]}}
+        # Default arg.
+        h_default = hash_steering_config(a)
+        # Explicit None.
+        h_explicit = hash_steering_config(a, module_ref=None)
+        assert h_default == h_explicit
+
+    def test_module_ref_identical_specs_hash_equal(self):
+        """Determinism gate for the named-module path: the same
+        ``(name, scale)`` reference plus the same inline overrides must
+        produce the same hash regardless of when (or whether) the
+        worker-side registry has been populated.  The hash is a pure
+        function of the reference, not the resolved vectors."""
+        inline = {"post_mlp": {14: [0.1, 0.2]}}
+        ref = ("foo", 1.0)
+        first = _hash(inline, module_ref=ref)
+        second = _hash(inline, module_ref=ref)
+        assert first == second
 
     def test_across_processes(self):
         """Same spec hashes to the same value in a fresh Python process.
