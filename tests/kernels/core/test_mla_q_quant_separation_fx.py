@@ -10,14 +10,17 @@ AITER fused kernel.
 
 We compile ``_maybe_prepare_decode_mqa_q`` end-to-end with vLLM's
 ``TestBackend`` and assert that the post-Dynamo / pre-pass graph contains
-the four ops we care about as separate ``call_function`` nodes:
+the four lifted ops as separate ``call_function`` nodes, in the right
+order:
 
+* ``vllm::mla_decode_q_take``  (slices q to ``num_decode_tokens`` rows)
 * ``vllm::unified_mla_q_absorb``
 * ``aten::cat``
 * the static FP8 quant op
-* ``vllm::unified_mla_attention_with_output`` is *not* exercised here
-  (we test the prep in isolation), but its ``prepared_mqa_q`` kwarg is
-  validated separately by the wiring test.
+
+``vllm::unified_mla_attention_with_output`` is *not* exercised here (we
+test the prep in isolation), but its ``prepared_mqa_q`` kwarg is
+validated separately by the wiring test.
 
 If this test ever starts failing, **stop**: it means the lift has
 collapsed back into the opaque attention custom op and Phase 2's
