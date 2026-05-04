@@ -101,8 +101,7 @@ def _normalize_tool_choice(
 
 
 def _get_function_parameters(function: Any) -> dict[str, Any] | bool:
-    """Return the JSON schema used for constrained tool arguments.
-    """
+    """Return the JSON schema used for constrained tool arguments."""
 
     if getattr(function, "strict", None) is False:
         return True
