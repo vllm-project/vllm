@@ -139,7 +139,7 @@ def sample_requests(
             out.append(
                 SampleRequest(
                     prompt=full_prompt,
-                    prompt_len=len(full_ids),
+                    prompt_len=len(tokenizer(full_prompt).input_ids),
                     expected_output_len=req.expected_output_len,
                     schema=req.schema,
                     structure_type=req.structure_type,
