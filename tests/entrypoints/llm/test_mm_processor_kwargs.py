@@ -11,7 +11,9 @@ from vllm import LLM, SamplingParams
 
 def _make_mock_llm() -> LLM:
     llm = object.__new__(LLM)
-    llm.model_config = SimpleNamespace(runner_type="generate")
+    llm.model_config = SimpleNamespace(
+        runner_type="generate", enable_prompt_embeds=False
+    )
     return llm
 
 
