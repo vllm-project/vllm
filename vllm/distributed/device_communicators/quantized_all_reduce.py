@@ -75,10 +75,10 @@ class QuantizedAllReduceCommunicator:
             device = torch.device(device)
         self.device = device
 
-        mode = envs.VLLM_ALLREDUCE_QUANTIZATION
-        if mode is None:
+        mode_raw = envs.VLLM_ALLREDUCE_QUANTIZATION
+        if mode_raw is None:
             return
-        mode = mode.lower()
+        mode = mode_raw.lower()
 
         try:
             from vllm.distributed.device_communicators.quantized_allreduce import (
@@ -144,7 +144,7 @@ class QuantizedAllReduceCommunicator:
         self.disabled = False
 
     def should_use_quantized(self, inp: torch.Tensor) -> bool:
-        if self.disabled or envs.VLLM_BATCH_INVARIANT:
+        if self.disabled:
             return False
         if inp.dtype != torch.bfloat16:
             return False

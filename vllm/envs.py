@@ -220,7 +220,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
-    VLLM_ALLREDUCE_QUANTIZATION: str | None = None
+    VLLM_ALLREDUCE_QUANTIZATION: Literal["int8", "fp8"] | None = None
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
@@ -1562,7 +1562,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Quantized allreduce mode: None (disabled), "int8", or "fp8"
     "VLLM_ALLREDUCE_QUANTIZATION": env_with_choices(
-        "VLLM_ALLREDUCE_QUANTIZATION", default=None, choices=["int8", "fp8"]
+        "VLLM_ALLREDUCE_QUANTIZATION",
+        default=None,
+        choices=["int8", "fp8"],
+        case_sensitive=False,
     ),
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(

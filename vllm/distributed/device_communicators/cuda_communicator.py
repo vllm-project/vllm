@@ -100,16 +100,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and self.world_size > 1
             and envs.VLLM_ALLREDUCE_QUANTIZATION is not None
         ):
-            if envs.VLLM_BATCH_INVARIANT:
-                logger.warning(
-                    "Disabling quantized allreduce because "
-                    "VLLM_BATCH_INVARIANT is enabled."
-                )
-            else:
-                self.quant_comm = QuantizedAllReduceCommunicator(
-                    group=self.cpu_group,
-                    device=self.device,
-                )
+            self.quant_comm = QuantizedAllReduceCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
