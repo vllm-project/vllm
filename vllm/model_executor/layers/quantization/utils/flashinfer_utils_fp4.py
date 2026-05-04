@@ -11,22 +11,23 @@ def apply_mxfp4_flashinfer_linear(
     size_n: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    from vllm.utils.flashinfer import flashinfer_mm_fp4, flashinfer_mxfp4_quantize
+    from vllm.utils.flashinfer import (
+        flashinfer_mxfp4_quantize,
+        flashinfer_scaled_fp4_mm,
+    )
 
     x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
     x_fp4, x_scale = flashinfer_mxfp4_quantize(x)
 
-    dummy_alpha = torch.ones(1, dtype=torch.float32, device=x.device)
-    out = flashinfer_mm_fp4(
+    out = flashinfer_scaled_fp4_mm(
         x_fp4,
-        weight.t(),  # [N, K//2] -> [K//2, N]
+        weight,
         x_scale,
-        weight_scale.t(),  # [N, K//32] -> [K//32, N]
-        dummy_alpha,
-        input.dtype,
-        use_8x4_sf_layout=False,
+        weight_scale,
+        alpha=None,
+        out_dtype=input.dtype,
         backend="cute-dsl",
         block_size=32,
         use_nvfp4=False,

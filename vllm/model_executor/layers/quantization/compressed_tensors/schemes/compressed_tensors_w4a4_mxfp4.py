@@ -5,9 +5,9 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
-# from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-#     swizzle_mxfp4_scales,
-# )
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    swizzle_mxfp4_scales,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -101,17 +101,12 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
         del layer.weight_packed
 
         if self.use_flashinfer:
-            # TODO: verify whether FlashInfer cute-dsl needs a specific
-            # swizzle for checkpoint weight scales (flat [N, K//32] E8M0).
-            # swizzle_mxfp4_scales targets the CUTLASS MoE tiled layout and
-            # may not match FlashInfer's 128x4 layout — test first.
-            # N, scale_K = layer.weight_scale.shape
-            # K = scale_K * self.group_size
-            # layer.weight_scale = Parameter(
-            #     swizzle_mxfp4_scales(layer.weight_scale.data, N, K).reshape(N, -1),
-            #     requires_grad=False,
-            # )
-            layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+            N, scale_K = layer.weight_scale.shape
+            K = scale_K * self.group_size
+            layer.weight_scale = Parameter(
+                swizzle_mxfp4_scales(layer.weight_scale.data, N, K).reshape(N, -1),
+                requires_grad=False,
+            )
         else:
             prepare_fp4_layer_for_marlin(layer)
 

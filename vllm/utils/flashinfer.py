@@ -685,14 +685,19 @@ def flashinfer_scaled_fp4_mm(
     b: torch.Tensor,
     block_scale_a: torch.Tensor,
     block_scale_b: torch.Tensor,
-    alpha: torch.Tensor,
+    alpha: torch.Tensor | None,
     out_dtype: torch.dtype,
     backend: str,
+    block_size: int = 16,
+    use_nvfp4: bool = True,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
+
+    if alpha is None:
+        alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
     if backend in ("cutlass", "cudnn"):
         block_scale_a = block_scale_a.view(torch.uint8)
@@ -709,6 +714,8 @@ def flashinfer_scaled_fp4_mm(
         out_dtype,
         use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
+        block_size=block_size,
+        use_nvfp4=use_nvfp4,
     )
 
 
