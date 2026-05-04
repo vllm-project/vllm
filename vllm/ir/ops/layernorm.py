@@ -37,7 +37,7 @@ rms_norm.override_tolerance(torch.float16, atol=1e-2, rtol=2e-3)
 
 # Scaling property test (rms_norm(2*x) ≈ rms_norm(x)) is approximate
 # due to epsilon, causing slightly larger errors for float32.
-rms_norm.override_tolerance(torch.float32, atol=5e-5, rtol=5e-5)
+# rms_norm.override_tolerance(torch.float32, atol=5e-5, rtol=5e-5)
 
 
 @register_op(allow_inplace=True)
