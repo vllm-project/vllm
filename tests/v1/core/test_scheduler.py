@@ -1211,6 +1211,47 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     return initial_ecos
 
 
+def test_mamba_block_aligned_split_accepts_external_kv_tokens():
+    scheduler = create_scheduler(block_size=16)
+    (request,) = create_requests(num_requests=1, num_tokens=64, block_size=16)
+
+    num_new_tokens = scheduler._mamba_block_aligned_split(
+        request,
+        num_new_tokens=0,
+        num_external_computed_tokens=64,
+    )
+
+    assert num_new_tokens == 0
+
+
+def test_async_kv_load_skips_mamba_block_aligned_split():
+    block_size = 16
+    num_external_tokens = block_size * 2
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(
+            matched_tokens=num_external_tokens,
+            is_async=True,
+        ),
+        block_size=block_size,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler._mamba_block_aligned_split = Mock(  # type: ignore[method-assign]
+        side_effect=AssertionError("mamba split should be skipped")
+    )
+
+    (request,) = create_requests(num_requests=1, num_tokens=block_size * 4)
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler._mamba_block_aligned_split.call_count == 0
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == num_external_tokens
+    assert len(scheduler.skipped_waiting) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 0
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """
