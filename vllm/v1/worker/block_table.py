@@ -258,7 +258,7 @@ class MultiGroupBlockTable:
             )
 
         # Align to a multiple of (128 / block_size) as required
-        # by some attention backends.
+        # by some attention backends such as TRTLLM (#39324)
         max_num_blocks = [
             cdiv(n, 128 // bs) * (128 // bs) if bs <= 128 else n
             for n, bs in zip(max_num_blocks, block_sizes)

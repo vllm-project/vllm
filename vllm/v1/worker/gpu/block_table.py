@@ -42,7 +42,7 @@ class BlockTables:
             # tokens in the full, global (unsharded) sequence.
             max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
             # Align to a multiple of (128 / block_size) as required
-            # by some attention backends.
+            # by some attention backends such as TRTLLM (#39324)
             if block_size <= 128:
                 alignment = 128 // block_size
                 max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
