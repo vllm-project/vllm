@@ -75,6 +75,7 @@ from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,  # cohere
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -801,7 +802,10 @@ class Cohere2MoeDecoderLayer(nn.Module):
             elif isinstance(self.mlp, Cohere2MoE):
                 # TODO(czhu): for some special EP/DP backends (DeepEP, pplx)
                 # this condition evaluates to True; we should check it works correctly.
-                if self.mlp.experts.must_reduce_shared_expert_outputs():
+                # cohere start
+                experts = getattr(self.mlp.experts, "base_layer", self.mlp.experts)
+                # cohere end
+                if experts.must_reduce_shared_expert_outputs():
                     # MoE layer already reduced outputs, just reduce attention
                     # outputs.
                     hidden_states_attention = tensor_model_parallel_all_reduce(
@@ -903,6 +907,20 @@ class Cohere2MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    # cohere start
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
+
+    # cohere end
+
 
 class Cohere2MoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     is_text_generation_model = True
@@ -920,6 +938,14 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             "up_proj",
         ],
     }
+    # cohere end
+
+    # cohere start
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "backend.model.": "",
+        }
+    )
     # cohere end
 
     # Ignore copy
@@ -950,6 +976,12 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+
+    # cohere start
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
+
+    # cohere end
 
     @torch.no_grad()
     def forward(
@@ -989,13 +1021,15 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        # cohere start
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            self,  # cohere
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_experts,
         )
+        # cohere end
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1020,6 +1054,10 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
+                # cohere start
+                if param_name in name:
+                    continue
+                # cohere end
                 # We have mlp.experts[0].gate_proj in the checkpoint.
                 # Since we handle the experts below in expert_params_mapping,
                 # we need to skip here BEFORE we update the name, otherwise

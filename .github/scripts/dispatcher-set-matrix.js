@@ -130,6 +130,7 @@ function setMatrixOutput({ core, inputs }) {
   if (features === "model_arch" || features === "all") {
     featureTests.push("model_arch_reward");
     featureTests.push("model_arch_c5_3a30t");
+    featureTests.push("model_arch_c5_lora");
   }
   if (features === "quantization" || features === "all") {
     featureTests.push("quantization_32bit_logits");

@@ -81,6 +81,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
+    # cohere - MoE models use Cohere2Config from transformers
+    cohere2moe="Cohere2Config",
     colmodernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",

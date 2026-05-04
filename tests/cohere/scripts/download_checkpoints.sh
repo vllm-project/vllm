@@ -198,6 +198,17 @@ download_model_arch_c5_3a30t_assets () {
     download_model_if_missing "c5-3a30t_fp8"
 }
 
+download_model_arch_c5_lora_assets () {
+    local DEST="${ENGINES_DIR}/c5-3a30t-petfatt-bf16"
+    if [[ ! -d "${DEST}" ]]; then
+        echo "==> Downloading c5 LoRA base model checkpoint"
+        mkdir -p "${DEST}"
+        gcloud storage cp -r gs://cohere-model-efficiency-ci/engines/c5_3a30t_petfatt-141_hf_export_bf16/* "${DEST}/"
+    else
+        echo "c5 LoRA base model checkpoint already exists, skipping download."
+    fi
+}
+
 download_model_arch_reward_assets () {
     # download reward v4.3.0 checkpoint if it doesn't exist
     if [[ ! -d "${ENGINES_DIR}/reward_v430" ]]; then
@@ -213,6 +224,7 @@ download_model_arch () {
     echo "==> Downloading checkpoints for model architecture suite"
     download_model_arch_reward_assets
     download_model_arch_c5_3a30t_assets
+    download_model_arch_c5_lora_assets
 }
 
 
@@ -226,6 +238,7 @@ download_models () {
     download_guided_generation
     download_model_arch_reward_assets
     download_model_arch_c5_3a30t_assets
+    download_model_arch_c5_lora_assets
 
     echo "==> All required models downloaded successfully"
 }
@@ -238,6 +251,7 @@ run_downloads () {
         quantization_32bit_logits) download_model_arch_c5_3a30t_assets ;;
         model_arch_reward) download_model_arch_reward_assets ;;
         model_arch_c5_3a30t)     download_model_arch_c5_3a30t_assets     ;;
+        model_arch_c5_lora)      download_model_arch_c5_lora_assets      ;;
         bee_sample_tb_check)     download_model_arch_c5_3a30t_assets     ;;
         fast_check)        download_fast_check        ;;
         lm_eval)           download_eval              ;;
@@ -249,7 +263,7 @@ run_downloads () {
         models)            download_models            ;;
         *)
             echo "Unknown group '${TEST_GROUP}'"
-            echo "Valid groups: cpu, fast_check, model_arch, model_arch_reward, model_arch_c5_3a30t, bee_sample_tb_check, quantization, quantization_32bit_logits, lm_eval, bee_eval, performance, guided_generation, speculative_decoding, vision, models"
+            echo "Valid groups: cpu, fast_check, model_arch, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, bee_sample_tb_check, quantization, quantization_32bit_logits, lm_eval, bee_eval, performance, guided_generation, speculative_decoding, vision, models"
             exit 1
             ;;
     esac

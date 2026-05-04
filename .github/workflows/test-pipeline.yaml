@@ -19,7 +19,7 @@ on:
         required: true
         type: string
       test_group:
-        description: 'which tests to run (cpu_check, fast_check, model_arch_reward, model_arch_c5_3a30t, quantization_32bit_logits, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, performance, speculative_decoding, vision)'
+        description: 'which tests to run (cpu_check, fast_check, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization_32bit_logits, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, performance, speculative_decoding, vision)'
         type: string
         required: true
       result_upload_branch:
@@ -221,7 +221,7 @@ jobs:
     # Only run test reporting for pytest-based tests.
     - name: Test Report
       uses: dorny/test-reporter@v2
-      if: always() && (inputs.test_group == 'fast_check' || inputs.test_group == 'cpu_check' || inputs.test_group == 'quantization_32bit_logits' || inputs.test_group == 'model_arch_c5_3a30t' || inputs.test_group == 'bee_sample_tb_check')
+      if: always() && (inputs.test_group == 'fast_check' || inputs.test_group == 'cpu_check' || inputs.test_group == 'quantization_32bit_logits' || inputs.test_group == 'model_arch_c5_3a30t' || inputs.test_group == 'model_arch_c5_lora' || inputs.test_group == 'bee_sample_tb_check')
       with:
         name: "${{ inputs.test_group }} Test Report"
         path: "${{ runner.temp }}/*.xml"

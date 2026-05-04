@@ -28,6 +28,10 @@ This matrix is part of a three-layer documentation structure:
 
 - 1.1.1 `test_bee_samples` (c5-3a30t_fp8)
 
+#### 1.2 [C5 LoRA Serving](./features/c5_lora.md)
+
+- 1.2.1 `test_c5_lora_sanity_check`
+
 ### 2. Quantization
 
 #### 2.1 [FP32 Logits](./features/fp32_logits.md)

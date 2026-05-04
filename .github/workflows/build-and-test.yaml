@@ -33,7 +33,7 @@ on:
         required: false
         type: choice
         default: 'all'
-        description: 'Feature tests to run (all excludes fast_check). cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+        description: 'Feature tests to run (all excludes fast_check). cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
         options:
           - cpu_check
           - fast_check

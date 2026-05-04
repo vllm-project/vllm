@@ -636,6 +636,40 @@ run_model_arch_c5_3a30t_checks() {
     return 0
 }
 
+run_model_arch_c5_lora_checks() {
+    echo "Running c5 LoRA serving sanity check..."
+
+    cd "${VLLM_WORKSPACE}"
+
+    MODEL_DIR=${ENGINES_DIR}/c5-3a30t-petfatt-bf16
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+    # If C5_LORA_DIR is not provided, generate a zero-weight synthetic adapter
+    # from the model config so the full vLLM LoRA path is still exercised.
+    _LORA_DIR="${C5_LORA_DIR:-}"
+    if [[ -z "${_LORA_DIR}" ]]; then
+        _DUMMY_LORA_DIR="${OUTPUT_DIR}/c5_dummy_lora"
+        echo "C5_LORA_DIR not set — generating a zero-weight dummy LoRA at ${_DUMMY_LORA_DIR}"
+        if python3 tests/cohere/scripts/create_dummy_lora.py \
+               --model-dir "$MODEL_DIR" \
+               --output-dir "$_DUMMY_LORA_DIR"; then
+            _LORA_DIR="$_DUMMY_LORA_DIR"
+        else
+            echo "Error: dummy LoRA creation failed."
+            return 1
+        fi
+    fi
+
+    echo "Running c5 LoRA serving sanity check with model: $MODEL_DIR"
+    if ! C5_MODEL_DIR=$MODEL_DIR C5_LORA_DIR=$_LORA_DIR pytest -v -s tests/cohere/test_c5_lora.py; then
+        echo "Model architecture c5 LoRA checks failed."
+        return 1
+    fi
+
+    echo "Model architecture c5 LoRA checks passed."
+    return 0
+}
+
 run_bee_sample_tb_check() {
     echo "Running bee sample thinking-budget check..."
 
@@ -678,6 +712,7 @@ run_model_arch() {
     run_model_arch_logits_checks || failed=1
     run_model_arch_reward_checks || failed=1
     run_model_arch_c5_3a30t_checks || failed=1
+    run_model_arch_c5_lora_checks || failed=1
 
     if [[ $failed -ne 0 ]]; then
         echo "Model architecture tests FAILED."
@@ -706,7 +741,7 @@ run_c4_sanity_check() {
 run_tests() {
     if [[ -z "${TEST_GROUP:-}" ]]; then
         echo "Error: TEST_GROUP environment variable is not set"
-        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, quantization, quantization_32bit_logits, GG_TB, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, c4_sanity_check"
+        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG_TB, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, c4_sanity_check"
         exit 1
     fi
 
@@ -731,6 +766,9 @@ run_tests() {
             ;;
         model_arch_c5_3a30t)
             run_model_arch_c5_3a30t_checks
+            ;;
+        model_arch_c5_lora)
+            run_model_arch_c5_lora_checks
             ;;
         lm_eval)
             run_lm_eval
@@ -761,7 +799,7 @@ run_tests() {
             ;;
         *)
             echo "Unknown test group: $TEST_GROUP"
-            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, quantization, quantization_32bit_logits, GG_TB, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, c4_sanity_check"
+            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG_TB, guided_generation, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, c4_sanity_check"
             exit 1
             ;;
     esac

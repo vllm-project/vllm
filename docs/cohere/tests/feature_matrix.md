@@ -104,6 +104,32 @@ This matrix is part of a three-layer documentation structure:
 |---|---|---|---|---|---|
 | | T.1.1.1 | | | | T.1.1.1 |
 
+### C5 LoRA Serving
+
+| Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
+|---|---|---|---|---|---|---|
+| | T.1.2.1 | | T.1.2.1 | | | |
+
+| Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody |
+|---|---|---|---|---|
+| | | | | |
+
+| Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward |
+|---|---|---|---|---|
+| | | | T.1.2.1 | |
+
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits |
+|---|---|---|---|---|---|
+| | T.1.2.1 | | | | |
+
+| Hardware | A100 | H100 | B200 | GB200 | MI300x |
+|---|---|---|---|---|---|
+| | ❌ | T.1.2.1 | T.1.2.1 | T.1.2.1 | ❌ |
+
+| vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs |
+|---|---|---|---|---|---|
+| | T.1.2.1 | | | | T.1.2.1 |
+
 ### Thinking Budget
 
 | Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |

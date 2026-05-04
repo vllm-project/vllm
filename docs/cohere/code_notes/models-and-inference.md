@@ -204,6 +204,26 @@ Validation checklist:
 4. Run guided generation with both tool grammar and structural tag JSON schema.
 5. Run multimodal spec decode script using local media path.
 
+## 9) LoRA Serving for `cohere2moe` (Cohere MoE Models)
+
+`commandr.py` and related files include several fixes to enable LoRA adapter serving for `Cohere2MoE` models:
+
+- **`_CONFIG_REGISTRY` entry** (`vllm/transformers_utils/config.py`): `cohere2moe` maps to the string `"Cohere2Config"` for lazy resolution via `LazyConfigDict` (see `vllm/transformers_utils/configs/__init__.py` `_CLASS_TO_MODULE`), avoiding `NameError` when `VLLM_USE_MODELSCOPE` is enabled.
+
+- **`hf_to_vllm_mapper`** (`Cohere2MoeForCausalLM`): strips the `backend.model.` prefix that the Faraday training framework adds when saving LoRA checkpoints, so vLLM can find weights at `layers.X...` paths.
+
+- **`get_expert_mapping()`** (`Cohere2MoeModel` and `Cohere2MoeForCausalLM`): exposes `FusedMoE.make_expert_params_mapping(self, ...)` so vLLM can build the correct expert-weight → param-name mapping for MoE LoRA. The `self` positional argument is required by the v0.17.1 signature.
+
+- **LoRA base-layer unwrap** (`Cohere2MoeDecoderLayer`): `getattr(self.mlp.experts, "base_layer", self.mlp.experts)` is used before calling `must_reduce_shared_expert_outputs()` so the check works even when the experts layer is wrapped by LoRA.
+
+- **`lora_extra_vocab_size` on `LoRAConfig`** (`vllm/config/lora.py`): the fork adds this field (default `0`) so `Cohere2MoeModel` / `Cohere2MoeForCausalLM` can size embedding tables consistently with other LoRA-enabled models without silent `getattr` fallbacks.
+
+- **Packed module validation** (`vllm/lora/worker_manager.py`): when a module appears in `packed_modules_mapping`, both the unpacked component names *and* the packed name itself are added to `expected_lora_lst`, so checkpoints saved with either naming convention (e.g. `qkv_proj` vs individual `q_proj`/`k_proj`/`v_proj`) are accepted.
+
+- **Double-replacement guard** (`load_weights`): the `stacked_params_mapping` loop skips remapping when the target `param_name` is already present in `name` (e.g., `qkv_proj` contains `v_proj` as a substring), preventing incorrect double-replacement.
+
+- **Dummy LoRA for CI** (`tests/cohere/scripts/create_dummy_lora.py`): when the c5 checkpoint is saved as a `cohere2_vision` top-level config, read attention dimensions from `text_config` (same keys as `cohere2moe`). vLLM maps `base_model.model.model.layers...` LoRA weights onto `language_model.model.layers...` via `parse_fine_tuned_lora_name` and `Cohere2VisionForConditionalGeneration.hf_to_vllm_mapper`.
+
 ## 10) Optional FP32 Final-Logits Projection
 
 Cohere branch adds `VLLM_USE_LOGITS_FP32_COMPUTATION` (default **off**; set to

@@ -40,15 +40,19 @@ def build_c5_llm(
     model_path: str,
     tensor_parallel_size: int,
     engine_args: str | None,
+    extra_kwargs: dict | None = None,
 ) -> LLM:
     # Get effective engine kwargs with hardware profile args + test-specific
     # overrides.
+    test_kwargs: dict = {
+        "model": model_path,
+        "max_model_len": 32768,  # c5 uses smaller context than default
+        "tensor_parallel_size": tensor_parallel_size,
+    }
+    if extra_kwargs:
+        test_kwargs.update(extra_kwargs)
     effective_kwargs = get_engine_kwargs_with_overrides(
-        test_kwargs={
-            "model": model_path,
-            "max_model_len": 32768,  # c5 uses smaller context than default
-            "tensor_parallel_size": tensor_parallel_size,
-        },
+        test_kwargs=test_kwargs,
         engine_args_override=engine_args,
     )
     print("Creating LLM with effective kwargs...")
