@@ -349,10 +349,16 @@ def fake_quantize_fp8(
     return _from_bnhtd(out, orig_shape).to(orig_dtype)
 
 
-def fake_quantize_v_pertoken(
+def fake_quantize_pertoken(
     x: torch.Tensor, num_kv_heads: int, head_dim: int,
     group_size: int, bits: int,
 ) -> torch.Tensor:
+    """Per-token int{2,4} quant: groups along the last dim (head_dim).
+
+    Used for both K and V in pertoken / smoothkv / kivi2 methods (the kernel
+    is symmetric in K vs V; only KIVI-2's per-channel K uses a different
+    kernel — see ``fake_quantize_k_perchannel``).
+    """
     orig_shape = x.shape
     orig_dtype = x.dtype
     x4 = _to_bnhtd(x, num_kv_heads, head_dim)
@@ -363,14 +369,6 @@ def fake_quantize_v_pertoken(
         code, scale, mn, group_size, bits
     )
     return _from_bnhtd(out, orig_shape).to(orig_dtype)
-
-
-def fake_quantize_k_pertoken(
-    x: torch.Tensor, num_kv_heads: int, head_dim: int,
-    group_size: int, bits: int,
-) -> torch.Tensor:
-    # Per-token K uses the same packing scheme as V (groups along last dim).
-    return fake_quantize_v_pertoken(x, num_kv_heads, head_dim, group_size, bits)
 
 
 def fake_quantize_k_perchannel(
@@ -476,22 +474,22 @@ def apply_kv_quant(
         key = fake_quantize_fp8(key, nh, hd, gs)
         value = fake_quantize_fp8(value, nh, hd, gs)
     elif method == "pertoken":
-        key = fake_quantize_k_pertoken(key, nh, hd, gs, bits)
-        value = fake_quantize_v_pertoken(value, nh, hd, gs, bits)
+        key = fake_quantize_pertoken(key, nh, hd, gs, bits)
+        value = fake_quantize_pertoken(value, nh, hd, gs, bits)
     elif method == "smoothkv":
         sk_flat = layer._kv_quant_s_k.reshape(-1)
         sv_flat = layer._kv_quant_s_v.reshape(-1)
         k_s = key / sk_flat
-        k_s = fake_quantize_k_pertoken(k_s, nh, hd, gs, bits)
+        k_s = fake_quantize_pertoken(k_s, nh, hd, gs, bits)
         key = k_s * sk_flat
         v_s = value / sv_flat
-        v_s = fake_quantize_v_pertoken(v_s, nh, hd, gs, bits)
+        v_s = fake_quantize_pertoken(v_s, nh, hd, gs, bits)
         value = v_s * sv_flat
     elif method == "kivi2":
         # KIVI-2: K per-channel int2, V per-token int2 (residual buffer not
         # faithfully simulated -- see KIVI paper §3.3).
-        key = fake_quantize_k_pertoken(key, nh, hd, gs, 2)
-        value = fake_quantize_v_pertoken(value, nh, hd, gs, 2)
+        key = fake_quantize_pertoken(key, nh, hd, gs, 2)
+        value = fake_quantize_pertoken(value, nh, hd, gs, 2)
     else:
         raise ValueError(f"Unknown _kv_quant_method: {method!r}")
     return key, value
