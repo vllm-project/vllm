@@ -8,7 +8,7 @@ from transformers import PreTrainedTokenizerFast
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 from .deepseek_v4_encoding import encode_messages
-from .hf import HfTokenizer, get_cached_tokenizer, make_tokenizer_pool
+from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
 
@@ -93,5 +93,4 @@ class DeepseekV4Tokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
         tokenizer = PreTrainedTokenizerFast.from_pretrained(*args, **kwargs)
-        tokenizer = make_tokenizer_pool(tokenizer)
         return get_cached_tokenizer(get_deepseek_v4_tokenizer(tokenizer))

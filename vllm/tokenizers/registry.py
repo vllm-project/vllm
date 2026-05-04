@@ -267,8 +267,4 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         **kwargs,
     )
 
-    # HF fast tokenizer specific method to reserve pool of tokenizers.
-    if hasattr(tok, "_reserve_pool"):
-        tok._reserve_pool(model_config.renderer_num_workers)
-
     return tok

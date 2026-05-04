@@ -99,12 +99,11 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
 )
 
 
-def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
-    """Register `PROMPT_EMBEDS_PLACEHOLDER_TOKEN` as a special token and return
-    its token ID."""
-    cached = _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE.get(tokenizer)
-    if cached is not None:
-        return cached
+def _maybe_register_prompt_embeds_placeholder_token(
+    model_config: ModelConfig, tokenizer: HfTokenizer
+):
+    if not model_config.enable_prompt_embeds:
+        return
 
     tokenizer.add_special_tokens(
         {"additional_special_tokens": [PROMPT_EMBEDS_PLACEHOLDER_TOKEN]}
@@ -122,7 +121,17 @@ def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
 
     token_id = ids[0]
     _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE[tokenizer] = token_id
-    return token_id
+
+
+def _get_prompt_embeds_placeholder_token_id(tokenizer: HfTokenizer) -> int:
+    """Get the token ID of `PROMPT_EMBEDS_PLACEHOLDER_TOKEN`."""
+    cached = _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE.get(tokenizer)
+    if cached is None:
+        raise RuntimeError(
+            "Prompt embeds placeholder token ID not found for tokenizer %s",
+            tokenizer.name_or_path,
+        )
+    return cached
 
 
 def _build_prompt_embeds_updates(
@@ -785,6 +794,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         config: VllmConfig,
         tokenizer: HfTokenizer | None,
     ) -> None:
+        _maybe_register_prompt_embeds_placeholder_token(config.model_config, tokenizer)
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
@@ -806,7 +816,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
             prompt_embeds_placeholder_token_id = (
-                _ensure_prompt_embeds_placeholder_token(tokenizer)
+                _get_prompt_embeds_placeholder_token_id(tokenizer)
             )
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -913,7 +923,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
             prompt_embeds_placeholder_token_id = (
-                _ensure_prompt_embeds_placeholder_token(tokenizer)
+                _get_prompt_embeds_placeholder_token_id(tokenizer)
             )
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(

@@ -15,22 +15,26 @@ from .protocol import TokenizerLike
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 
-def make_tokenizer_pool(tokenizer: HfTokenizer) -> HfTokenizer:
-    """Ensure the public interface of  ``TokenizerLike`` is thread-safe.
-    Route calls to ``PreTrainedTokenizerFast`` through a deep-copied
-    tokenizer pool.
+def maybe_make_thread_pool(tokenizer: TokenizerLike, copies: int = 1) -> TokenizerLike:
+    """
+    If `tokenizer` is a `PreTrainedTokenizerFast`, modify the tokenizer
+    in place to make the public interface thread-safe by routing calls
+    through a deep-copied tokenizer pool.
 
     Note that:
-    - Mutation is not propagated to tokenizers in the pool.
+    - Only ``TokenizerLike``'s public interface is thread-safe.
+      This doesn't include ``_tokenizer`` property nor any mutation
+      methods like ``add_special_tokens`` or ``add_tokens``.
     - Adjacent method calls could happen on different deep copies.
-    - ``_tokenizer`` property is not protected by tokenizer pool.
     """
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         return tokenizer
 
-    thread_safe_tokenizer = copy.copy(tokenizer)
+    og_tokenizer = copy.copy(tokenizer)
 
     tokenizer_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
+    for _ in range(copies):
+        tokenizer_pool.put(copy.deepcopy(og_tokenizer))
 
     @contextlib.contextmanager
     def _borrow_from_pool():
@@ -81,19 +85,12 @@ def make_tokenizer_pool(tokenizer: HfTokenizer) -> HfTokenizer:
                 return tok(*args, **kwargs)
 
         def __reduce__(self):
-            return make_tokenizer_pool, (tokenizer,)
-
-        @staticmethod
-        def _reserve_pool(copies: int):
-            # Ensure tokenizer pool contains at least `copies` tokenizers.
-            num_to_add = copies - tokenizer_pool.qsize()
-            for _ in range(num_to_add):
-                tokenizer_pool.put(copy.deepcopy(tokenizer))
+            return maybe_make_thread_pool, (og_tokenizer, copies)
 
     TokenizerPool.__name__ = f"TokenizerPool{tokenizer.__class__.__name__}"
 
-    thread_safe_tokenizer.__class__ = TokenizerPool
-    return thread_safe_tokenizer
+    tokenizer.__class__ = TokenizerPool
+    return tokenizer
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
@@ -204,4 +201,4 @@ class CachedHfTokenizer(TokenizerLike):
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        return get_cached_tokenizer(make_tokenizer_pool(tokenizer))
+        return get_cached_tokenizer(tokenizer)

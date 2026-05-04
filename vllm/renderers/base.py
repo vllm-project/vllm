@@ -37,7 +37,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike, maybe_make_thread_pool
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     make_async,
@@ -78,8 +78,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self.config = config
         self.model_config = config.model_config
         self.api_process_rank = config.parallel_config._api_process_rank
-
-        self.tokenizer = tokenizer
 
         # Shared thread pool executor for blocking tokenizer and
         # multimodal preprocessing operations.  The multimodal processor
@@ -135,6 +133,9 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_timing_registry = MultiModalTimingRegistry(
                 config.observability_config
             )
+
+        # Make HF fast tokenizer thread-safe by dispatching calls to tokenizer pool
+        self.tokenizer = maybe_make_thread_pool(tokenizer, pool_workers + 1)
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
