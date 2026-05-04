@@ -32,6 +32,12 @@ def sample_tools():
         ),
         ChatCompletionToolsParam(
             function=FunctionDefinition(
+                name="mcp__gmail-cleanup__list_filters",
+                parameters={},
+            ),
+        ),
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
                 name="get_weather",
                 parameters={
                     "type": "object",
@@ -125,23 +131,70 @@ def _reset(parser):
     parser._sent_content_idx = 0
 
 
+def _stream_chunks(parser, request, chunks):
+    current_text = ""
+    deltas = []
+    for chunk in chunks:
+        current_text += chunk
+        delta = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        if delta and delta.tool_calls:
+            deltas.extend(delta.tool_calls)
+    return deltas
+
+
+def _tool_call_args_from_deltas(deltas, index):
+    return "".join(
+        tool_call.function.arguments or ""
+        for tool_call in deltas
+        if tool_call.index == index and tool_call.function
+    )
+
+
 class TestGlm47Streaming:
     def test_no_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
         chunks = ["<tool_call>", "get_current_date", "</tool_call>"]
-        current_text = ""
-        for chunk in chunks:
-            current_text += chunk
-            glm47_tool_parser.extract_tool_calls_streaming(
-                previous_text="",
-                current_text=current_text,
-                delta_text=chunk,
-                previous_token_ids=[],
-                current_token_ids=[],
-                delta_token_ids=[],
-                request=mock_request,
-            )
-        assert len(glm47_tool_parser.prev_tool_call_arr) >= 1
+        deltas = _stream_chunks(glm47_tool_parser, mock_request, chunks)
+
+        assert glm47_tool_parser.prev_tool_call_arr[0]["name"] == "get_current_date"
+        assert json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"]) == {}
+        assert any(
+            tool_call.function
+            and tool_call.function.name == "get_current_date"
+            and tool_call.index == 0
+            for tool_call in deltas
+        )
+        assert json.loads(_tool_call_args_from_deltas(deltas, 0)) == {}
+
+    def test_no_args_mcp_tool_name(self, glm47_tool_parser, mock_request):
+        _reset(glm47_tool_parser)
+        chunks = [
+            "<tool_call>",
+            "mcp__gmail-cleanup__list_filters",
+            "</tool_call>",
+        ]
+        deltas = _stream_chunks(glm47_tool_parser, mock_request, chunks)
+
+        assert (
+            glm47_tool_parser.prev_tool_call_arr[0]["name"]
+            == "mcp__gmail-cleanup__list_filters"
+        )
+        assert json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"]) == {}
+        assert any(
+            tool_call.function
+            and tool_call.function.name == "mcp__gmail-cleanup__list_filters"
+            and tool_call.index == 0
+            for tool_call in deltas
+        )
+        assert json.loads(_tool_call_args_from_deltas(deltas, 0)) == {}
 
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
@@ -154,17 +207,6 @@ class TestGlm47Streaming:
             "</arg_value>",
             "</tool_call>",
         ]
-        current_text = ""
-        for chunk in chunks:
-            current_text += chunk
-            glm47_tool_parser.extract_tool_calls_streaming(
-                previous_text="",
-                current_text=current_text,
-                delta_text=chunk,
-                previous_token_ids=[],
-                current_token_ids=[],
-                delta_token_ids=[],
-                request=mock_request,
-            )
+        _stream_chunks(glm47_tool_parser, mock_request, chunks)
         args = json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"])
         assert args["city"] == "Beijing"
