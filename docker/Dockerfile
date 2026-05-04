@@ -25,6 +25,7 @@
 ARG CUDA_VERSION=13.0.0
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
+ARG FLASHINFER_VERSION=0.6.8.post1
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -94,6 +95,7 @@ FROM ${BUILD_BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG FLASHINFER_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -176,13 +178,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-# On CUDA 13 builds, install `nvidia-cutlass-dsl[cu13]` — it ships the
-# CuTe-DSL libs that FlashInfer's Blackwell SM100 GDN prefill kernel
-# (flashinfer-ai/flashinfer#3001) JIT-requires.
+# `flashinfer-python` is already installed via requirements/cuda.txt above;
+# this only activates its `[cu13]` extra (cu13 deps for the SM100 GDN kernel).
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         uv pip install --python /opt/venv/bin/python3 \
-            "nvidia-cutlass-dsl[cu13]>=4.4.2"; \
+            "flashinfer-python[cu13]==${FLASHINFER_VERSION}"; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
@@ -490,6 +491,7 @@ ARG PYTHON_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
+ARG FLASHINFER_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
@@ -586,18 +588,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# On CUDA 13 builds, install `nvidia-cutlass-dsl[cu13]` — it ships the
-# CuTe-DSL libs that FlashInfer's Blackwell SM100 GDN prefill kernel
-# (flashinfer-ai/flashinfer#3001) JIT-requires.
+# `flashinfer-python` is already installed via requirements/cuda.txt above;
+# this only activates its `[cu13]` extra (cu13 deps for the SM100 GDN kernel).
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
-        uv pip install --system "nvidia-cutlass-dsl[cu13]>=4.4.2"; \
+        uv pip install --system \
+            "flashinfer-python[cu13]==${FLASHINFER_VERSION}"; \
     fi
 
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.8.post1
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \

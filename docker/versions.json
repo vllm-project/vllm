@@ -10,6 +10,9 @@
     "UBUNTU_VERSION": {
       "default": "22.04"
     },
+    "FLASHINFER_VERSION": {
+      "default": "0.6.8.post1"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.0-devel-ubuntu22.04"
     },
@@ -63,9 +66,6 @@
     },
     "RUN_WHEEL_CHECK": {
       "default": "true"
-    },
-    "FLASHINFER_VERSION": {
-      "default": "0.6.8.post1"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"

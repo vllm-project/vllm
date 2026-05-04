@@ -967,14 +967,12 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
-            if req.startswith("nvidia-cutlass-dsl") and cuda_major == "13":
-                # On CUDA 13 builds, pull in the `[cu13]` extra — it ships
-                # the CuTe-DSL libs that FlashInfer's Blackwell SM100 GDN
-                # prefill kernel (flashinfer-ai/flashinfer#3001) JIT-
-                # requires.
+            if req.startswith("flashinfer-python") and cuda_major == "13":
+                # Activate FI's `[cu13]` extra on cu13 builds (cu13 deps for
+                # the SM100 GDN kernel). Mirrors the Dockerfile cu13 path.
                 req = req.replace(
-                    "nvidia-cutlass-dsl",
-                    "nvidia-cutlass-dsl[cu13]",
+                    "flashinfer-python",
+                    "flashinfer-python[cu13]",
                     1,
                 )
             modified_requirements.append(req)
