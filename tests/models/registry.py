@@ -1158,6 +1158,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                     "model": "vit_huge_patch16_224",
                 },
                 video_temporal_patch_size=2,
+                # TODO(nhaber): This is `true` in the official `config.json`,
+                # but this causes a processor exception in the tests due to a known bug
+                # with mixed-resolution video when `true`. To be resolved.
                 video_maintain_aspect_ratio=False,
             ),
             "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
