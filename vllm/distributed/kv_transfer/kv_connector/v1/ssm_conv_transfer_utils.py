@@ -92,19 +92,30 @@ def derive_mamba_conv_split(
     Called once at init on both P and D.  Decomposes the conv dimension
     (= intermediate_size + 2 * groups_ss) into its x, B, C parts.
 
+    Supported mamba types:
+      * "mamba2": SSM temporal shape is (local_num_heads, head_dim, state_size).
+        intermediate_size = local_num_heads * local_tp * head_dim.
+      * "gdn_attention" (Gated Delta Net, used by Qwen3-Next / Qwen3.5):
+        SSM temporal shape is (local_num_v_heads, head_v_dim, head_k_dim).
+        intermediate_size_equivalent = local_num_v_heads * local_tp * head_v_dim
+        (i.e. value_dim).  groups_ss_equivalent = key_dim.  The math of conv
+        decomposition matches mamba2 exactly because GDN's conv layout is
+        ``[x | B | C]`` with ``x_dim = value_dim`` and ``B_dim = C_dim = key_dim``.
+
     Args:
         mamba_spec: MambaSpec whose shapes are:
             shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
-            shapes[1] = SSM temporal: (local_num_heads, head_dim).
+            shapes[1] = SSM temporal: (local_num_heads, head_dim, ...).
         local_tp: this engine's tensor-parallel size.
 
     Returns:
         MambaConvSplitInfo with per-rank x_local, b_local, conv_rows, and
         conv_dtype_size.
     """
-    if mamba_spec.mamba_type != "mamba2":
+    supported_mamba_types = ("mamba2", "gdn_attention")
+    if mamba_spec.mamba_type not in supported_mamba_types:
         raise NotImplementedError(
-            f"3-read conv transfer only supports Mamba2 models, "
+            f"3-read conv transfer supports {supported_mamba_types}, "
             f"got mamba_type={mamba_spec.mamba_type!r}.  "
             f"Mamba1 SSM temporal shape is (intermediate_size // tp, state_size) "
             f"which cannot be used to reconstruct intermediate_size."
@@ -119,9 +130,12 @@ def derive_mamba_conv_split(
     local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
     conv_rows = conv_shape[1]
 
-    # NOTE (ZhanqiuHu): intermediate_size (= global x dim) is not stored
-    # in MambaSpec, so we reconstruct it from the SSM temporal state shape:
-    #   shapes[1] = (local_num_heads, head_dim), already divided by TP.
+    # NOTE: intermediate_size (= global x dim, i.e. value_dim for GDN) is not
+    # stored in MambaSpec, so we reconstruct it from the SSM temporal state shape:
+    #   mamba2:        shapes[1] = (local_num_heads, head_dim, state_size)
+    #   gdn_attention: shapes[1] = (local_num_v_heads, head_v_dim, head_k_dim)
+    # In both cases the first two axes are "(local_x_heads, x_head_dim)" and
+    # the third axis is irrelevant for the conv decomposition.
     head_dim = mamba_spec.shapes[1][1]
     local_num_heads = mamba_spec.shapes[1][0]
     intermediate_size = local_num_heads * local_tp * head_dim
