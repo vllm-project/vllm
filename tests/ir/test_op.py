@@ -12,6 +12,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
+
 # This should not exist
 assert "_custom_add" not in IrOp.registry
 
@@ -570,4 +571,3 @@ class TestTolerance:
         op = IrOp("_tol_test_unknown", _test_native)
         with pytest.raises(ValueError, match="No tolerance defined"):
             op.get_tolerance(torch.complex64)
-

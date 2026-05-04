@@ -216,9 +216,7 @@ def assert_impl_numerical(op: IrOp, provider: str, args: tuple) -> None:
     assert_close(op, out, ref)
 
 
-def assert_dispatch_matches_direct(
-    op: IrOp, provider: str, args: tuple
-) -> None:
+def assert_dispatch_matches_direct(op: IrOp, provider: str, args: tuple) -> None:
     """
     Assert that dispatch matches direct implementation call.
 
@@ -264,11 +262,7 @@ def generate_symbolic_inputs(op: IrOp, **kwargs) -> tuple:
     result = []
     first_tensor_found = False
     for arg in args:
-        if (
-            isinstance(arg, torch.Tensor)
-            and arg.dim() >= 1
-            and not first_tensor_found
-        ):
+        if isinstance(arg, torch.Tensor) and arg.dim() >= 1 and not first_tensor_found:
             first_tensor_found = True
             new_shape = (sym_num_tokens,) + arg.shape[1:]
             result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
@@ -302,6 +296,7 @@ def registered_test_op():
         impls: dict[str, tuple[Callable[..., bool] | None, Callable]],
     ) -> IrOp:
         from vllm import ir
+
         op = ir.register_op(name=name)(native_fn)
         op.register_input_generator(input_generator)
 

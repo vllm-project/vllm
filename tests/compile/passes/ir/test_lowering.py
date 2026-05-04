@@ -8,7 +8,6 @@ import vllm.kernels  # noqa: F401 to register kernels
 from tests.ir.ir_test_utils import (
     _make_simple_model,
     generate_symbolic_inputs,
-    registered_test_op,
 )
 from vllm import ir
 from vllm.compilation.passes.ir.lowering_pass import (
@@ -19,7 +18,6 @@ from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
 from ...backend import TestBackend
-
 
 # ============================================================
 # Lowering unit tests with fake ops
@@ -32,9 +30,7 @@ class TestFakeOpLowering:
     through the VllmIRLoweringPass.
     """
 
-    def test_impl_selection_and_fallback(
-        self, default_vllm_config, registered_test_op
-    ):
+    def test_impl_selection_and_fallback(self, default_vllm_config, registered_test_op):
         """
         Test that lowering correctly selects implementation based on supports_args,
         and falls back to native when no custom impl matches.
