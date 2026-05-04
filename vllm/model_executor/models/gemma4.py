@@ -51,6 +51,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    unpack_quantized_values_into_int32,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -61,6 +64,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
@@ -202,6 +206,40 @@ def gemma4_routing_function_torch(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+def _dequantize_autoround_gptq_router_weight(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    num_bits: int,
+    group_size: int,
+    sym: bool,
+    params_dtype: torch.dtype,
+) -> torch.Tensor:
+    if num_bits not in (4, 8):
+        raise ValueError(f"Router dequant: unsupported num_bits={num_bits}")
+    weight_type = {
+        4: scalar_types.uint4b8,
+        8: scalar_types.uint8b128,
+    }[num_bits]
+    unpacked_qweight = unpack_quantized_values_into_int32(
+        qweight, weight_type, packed_dim=0
+    ).to(torch.float32)
+    unpacked_qzeros = unpack_quantized_values_into_int32(
+        qzeros, weight_type, packed_dim=1
+    ).to(torch.float32)
+    if sym:
+        # AutoRound's GPTQ-style symmetric checkpoints store router qzeros
+        # with a -1 offset relative to the effective zero point.
+        unpacked_qzeros = unpacked_qzeros + 1
+    row_groups = (
+        torch.arange(unpacked_qweight.shape[0], device=qweight.device) // group_size
+    )
+    scales_per_row = scales.to(torch.float32)[row_groups]
+    qzeros_per_row = unpacked_qzeros[row_groups]
+    weight = (unpacked_qweight - qzeros_per_row) * scales_per_row
+    return weight.t().to(params_dtype)
+
+
 def _get_text_config(config):
     """Dereference text_config if config is a nested Gemma4Config.
 
@@ -291,6 +329,7 @@ class Gemma4Router(nn.Module):
             config.num_experts,
             bias=False,
             out_dtype=torch.float32,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
 
@@ -1402,6 +1441,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
+        router_quant_params: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -1423,6 +1463,40 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(remapped_name)
                     continue
+
+            if (
+                self.quant_config is not None
+                and name.endswith((".qweight", ".qzeros", ".scales"))
+                and ".router.proj." in name
+            ):
+                router_name, _, suffix = name.rpartition(".")
+                router_quant_params.setdefault(router_name, {})[suffix] = loaded_weight
+                loaded_params.add(name)
+                quant_params = router_quant_params[router_name]
+                if len(quant_params) == 3:
+                    weight_name = f"{router_name}.weight"
+                    if is_pp_missing_parameter(weight_name, self):
+                        del router_quant_params[router_name]
+                        continue
+                    if weight_name not in params_dict:
+                        raise KeyError(weight_name)
+                    param = params_dict[weight_name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    router_weight = _dequantize_autoround_gptq_router_weight(
+                        qweight=quant_params["qweight"],
+                        qzeros=quant_params["qzeros"],
+                        scales=quant_params["scales"],
+                        num_bits=self.quant_config.weight_bits,
+                        group_size=self.quant_config.group_size,
+                        sym=self.quant_config.sym,
+                        params_dtype=param.dtype,
+                    )
+                    weight_loader(param, router_weight)
+                    loaded_params.add(weight_name)
+                    del router_quant_params[router_name]
+                continue
 
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
@@ -1496,6 +1570,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        if router_quant_params:
+            for router_name, quant_params in router_quant_params.items():
+                logger.warning(
+                    "Skipping incomplete quantized router params for %s: %s",
+                    router_name,
+                    sorted(quant_params),
+                )
 
         return loaded_params
 
