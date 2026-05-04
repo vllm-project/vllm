@@ -177,6 +177,7 @@ class Qwen3DecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -186,6 +187,7 @@ class Qwen3DecoderLayer(nn.Module):
             config.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(

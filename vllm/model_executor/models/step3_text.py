@@ -36,6 +36,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -239,6 +240,7 @@ class Step3TextDecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -248,6 +250,7 @@ class Step3TextDecoderLayer(nn.Module):
             self.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
 
         self.self_attn = Step3TextAttention(
@@ -362,6 +365,7 @@ class Step3TextModel(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_steering_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=get_steering_buffer_dtype(vllm_config),
             ),
             prefix=f"{prefix}.layers",
         )

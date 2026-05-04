@@ -59,6 +59,7 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
     apply_layer_steering,
     get_steering_buffer_config,
+    get_steering_buffer_dtype,
     register_steering_buffers,
     share_steering_index_across_layers,
 )
@@ -393,6 +394,7 @@ class InternS1ProMoeDecoderLayer(nn.Module):
             self.hidden_size,
             max_steering_tokens=max_steering_tokens,
             max_steering_configs=max_steering_configs,
+            dtype=get_steering_buffer_dtype(vllm_config),
         )
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
         dual_chunk_attention_config = getattr(
