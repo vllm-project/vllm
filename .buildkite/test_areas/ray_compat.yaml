@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Ray Dependency Compatibility Check
+  key: ray-dependency-compatibility-check
   # Informational only — does not block the pipeline.
   # If this fails, it means the PR introduces a dependency that
   # conflicts with Ray's dependency constraints.

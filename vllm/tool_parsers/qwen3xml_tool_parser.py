@@ -1258,11 +1258,11 @@ class Qwen3XMLToolParser(ToolParser):
             return None
 
         # Parse the delta text and get the result
-        result = self.parser.parse_single_streaming_chunks(delta_text)
+        delta = self.parser.parse_single_streaming_chunks(delta_text)
 
         # Update tool call tracking arrays based on incremental parsing results
-        if result and result.tool_calls:
-            for tool_call in result.tool_calls:
+        if delta and delta.tool_calls:
+            for tool_call in delta.tool_calls:
                 if tool_call.function:
                     tool_index = (
                         tool_call.index
@@ -1292,4 +1292,7 @@ class Qwen3XMLToolParser(ToolParser):
                         self.streamed_args_for_tool[tool_index] += (
                             tool_call.function.arguments
                         )
-        return result
+        if delta.content is None and not delta.tool_calls and delta.reasoning is None:
+            # If no content and no tool calls, return None to indicate no update
+            return None
+        return delta

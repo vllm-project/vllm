@@ -45,7 +45,7 @@ def _compute_global_lse(
 
 
 @triton.jit
-def _compute_block_max_and_sumexp_kernel(
+def _compute_block_stats_kernel(
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
     target_local_argmax_stride,
@@ -77,6 +77,7 @@ def _compute_block_max_and_sumexp_kernel(
     vocab_size,
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
+    HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -112,24 +113,6 @@ def _compute_block_max_and_sumexp_kernel(
             value,
         )
     else:
-        # Get local draft max and summed exponentials.
-        draft_logits = tl.load(
-            draft_logits_ptr
-            + req_state_idx * draft_logits_stride_0
-            + draft_step_idx * draft_logits_stride_1
-            + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        draft_max, draft_sumexp = _compute_block_max_and_sumexp(draft_logits)
-        tl.store(
-            draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
-            draft_max,
-        )
-        tl.store(
-            draft_local_sumexp_ptr + logit_idx * draft_local_sumexp_stride + block_idx,
-            draft_sumexp,
-        )
         # Get local target max and summed exponentials.
         target_logits = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
@@ -147,6 +130,27 @@ def _compute_block_max_and_sumexp_kernel(
             + block_idx,
             target_sumexp,
         )
+        if HAS_DRAFT_LOGITS:
+            # Get local draft max and summed exponentials.
+            draft_logits = tl.load(
+                draft_logits_ptr
+                + req_state_idx * draft_logits_stride_0
+                + draft_step_idx * draft_logits_stride_1
+                + block_offsets,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            draft_max, draft_sumexp = _compute_block_max_and_sumexp(draft_logits)
+            tl.store(
+                draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
+                draft_max,
+            )
+            tl.store(
+                draft_local_sumexp_ptr
+                + logit_idx * draft_local_sumexp_stride
+                + block_idx,
+                draft_sumexp,
+            )
 
 
 @triton.jit
@@ -196,6 +200,7 @@ def _probabilistic_rejection_kernel(
     pos_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -238,12 +243,6 @@ def _probabilistic_rejection_kernel(
                 target_logit = tl.load(
                     target_logits_ptr + logit_idx * target_logits_stride + draft_sampled
                 ).to(tl.float32)
-                draft_logit = tl.load(
-                    draft_logits_ptr
-                    + req_state_idx * draft_logits_stride_0
-                    + i * draft_logits_stride_1
-                    + draft_sampled
-                ).to(tl.float32)
                 target_lse = _compute_global_lse(
                     target_local_max_ptr,
                     target_local_max_stride,
@@ -253,19 +252,29 @@ def _probabilistic_rejection_kernel(
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
                 )
-                draft_lse = _compute_global_lse(
-                    draft_local_max_ptr,
-                    draft_local_max_stride,
-                    draft_local_sumexp_ptr,
-                    draft_local_sumexp_stride,
-                    logit_idx,
-                    vocab_num_blocks,
-                    PADDED_VOCAB_NUM_BLOCKS,
-                )
                 target_log_prob = target_logit - target_lse
-                draft_log_prob = draft_logit - draft_lse
                 pos = tl.load(pos_ptr + logit_idx)
                 u = tl_rand64(seed, pos, includes_zero=False)
+                if HAS_DRAFT_LOGITS:
+                    draft_logit = tl.load(
+                        draft_logits_ptr
+                        + req_state_idx * draft_logits_stride_0
+                        + i * draft_logits_stride_1
+                        + draft_sampled
+                    ).to(tl.float32)
+                    draft_lse = _compute_global_lse(
+                        draft_local_max_ptr,
+                        draft_local_max_stride,
+                        draft_local_sumexp_ptr,
+                        draft_local_sumexp_stride,
+                        logit_idx,
+                        vocab_num_blocks,
+                        PADDED_VOCAB_NUM_BLOCKS,
+                    )
+                    draft_log_prob = draft_logit - draft_lse
+                else:
+                    # One-hot draft: q(draft_token) = 1, log_q = 0.
+                    draft_log_prob = 0
                 # Probability ratio test: p(x) > u * q(x)
                 # Equivalent log form: log_p(x) > log(u) + log_q(x)
                 accepted &= target_log_prob > tl.log(u) + draft_log_prob
@@ -301,6 +310,8 @@ def _resample_kernel(
     cu_num_logits_ptr,
     # [num_logits]
     expanded_idx_mapping_ptr,
+    # [num_logits]
+    draft_sampled_ptr,
     # [max_num_reqs]
     temp_ptr,
     # [max_num_reqs]
@@ -309,6 +320,7 @@ def _resample_kernel(
     pos_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
+    HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -327,22 +339,17 @@ def _resample_kernel(
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
+    target_logits = tl.load(
+        target_logits_ptr + resample_token_idx * target_logits_stride + block,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
 
-    # Compute the residual logits to resample the rejected token
-    # from. In the case of no rejections (bonus token), we directly
-    # use the target logits.
+    # Compute the residual logits to resample the rejected token from.
     if is_bonus:
-        residual_logits = tl.load(
-            target_logits_ptr + resample_token_idx * target_logits_stride + block,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-    else:
-        target_logits = tl.load(
-            target_logits_ptr + resample_token_idx * target_logits_stride + block,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
+        # Bonus token (no rejections). Directly use the target logits.
+        residual_logits = target_logits
+    elif HAS_DRAFT_LOGITS:
         draft_logits = tl.load(
             draft_logits_ptr
             + req_state_idx * draft_logits_stride_0
@@ -363,6 +370,15 @@ def _resample_kernel(
         residual_logits = tl.where(
             ratio < 1.0,
             target_log_probs + tl.log(1 - ratio),
+            float("-inf"),
+        ).to(tl.float32)
+    else:
+        # One-hot draft. The residual is just the target distribution with
+        # the rejected draft token probability zeroed out.
+        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
+        residual_logits = tl.where(
+            block != rejected_draft_token,
+            target_logits,
             float("-inf"),
         ).to(tl.float32)
 
@@ -456,7 +472,7 @@ def probabilistic_rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
     # [max_num_reqs, num_speculative_steps, V]
-    draft_logits: torch.Tensor,
+    draft_logits: torch.Tensor | None,
     # [num_logits]
     draft_sampled: torch.Tensor,
     # [num_reqs + 1]
@@ -477,9 +493,17 @@ def probabilistic_rejection_sample(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
+    has_draft_logits = draft_logits is not None
 
-    # Gather draft logits, compute target argmax for greedy, and
-    # compute per-block LSE and max for non-greedy requests.
+    if draft_logits is None:
+        # When draft_logits is None, create a dummy tensor so that Triton
+        # kernel signatures receive valid pointers/strides. The kernels
+        # will never read from it when HAS_DRAFT_LOGITS=False.
+        draft_logits = target_logits.new_empty(1, 1, 1)
+
+    # Compute the block-level logits stats, such as target argmax
+    # (for greedy requests), and target max + softmax exponential
+    # (for non-greedy requests).
     VOCAB_BLOCK_SIZE = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
@@ -498,7 +522,7 @@ def probabilistic_rejection_sample(
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    _compute_block_max_and_sumexp_kernel[(num_logits, vocab_num_blocks)](
+    _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,
@@ -520,6 +544,7 @@ def probabilistic_rejection_sample(
         vocab_size,
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+        HAS_DRAFT_LOGITS=has_draft_logits,
     )
 
     # Sample up until the first rejected/bonus token, and store
@@ -527,7 +552,7 @@ def probabilistic_rejection_sample(
     sampled = draft_sampled.new_empty(
         num_reqs, num_speculative_steps + 1, dtype=torch.int64
     )
-    num_sampled = sampled.new_empty(num_reqs)
+    num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _probabilistic_rejection_kernel[(num_reqs,)](
@@ -559,6 +584,7 @@ def probabilistic_rejection_sample(
         pos,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+        HAS_DRAFT_LOGITS=has_draft_logits,
         num_warps=1,
     )
 
@@ -587,11 +613,13 @@ def probabilistic_rejection_sample(
         num_sampled,
         cu_num_logits,
         expanded_idx_mapping,
+        draft_sampled,
         temperature,
         seed,
         pos,
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
+        HAS_DRAFT_LOGITS=has_draft_logits,
     )
 
     # Insert the resampled tokens into the output sampled.
