@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Adapted from vllm-project/vllm-ascend
+# (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """MooncakeStoreConnector - KV cache connector using MooncakeDistributedStore.
 
 Unlike MooncakeConnector which does direct P2P transfer, this connector

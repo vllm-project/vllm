@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# The transfer-thread scaffolding (KVTransferThread, KVCacheStoreSendingThread,
+# KVCacheStoreRecvingThread) is adapted from vllm-project/vllm-ascend
+# (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Worker-side logic for MooncakeStoreConnector.
 
 Includes the store worker, transfer threads, lookup server,
