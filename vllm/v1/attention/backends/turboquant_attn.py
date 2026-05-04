@@ -69,6 +69,54 @@ if _HAS_FLASH_ATTN:
 _CONTINUATION_DECODE_THRESHOLD = 128
 
 
+def _get_turboquant_decode_workspace_shapes(
+    batch_size: int,
+    num_heads: int,
+    head_size: int,
+    max_num_kv_splits: int,
+    output_dtype: torch.dtype = torch.float32,
+) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+    """Workspace views required by one TurboQuant decode kernel call."""
+    return (
+        ((batch_size, num_heads, max_num_kv_splits, head_size + 1), torch.float32),
+        ((batch_size, num_heads, head_size), output_dtype),
+        ((batch_size, num_heads), torch.float32),
+    )
+
+
+def reserve_turboquant_decode_workspace(
+    *,
+    vllm_config: Any,
+    num_heads: int,
+    head_size: int,
+) -> bool:
+    """Pre-grow WorkspaceManager for TurboQuant decode scratch buffers.
+
+    WorkspaceManager has no separate reservation API; the supported way to
+    size it is to request the largest views during model initialization or
+    profiling, before ``lock_workspace()`` freezes workspace size. The output
+    buffer is reserved as float32 so runtime requests with fp16/bf16 query
+    dtypes cannot exceed the reservation.
+    """
+    if not is_workspace_manager_initialized():
+        return False
+
+    batch_size = max(
+        vllm_config.scheduler_config.max_num_seqs,
+        _CONTINUATION_DECODE_THRESHOLD,
+    )
+    max_num_kv_splits = vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+    current_workspace_manager().get_simultaneous(
+        *_get_turboquant_decode_workspace_shapes(
+            batch_size=batch_size,
+            num_heads=num_heads,
+            head_size=head_size,
+            max_num_kv_splits=max_num_kv_splits,
+        )
+    )
+    return True
+
+
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
     """Orthonormal Hadamard matrix (Sylvester construction), cached per (d, device).
 
@@ -288,6 +336,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
+        reserve_turboquant_decode_workspace(
+            vllm_config=vllm_config,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+        )
 
     def _flash_attn_varlen(
         self,
@@ -353,6 +406,26 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             c_sorted, _ = layer._tq_centroids.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
             layer._tq_cached = True
+
+    def _get_decode_workspace(
+        self,
+        batch_size: int,
+        output_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        if not is_workspace_manager_initialized():
+            return None, None, None
+
+        return tuple(
+            current_workspace_manager().get_simultaneous(
+                *_get_turboquant_decode_workspace_shapes(
+                    batch_size=batch_size,
+                    num_heads=self.num_heads,
+                    head_size=self.head_size,
+                    max_num_kv_splits=self.max_num_kv_splits,
+                    output_dtype=output_dtype,
+                )
+            )
+        )
 
     def do_kv_cache_update(
         self,
@@ -842,18 +915,18 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Falls back to kernel-internal allocation if workspace unavailable.
         B = query.shape[0]
         D = self.head_size
-        S = self.max_num_kv_splits
         Hq = self.num_heads
-        mid_o_buf = output_buf = lse_buf = None
-        if is_workspace_manager_initialized():
-            # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
-            mid_o_buf, output_buf, lse_buf = (
-                current_workspace_manager().get_simultaneous(
-                    ((B, Hq, S, D + 1), torch.float32),
-                    ((B, Hq, D), query.dtype),
-                    ((B, Hq), torch.float32),
-                )
-            )
+        assert query.shape[-1] == D
+        assert Hq == query.shape[1]
+
+        # output_buf in query dtype — matches the in-kernel cast in stage2.
+        mid_o_buf, output_buf, lse_buf = self._get_decode_workspace(B, query.dtype)
+        buf_holder = (
+            layer
+            if layer is not None
+            and (mid_o_buf is None or output_buf is None or lse_buf is None)
+            else None
+        )
 
         result = triton_turboquant_decode_attention(
             query=query,
@@ -872,7 +945,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             mid_o_buf=mid_o_buf,
             output_buf=output_buf,
             lse_buf=lse_buf,
-            buf_holder=layer,
+            buf_holder=buf_holder,
             max_num_kv_splits=self.max_num_kv_splits,
         )
         return result
