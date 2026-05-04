@@ -200,40 +200,45 @@ class TieringOffloadingManager(OffloadingManager):
 
         Algorithm:
         1. Process any completed async jobs first
-        2. Check primary tier
-        3. If not in primary, check secondary tiers and initiate promotion
-           if the block is found there
+        2. Query all tiers (primary + secondaries) unconditionally
+        3. Decide based on combined results
 
         Args:
             key: Block hash to look up.
             req_context: Per-request context.
 
         Returns:
-            True if the block is in the primary tier and ready,
+            True if the block is ready (primary hit, or found in a secondary
+                tier with promotion initiated),
             False if not found in any tier,
-            None if the block is being transferred (retry later).
+            None if no tier has the block but at least one tier is busy
+                (retry later).
         """
         self._process_finished_jobs()
 
-        # Step 1: Check primary tier
+        # Always query every tier to warm up caches / prefetch state
         primary_hit = self.primary_tier.lookup(key, req_context)
-        if primary_hit is None:
-            return None
+
+        hit_tier = None
+        any_none = False
+        for tier in self.secondary_tiers:
+            result = tier.lookup(key, req_context)
+            if result is True and hit_tier is None:
+                hit_tier = tier
+            elif result is None:
+                any_none = True
+
         if primary_hit:
             return True
-
-        # Step 2: Check secondary tiers
-        for tier in self.secondary_tiers:
-            secondary_hit = tier.lookup(key, req_context)
-            if secondary_hit is None:
-                # Tier is busy with this block
-                return None
-            if secondary_hit:
-                # Found in secondary — initiate promotion and signal retry
-                self._initiate_promotion(tier, key, req_context)
-                return None
-
-        return False
+        elif primary_hit is None:
+            return None
+        elif hit_tier is not None:
+            self._initiate_promotion(hit_tier, key, req_context)
+            return True
+        elif any_none:
+            return None
+        else:
+            return False
 
     def _initiate_promotion(
         self,
