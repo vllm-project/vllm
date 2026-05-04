@@ -598,6 +598,11 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         )
 
     @classmethod
+    def get_transcription_stop_token_ids(cls, model_config: ModelConfig) -> list[int]:
+        eos_token_id = model_config.hf_config.eos_token_id
+        return [eos_token_id] if isinstance(eos_token_id, int) else []
+
+    @classmethod
     def get_num_audio_tokens(
         cls,
         audio_duration_s: float,

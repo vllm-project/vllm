@@ -133,6 +133,38 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
+    def _get_transcription_stop_token_ids(self) -> list[int]:
+        return list(
+            dict.fromkeys(
+                self.model_cls.get_transcription_stop_token_ids(self.model_config)
+            )
+        )
+
+    @staticmethod
+    def _apply_transcription_stop_token_ids(
+        sampling_params: SamplingParams,
+        stop_token_ids: list[int],
+    ) -> None:
+        if sampling_params.ignore_eos or not stop_token_ids:
+            return
+
+        all_stop_token_ids = set(sampling_params.stop_token_ids or [])
+        all_stop_token_ids.update(stop_token_ids)
+        sampling_params.stop_token_ids = sorted(all_stop_token_ids)
+        sampling_params._all_stop_token_ids.update(stop_token_ids)
+
+    def _get_transcription_beam_search_error(
+        self,
+        stop_token_ids: list[int],
+    ) -> ErrorResponse | None:
+        if not stop_token_ids:
+            return None
+
+        return self.create_error_response(
+            "Model-provided transcription stop token ids are not supported "
+            "with beam search. Disable beam search for this transcription model."
+        )
+
     async def _detect_language(
         self,
         audio_chunk: np.ndarray,
@@ -410,6 +442,15 @@ class OpenAISpeechToText(OpenAIServing):
             return self.create_error_response(
                 "verbose_json format doesn't support streaming case"
             )
+
+        transcription_stop_token_ids = self._get_transcription_stop_token_ids()
+        if request.use_beam_search:
+            error_response = self._get_transcription_beam_search_error(
+                transcription_stop_token_ids
+            )
+            if error_response is not None:
+                return error_response
+
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
@@ -453,6 +494,9 @@ class OpenAISpeechToText(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 max_tokens,
                 self.default_sampling_params,
+            )
+            self._apply_transcription_stop_token_ids(
+                sampling_params, transcription_stop_token_ids
             )
 
         if request.response_format == "verbose_json":
