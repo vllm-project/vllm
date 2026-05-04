@@ -267,6 +267,7 @@ class ModelArchConfigConvertorBase:
             "bagel",
             "gemma3",
             "molmo2",
+            "moondream3",
             "paligemma",
             "umm",
         )
@@ -350,6 +351,9 @@ class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
             "Encoder and decoder must have the same number of kv heads"
         )
         return enc_num_kv_heads
+
+    def is_mm_prefix_lm(self) -> bool:
+        return False
 
 
 class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
