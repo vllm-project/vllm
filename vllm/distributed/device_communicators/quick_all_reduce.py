@@ -39,7 +39,8 @@ class QuickReduceRegime(Enum):
     NONE = 4
 
 
-MB = 1024 * 1024
+KB = 1024
+MB = 1024 * KB
 
 
 class QuickAllReduce:
@@ -175,6 +176,7 @@ class QuickAllReduce:
             )
             return
 
+        self.qr_quantization_min_size = self._get_qr_quantization_min_size()
         if regime_str == "NONE":
             logger.debug(
                 "Custom quick allreduce is disabled based "
@@ -219,6 +221,18 @@ class QuickAllReduce:
         self.qr_max_size = qr_max_size if qr_max_size is not None else ops.qr_max_size()
         self.create_shared_buffer()
         self.disabled = False
+
+    @staticmethod
+    def _get_qr_quantization_min_size() -> int | None:
+        quantization_min_size = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB
+        if quantization_min_size is None:
+            return None
+        if quantization_min_size < 0:
+            raise ValueError(
+                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB must be "
+                f"non-negative, got {quantization_min_size}"
+            )
+        return quantization_min_size * KB
 
     def _rocm_arch_available(self):
         if not current_platform.is_rocm():
@@ -274,9 +288,18 @@ class QuickAllReduce:
         if out is None:
             out = torch.empty_like(inp)
         ops.qr_all_reduce(
-            self._ptr, inp, out, self.qr_quant_level.value, self.use_fp16_kernels
+            self._ptr, inp, out, self._get_qr_quant_level(inp), self.use_fp16_kernels
         )
         return out
+
+    def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
+        quantization_min_size = self.qr_quantization_min_size
+        if (
+            quantization_min_size is not None
+            and inp.numel() * inp.element_size() < quantization_min_size
+        ):
+            return QuickReduceRegime.FP.value
+        return self.qr_quant_level.value
 
     def close(self):
         if not self.disabled and getattr(self, "_ptr", None):
