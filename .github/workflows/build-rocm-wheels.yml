@@ -233,6 +233,7 @@ jobs:
             tests/kernels/quantization/test_hybrid_w4a16_triton.py \
             tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py \
             tests/kernels/quantization/test_rocm_skinny_gemms.py \
+            tests/kernels/quantization/test_dynamic_int8_lm_head.py \
             tests/quantization/test_hip_w4a16_kernel.py
 
   upload-wheel:

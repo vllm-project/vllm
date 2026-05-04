@@ -206,6 +206,10 @@ class ModelConfig:
     the `OnlineQuantScheme` enum."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
+    dynamic_lm_head_quantization: str | None = None
+    """Dynamically quantize the lm_head at load time. Supported values:
+    'int8' — channel-wise symmetric INT8 (ROCm only, uses wvSplitK_int8
+    kernel). None — no dynamic quantization (default)."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use

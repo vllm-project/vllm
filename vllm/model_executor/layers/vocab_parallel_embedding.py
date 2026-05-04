@@ -230,6 +230,14 @@ class VocabParallelEmbedding(PluggableLayer):
 
     # --8<-- [end:vocab_parallel_embedding]
 
+    @staticmethod
+    def _has_tied_embeddings() -> bool:
+        """Check if the model ties embed_tokens and lm_head weights."""
+        from vllm.config import get_current_vllm_config
+
+        hf_config = get_current_vllm_config().model_config.hf_config
+        return getattr(hf_config, "tie_word_embeddings", False)
+
     def __init__(
         self,
         num_embeddings: int,
@@ -271,7 +279,16 @@ class VocabParallelEmbedding(PluggableLayer):
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
-            quant_method = UnquantizedEmbeddingMethod()
+            from vllm.model_executor.layers.quantization.dynamic_int8_lm_head import (
+                DynamicInt8LMHeadMethod,
+                should_use_dynamic_int8_lm_head,
+            )
+
+            is_lm_head = isinstance(self, ParallelLMHead) or self._has_tied_embeddings()
+            if is_lm_head and should_use_dynamic_int8_lm_head(embedding_dim):
+                quant_method = DynamicInt8LMHeadMethod()
+            else:
+                quant_method = UnquantizedEmbeddingMethod()
 
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
