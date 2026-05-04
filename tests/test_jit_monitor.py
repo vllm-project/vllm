@@ -56,9 +56,9 @@ class TestActivateBasic:
             jit_monitor.activate()
             assert fake.runtime.jit_post_compile_hook is first_hook
 
-    def test_logs_debug_on_activation(self):
+    def test_logs_info_on_activation(self):
         with (
-            mock.patch.object(jit_monitor.logger, "debug") as m,
+            mock.patch.object(jit_monitor.logger, "info") as m,
             _patch_triton_knobs(_make_fake_knobs()),
         ):
             jit_monitor.activate()
