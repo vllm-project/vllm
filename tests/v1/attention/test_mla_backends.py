@@ -45,7 +45,7 @@ BACKENDS_TO_TEST = [
 DEVICE_TYPE = current_platform.device_type
 
 # Remove sm100 backends from the list if not using sm100
-if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
+if not torch.cuda.is_available() or current_platform.is_rocm() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER_MLA)
 

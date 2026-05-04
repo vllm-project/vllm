@@ -5,6 +5,7 @@
 import pytest
 import torch
 from packaging import version
+from vllm.platforms import current_platform
 
 from tests.utils import set_random_seed
 from tests.v1.attention.utils import (
@@ -185,7 +186,7 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    not torch.cuda.is_available() or current_platform.is_rocm() or TORCH_VERSION < DIRECT_BUILD_VERSION,
     reason="CUDA not available or PyTorch version < 2.7",
 )
 def test_block_mask_direct_vs_slow_path():
@@ -278,7 +279,7 @@ def test_physical_to_logical_mapping_handles_reused_blocks():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    not torch.cuda.is_available() or current_platform.is_rocm() or TORCH_VERSION < DIRECT_BUILD_VERSION,
     reason="CUDA not available or PyTorch version < 2.9",
 )
 def test_block_sparsity_hint_prunes_blocks():
@@ -328,4 +329,6 @@ def test_block_sparsity_hint_prunes_blocks():
 
 
 if __name__ == "__main__":
+    pytest.main([__file__])
+:
     pytest.main([__file__])
