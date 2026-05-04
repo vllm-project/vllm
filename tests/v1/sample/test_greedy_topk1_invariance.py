@@ -39,6 +39,7 @@ def _make_metadata(
         all_random=all_random,
         top_p=top_p_t,
         top_k=top_k_t,
+        has_top_k_one=bool(top_k is not None and 1 in top_k),
         generators={},
         max_num_logprobs=None,
         no_penalties=True,

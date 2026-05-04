@@ -247,7 +247,7 @@ class Sampler(nn.Module):
         # apply_top_k_only keeps every token tied with the maximum and the
         # downstream Gumbel-max then picks among the survivors via FP noise,
         # diverging from argmax (vllm-project/vllm#5404).
-        if sampling_metadata.all_random and sampling_metadata.top_k is None:
+        if sampling_metadata.all_random and not sampling_metadata.has_top_k_one:
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
@@ -284,7 +284,7 @@ class Sampler(nn.Module):
             return random_sampled, processed_logprobs
 
         use_greedy = sampling_metadata.temperature < _SAMPLING_EPS
-        if sampling_metadata.top_k is not None:
+        if sampling_metadata.has_top_k_one:
             use_greedy = use_greedy | (sampling_metadata.top_k == 1)
         sampled = torch.where(
             use_greedy,
