@@ -3573,17 +3573,18 @@ class GPUModelRunner(
         uniform_decode_query_len: int,
         num_tokens: int,
         num_reqs: int,
+        num_computed_tokens_cpu: np.ndarray,
+        num_prompt_tokens_cpu: np.ndarray,
         force_uniform_decode: bool | None = None,
-        num_computed_tokens_cpu: np.ndarray | None = None,
     ) -> bool:
         """
         Checks if it's a decode batch with same amount scheduled tokens
         across all requests.
 
-        When num_computed_tokens_cpu is provided, also verifies that no
-        request is still prefilling (num_computed_tokens == 0).  This
-        prevents misclassifying a prefill whose token count happens to
-        match uniform_decode_query_len * num_reqs.
+        Verifies that no request is still prefilling
+        (num_computed_tokens < num_prompt_tokens), which prevents
+        misclassifying a prefill whose token count happens to match
+        uniform_decode_query_len * num_reqs.
         """
         if force_uniform_decode is not None:
             return force_uniform_decode
@@ -3591,7 +3592,7 @@ class GPUModelRunner(
             num_tokens != max_num_scheduled_tokens * num_reqs
         ):
             return False
-        return num_computed_tokens_cpu is None or np.all(num_computed_tokens_cpu != 0)
+        return bool(np.all(num_computed_tokens_cpu >= num_prompt_tokens_cpu))
 
     def _determine_batch_execution_and_padding(
         self,
@@ -3624,6 +3625,7 @@ class GPUModelRunner(
             num_computed_tokens_cpu=(
                 self.input_batch.num_computed_tokens_cpu[:num_reqs]
             ),
+            num_prompt_tokens_cpu=self.input_batch.num_prompt_tokens[:num_reqs],
         )
 
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
