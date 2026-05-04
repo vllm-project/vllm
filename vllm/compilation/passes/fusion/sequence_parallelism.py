@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
+    DYNAMIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
@@ -338,7 +339,7 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
 class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
     def get_inputs(self) -> list[torch.Tensor]:
-        input = self.empty([1, 8, 16])
+        input = self.empty([8, 16])
         weight = self.empty([16])
         input_global_scale = self.empty_f32([1, 1])
         quant_output = torch.empty([8, 8], device=self.device, dtype=torch.uint8)
@@ -374,18 +375,16 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
             rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
-            quant = auto_functionalized(
-                STATIC_FP4_QUANT_OP,
-                input=rms,
-                input_scale=input_global_scale,
-                is_sf_swizzled_layout=True,
-                output=quant_output,
-                output_scale=output_scale,
+            rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
+            quant = DYNAMIC_FP4_QUANT_OP(
+                rms,
+                input_global_scale,
+                True,
             )
             return (
-                self._all_gather(quant[1]),
+                self._all_gather(quant[0]),
                 reduce_scatter,
-                self._all_gather(quant[2]),
+                self._all_gather(quant[1]),
             )
 
         pm.register_replacement(
@@ -448,15 +447,13 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
                 reduce_scatter, residual, rms_norm_weights, self.epsilon
             )
-            quant = auto_functionalized(
-                STATIC_FP4_QUANT_OP,
-                input=rms,
-                input_scale=input_global_scale,
-                is_sf_swizzled_layout=True,
-                output=quant_output,
-                output_scale=output_scale,
+            rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
+            quant = DYNAMIC_FP4_QUANT_OP(
+                rms,
+                input_global_scale,
+                True,
             )
-            return self._all_gather(quant[1]), residual_out, self._all_gather(quant[2])
+            return self._all_gather(quant[0]), residual_out, self._all_gather(quant[1])
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass

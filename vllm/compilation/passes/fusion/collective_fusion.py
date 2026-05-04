@@ -325,15 +325,6 @@ def fused_all_gather_flashinfer_fp4_matmul_fake(
     )
 
 
-def _all_gather_dim0(input_: torch.Tensor, group_name: str) -> torch.Tensor:
-    group = c10d._resolve_process_group(group_name)
-    output_shape = list(input_.shape)
-    output_shape[0] *= group.size()
-    output = torch.empty(output_shape, dtype=input_.dtype, device=input_.device)
-    torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
-    return output
-
-
 def fused_all_gather_flashinfer_fp4_matmul(
     A_shard: torch.Tensor,
     B: torch.Tensor,
@@ -350,29 +341,48 @@ def fused_all_gather_flashinfer_fp4_matmul(
     assert gather_dim == 0, (
         "FlashInfer FP4 symm_mem adapter currently only supports gather_dim=0"
     )
-    A_scale = _all_gather_dim0(A_scale_shard, group_name)
-    if view_a_scale_as_fp8:
-        A_scale = A_scale.view(torch.float8_e4m3fn)
-    _, outputs = torch.distributed._symmetric_memory._fused_all_gather_matmul_impl(
-        mm_out_op=_flashinfer_fp4_mm_out,
-        A_shard=A_shard,
-        Bs=[B],
-        A_scale=A_scale,
-        kwargs_list=[
-            {
-                "scale_b": B_scale,
-                "alpha": alpha,
-                "out_dtype": out_dtype,
-                "use_8x4_sf_layout": use_8x4_sf_layout,
-                "backend": backend,
-            }
-        ],
-        out_dtypes=[out_dtype],
-        gather_dim=gather_dim,
-        group_name=group_name,
-        return_A=False,
+    assert A_shard.ndim == 2 and A_scale_shard.ndim == 2 and B.ndim == 2, (
+        "FlashInfer FP4 symm_mem adapter expects 2D inputs"
     )
-    return outputs[0]
+    if view_a_scale_as_fp8:
+        A_scale_shard = A_scale_shard.view(torch.float8_e4m3fn)
+
+    group = c10d._resolve_process_group(group_name)
+    world_size = group.size()
+    output = A_shard.new_empty(
+        A_shard.shape[0] * world_size,
+        B.shape[1],
+        dtype=out_dtype or torch.bfloat16,
+    )
+    output_shards = output.chunk(world_size)
+
+    A = A_shard.new_empty(A_shard.shape[0] * world_size, A_shard.shape[1])
+    A_scale = A_scale_shard.new_empty(
+        A_scale_shard.shape[0] * world_size,
+        A_scale_shard.shape[1],
+    )
+
+    def fp4_shard_consumer(shards: list[torch.Tensor], rank: int) -> None:
+        _flashinfer_fp4_mm_out(
+            shards[0],
+            B,
+            scale_a=shards[1],
+            scale_b=B_scale,
+            alpha=alpha,
+            out=output_shards[rank],
+            out_dtype=out_dtype,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            backend=backend,
+        )
+
+    torch.distributed._symmetric_memory._pipelined_multi_all_gather_and_consume(
+        [A_shard, A_scale_shard],
+        fp4_shard_consumer,
+        [A, A_scale],
+        group_name,
+        False,
+    )
+    return output
 
 
 direct_register_custom_op(
@@ -1093,14 +1103,6 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
-                    self.register(
-                        FlashInferFP4ReduceScatterPattern(
-                            self.model_dtype,
-                            self.device,
-                            backend,
-                            use_8x4_sf_layout=False,
-                        )
-                    )
                 for use_8x4_sf_layout in (False, True):
                     for a_scale_view in ("float8",):
                         self.register(
@@ -1112,14 +1114,13 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
-                    self.register(
-                        FlashInferFP4ReduceScatterPattern(
-                            self.model_dtype,
-                            self.device,
-                            "trtllm",
-                            use_8x4_sf_layout=use_8x4_sf_layout,
-                        )
-                    )
+                # NVFP4 activation scales are block/group scales, not FP8
+                # row-wise scales. The current reduce-scatter adapter routes
+                # through PyTorch's FP8 scaled-matmul helper, which rejects
+                # padded group-scale shapes and also cannot split/repack group
+                # scales for non-aligned sequence shards. Keep NVFP4 AsyncTP
+                # on the all-gather path until the reduce-scatter side has a
+                # scale-sharding implementation.
 
         self.dump_patterns(config, self.pm_pass)
 
