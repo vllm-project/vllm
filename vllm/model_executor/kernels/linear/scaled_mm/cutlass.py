@@ -7,6 +7,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
@@ -24,6 +27,20 @@ from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
+
+
+def _is_sm12x_compute_capability(compute_capability) -> bool:
+    if compute_capability is None:
+        return current_platform.is_device_capability_family(120)
+
+    if isinstance(compute_capability, tuple):
+        return compute_capability[0] == 12
+
+    to_int = getattr(compute_capability, "to_int", None)
+    if callable(to_int):
+        return to_int() // 10 == 12
+
+    return int(compute_capability) // 10 == 12
 
 
 class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -196,6 +213,9 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     @classmethod
     def is_supported(cls, compute_capability=None):
+        if _is_sm12x_compute_capability(compute_capability):
+            return False, "CUTLASS block-scaled FP8 GEMM is not supported on SM12x."
+
         if not CUTLASS_BLOCK_FP8_SUPPORTED:
             return (
                 False,
@@ -218,6 +238,31 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "quantization with group_shape=(1,128).",
             )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        super().process_weights_after_loading(layer)
+        params = self._get_layer_params(layer)
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        scale_attr_name = (
+            params.WEIGHT_SCALE
+            if params.weight_scale_inv is None
+            else params.WEIGHT_SCALE_INV
+        )
+        e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+        if (
+            e8m0_dtype is not None
+            and weight_scale is not None
+            and weight_scale.dtype == e8m0_dtype
+        ):
+            replace_parameter(
+                layer,
+                scale_attr_name,
+                _upcast_e8m0_to_fp32(weight_scale),
+            )
 
     def apply_block_scaled_mm(
         self,

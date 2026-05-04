@@ -817,6 +817,35 @@ def get_w8a8_block_fp8_configs(
     return None
 
 
+def _get_default_w8a8_block_fp8_config(
+    M: int,
+    block_n: int,
+    block_k: int,
+) -> dict[str, Any]:
+    # Block-wise quant: BLOCK_SIZE_N must be divisible by block_n and
+    # BLOCK_SIZE_K must be divisible by block_k.
+    # M-aware tuning for low-M decode: BLOCK_SIZE_M=64 wastes most of the
+    # M-dim for single-request decode and short MTP-style draft batches. SM12x
+    # keeps benefiting from the low-M tile through M=32 on DeepSeek V4 shapes.
+    capability = current_platform.get_device_capability()
+    capability_major = getattr(capability, "major", None)
+    if capability_major is None and capability is not None:
+        capability_major = capability[0]
+    low_m_limit = 32 if capability_major == 12 else 8
+    if low_m_limit >= M:
+        block_m, num_stages = 16, (2 if current_platform.is_rocm() else 3)
+    else:
+        block_m, num_stages = 64, 2
+    return {
+        "BLOCK_SIZE_M": block_m,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": block_k,
+        "GROUP_SIZE_M": 32,
+        "num_warps": 4,
+        "num_stages": num_stages,
+    }
+
+
 def w8a8_triton_block_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -861,6 +890,12 @@ def w8a8_triton_block_scaled_mm(
     N, K = B.shape
     assert triton.cdiv(N, block_n) == Bs.shape[0]
     assert triton.cdiv(K, block_k) == Bs.shape[1]
+    e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+    if e8m0_dtype is not None:
+        if As.dtype == e8m0_dtype:
+            As = _upcast_e8m0_to_fp32(As)
+        if Bs.dtype == e8m0_dtype:
+            Bs = _upcast_e8m0_to_fp32(Bs)
 
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
@@ -870,17 +905,7 @@ def w8a8_triton_block_scaled_mm(
         # Get the optimal config if there is one
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
     else:
-        # Default config
-        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
-        # BLOCK_SIZE_K must be divisible by block_size[1]
-        config = {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": block_size[0],
-            "BLOCK_SIZE_K": block_size[1],
-            "GROUP_SIZE_M": 32,
-            "num_warps": 4,
-            "num_stages": 2,
-        }
+        config = _get_default_w8a8_block_fp8_config(M, block_size[0], block_size[1])
 
     def grid(META):
         return (
@@ -1215,6 +1240,8 @@ def create_fp8_scale_parameter(
 
     if dtype == torch.float32:
         scale[:] = torch.finfo(torch.float32).min
+    elif dtype == getattr(torch, "float8_e8m0fnu", None):
+        scale[:] = 0
     set_weight_attrs(scale, {"scale_type": "weight_scale"})
     return scale
 

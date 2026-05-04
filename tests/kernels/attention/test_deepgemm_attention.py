@@ -10,9 +10,11 @@ from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
     calc_diff,
     fp8_fp4_mqa_logits,
-    fp8_fp4_paged_mqa_logits,
     get_num_sms,
     get_paged_mqa_logits_metadata,
+)
+from vllm.utils.deep_gemm import (
+    fp8_fp4_paged_mqa_logits as fp8_paged_mqa_logits,
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
@@ -90,10 +92,64 @@ def _ref_fp8_mqa_logits(
     return logits
 
 
+def _supports_deepgemm_optimized_mqa_logits() -> bool:
+    return current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM120 only"
+)
+def test_sm120_fp8_mqa_logits_torch_path():
+    torch.manual_seed(0)
+
+    seq_len, seq_len_kv, num_heads, head_dim = 9, 17, 32, 32
+    q = torch.randn(
+        seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    kv = torch.randn(seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(seq_len, num_heads, device="cuda", dtype=torch.float32)
+    cu_seqlen_ks = (torch.arange(seq_len, device="cuda", dtype=torch.int32) % 3)
+    cu_seqlen_ke = torch.minimum(
+        torch.arange(seq_len, device="cuda", dtype=torch.int32) + 4,
+        torch.full((seq_len,), seq_len_kv, device="cuda", dtype=torch.int32),
+    )
+
+    q_fp8 = q.to(torch.float8_e4m3fn)
+    kv_amax = kv.abs().float().amax(dim=1, keepdim=True).clamp(1e-4)
+    kv_scale = (kv_amax / 448.0).squeeze(1).contiguous()
+    kv_fp8 = (kv * (1.0 / kv_scale[:, None])).to(torch.float8_e4m3fn)
+
+    logits = fp8_fp4_mqa_logits(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=True,
+    )
+
+    kv_dequant = kv_fp8.float() * kv_scale[:, None]
+    score = torch.einsum("mhd,nd->hmn", q_fp8.float(), kv_dequant)
+    ref_logits = (score.relu() * weights.transpose(0, 1).unsqueeze(-1)).sum(dim=0)
+    offsets = torch.arange(seq_len_kv, device="cuda")
+    valid = (offsets[None, :] >= cu_seqlen_ks[:, None]) & (
+        offsets[None, :] < cu_seqlen_ke[:, None]
+    )
+    ref_logits = ref_logits.masked_fill(~valid, float("-inf"))
+
+    assert torch.equal(torch.isneginf(logits), torch.isneginf(ref_logits))
+    finite = torch.isfinite(ref_logits)
+    assert (logits[finite] - ref_logits[finite]).abs().max() < 1e-4
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
+    not _supports_deepgemm_optimized_mqa_logits(), reason="SM90 and SM100 only"
 )
 @pytest.mark.parametrize("clean_logits", [True, False])
 def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
@@ -150,7 +206,7 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
                 assert diff < 1e-3, f"{diff=}"
 
 
-def _ref_fp8_fp4_paged_mqa_logits(
+def _ref_fp8_paged_mqa_logits(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
     weights: torch.Tensor,
@@ -203,12 +259,10 @@ def _ref_fp8_fp4_paged_mqa_logits(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
+    not _supports_deepgemm_optimized_mqa_logits(), reason="SM90 and SM100 only"
 )
-def test_deepgemm_fp8_fp4_paged_mqa_logits():
-    # NOTE: clean_logits=True is incompatible with the 2D context_lens
-    # required by csrc/apis/attention.hpp; only the False path is exercised.
-    clean_logits = False
+@pytest.mark.parametrize("clean_logits", [True, False])
+def test_deepgemm_fp8_paged_mqa_logits(clean_logits: bool):
     torch.manual_seed(0)
     random.seed(0)
 
@@ -260,29 +314,24 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
 
-                # deep_gemm paged MQA logits requires 2D context_lens of
-                # shape (B, next_n) (csrc/apis/attention.hpp:332-335);
-                # see indexer.py:607-608. For each batch/next_n token, the
-                # effective context length is context_lens[b] - next_n + j + 1.
-                next_n_arange = torch.arange(next_n, device="cuda", dtype=torch.int32)
-                context_lens_2d = (
-                    context_lens.unsqueeze(-1) - next_n + 1 + next_n_arange
-                ).contiguous()
-                schedule_metadata = get_paged_mqa_logits_metadata(
-                    context_lens_2d, blocksize, get_num_sms()
+                deepgemm_context_lens = (
+                    context_lens[:, None].expand(-1, next_n).contiguous()
                 )
-                logits = fp8_fp4_paged_mqa_logits(
+                schedule_metadata = get_paged_mqa_logits_metadata(
+                    deepgemm_context_lens, blocksize, get_num_sms()
+                )
+                logits = fp8_paged_mqa_logits(
                     (q_fp8, None),
                     kv_cache_fp8,
                     weights,
-                    context_lens_2d,
+                    deepgemm_context_lens,
                     block_tables,
                     schedule_metadata,
                     max_model_len,
                     clean_logits=clean_logits,
                 )
 
-                ref_logits = _ref_fp8_fp4_paged_mqa_logits(
+                ref_logits = _ref_fp8_paged_mqa_logits(
                     q,
                     kv_cache,
                     weights,

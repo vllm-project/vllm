@@ -349,12 +349,166 @@ def dequantize_and_gather_k_cache(
     )
 
 
+@triton.jit
+def _dequantize_global_slots_k_kernel(
+    out_ptr,
+    out_stride_token,
+    out_stride_slot,
+    k_cache_ptr,
+    slot_ids_ptr,
+    slot_ids_stride_token,
+    slot_ids_stride_slot,
+    cache_block_size: tl.constexpr,
+    token_data_size: tl.constexpr,
+    block_stride: tl.constexpr,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    scale_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    output_dim: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    topk_idx = tl.program_id(1)
+
+    slot_id = tl.load(
+        slot_ids_ptr
+        + token_idx * slot_ids_stride_token
+        + topk_idx * slot_ids_stride_slot
+    )
+    offsets = tl.arange(0, BLOCK_D)
+    output_row = out_ptr + token_idx * out_stride_token + topk_idx * out_stride_slot
+
+    if slot_id < 0:
+        tl.store(
+            output_row + offsets,
+            tl.zeros((BLOCK_D,), dtype=tl.float32).to(tl.bfloat16),
+            mask=offsets < output_dim,
+        )
+        return
+
+    block_idx = slot_id // cache_block_size
+    pos_in_block = slot_id % cache_block_size
+    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
+    token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+    token_scale_ptr = (
+        cache_block_ptr + cache_block_size * token_data_size + pos_in_block * scale_dim
+    )
+
+    fp8_offsets = tl.arange(0, 512)
+    fp8_mask = fp8_offsets < fp8_dim
+    x_uint8 = tl.load(token_data_ptr + fp8_offsets, mask=fp8_mask, other=0)
+    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+    x_float = x_fp8.to(tl.float32)
+
+    scale_offsets = fp8_offsets // quant_block
+    encoded_scale = tl.load(token_scale_ptr + scale_offsets, mask=fp8_mask, other=127)
+    scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+    x_dequant = x_float * scale
+    tl.store(output_row + fp8_offsets, x_dequant.to(tl.bfloat16), mask=fp8_mask)
+
+    bf16_offsets = tl.arange(0, 64)
+    bf16_cache_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+    bf16_vals = tl.load(bf16_cache_ptr + bf16_offsets, mask=bf16_offsets < bf16_dim)
+    tl.store(
+        output_row + fp8_dim + bf16_offsets,
+        bf16_vals,
+        mask=bf16_offsets < bf16_dim,
+    )
+
+
+def dequantize_global_slots_k_cache(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_ids: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Dequantize fp8_ds_mla cache rows addressed by physical global slot ids."""
+    if slot_ids.dim() == 3:
+        assert slot_ids.shape[1] == 1
+        slot_ids = slot_ids[:, 0, :]
+    assert slot_ids.dim() == 2, (
+        f"slot_ids must be [num_tokens, topk], got {slot_ids.shape}"
+    )
+    assert out.shape[:2] == slot_ids.shape
+    assert out.shape[-1] == 512
+    assert out.dtype == torch.bfloat16
+    assert k_cache.dtype == torch.uint8
+
+    TOKEN_FP8_DIM = 448
+    TOKEN_BF16_DIM = 64
+    TOKEN_SCALE_DIM = 8
+    QUANT_BLOCK_SIZE = 64
+    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
+
+    grid = slot_ids.shape
+    _dequantize_global_slots_k_kernel[grid](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        slot_ids,
+        slot_ids.stride(0),
+        slot_ids.stride(1),
+        cache_block_size=block_size,
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=k_cache.stride(0),
+        fp8_dim=TOKEN_FP8_DIM,
+        bf16_dim=TOKEN_BF16_DIM,
+        scale_dim=TOKEN_SCALE_DIM,
+        quant_block=QUANT_BLOCK_SIZE,
+        output_dim=512,
+        BLOCK_D=triton.next_power_of_2(512),
+    )
+
+
+def dequantize_combined_sparse_mla_decode_kv(
+    combined_kv: torch.Tensor,
+    compressed_k_cache: torch.Tensor,
+    compressed_slot_ids: torch.Tensor,
+    compressed_block_size: int,
+    swa_k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    swa_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    swa_block_size: int,
+) -> None:
+    """Fill `[compressed, SWA]` decode candidates into one output buffer."""
+    assert combined_kv.dim() == 3
+    compressed_topk = compressed_slot_ids.shape[-1]
+    assert combined_kv.shape[0] == compressed_slot_ids.shape[0]
+    assert combined_kv.shape[-1] == 512
+    assert combined_kv.dtype == torch.bfloat16
+    assert combined_kv.shape[1] >= compressed_topk
+
+    dequantize_global_slots_k_cache(
+        combined_kv[:, :compressed_topk],
+        compressed_k_cache,
+        compressed_slot_ids,
+        compressed_block_size,
+    )
+    swa_out = combined_kv[:, compressed_topk:]
+    if swa_out.shape[1] == 0:
+        return
+    dequantize_and_gather_k_cache(
+        swa_out,
+        swa_k_cache,
+        seq_lens=seq_lens,
+        gather_lens=swa_lens,
+        block_table=block_table,
+        block_size=swa_block_size,
+        offset=0,
+    )
+
+
 def compute_global_topk_indices_and_lens(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    global_topk_indices: torch.Tensor | None = None,
+    topk_lens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -364,8 +518,20 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
-    global_topk_indices = torch.empty_like(topk_indices)
-    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
+    if global_topk_indices is None:
+        global_topk_indices = torch.empty_like(topk_indices)
+    else:
+        assert global_topk_indices.shape == topk_indices.shape
+        assert global_topk_indices.dtype == topk_indices.dtype
+        assert global_topk_indices.device == topk_indices.device
+    if topk_lens is None:
+        topk_lens = torch.empty(
+            num_tokens, dtype=torch.int32, device=topk_indices.device
+        )
+    else:
+        assert topk_lens.shape == (num_tokens,)
+        assert topk_lens.dtype == torch.int32
+        assert topk_lens.device == topk_indices.device
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
         global_topk_indices,
         global_topk_indices.stride(0),
@@ -412,7 +578,7 @@ def _compute_global_topk_indices_and_lens_kernel(
             mask=mask,
             other=-1,
         )
-        is_valid = local_idx >= 0
+        is_valid = (local_idx >= 0) & is_valid_token
 
         block_indices = local_idx // block_size
         block_numbers = tl.load(
@@ -442,6 +608,14 @@ def _compute_global_topk_indices_and_lens_kernel(
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 
+def sparse_prefill_combined_topk_size(topk: int, window_size: int) -> int:
+    return (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+
+
 def combine_topk_swa_indices(
     topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -452,23 +626,35 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    combined_indices: torch.Tensor | None = None,
+    combined_lens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
-    combined_topk = (
-        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
-        // _SPARSE_PREFILL_TOPK_ALIGNMENT
-        * _SPARSE_PREFILL_TOPK_ALIGNMENT
-    )
-    combined_indices = torch.full(
-        (num_tokens, combined_topk),
-        fill_value=-1,
-        dtype=torch.int32,
-        device=topk_indices.device,
-    )
-    combined_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=topk_indices.device
-    )
+    combined_topk = sparse_prefill_combined_topk_size(topk, window_size)
+    if combined_indices is None:
+        combined_indices = torch.full(
+            (num_tokens, combined_topk),
+            fill_value=-1,
+            dtype=torch.int32,
+            device=topk_indices.device,
+        )
+    else:
+        assert combined_indices.shape[0] >= num_tokens
+        assert combined_indices.shape[1] >= combined_topk
+        assert combined_indices.dtype == torch.int32
+        assert combined_indices.device == topk_indices.device
+        combined_indices = combined_indices[:num_tokens, :combined_topk]
+        combined_indices.fill_(-1)
+    if combined_lens is None:
+        combined_lens = torch.empty(
+            num_tokens, dtype=torch.int32, device=topk_indices.device
+        )
+    else:
+        assert combined_lens.shape[0] >= num_tokens
+        assert combined_lens.dtype == torch.int32
+        assert combined_lens.device == topk_indices.device
+        combined_lens = combined_lens[:num_tokens]
 
     NUM_WORKERS = 128
     _combine_topk_swa_indices_kernel[(num_reqs, NUM_WORKERS)](

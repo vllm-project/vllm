@@ -16,9 +16,15 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.sparse_mla_env import (
+    is_triton_sparse_mla_enabled,
+    is_triton_sparse_mla_enabled_for_platform,
+    triton_sparse_mla_cudagraphs_allowed,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -162,6 +168,8 @@ class DeepseekSparseSWAMetadata:
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
+    prefill_seq_lens_cpu: torch.Tensor | None = None
+    prefill_gather_lens_cpu: torch.Tensor | None = None
 
     # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
     # per present DeepseekV4 layer type, shared across all ~60 layers of that type
@@ -194,6 +202,20 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     # Base threshold: query_len <= 1 is decode
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        if (
+            getattr(kv_cache_spec, "model_version", None) == "deepseek_v4"
+            and is_triton_sparse_mla_enabled_for_platform()
+            and not triton_sparse_mla_cudagraphs_allowed(vllm_config)
+        ):
+            return AttentionCGSupport.NEVER
+        return cls._cudagraph_support
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -313,6 +335,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_prefills,
             seq_lens,
             query_start_loc,
+            query_start_loc_cpu,
+            common_attn_metadata.seq_lens_cpu_upper_bound,
         )
 
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
@@ -363,6 +387,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         }
         if num_decode_tokens == 0 or current_platform.is_rocm():
             return out
+        if is_triton_sparse_mla_enabled(self.device):
+            return out
         for layer_type in self._layer_types:
             # get_mla_metadata() is the official FlashMLA entry point that
             # returns a fresh empty FlashMLASchedMeta; using it keeps this
@@ -377,6 +403,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         num_prefills: int,
         seq_lens: torch.Tensor,
         query_start_loc: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        seq_lens_cpu_upper_bound: torch.Tensor | None,
     ) -> dict[str, torch.Tensor | None]:
         """Pre-compute DeepseekV4 prefill metadata during the metadata build phase.
 
@@ -403,8 +431,27 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 BLOCK_SIZE=triton.next_power_of_2(num_prefills),
             )
 
+            assert seq_lens_cpu_upper_bound is not None
+            seq_lens_cpu = seq_lens_cpu_upper_bound
+            prefill_seq_lens_cpu = seq_lens_cpu[
+                num_decodes : num_decodes + num_prefills
+            ]
+            query_lens_cpu = (
+                query_start_loc_cpu[
+                    num_decodes + 1 : num_decodes + num_prefills + 1
+                ]
+                - query_start_loc_cpu[num_decodes : num_decodes + num_prefills]
+            )
+            prefix_lens_cpu = prefill_seq_lens_cpu - query_lens_cpu
+            prefill_gather_lens_cpu = query_lens_cpu + torch.minimum(
+                prefix_lens_cpu,
+                torch.full_like(prefix_lens_cpu, self.window_size - 1),
+            )
+
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
+            result["prefill_seq_lens_cpu"] = prefill_seq_lens_cpu
+            result["prefill_gather_lens_cpu"] = prefill_gather_lens_cpu
 
         return result
 
