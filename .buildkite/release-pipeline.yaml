@@ -723,7 +723,7 @@ steps:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
       S3_BUCKET: "vllm-wheels"
-      VARIANT: "rocm721"
+      VARIANT: "rocm722"
 
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"

@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.1-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.2-complete
 ARG TRITON_BRANCH="ba5c1517"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="8514f051" # release/2.10 as of 3/17
@@ -9,7 +9,7 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.10.post3"
+ARG AITER_BRANCH="v0.1.12.post2"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -104,6 +104,28 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
+# torch profiler hotfix for 7.2.2: rebuild CLR with https://github.com/ROCm/rocm-systems/pull/5062
+# will be removed once we move to ROCm 7.2.3
+RUN apt-get update && apt-get install -y rocm-llvm-dev
+RUN pip install CppHeaderParser
+RUN git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-systems /tmp/rocm-systems \
+    && cd /tmp/rocm-systems \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/hip projects/clr \
+    && git checkout 35e8c7bf8911862e5389509800e65fdf125412b3 \
+    && export CLR_DIR=/tmp/rocm-systems/projects/clr \
+    && export HIP_DIR=/tmp/rocm-systems/projects/hip \
+    && mkdir -p $CLR_DIR/build && cd $CLR_DIR/build \
+    && cmake \
+        -DHIP_COMMON_DIR=$HIP_DIR \
+        -DCMAKE_PREFIX_PATH="/opt/rocm/" \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DHIP_PLATFORM=amd \
+        .. \
+    && make -j$(nproc) \
+    && make install \
+    && rm -rf /tmp/rocm-systems
 
 ###
 ### Triton Build
@@ -153,8 +175,6 @@ RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
     && pip install -r requirements.txt && git submodule update --init --recursive
-RUN cd pytorch/third_party/kineto \
-    && git remote add rocm https://github.com/ROCm/kineto && git fetch rocm && git checkout 2d73be3 
 RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
