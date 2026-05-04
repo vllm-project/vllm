@@ -66,7 +66,7 @@ class EplbCommunicator(ABC):
         pass
 
     @abstractmethod
-    def execute(self, old_indices: np.ndarray | None = None) -> None:
+    def execute(self) -> None:
         pass
 
     def set_transfer_context(  # noqa: B027
@@ -137,7 +137,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 )
             )
 
-    def execute(self, old_indices: np.ndarray | None = None) -> None:
+    def execute(self) -> None:
         if not self._p2p_ops:
             return
         try:
@@ -180,7 +180,7 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         for tensor in tensors:
             self._ops.append(("recv", tensor, src_rank))
 
-    def execute(self, old_indices: np.ndarray | None = None) -> None:
+    def execute(self) -> None:
         if not self._ops:
             return
 
@@ -243,7 +243,6 @@ class NixlEplbCommunicator(EplbCommunicator):
         cpu_group: ProcessGroup,
         all_expert_weights: Sequence[Sequence[torch.Tensor]],
         expert_buffer: Sequence[torch.Tensor],
-        cuda_stream: torch.cuda.Stream | None = None,
     ) -> None:
         assert all_expert_weights, (
             "NixlEplbCommunicator requires non-empty all_expert_weights."
@@ -253,14 +252,12 @@ class NixlEplbCommunicator(EplbCommunicator):
             raise RuntimeError("NIXL/ RIXL is unavailable.")
 
         self._cpu_group = cpu_group
-        self._cuda_stream = cuda_stream
         self._world_size = cpu_group.size()
         self._rank = cpu_group.rank()
 
         self._all_expert_weights = all_expert_weights
         self._expert_buffer = expert_buffer
         self._num_local_experts: int = all_expert_weights[0][0].shape[0]
-        self._num_tensors_per_layer: int = len(all_expert_weights[0])
         self._device = all_expert_weights[0][0].device
 
         for layer_tensors in all_expert_weights:
@@ -516,7 +513,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         )
         return (local_handle, remote_handle, xfer_handle)
 
-    def execute(self, old_indices: np.ndarray | None = None) -> None:
+    def execute(self) -> None:
         assert self._layer_idx is not None or not self._xfer_entries, (
             "set_transfer_context() must be called before execute() "
             "if any add_recv() calls were made"
@@ -602,7 +599,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
         for tensor in tensors:
             self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
 
-    def execute(self, old_indices: np.ndarray | None = None) -> None:
+    def execute(self) -> None:
         if self._group_started:
             self._pynccl_comm.group_end()
             self._group_started = False

@@ -335,9 +335,8 @@ def move_to_buffer(
                 expert_id=int(expert),
             )
 
-    # 4. Execute the P2P operations. The real communication happens here.
-    communicator.execute(old_indices=old_indices)
-    # wait for the communication to finish
+    # 4. Execute transfers and wait for completion.
+    communicator.execute()
     return TransferMetadata(
         is_unchanged=is_unchanged,
         is_received_locally=is_received_locally,
