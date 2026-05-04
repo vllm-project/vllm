@@ -64,7 +64,7 @@ class QkNormRopePattern:
         eps: float,
         is_neox: bool,
         rope_flashinfer: bool = False,
-        match_rocm_aiter: bool = False,
+        match_rocm_aiter_rope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -81,7 +81,7 @@ class QkNormRopePattern:
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             use_flashinfer=self.rope_flashinfer,
-            match_rocm_aiter=match_rocm_aiter if match_rocm_aiter else None,
+            match_rocm_aiter=match_rocm_aiter_rope if match_rocm_aiter_rope else None,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -236,12 +236,16 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        aiter_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
-        aiter_variants = [False]
-        if aiter_enabled:
-            aiter_variants.append(True)
+        # RMS norm variants are no longer iterated: after the vLLM IR
+        # migration (#33825), `MatcherRMSNorm` dispatches via
+        # `ir.ops.rms_norm`, which resolves to the same backend (native /
+        # vllm_c / aiter / oink / ...) that the model's RMSNorm layer
+        # picks.  The pattern graph tracks the target graph automatically.
+        aiter_rope_variants = [False]
+        if rocm_aiter_ops.is_triton_rotary_embed_enabled():
+            aiter_rope_variants.append(True)
 
-        for match_aiter in aiter_variants:
+        for aiter_rope in aiter_rope_variants:
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
                     if RotaryEmbedding.enabled():
@@ -253,7 +257,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                                 eps=epsilon,
                                 is_neox=neox,
                                 rope_flashinfer=rope_flashinfer,
-                                match_rocm_aiter=match_aiter,
+                                match_rocm_aiter_rope=aiter_rope,
                             ).register(self.patterns)
                     else:
                         QkNormRopePattern(
@@ -262,7 +266,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                             num_kv_heads=layer.num_kv_heads,
                             eps=epsilon,
                             is_neox=neox,
-                            match_rocm_aiter=match_aiter,
+                            match_rocm_aiter_rope=aiter_rope,
                         ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
