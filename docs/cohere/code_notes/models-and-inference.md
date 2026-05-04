@@ -246,3 +246,68 @@ Current constraint:
   `language_model`, so runtime inspection/hooks that look for
   `logits_processor` or LM-head weights must walk through that wrapper instead
   of assuming those objects live on the top-level module.
+
+## 11) Pre-quantized MXFP8 via compressed-tensors (temporary port)
+
+Adds support for serving pre-quantized **MXFP8** (E4M3 weights + E8M0 `uint8`
+per-group scales, `group_size=32`) checkpoints through the compressed-tensors
+backend, for both dense linear layers and MoE layers. Activations are
+dynamically quantized to MXFP8 at runtime via the existing `Mxfp8LinearOp`
+(FlashInfer-CUTLASS or emulation backend). This complements the online-MXFP8
+path added in `#665`, which quantizes bf16/fp16 weights at load time; the new
+path loads already-quantized weights directly.
+
+### Status: temporary port of upstream vllm-project/vllm#38815
+
+This is a manual port, not a `git cherry-pick`, because two upstream refactors
+that `df1e30e74` depends on are not yet in this fork:
+
+- **vllm-project/vllm#39205** (`MxFp8LinearKernel` refactor). Upstream's scheme
+  file imports `init_mxfp8_linear_kernel()`, which does not exist here. The
+  cohere port wires directly to `Mxfp8LinearOp` instead, mirroring
+  `Mxfp8OnlineLinearMethod` in `vllm/model_executor/layers/quantization/mxfp8.py`.
+- **vllm-project/vllm#39187** (CT MoE "Oracle Structure" package split).
+  Upstream places the new MoE method at
+  `compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w8a8_mxfp8.py`.
+  This fork still has `compressed_tensors_moe.py` as a single file, so
+  `CompressedTensorsW8A8Mxfp8MoEMethod` is appended in-place instead.
+
+**Drop condition.** Once this fork merges upstream past `df1e30e74` (which
+requires `#39187` and `#39205`), delete this port and take upstream's version.
+At that point the directory layout and kernel-init API will match upstream,
+and `df1e30e74` applies cleanly. The scheme file becomes redundant with
+upstream's `schemes/compressed_tensors_w8a8_mxfp8.py`; the MoE class is replaced
+by upstream's `compressed_tensors_moe/compressed_tensors_moe_w8a8_mxfp8.py`.
+
+### Code layout
+
+- `schemes/compressed_tensors_w8a8_mxfp8.py` *(new)* — `CompressedTensorsW8A8Mxfp8`
+  linear scheme. Loads `float8_e4m3fn` weights + `uint8` scales, swizzles the
+  scale for FlashInfer-CUTLASS in `process_weights_after_loading`, and dispatches
+  to `Mxfp8LinearOp.apply`.
+- `compressed_tensors_moe.py` — appends `CompressedTensorsW8A8Mxfp8MoEMethod`
+  (structurally a twin of `CompressedTensorsW8A8Fp8MoEMethod`; reuses the
+  already-present `select_mxfp8_moe_backend` / `make_fp8_moe_kernel` /
+  `convert_to_fp8_moe_kernel_format` oracle helpers from `#665`).
+- `compressed_tensors.py` — `_is_mxfp8` detection (group-quant, 8-bit float,
+  `scale_dtype=uint8`, `group_size=32`, symmetric) + scheme dispatch.
+- `schemes/__init__.py` — export.
+
+### Rebase guidance
+
+All port sites carry `# cohere: #38815` inline markers or `# cohere start` /
+`# cohere end` block markers, plus `Upstream-Commit:` /
+`Drop-After-Upstream-Merged:` trailers in the file / class docstrings. To find
+everything at rebase time:
+
+```bash
+git grep -nE '# cohere.*#38815|Upstream-Commit:.*df1e30e74|Drop-After-Upstream-Merged:' \
+  vllm/ tests/
+```
+
+### Validation checklist
+
+1. Scheme + MoE method dispatch: `pytest tests/quantization/test_compressed_tensors.py::test_compressed_tensors_mxfp8_moe_setup -v` (Turing+ required; uses dummy weights so no real download).
+2. Accuracy: `lm_eval --model vllm --trust_remote_code --model_args pretrained=AliEdalati97/Qwen3-30B-A3B-MXFP8 --tasks gsm8k,mmlu_pro --batch_size auto`. Upstream PR reports GSM8K strict-match 88.9, MMLU-Pro 68.8 vs bf16 89.4 / 69.3.
+3. Throughput: confirm FlashInfer-CUTLASS backend is selected (check `logger.info_once("Using %s backend for MXFP8 GEMM", ...)` output) — emulation fallback is materially slower.
+4. Coexistence with `#665` online path: a bf16 checkpoint served with `--quantization mxfp8` should still take the online path; only checkpoints whose `compressed_tensors` config has `type=float, num_bits=8, group_size=32, scale_dtype=uint8` should route to this new scheme.
