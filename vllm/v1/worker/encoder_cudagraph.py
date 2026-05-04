@@ -115,9 +115,7 @@ class EncoderCudaGraphManager:
                 # budgets so min(budgets) >= max_batch_size.
                 self.max_batch_size = user_max_vision_items
                 effective_min = max(min_budget, user_max_vision_items)
-                self.token_budgets = self._generate_budgets(
-                    effective_min, max_budget
-                )
+                self.token_budgets = self._generate_budgets(effective_min, max_budget)
             elif user_budgets:
                 # User provided budgets only; cap auto-inferred
                 # max_batch_size to min(user_budgets).

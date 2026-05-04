@@ -42,11 +42,16 @@ class _MockCompilationConfig:
     ):
         self.encoder_cudagraph_token_budgets = token_budgets or []
         self.encoder_cudagraph_max_vision_items_per_batch = max_mm_items
-        self.encoder_cudagraph_max_frames_per_batch = 0
+        self.encoder_cudagraph_max_frames_per_batch = None
 
 
 class _MockMultimodalConfig:
     mm_encoder_tp_mode = "replicate"
+
+    def get_limit_per_prompt(self, modality: str) -> int:
+        # Image-only mocks — return 0 for "video" to short-circuit the
+        # max_frames_per_batch branch, so tests don't need a video-frame mock.
+        return 0
 
 
 class _MockModelConfig:
