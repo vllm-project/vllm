@@ -663,8 +663,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
-        mha_use_quant_fusion = self.impl.mha_merge_state_fusion_supported(  # type: ignore[attr-defined]
-            quant_key, attn_metadata
+        # Fuse quant output, currently supports:
+        # - static fp8 in chunked prefill path, dcp <= 1
+        mha_use_quant_fusion = (
+            quant_key == kFp8StaticTensorSym
+            and attn_metadata is not None
+            and attn_metadata.prefill is not None
+            and attn_metadata.prefill.chunked_context is not None
+            and self.impl.dcp_world_size <= 1
         )
 
         if num_mha_tokens > 0:
@@ -1960,16 +1966,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             kNvfp4Dynamic,
             kFp8Dynamic128Sym,
             kFp8Dynamic64Sym,
-        )
-
-    def mha_merge_state_fusion_supported(self, quant_key, attn_metadata):
-        # DCP keeps the bf16 path until its cross-rank merge is fused.
-        return (
-            quant_key == kFp8StaticTensorSym
-            and attn_metadata is not None
-            and attn_metadata.prefill is not None
-            and attn_metadata.prefill.chunked_context is not None
-            and self.dcp_world_size <= 1
         )
 
     def __init__(
