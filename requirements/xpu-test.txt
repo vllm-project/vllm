@@ -39,4 +39,4 @@ pqdm==0.2.0
 # Required for some evaluation scripts
 timm==1.0.17
 albumentations==1.4.6
-mistral-common[image,audio]==1.9.1
+mistral-common[image,audio]==1.11.0

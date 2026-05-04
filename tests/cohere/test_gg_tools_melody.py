@@ -256,8 +256,8 @@ async def run_tool_chat_completions_tests(args):
         "--gpu_memory_utilization",
         "0.9",
         "--reasoning-config",
-        '{"think_start_str": "<|START_THINKING|>", '
-        '"think_end_str": "<|END_THINKING|>"}',
+        '{"reasoning_start_str": "<|START_THINKING|>", '
+        '"reasoning_end_str": "<|END_THINKING|>"}',
         "--structured-outputs-config",
         '{"backend": "xgrammar"}',
         "--reasoning-parser",

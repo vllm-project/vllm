@@ -64,7 +64,10 @@ def run_reward_test(
         PoolingParams(use_activation=False),
     ]
     outputs = llm.encode(
-        PROMPTS, pooling_params=pooling_params, pooling_task="token_classify"
+        PROMPTS,
+        pooling_params=pooling_params,
+        pooling_task="token_classify",
+        tokenization_kwargs={"add_special_tokens": False},
     )
     scores = [x.outputs.data for x in outputs]
 

@@ -131,11 +131,11 @@ COPY requirements/test.in requirements/cpu-test.in
 
 RUN \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    sed -i '/terratorch/d' requirements/cpu-test.in && \
     remove_packages_not_supported_on_aarch64() { \
     case "$(uname -m)" in \
     aarch64|arm64) \
     sed -i '/decord/d' requirements/cpu-test.in; \
-    sed -i '/terratorch/d' requirements/cpu-test.in; \
     ;; \
     esac; \
     }; \

@@ -1205,8 +1205,8 @@ if __name__ == "__main__":
         "--gpu_memory_utilization",
         "0.9",
         "--reasoning-config",
-        '{"think_start_str": "<|START_THINKING|>", '
-        '"think_end_str": "<|END_THINKING|>"}',
+        '{"reasoning_start_str": "<|START_THINKING|>", '
+        '"reasoning_end_str": "<|END_THINKING|>"}',
     ]
 
     # Add speculative decoding configuration if provided and not disabled

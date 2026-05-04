@@ -283,7 +283,6 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
-    thinking_token_budget: int | None = -1  # cohere
     continue_thinking: bool = False  # cohere
 
     skip_reading_prefix_cache: bool | None = None
@@ -325,7 +324,7 @@ class SamplingParams(
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
-        thinking_token_budget: int | None = -1,  # cohere
+        thinking_token_budget: int | None = None,
         continue_thinking: bool = False,  # cohere
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
@@ -367,7 +366,7 @@ class SamplingParams(
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
-            thinking_token_budget=thinking_token_budget,  # cohere
+            thinking_token_budget=thinking_token_budget,
             continue_thinking=continue_thinking,  # cohere
             extra_args=extra_args,
             skip_clone=skip_clone,
@@ -885,7 +884,6 @@ class SamplingParams(
             f"logprobs={self.logprobs}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
             f"skip_special_tokens={self.skip_special_tokens}, "
-            f"thinking_token_budget={self.thinking_token_budget}, "  # cohere
             f"spaces_between_special_tokens={self.spaces_between_special_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"

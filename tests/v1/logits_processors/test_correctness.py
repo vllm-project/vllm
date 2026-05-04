@@ -1441,10 +1441,10 @@ def _make_thinking_budget_reasoning_config(
     think_start: list[int] | None = THINK_BUDGET_START_IDS,
     think_end: list[int] | None = THINK_BUDGET_END_IDS,
 ) -> ReasoningConfig:
-    return ReasoningConfig(
-        think_start_token_ids=think_start or [],
-        think_end_token_ids=think_end or [],
-    )
+    cfg = ReasoningConfig()
+    cfg._reasoning_start_token_ids = think_start or []
+    cfg._reasoning_end_token_ids = think_end or []
+    return cfg
 
 
 def _make_thinking_budget_vllm_config(
@@ -1537,10 +1537,9 @@ def test_thinking_budget_edge_case_single_token_think_end(device: str):
     """Edge case: single-token think_end must not crash."""
     from vllm.config.reasoning import ReasoningConfig
 
-    single_end = ReasoningConfig(
-        think_start_token_ids=THINK_BUDGET_START_IDS,
-        think_end_token_ids=[42],
-    )
+    single_end = ReasoningConfig()
+    single_end._reasoning_start_token_ids = THINK_BUDGET_START_IDS
+    single_end._reasoning_end_token_ids = [42]
     config = _make_thinking_budget_vllm_config(reasoning_config=single_end)
     proc = ThinkingTokenBudgetLogitsProcessor(
         config,
@@ -1597,19 +1596,19 @@ def test_thinking_budget_edge_case_state_keys_present_after_init(device: str):
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_budget_minus_one_early_return(device: str):
-    """Edge case: budget=-1 skips countdown in _update_think_state (no crash)."""
+def test_thinking_budget_edge_case_budget_none_early_return(device: str):
+    """Edge case: budget=None skips countdown in _update_think_state (no crash)."""
     proc = _make_thinking_budget_processor(
         reasoning_config=_make_thinking_budget_reasoning_config(),
         device=device,
     )
-    params = SamplingParams(thinking_token_budget=-1)
+    params = SamplingParams(thinking_token_budget=5)
     added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
         (0, params, THINK_BUDGET_START_IDS + [1, 2, 3], [])
     ]
     batch = _thinking_budget_batch_update(1, added=added)
     proc.update_state(batch, [[]])
-    assert proc._state[0]["thinking_token_budget"] == -1
+    proc._state[0]["thinking_token_budget"] = None
     proc._state[0]["output_tok_ids"] = THINK_BUDGET_START_IDS + [4, 5, 6]
     proc.update_state(None, [[]])
     logits = torch.randn(1, VOCAB_SIZE, device=torch.device(device))

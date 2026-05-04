@@ -54,11 +54,10 @@ def generate_eval_configs(
             server_params["tool_call_parser"] = "cohere_command4"
             server_params["reasoning_parser"] = "cohere_command4"
             server_params["enable_auto_tool_choice"] = ""
-            # For thinking budget, we need to set the think_start_str and think_end_str
             reasoning_config = json.dumps(
                 {
-                    "think_start_str": "<|START_THINKING|>",
-                    "think_end_str": "<|END_THINKING|>",
+                    "reasoning_start_str": "<|START_THINKING|>",
+                    "reasoning_end_str": "<|END_THINKING|>",
                 },
                 separators=(",", ":"),
             )

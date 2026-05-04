@@ -28,6 +28,7 @@ def mock_model_runner_with_input_batch():
     runner.requests = {}
     runner.max_num_reqs = 10
     runner.max_model_len = 1024
+    runner.late_interaction_runner = Mock()
 
     # Create a real InputBatch for e2e testing
     runner.input_batch = InputBatch(

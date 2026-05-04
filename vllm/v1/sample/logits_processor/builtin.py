@@ -455,10 +455,10 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     def _update_think_state(self, state: dict[str, Any]):
         """Updates the state based on newly generated output tokens."""
         # Skip if no thinking budget (missing key can happen for moved/empty state)
-        if state.get("thinking_token_budget", -1) == -1:
+        if state.get("thinking_token_budget") is None:
             return
         if len(self.reasoning_end_token_ids) == 0:
-            state["thinking_token_budget"] = -1
+            state["thinking_token_budget"] = None
             state["in_end"] = False
             state["force_index"] = []
             return

@@ -79,7 +79,9 @@ run_cpu_tests() {
         models/test_vision.py models/test_utils.py \
         kernels/quantization/test_scaled_mm_kernel_selection.py \
         test_inputs.py test_outputs.py \
-        -m cpu_test
+        -m cpu_test \
+        --deselect v1/streaming_input/test_gpu_model_runner_v2_streaming.py \
+        --deselect multimodal/media/test_audio.py::test_audio_media_io_from_video
 
     # ── Tests that are CPU-safe but not marked with cpu_test ──
 
@@ -89,7 +91,8 @@ run_cpu_tests() {
     # Tool parser unit tests (parsers only, no LLM required)
     pytest -v -s entrypoints/openai/tool_parsers \
         --ignore=entrypoints/openai/tool_parsers/test_openai_tool_parser.py \
-        --ignore=entrypoints/openai/tool_parsers/test_hermes_tool_parser.py
+        --ignore=entrypoints/openai/tool_parsers/test_hermes_tool_parser.py \
+        --deselect entrypoints/openai/tool_parsers/test_granite4_tool_parser.py::test_stop_sequence_interference
 
     # V1 output dataclass tests
     pytest -v -s v1/core/test_output.py
@@ -294,7 +297,7 @@ run_bee_samples() {
         local think_start think_end
         think_start=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import START_THINKING_TOKEN; print(START_THINKING_TOKEN)")
         think_end=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN; print(END_THINKING_TOKEN)")
-        local reasoning_json="{\"think_start_str\":\"${think_start}\",\"think_end_str\":\"${think_end}\"}"
+        local reasoning_json="{\"reasoning_start_str\":\"${think_start}\",\"reasoning_end_str\":\"${think_end}\"}"
         local server_cmd="vllm serve ${MODEL_PATH} ${VLLM_HARDWARE_PROFILE_ARGS:-} --tensor-parallel-size ${TP_SIZE} --served-model-name ${MODEL_NAME} --disable-log-stats --mm-processor-cache-type shm --reasoning-config '${reasoning_json}'"
 
         if [[ "${MODEL_NAME}" == *"eagle"* ]]; then

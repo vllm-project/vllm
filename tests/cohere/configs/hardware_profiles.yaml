@@ -5,7 +5,7 @@ profiles:
   - name: vllm-default
     when: server.type == "vllm"
     args:
-      gpu-memory-utilization: "0.95"
+      gpu-memory-utilization: "0.90"
       enable-chunked-prefill: ""
       max-num-batched-tokens: "8192"
       max-num-seqs: "128"
@@ -14,6 +14,14 @@ profiles:
     env:
       VLLM_USE_V1: "1"
       VLLM_WORKER_MULTIPROC_METHOD: spawn
+  
+    # We use a flashinfer backend since we end up with a 
+  # illegal memeory access error which originates from
+  # moe fp8 kernel
+  - name: vllm-h100
+    when: server.type == "vllm" && matches(gpu.name, "h100")
+    args:
+      attention-backend: "FLASHINFER"
 
   - name: vllm-b200
     when: server.type == "vllm" && matches(gpu.name, "b200")
@@ -32,6 +40,8 @@ profiles:
 
   - name: vllm-mi300x
     when: server.type == "vllm" && matches(gpu.name, "mi300x")
+    args:
+      attention-backend: "TRITON_ATTN"
     env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MHA: "1"

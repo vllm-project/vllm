@@ -126,8 +126,8 @@ jobs:
             set -eo pipefail
             git clone git@github.com:cohere-ai/cohere-transformers.git
             cd cohere-transformers
-            # branch upgrade-4.56.2
-            git checkout v4.56.2.6
+            # branch cohere-rebase-v5.5.3
+            git checkout cohere-rebase-v5.5.3
 
       - name: gcp auth
         id: auth
