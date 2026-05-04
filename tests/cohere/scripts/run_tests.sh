@@ -402,7 +402,14 @@ run_guided_generation() {
     # python3 test_gg_melody.py  --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 || errors=1
     
     # python3 test_gg_tools_melody.py  --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 || errors=1
+    
+    # test guided_generation with command 4 reasoning model
+    echo "Running C4 TB + GG + spec with model: $C4_MODEL_DIR"
+    python3 test_thinking_budget.py --reasoning_mode "guided_generation" --model $C4_MODEL_DIR --tensor_parallel_size 4  --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --mode "speculative"|| errors=1
 
+    # test guided_generation with command 4 reasoning model
+    echo "Running C4 TB + spec with model: $C4_MODEL_DIR"
+    python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $C4_MODEL_DIR --tensor_parallel_size 4  --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --mode "speculative"|| errors=1
     # Same melody suites against mhl_v2 (Cohere2 vision + text); checkpoint from
     # gs://cohere-model-efficiency-ci/engines/mhl_v2 via download_checkpoints.sh.
     # Non-speculative: no bundled draft under this engine path.
@@ -411,14 +418,6 @@ run_guided_generation() {
     python3 test_gg_melody.py --mode "non-speculative" --model="$MHL_V2_MODEL_DIR" --tensor_parallel_size 4 --server_wait_seconds 8000 || errors=1
     echo "Running test_gg_tools_melody with mhl_v2: $MHL_V2_MODEL_DIR"
     python3 test_gg_tools_melody.py --mode "non-speculative" --model="$MHL_V2_MODEL_DIR" --tensor_parallel_size 4 --server_wait_seconds 8000 || errors=1
-
-    # test guided_generation with command 4 reasoning model
-
-    python3 test_thinking_budget.py --reasoning_mode "guided_generation" --model $C4_MODEL_DIR --tensor_parallel_size 4  --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --mode "speculative"|| errors=1
-
-    # test guided_generation with command 4 reasoning model
-
-    python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $C4_MODEL_DIR --tensor_parallel_size 4  --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --mode "speculative"|| errors=1
     
     # # test guided generation with speculative mode, command A
     # C3_TARGET_MODEL_DIR=${ENGINES_DIR}/command-a_fp8
