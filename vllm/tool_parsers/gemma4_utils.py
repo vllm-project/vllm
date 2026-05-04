@@ -66,10 +66,9 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     if not args_str or not args_str.strip():
         return {}
 
-    # Replace Gemma4 escape tokens with standard quotes.
-    cleaned = args_str.replace(_ESCAPE_TOKEN, '"')
-
     # Try JSON parsing first (handles nested values, arrays, etc.).
+    # Replace Gemma4 escape tokens with standard quotes for JSON attempt.
+    cleaned = args_str.replace(_ESCAPE_TOKEN, '"')
     try:
         parsed = json.loads("{" + cleaned + "}")
         # Ensure all values are strings for consistency.
@@ -77,9 +76,11 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Fallback: extract key:"value" pairs (allow optional space after colon).
+    # Fallback: extract key:<|"|>value<|"|> pairs using the original
+    # escape-token delimiters so that internal quotes are preserved.
     arguments = {}
-    for key, value in re.findall(r'(\w+):\s*"([^"]*)"', cleaned):
+    for key, value in re.findall(r'(\w+):\s*<\|"\|>(.*?)<\|"\|>',
+                                 args_str):
         arguments[key] = value
 
     if not arguments:
