@@ -275,7 +275,10 @@ class NixlEplbCommunicator(EplbCommunicator):
         for tensor in expert_buffer:
             assert tensor.is_contiguous(), "expert_buffer tensors must be contiguous"
 
+        # (local_dlist, remote_dlist, xfer_handle) for in-flight READs;
+        # accumulated by add_recv, drained by execute.
         self._xfer_entries: list[tuple[int, int, int]] = []
+        # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
 
@@ -286,8 +289,10 @@ class NixlEplbCommunicator(EplbCommunicator):
         )
         self._nixl_wrapper = NixlWrapper(self._make_agent_name(), config)
         self._nixl_memory_type = "VRAM"
+        # NIXL registration handles; deregistered in __del__.
         self._registered_descs: list[object] = []
         self._remote_agents: dict[int, str] = {}
+        # peer -> (layer, tensor) -> (base_ptr, bytes_per_expert, dev_id).
         self._remote_send_meta: dict[
             int, dict[tuple[int, int], tuple[int, int, int]]
         ] = {}
@@ -328,8 +333,7 @@ class NixlEplbCommunicator(EplbCommunicator):
 
     def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
         # Pre-compute expert_id -> src_row mapping for every rank so that
-        # add_recv can immediately issue NIXL READs without deferring to
-        # execute().
+        # add_recv can immediately issue NIXL READs.
         assert not self._xfer_entries, (
             f"set_transfer_context() called with {len(self._xfer_entries)} "
             f"pending transfers from layer {self._layer_idx}; "
@@ -351,7 +355,7 @@ class NixlEplbCommunicator(EplbCommunicator):
     ) -> None:
         # Build NIXL descriptors and issue the RDMA READ immediately,
         # overlapping the transfer with the remaining Python loop in
-        # move_to_buffer. execute() only waits for completion.
+        # move_to_buffer.
         assert self._expert_to_src_row is not None and self._layer_idx is not None, (
             "set_transfer_context() must be called before add_recv()"
         )
@@ -388,10 +392,6 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._nixl_wrapper.transfer(xfer_h)
         self._xfer_entries.append((local_h, remote_h, xfer_h))
 
-    # ------------------------------------------------------------------
-    # Initialization helpers
-    # ------------------------------------------------------------------
-
     def _init_remote_agents(self) -> None:
         local_metadata = self._nixl_wrapper.get_agent_metadata()
         gathered_metadata: list[bytes | None] = [None] * self._world_size
@@ -408,23 +408,14 @@ class NixlEplbCommunicator(EplbCommunicator):
             )
 
     def _init_registered_buffers(self) -> None:
-        t0 = time.monotonic()
         all_tensors: list[torch.Tensor] = []
         for layer_tensors in self._all_expert_weights:
             all_tensors.extend(layer_tensors)
         all_tensors.extend(self._expert_buffer)
 
-        total_bytes = sum(t.nbytes for t in all_tensors)
         descs = self._nixl_wrapper.get_reg_descs(all_tensors)
         self._nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
-        duration = time.monotonic() - t0
-        logger.info(
-            "Registered %d regions (%d bytes) in %.3f s",
-            len(all_tensors),
-            total_bytes,
-            duration,
-        )
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
@@ -469,10 +460,6 @@ class NixlEplbCommunicator(EplbCommunicator):
                         f"local={local_stride}, peer={peer_stride}"
                     )
             self._remote_send_meta[peer] = peer_meta
-
-    # ------------------------------------------------------------------
-    # Transfer helpers
-    # ------------------------------------------------------------------
 
     def _wait_for_all_transfers(self, handles: list[int]) -> None:
         pending = set(handles)
@@ -528,10 +515,6 @@ class NixlEplbCommunicator(EplbCommunicator):
             indices,
         )
         return (local_handle, remote_handle, xfer_handle)
-
-    # ------------------------------------------------------------------
-    # execute / cleanup
-    # ------------------------------------------------------------------
 
     def execute(self, old_indices: np.ndarray | None = None) -> None:
         assert self._layer_idx is not None or not self._xfer_entries, (

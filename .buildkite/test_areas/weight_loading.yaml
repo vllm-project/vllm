@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Weight Loading Multiple GPU  # 33min
+  key: weight-loading-multiple-gpu
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
