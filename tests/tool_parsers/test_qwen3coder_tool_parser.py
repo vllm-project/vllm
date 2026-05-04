@@ -1146,3 +1146,139 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     args = json.loads(raw_arguments)
     assert args["message"] == "hello world"
     assert '\\"hello world\\"' not in raw_arguments
+
+
+def test_streaming_mtp_param_and_function_end_same_delta(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: MTP burst delivering last param + </function> in one delta.
+
+    With MTP/speculative decoding the final parameter and </function> can
+    arrive together. The old code had an early return after emitting
+    parameter fragments, so the </function> block never executed —
+    leaving prev_tool_call_arr with stale arguments and
+    streamed_args_for_tool without the closing '}'.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",  # triggers json_started -> sends "{"
+        "<parameter=city>\nDallas\n</parameter>",
+        "<parameter=state>\nTX\n</parameter>",
+        # BUG TRIGGER: last param + </function> together in one delta
+        "\n<parameter=unit>\nfahrenheit\n</parameter>\n</function>",
+        "\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+
+    # prev_tool_call_arr must have real arguments, not stale "{}"
+    stored_args = json.loads(
+        qwen3_tool_parser.prev_tool_call_arr[0]["arguments"]
+    )
+    assert stored_args == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+
+    # streamed_args_for_tool must end with closing brace
+    assert qwen3_tool_parser.streamed_args_for_tool[0].endswith("}")
+
+
+def test_streaming_mtp_param_function_end_and_tool_end_same_delta(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: MTP burst with param + </function> + </tool_call> together.
+
+    Even more aggressive batching than the previous test — the closing
+    </tool_call> tag also arrives in the same delta.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",  # triggers json_started -> sends "{"
+        "<parameter=city>\nDallas\n</parameter>",
+        "<parameter=state>\nTX\n</parameter>",
+        # Everything remaining in a single burst
+        "\n<parameter=unit>\nfahrenheit\n</parameter>\n</function>\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+
+    # prev_tool_call_arr must have real arguments
+    stored_args = json.loads(
+        qwen3_tool_parser.prev_tool_call_arr[0]["arguments"]
+    )
+    assert stored_args == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+
+    # streamed_args_for_tool must end with closing brace
+    assert qwen3_tool_parser.streamed_args_for_tool[0].endswith("}")
+
+
+def test_streaming_non_mtp_unchanged(qwen3_tool_parser, qwen3_tokenizer):
+    """Verify normal (non-MTP) streaming still works after the early-return fix.
+
+    </function> arrives in its own separate delta — the common case
+    without speculative decoding. This must not regress.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",  # triggers json_started -> sends "{"
+        "<parameter=city>\nDallas\n</parameter>",
+        "\n</function>",  # </function> is a SEPARATE delta (non-MTP)
+        "\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args == {"city": "Dallas"}
+
+    # prev_tool_call_arr must have real arguments
+    stored_args = json.loads(
+        qwen3_tool_parser.prev_tool_call_arr[0]["arguments"]
+    )
+    assert stored_args == {"city": "Dallas"}
+
+    # streamed_args_for_tool must end with closing brace
+    assert qwen3_tool_parser.streamed_args_for_tool[0].endswith("}")
