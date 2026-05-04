@@ -7,13 +7,11 @@ from vllm.model_executor.models.nano_nemotron_vl import NemotronH_Nano_VL_V2
 
 
 class _TextOnlyMultiModalConfig:
-
     def get_limit_per_prompt(self, modality: str) -> int:
         return 0
 
 
 class _ImageOnlyMultiModalConfig:
-
     def get_limit_per_prompt(self, modality: str) -> int:
         return 1 if modality == "image" else 0
 
@@ -27,16 +25,14 @@ class _ImageOnlyModelConfig:
 
 
 class _LanguageModel:
-
     def __init__(self) -> None:
-        self.loaded_weights = []
+        self.loaded_weights: list[tuple[str, object]] = []
 
     def load_weights(self, weights):
         self.loaded_weights = list(weights)
 
 
 class _MissingMultiModalModule:
-
     def named_parameters(self):
         raise AssertionError("multimodal weights should not be inspected")
 
@@ -45,15 +41,13 @@ class _MissingMultiModalModule:
 
 
 class _AdapterModule:
-
     def named_parameters(self):
         return []
 
 
 class _VisionModel:
-
     def __init__(self) -> None:
-        self.loaded_weights = []
+        self.loaded_weights: list[tuple[str, object]] = []
 
     def load_weights(self, weights):
         self.loaded_weights = list(weights)
@@ -101,7 +95,9 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     )
 
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
-    assert vision_model.loaded_weights == [("radio_model.encoder.weight", vision_weight)]
+    assert vision_model.loaded_weights == [
+        ("radio_model.encoder.weight", vision_weight)
+    ]
 
 
 def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
