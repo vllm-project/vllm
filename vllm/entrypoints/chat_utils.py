@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import types
 import warnings
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -11,7 +12,20 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    Generic,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    is_typeddict,
+)
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -1451,38 +1465,23 @@ MM_PARSER_MAP: dict[
     ).get("name", None),
 }
 
-# Fields already consumed by the content part parser. Any field NOT in this
-# set is treated as an extra field and passed through to the chat template
-# when using the OpenAI (wrap_dicts) content format.
-_KNOWN_CONTENT_PART_FIELDS: frozenset[str] = frozenset(
-    {
-        "type",
-        "text",
-        "refusal",
-        "thinking",
-        "input_text",
-        "output_text",
-        "closed",
-        "image_url",
-        "image_pil",
-        "image_embeds",
-        "detail",
-        "audio_url",
-        "input_audio",
-        "audio_embeds",
-        "video_url",
-        "input_image",
-        "uuid",
-    }
-)
+
+def _collect_known_content_part_fields() -> frozenset[str]:
+    fields: set[str] = set()
+    stack: list[Any] = [ChatCompletionContentPartParam]
+    while stack:
+        node = stack.pop()
+        if get_origin(node) in (Union, types.UnionType):
+            stack.extend(get_args(node))
+        elif is_typeddict(node):
+            fields |= node.__required_keys__ | node.__optional_keys__
+    return frozenset(fields)
+
+
+_KNOWN_CONTENT_PART_FIELDS = _collect_known_content_part_fields()
 
 
 def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
-    """Collect fields from a content part that are not consumed by the parser.
-
-    This allows model-specific metadata (e.g., language codes for translation
-    models) to flow through to the chat template.
-    """
     return {k: v for k, v in part.items() if k not in _KNOWN_CONTENT_PART_FIELDS}
 
 

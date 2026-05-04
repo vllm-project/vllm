@@ -414,13 +414,13 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Transformers v4 installed, legacy config fields may be present.
         existing_rp = getattr(config, "rope_parameters", None)
         if isinstance(existing_rp, dict) and is_rope_parameters_nested(existing_rp):
-            # Interleaved-attention models (e.g. Laguna-XS.2, TranslateGemma)
-            # ship a nested {layer_type: {...}} rope_parameters that the model
-            # code indexes by layer_type. The per-layer-type sub-dicts already
-            # carry the correct rope_theta / partial_rotary_factor / ompe (the
-            # converter places top-level legacy fields inside full_attention),
-            # so don't merge top-level fields here — that would shadow the
-            # per-type values and break sliding-attention layers.
+            # Interleaved-attention models (e.g. Laguna-XS.2) ship a nested
+            # {layer_type: {...}} rope_parameters that the model code indexes
+            # by layer_type. The per-layer-type sub-dicts already carry the
+            # correct rope_theta / partial_rotary_factor / ompe (the converter
+            # places top-level legacy fields inside full_attention), so don't
+            # merge top-level fields here — that would shadow the per-type
+            # values and break sliding-attention layers.
             pass
         else:
             if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
