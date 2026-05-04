@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 import secrets
 import uuid
 from argparse import Namespace
@@ -13,6 +12,7 @@ from http import HTTPStatus
 from typing import ClassVar
 
 import pydantic
+import regex as re
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -117,9 +117,7 @@ class UnicodeFilterMiddleware:
     )
 
     # Unicode "Tags" block (U+E0020 - U+E007F).
-    UNICODE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"[\U000E0020-\U000E007F]"
-    )
+    UNICODE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"[\U000E0020-\U000E007F]")
     _TRANSLATION_TABLE: ClassVar[dict[int, None]] = dict.fromkeys(
         range(0xE0020, 0xE0080)
     )
@@ -162,7 +160,7 @@ class UnicodeFilterMiddleware:
             async def disconnect_receive() -> Message:
                 return {"type": "http.disconnect"}
 
-            await self.app(scope, disconnect_receive, send) 
+            await self.app(scope, disconnect_receive, send)
             return
 
         body_bytes = bytes(body)

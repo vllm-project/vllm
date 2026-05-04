@@ -774,9 +774,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # /v1/chat/completions and /v1/completions, since they can cause
     # unpredictable LLM behavior. Disabled by default.
     "VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE": lambda: (
-        os.environ.get(
-            "VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE", "False"
-        ).lower()
+        os.environ.get("VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE", "False").lower()
         == "true"
     ),
     # When the Unicode filtering middleware is enabled, use ``str.translate``
