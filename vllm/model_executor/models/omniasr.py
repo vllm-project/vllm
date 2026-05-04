@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -20,15 +22,22 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalFieldConfig
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
+    PromptReplacement,
+    PromptUpdate,
 )
 from vllm.transformers_utils.configs.omniasr import OmniASRConfig
-
+from vllm.multimodal.parse import (
+    AudioProcessorItems
+)
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -100,7 +109,6 @@ class Wav2Vec2FeatureExtractor(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList()
         self.sampling_rate = config.sampling_rate
-        self.subsampling_factor = config.subsampling_factor
 
         in_ch = 1  # mono audio
         for out_ch, kernel_size, stride in config.feature_extractor_layer_descs:
@@ -124,6 +132,16 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             x = nn.functional.gelu(x)
         return x
 
+    def get_seq_len(self, num_samples: int) -> int:
+        seq_len = num_samples
+        for layer in self.layers:
+            conv = layer["conv"]
+            kernel_size = conv.kernel_size[0]
+            stride = conv.stride[0]
+            padding = conv.padding[0]
+            dilation = conv.dilation[0]
+            seq_len = (seq_len + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+        return seq_len
 
 class Wav2Vec2Attention(nn.Module):
     """Self-attention with separate q/k/v/output projections (matching checkpoint)"""
@@ -273,6 +291,9 @@ class Wav2Vec2TransformerEncoder(nn.Module):
 
 
 class OmniASRProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self) -> PretrainedConfig:
+        return self.ctx.get_hf_config()
+
     def get_default_tok_params(self):
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
@@ -283,14 +304,12 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
         feature_extractor = self.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
-    def get_feature_extractor(self):
-        config = self.ctx.get_hf_config()
+    def get_feature_extractor(self) -> Wav2Vec2FeatureExtractor:
+        config = self.get_hf_config()
         return Wav2Vec2FeatureExtractor(config)
 
-    def get_num_audio_tokens(self, num_samples):
-        fe = self.get_feature_extractor()
-        return num_samples // fe.subsampling_factor
-
+    def get_num_audio_tokens(self, num_samples: int) -> int:
+        return self.get_feature_extractor().get_seq_len(num_samples)
 
 class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
     def create_encoder_prompt(
@@ -339,9 +358,25 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
             length=MultiModalFieldConfig.batched("audio"),
         )
 
-    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
-        # TODO: implement proper prompt replacement
-        return []
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        def get_audio_replacement_omniasr(item_idx: int):
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            audio_len = audios.get_audio_length(item_idx)
+            num_tokens = self.info.get_num_audio_tokens(num_samples=audio_len)
+            return [0] * num_tokens
+
+        return [
+            PromptReplacement(
+                modality="audio",
+                target=[0],
+                replacement=get_audio_replacement_omniasr,
+            )
+        ]
 
 
 class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
@@ -363,6 +398,23 @@ class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
             "audio": self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
+#TODO:Add all supported languages
+ISO639_1_SUPPORTED_LANGS = {
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "el": "Greek",
+    "ar": "Arabic",
+    "ko": "Korean",
+    "ja": "Japanese",
+    "vi": "Vietnamese",
+    "zh": "Chinese",
+}
 
 @MULTIMODAL_REGISTRY.register_processor(
     OmniASRMultiModalProcessor,
@@ -377,7 +429,9 @@ class OmniAsrForConditionalGeneration(
     TODO:
     - Integrate LLaMA decoder via vLLM's LlamaForCausalLM
     """
-
+    
+    supports_transcription_only = True
+    supported_languages = ISO639_1_SUPPORTED_LANGS
     def __init__(self, *, vllm_config=None, prefix: str = ""):
         super().__init__()
         config: OmniASRConfig = vllm_config.model_config.hf_config
