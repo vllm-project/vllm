@@ -134,8 +134,13 @@ class BaseRenderer(ABC, Generic[_T]):
                 config.observability_config
             )
 
-        # Make HF fast tokenizer thread-safe by dispatching calls to tokenizer pool
-        self.tokenizer = maybe_make_thread_pool(tokenizer, pool_workers + 1)
+        # Make HF fast tokenizer thread-safe by dispatching calls to tokenizer
+        # pool when a tokenizer is available.
+        self.tokenizer = (
+            None
+            if tokenizer is None
+            else maybe_make_thread_pool(tokenizer, pool_workers + 1)
+        )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer

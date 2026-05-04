@@ -4,7 +4,7 @@ import contextlib
 import copy
 import queue
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -13,9 +13,10 @@ from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_co
 from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+_T = TypeVar("_T", bound=TokenizerLike)
 
 
-def maybe_make_thread_pool(tokenizer: TokenizerLike, copies: int = 1) -> TokenizerLike:
+def maybe_make_thread_pool(tokenizer: _T, copies: int = 1) -> _T:
     """
     If `tokenizer` is a `PreTrainedTokenizerFast`, modify the tokenizer
     in place to make the public interface thread-safe by routing calls
