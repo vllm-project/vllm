@@ -101,9 +101,17 @@ else:
     flash_attn_varlen_func = _raise_flashmla_unavailable  # type: ignore[assignment]
     flash_attn_varlen_kvpacked_func = _raise_flashmla_unavailable  # type: ignore[assignment]
     flash_attn_varlen_qkvpacked_func = _raise_flashmla_unavailable  # type: ignore[assignment]
-    flash_mla_sparse_fwd = _raise_flashmla_unavailable  # type: ignore[assignment]
-    flash_mla_with_kvcache = _raise_flashmla_unavailable  # type: ignore[assignment]
-    get_mla_metadata = _raise_flashmla_unavailable  # type: ignore[assignment]
+
+    if current_platform.is_rocm():
+        from vllm.v1.attention.ops.rocm_flash_mla_sparse import (
+            flash_mla_sparse_fwd_rocm as flash_mla_sparse_fwd,
+            flash_mla_with_kvcache_rocm as flash_mla_with_kvcache,
+            get_mla_metadata_rocm as get_mla_metadata,
+        )
+    else:
+        flash_mla_sparse_fwd = _raise_flashmla_unavailable  # type: ignore[assignment]
+        flash_mla_with_kvcache = _raise_flashmla_unavailable  # type: ignore[assignment]
+        get_mla_metadata = _raise_flashmla_unavailable  # type: ignore[assignment]
 
 
 def get_mla_metadata_dense_fp8(
