@@ -3,8 +3,8 @@
 
 """
 KV-cache fake-quantization for accuracy studies (BF16 / FP8 / per-token int4 /
-SmoothKV / KIVI-2). Kernels run quant -> dequant in the same step, so KV
-cache storage is unchanged but values are constrained to the chosen grid.
+SmoothKV). Kernels run quant -> dequant in the same step, so KV cache storage
+is unchanged but values are constrained to the chosen grid.
 
 Wired into ``Attention`` via two inline reads (``__init__``: registration,
 ``forward``: dispatch). No ``Worker.load_model`` post-load hook, no class-level
@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class _KvQuantConfig:
-    method: str = "bf16"            # bf16 | fp16 | fp8 | pertoken | smoothkv | kivi2
+    method: str = "bf16"            # bf16 | fp16 | fp8 | pertoken | smoothkv | smoothkv_fused
     group_size: int = 128
     bits: int = 4
     # SmoothKV: full (num_layers, full_num_kv_heads, head_dim) tensors on CPU.
@@ -62,15 +62,13 @@ def configure_kv_quant(
     and sliced per-layer/per-TP-rank inside the layer ``__init__``.
     """
     if method not in ("bf16", "fp16", "fp8", "pertoken", "smoothkv",
-                      "smoothkv_fused", "kivi2"):
+                      "smoothkv_fused"):
         raise ValueError(
             f"Unknown method {method!r}; "
-            "expected bf16/fp16/fp8/pertoken/smoothkv/smoothkv_fused/kivi2"
+            "expected bf16/fp16/fp8/pertoken/smoothkv/smoothkv_fused"
         )
     if method in ("smoothkv", "smoothkv_fused") and not calib_path:
         raise ValueError(f"method={method!r} requires calib_path")
-    if method == "kivi2":
-        bits = 2  # KIVI-2 is fixed at int2
 
     _CONFIG.method = method
     _CONFIG.group_size = group_size
@@ -159,44 +157,26 @@ def _fake_quantize_dequantize_fp8_meta(
     return torch.empty_like(data)
 
 
-# ---- KIVI int{2,4} pack/unpack kernels (per-token along D, per-channel along T) ----
+# ---- int{2,4} per-token pack/unpack kernels (groups along D = head_dim) ----
 
-def _pack_tensor(data: torch.Tensor, bits: int, pack_dim: int) -> torch.Tensor:
+def _pack_tensor(data: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack along the last dim: feat_per_int (32 // bits) elements per int32."""
     feat_per_int = 32 // bits
-    shape = data.shape
-    out_shape = (
-        shape[:pack_dim] + (shape[pack_dim] // feat_per_int,) + shape[pack_dim + 1:]
-    )
+    out_shape = data.shape[:-1] + (data.shape[-1] // feat_per_int,)
     code = torch.zeros(out_shape, dtype=torch.int32, device=data.device)
-    unpacked_idx: list = [slice(None)] * len(shape)
-    packed_idx: list = [slice(None)] * len(shape)
-    row = 0
-    i = 0
-    while row < code.shape[pack_dim]:
-        packed_idx[pack_dim] = row
-        for j in range(i, i + feat_per_int):
-            unpacked_idx[pack_dim] = j
-            code[tuple(packed_idx)] |= data[tuple(unpacked_idx)] << (bits * (j - i))
-        i += feat_per_int
-        row += 1
+    for j in range(feat_per_int):
+        code |= data[..., j::feat_per_int] << (bits * j)
     return code
 
 
-def _unpack_tensor(code: torch.Tensor, bits: int, pack_dim: int) -> torch.Tensor:
+def _unpack_tensor(code: torch.Tensor, bits: int) -> torch.Tensor:
+    """Unpack the int32-packed last dim back to per-element int16."""
     feat_per_int = 32 // bits
-    shape = code.shape
-    new_len = shape[pack_dim] * feat_per_int
+    new_len = code.shape[-1] * feat_per_int
     j = torch.arange(new_len, device=code.device) % feat_per_int
     i = torch.arange(new_len, device=code.device) // feat_per_int
     mask = 0xFF >> (8 - bits)
-    packed_idx: list = [slice(None)] * len(shape)
-    packed_idx[pack_dim] = i
-    if pack_dim == 2:
-        return ((code[tuple(packed_idx)] >> (j * bits)[None, None, :, None])
-                .to(torch.int16)) & mask
-    elif pack_dim == 3:
-        return ((code[tuple(packed_idx)] >> (j * bits)).to(torch.int16)) & mask
-    raise NotImplementedError(f"pack_dim={pack_dim} not supported")
+    return ((code[..., i] >> (j * bits)).to(torch.int16)) & mask
 
 
 @torch.library.custom_op(
@@ -216,7 +196,7 @@ def _quant_and_pack_vcache(
     scale = (mx - mn) / max_int
     data = (data - mn) / scale
     data = data.clamp(0, max_int).round().to(torch.int32).view(shape)
-    code = _pack_tensor(data, bits, pack_dim=3)
+    code = _pack_tensor(data, bits)
     return code, scale, mn
 
 
@@ -240,7 +220,7 @@ def _unpack_and_dequant_vcache(
     code: torch.Tensor, scale: torch.Tensor, mn: torch.Tensor,
     group_size: int, bits: int,
 ) -> torch.Tensor:
-    data = _unpack_tensor(code, bits, pack_dim=3)
+    data = _unpack_tensor(code, bits)
     shape = data.shape
     num_groups = shape[-1] // group_size
     data = data.view(shape[:-1] + (num_groups, group_size)).to(scale.dtype)
@@ -256,67 +236,6 @@ def _unpack_and_dequant_vcache_meta(
     feat_per_int = 32 // bits
     B, nh, T, packed_D = code.shape
     return torch.empty(B, nh, T, packed_D * feat_per_int,
-                       dtype=scale.dtype, device=code.device)
-
-
-@torch.library.custom_op(
-    "vllm_kv_quant::quant_and_pack_kcache", mutates_args=()
-)
-def _quant_and_pack_kcache(
-    k: torch.Tensor, group_size: int, bits: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Per-channel K quant for KIVI-2: groups along T axis. (B, nh, T, D)."""
-    shape = k.shape
-    B, nh, T, D = shape
-    num_groups = T // group_size
-    new_shape = (B, nh, num_groups, group_size, D)
-    max_int = 2 ** bits - 1
-    data = k.view(new_shape)
-    mn = torch.min(data, dim=-2, keepdim=True)[0]
-    mx = torch.max(data, dim=-2, keepdim=True)[0]
-    scale = (mx - mn) / max_int
-    data = (data - mn) / scale
-    data = data.clamp(0, max_int).round().to(torch.int32).view(shape)
-    code = _pack_tensor(data, bits, pack_dim=2)
-    return code, scale, mn
-
-
-@_quant_and_pack_kcache.register_fake
-def _quant_and_pack_kcache_meta(
-    k: torch.Tensor, group_size: int, bits: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, nh, T, D = k.shape
-    feat_per_int = 32 // bits
-    num_groups = T // group_size
-    code = torch.empty(B, nh, T // feat_per_int, D, dtype=torch.int32, device=k.device)
-    scale = torch.empty(B, nh, num_groups, 1, D, dtype=k.dtype, device=k.device)
-    mn = torch.empty_like(scale)
-    return code, scale, mn
-
-
-@torch.library.custom_op(
-    "vllm_kv_quant::unpack_and_dequant_kcache", mutates_args=()
-)
-def _unpack_and_dequant_kcache(
-    code: torch.Tensor, scale: torch.Tensor, mn: torch.Tensor,
-    group_size: int, bits: int,
-) -> torch.Tensor:
-    data = _unpack_tensor(code, bits, pack_dim=2)
-    shape = data.shape
-    num_groups = shape[2] // group_size
-    data = data.view(shape[:2] + (num_groups, group_size) + shape[3:]).to(scale.dtype)
-    data = data * scale + mn
-    return data.view(shape)
-
-
-@_unpack_and_dequant_kcache.register_fake
-def _unpack_and_dequant_kcache_meta(
-    code: torch.Tensor, scale: torch.Tensor, mn: torch.Tensor,
-    group_size: int, bits: int,
-) -> torch.Tensor:
-    feat_per_int = 32 // bits
-    B, nh, packed_T, D = code.shape
-    return torch.empty(B, nh, packed_T * feat_per_int, D,
                        dtype=scale.dtype, device=code.device)
 
 
@@ -355,9 +274,8 @@ def fake_quantize_pertoken(
 ) -> torch.Tensor:
     """Per-token int{2,4} quant: groups along the last dim (head_dim).
 
-    Used for both K and V in pertoken / smoothkv / kivi2 methods (the kernel
-    is symmetric in K vs V; only KIVI-2's per-channel K uses a different
-    kernel — see ``fake_quantize_k_perchannel``).
+    Used for both K and V in pertoken / smoothkv methods (the kernel is
+    symmetric in K vs V).
     """
     orig_shape = x.shape
     orig_dtype = x.dtype
@@ -368,32 +286,6 @@ def fake_quantize_pertoken(
     out = torch.ops.vllm_kv_quant.unpack_and_dequant_vcache(
         code, scale, mn, group_size, bits
     )
-    return _from_bnhtd(out, orig_shape).to(orig_dtype)
-
-
-def fake_quantize_k_perchannel(
-    x: torch.Tensor, num_kv_heads: int, head_dim: int,
-    group_size: int, bits: int,
-) -> torch.Tensor:
-    """Per-channel K (groups along T axis) -- only KIVI-2 uses this."""
-    orig_shape = x.shape
-    orig_dtype = x.dtype
-    x4 = _to_bnhtd(x, num_kv_heads, head_dim)
-    B, nh, T, D = x4.shape
-    pad = (-T) % group_size
-    if pad:
-        x4 = torch.cat(
-            [x4, torch.zeros(B, nh, pad, D, dtype=x4.dtype, device=x4.device)],
-            dim=2,
-        )
-    code, scale, mn = torch.ops.vllm_kv_quant.quant_and_pack_kcache(
-        x4, group_size, bits
-    )
-    out = torch.ops.vllm_kv_quant.unpack_and_dequant_kcache(
-        code, scale, mn, group_size, bits
-    )
-    if pad:
-        out = out[:, :, :T, :]
     return _from_bnhtd(out, orig_shape).to(orig_dtype)
 
 
@@ -485,11 +377,6 @@ def apply_kv_quant(
         v_s = value / sv_flat
         v_s = fake_quantize_pertoken(v_s, nh, hd, gs, bits)
         value = v_s * sv_flat
-    elif method == "kivi2":
-        # KIVI-2: K per-channel int2, V per-token int2 (residual buffer not
-        # faithfully simulated -- see KIVI paper §3.3).
-        key = fake_quantize_pertoken(key, nh, hd, gs, 2)
-        value = fake_quantize_pertoken(value, nh, hd, gs, 2)
     else:
         raise ValueError(f"Unknown _kv_quant_method: {method!r}")
     return key, value
