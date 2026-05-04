@@ -26,7 +26,11 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (
+    AudioProcessorItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
@@ -35,9 +39,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.transformers_utils.configs.omniasr import OmniASRConfig
-from vllm.multimodal.parse import (
-    AudioProcessorItems
-)
+
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -140,8 +142,11 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             stride = conv.stride[0]
             padding = conv.padding[0]
             dilation = conv.dilation[0]
-            seq_len = (seq_len + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+            seq_len = (
+                seq_len + 2 * padding - dilation * (kernel_size - 1) - 1
+            ) // stride + 1
         return seq_len
+
 
 class Wav2Vec2Attention(nn.Module):
     """Self-attention with separate q/k/v/output projections (matching checkpoint)"""
@@ -311,6 +316,7 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
     def get_num_audio_tokens(self, num_samples: int) -> int:
         return self.get_feature_extractor().get_seq_len(num_samples)
 
+
 class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
     def create_encoder_prompt(
         self,
@@ -398,7 +404,8 @@ class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
             "audio": self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
-#TODO:Add all supported languages
+
+# TODO:Add all supported languages
 ISO639_1_SUPPORTED_LANGS = {
     "en": "English",
     "fr": "French",
@@ -416,6 +423,7 @@ ISO639_1_SUPPORTED_LANGS = {
     "zh": "Chinese",
 }
 
+
 @MULTIMODAL_REGISTRY.register_processor(
     OmniASRMultiModalProcessor,
     info=OmniASRProcessingInfo,
@@ -429,9 +437,10 @@ class OmniAsrForConditionalGeneration(
     TODO:
     - Integrate LLaMA decoder via vLLM's LlamaForCausalLM
     """
-    
+
     supports_transcription_only = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
     def __init__(self, *, vllm_config=None, prefix: str = ""):
         super().__init__()
         config: OmniASRConfig = vllm_config.model_config.hf_config
@@ -481,10 +490,7 @@ class OmniAsrForConditionalGeneration(
         encoder_outputs: list[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        if intermediate_tensors is not None:
-            inputs_embeds = None
-        else:
-            inputs_embeds = None
+        inputs_embeds = None if intermediate_tensors is not None else None
         hidden_states = self.language_model.model(
             input_ids,
             positions,
