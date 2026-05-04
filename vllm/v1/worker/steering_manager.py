@@ -42,6 +42,7 @@ effective vectors for each phase.
 
 from collections import defaultdict
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -170,14 +171,30 @@ class SteeringManager:
         # Row allocation above is unconditional — the filter only
         # affects what tensors get constructed, not which row is
         # assigned.
+        # Per-layer vectors are batched into ONE stacked H2D copy per hook
+        # point. Building each row as its own ``torch.tensor(list,
+        # device=cuda)`` triggers a synchronous ``cudaMemcpy`` per layer,
+        # which dominates the phase-transition cost when many configs are
+        # registered at the start of a decode step. Stacking up front and
+        # transferring once amortizes the sync to a single cost per hook.
         stored: dict[str, dict[int, torch.Tensor]] = {}
         for hook_point, layer_vecs in vectors.items():
-            stored[hook_point] = {
-                layer_idx: torch.tensor(
-                    vec, dtype=torch.float32, device=self.device
-                ).unsqueeze(0)
+            items = [
+                (layer_idx, vec)
                 for layer_idx, vec in layer_vecs.items()
                 if locally_owned_layers is None or layer_idx in locally_owned_layers
+            ]
+            if not items:
+                stored[hook_point] = {}
+                continue
+            layer_idxs = [layer_idx for layer_idx, _ in items]
+            raw_vecs = [vec for _, vec in items]
+            stacked = self._stack_vectors_to_device(raw_vecs)
+            # ``stacked[i:i+1]`` is a (1, hidden) view, matching the
+            # per-layer ``.unsqueeze(0)`` shape that ``_populate_one_table``
+            # expects to ``.squeeze(0)``. No extra copy.
+            stored[hook_point] = {
+                layer_idx: stacked[i : i + 1] for i, layer_idx in enumerate(layer_idxs)
             }
         self.config_vectors[key] = stored
         # New row content needs to be written into the per-layer tables on
@@ -307,6 +324,38 @@ class SteeringManager:
             squeezed = v.squeeze(0)
             result = squeezed.clone() if result is None else result + squeezed
         return result
+
+    def _stack_vectors_to_device(self, vecs: list[list[float]]) -> torch.Tensor:
+        """Stack a list of equal-length float vectors into a (N, hidden)
+        tensor on ``self.device`` via a single batched H2D copy.
+
+        For CUDA targets, the array is assembled in numpy, wrapped via
+        ``torch.from_numpy``, pinned, and copied with ``non_blocking=True``
+        — one ``cudaMemcpy`` regardless of ``len(vecs)``. Per-layer
+        ``torch.tensor(list, device=cuda)`` would otherwise issue one
+        synchronous transfer per row, which dominates the
+        ``register_config`` cost when many configs enter decode at once.
+        """
+        try:
+            arr = np.asarray(vecs, dtype=np.float32)
+        except (ValueError, TypeError) as exc:  # ragged / non-numeric input
+            raise ValueError(
+                "register_config received steering vectors of inconsistent "
+                "shape or non-numeric dtype; expected a list of equal-length "
+                f"float vectors. Underlying error: {exc}"
+            ) from exc
+        if arr.ndim != 2:
+            raise ValueError(
+                "register_config expected a 2D stack of steering vectors "
+                f"(N, hidden); got array with shape {arr.shape}."
+            )
+        cpu_t = torch.from_numpy(arr)
+        if self.device is None:
+            return cpu_t
+        if self.device.type == "cuda":
+            cpu_t = cpu_t.pin_memory()
+            return cpu_t.to(self.device, non_blocking=True)
+        return cpu_t.to(self.device)
 
     def populate_steering_tables(
         self, steerable_layers: dict[int, "torch.nn.Module"]
