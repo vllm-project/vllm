@@ -7,6 +7,13 @@ Test guided generation via vLLM serve: Chat Completions and Responses.
   ``structured_outputs`` with ``json`` (not ``text.format``).
 - JSON object mode (no field schema): Chat uses ``response_format`` type
   ``json_object``; Responses uses ``structured_outputs`` with ``json_object``.
+
+Within each phase, all ``synth_prompts`` requests are sent concurrently
+(``asyncio.gather``) so the server schedules overlapping sequences like production.
+
+CI (``run_guided_generation`` in ``run_tests.sh``) also runs this script against the
+``mhl_v2`` checkpoint (``${ENGINES_DIR}/mhl_v2``), non-speculative, tensor parallel 4,
+after the checkpoint is synced to ``gs://cohere-model-efficiency-ci/engines/mhl_v2``.
 """
 
 import argparse
@@ -140,7 +147,11 @@ def _assert_json_object_mode_checks(phase: str, bad: list[int]) -> None:
 
 
 async def run_guided_generation_tests(args: argparse.Namespace) -> None:
-    """Chat Completions (response_format) then Responses (structured_outputs)."""
+    """Chat Completions (response_format) then Responses (structured_outputs).
+
+    Each phase issues all ``synth_prompts`` requests concurrently (``asyncio.gather``)
+    so the engine sees overlapping work like production, not strictly sequential awaits.
+    """
     server_args = _server_args(args)
     with RemoteOpenAIServer(
         args.model,
@@ -155,9 +166,7 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
         ) as client:
             schema_map = {i: p["schema"] for i, p in enumerate(synth_prompts)}
 
-            # --- Chat Completions: response_format json_schema ---
-            chat_outputs: list[str | None] = []
-            for i, p in enumerate(synth_prompts):
+            async def chat_json_schema_one(i: int, p: dict) -> str | None:
                 try:
                     response = await client.chat.completions.create(
                         model=args.model,
@@ -179,10 +188,16 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
                         if choice and choice.message
                         else None
                     )
-                    chat_outputs.append(text or None)
+                    return text or None
                 except Exception as e:
                     print(f"Chat request {i} failed: {e}")
-                    chat_outputs.append(None)
+                    return None
+
+            chat_outputs: list[str | None] = list(
+                await asyncio.gather(
+                    *[chat_json_schema_one(i, p) for i, p in enumerate(synth_prompts)]
+                )
+            )
 
             bad_json, bad_schema = validate_api_output(chat_outputs, schema_map)
             _assert_schema_checks("Chat Completions", bad_json, bad_schema)
@@ -191,20 +206,32 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
                 f"({args.mode.value})"
             )
 
-            # --- Responses: structured_outputs.json (not text.format) ---
-            responses_outputs: list[str | None] = []
-            for i, p in enumerate(synth_prompts):
-                response = await client.responses.create(
-                    model=args.model,
-                    input=[{"role": "user", "content": p["prompt"]}],
-                    temperature=0.6,
-                    top_p=0.95,
-                    max_output_tokens=32000,
-                    extra_body={
-                        "structured_outputs": {"json": p["schema"]},
-                    },
+            # --- Responses: structured_outputs.json (concurrent) ---
+            async def responses_json_schema_one(i: int, p: dict) -> str | None:
+                try:
+                    response = await client.responses.create(
+                        model=args.model,
+                        input=[{"role": "user", "content": p["prompt"]}],
+                        temperature=0.6,
+                        top_p=0.95,
+                        max_output_tokens=32000,
+                        extra_body={
+                            "structured_outputs": {"json": p["schema"]},
+                        },
+                    )
+                    return _responses_output_text(response)
+                except Exception as e:
+                    print(f"Responses request {i} failed: {e}")
+                    return None
+
+            responses_outputs: list[str | None] = list(
+                await asyncio.gather(
+                    *[
+                        responses_json_schema_one(i, p)
+                        for i, p in enumerate(synth_prompts)
+                    ]
                 )
-                responses_outputs.append(_responses_output_text(response))
+            )
 
             bad_json_r, bad_schema_r = validate_api_output(
                 responses_outputs, schema_map
@@ -216,8 +243,7 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
             )
 
             # JSON object mode (no schema): Chat + Responses; same synth_prompts.
-            chat_json_outputs: list[str | None] = []
-            for i, p in enumerate(synth_prompts):
+            async def chat_json_object_one(i: int, p: dict) -> str | None:
                 try:
                     response = await client.chat.completions.create(
                         model=args.model,
@@ -233,10 +259,16 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
                         if choice and choice.message
                         else None
                     )
-                    chat_json_outputs.append(text or None)
+                    return text or None
                 except Exception as e:
                     print(f"Chat json_object request {i} failed: {e}")
-                    chat_json_outputs.append(None)
+                    return None
+
+            chat_json_outputs: list[str | None] = list(
+                await asyncio.gather(
+                    *[chat_json_object_one(i, p) for i, p in enumerate(synth_prompts)]
+                )
+            )
 
             bad_chat_jm = validate_json_object_mode_outputs(chat_json_outputs)
             _assert_json_object_mode_checks("Chat Completions json_object", bad_chat_jm)
@@ -245,8 +277,7 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
                 f"({args.mode.value})"
             )
 
-            responses_json_outputs: list[str | None] = []
-            for i, p in enumerate(synth_prompts):
+            async def responses_json_object_one(i: int, p: dict) -> str | None:
                 try:
                     response = await client.responses.create(
                         model=args.model,
@@ -256,10 +287,19 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
                         max_output_tokens=32000,
                         extra_body={"structured_outputs": {"json_object": True}},
                     )
-                    responses_json_outputs.append(_responses_output_text(response))
+                    return _responses_output_text(response)
                 except Exception as e:
                     print(f"Responses json_object request {i} failed: {e}")
-                    responses_json_outputs.append(None)
+                    return None
+
+            responses_json_outputs: list[str | None] = list(
+                await asyncio.gather(
+                    *[
+                        responses_json_object_one(i, p)
+                        for i, p in enumerate(synth_prompts)
+                    ]
+                )
+            )
 
             bad_resp_jm = validate_json_object_mode_outputs(responses_json_outputs)
             _assert_json_object_mode_checks(

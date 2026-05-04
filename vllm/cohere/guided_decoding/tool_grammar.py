@@ -5,24 +5,37 @@ import json
 import regex as re
 import xgrammar as xgr
 
-from vllm.cohere.guided_decoding.cohere_constants import MODEL_TO_TOOL_SCHEME
-from vllm.cohere.utils import get_text_model_name
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.cohere.guided_decoding.cohere_constants import COMMAND_R_TOOLS_TAG
+from vllm.reasoning.cohere_command_reasoning_parser import (
+    COMMAND_A_TOOLS_TAG,
+    MODEL_TO_TAG_STYLE,
+    CohereNormalizedTool,
+    CohereTagRegistry,
+    CohereTagStyle,
+)
+
+# Single registration for guided decoding + structural tags (Command R / C2).
+COMMAND_R_TOOLS_TAG = CohereTagRegistry(
+    trigger=COMMAND_R_TOOLS_TAG.trigger,
+    end=COMMAND_R_TOOLS_TAG.end,
+)
+MODEL_TO_TAG_STYLE["CohereForCausalLM"] = CohereTagStyle(
+    json_tags=(),
+    tools=COMMAND_R_TOOLS_TAG,
+)
 
 
-def collect_tool_schema(engine: AsyncLLM, tool_schema: list[dict]) -> str:
-    model_architecture = get_text_model_name(engine.model_config)
-    grammar = collect_tool_schema_v2(model_architecture, tool_schema)
-    return grammar
-
-
-def collect_tool_schema_v2(text_model_arch: str, tool_schema: list[dict]) -> str:
+def collect_tool_schema_v2(
+    text_model_arch: str, tool_schema: list[CohereNormalizedTool]
+) -> str:
     tool_dictionary = {}
     grammar = None
+    styles = MODEL_TO_TAG_STYLE[text_model_arch]
+    tool_style = styles.tools
     for tool in tool_schema:
         tool_name = tool["name"]
         tool_parameters = json.dumps(tool["parameters"])
-        if MODEL_TO_TOOL_SCHEME[text_model_arch] == "command-a-tools":
+        if tool_style == COMMAND_A_TOOLS_TAG:
             json_schema = f"""{{
                             "type": "object",
                             "properties": {{
@@ -37,7 +50,7 @@ def collect_tool_schema_v2(text_model_arch: str, tool_schema: list[dict]) -> str
                                 "parameters": {tool_parameters}
                                 }}
                                 }}"""
-        elif MODEL_TO_TOOL_SCHEME[text_model_arch] == "command-r-tools":
+        elif tool_style == COMMAND_R_TOOLS_TAG:
             json_schema = f"""{{
                             "type": "object",
                             "properties": {{

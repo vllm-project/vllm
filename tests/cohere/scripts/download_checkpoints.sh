@@ -46,6 +46,10 @@ setup_directories () {
 # Model checkpoints live under a common GCS prefix + model name.
 MODEL_PATH_PREFIX="${MODEL_PATH_PREFIX:-gs://cohere-model-efficiency-ci/engines/}"
 
+# To publish a local mhl_v2 engine tree to CI (requires GCP auth):
+#   gcloud storage rsync -r /path/to/mhl_v2 "${MODEL_PATH_PREFIX%/}/mhl_v2"
+# (Objects must end up under the bucket prefix so downloads land in ENGINES_DIR/mhl_v2/.)
+
 get_checkpoint_url () {
     local MODEL_NAME="$1"
     if [[ "$MODEL_PATH_PREFIX" != */ ]]; then
@@ -161,6 +165,8 @@ download_guided_generation () {
         "command-r35b_fp8"
         "command-a-reasoning_fp8"
         "c4-25a218t_fp8_eagle_l5"
+        # Cohere2 vision + text (mhl_v2); used by test_gg_melody / test_gg_tools_melody in run_guided_generation
+        "mhl_v2"
     )
 
     # Download each model using the checkpoint mapping

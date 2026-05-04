@@ -14,7 +14,7 @@ from test_utils import (
 from test_utils_engine_args import get_async_engine_args_with_overrides
 from transformers import AutoTokenizer
 
-from vllm.cohere.guided_decoding.tool_grammar import get_text_model_name
+from vllm.cohere.utils import get_text_model_name
 from vllm.v1.engine.async_llm import AsyncLLM
 
 # ----------------------- Validation Runner --------------------- #

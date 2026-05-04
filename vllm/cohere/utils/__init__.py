@@ -58,9 +58,6 @@ def get_tokenizer(vllm_config: VllmConfig):
 
 
 def get_text_model_name(model_config: ModelConfig) -> str:
-    if model_config.hf_text_config is not None:
-        # get text model arch for vision models
-        return model_config.hf_text_config.architectures[0]
     return model_config.architectures[0]
 
 

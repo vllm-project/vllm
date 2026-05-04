@@ -14,15 +14,19 @@ from jsonschema import validate
 from PIL import Image
 
 from vllm import SamplingParams, TokensPrompt
-from vllm.cohere.guided_decoding.cohere_constants import (
-    MODEL_TO_PREFIX_POSTFIX,
-    MODEL_TO_TOOL_SCHEME,
-)
+from vllm.cohere.guided_decoding.cohere_constants import MODEL_TO_PREFIX_POSTFIX
 from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # noqa: E501
     convert_schema_to_structural_tags,
 )
+from vllm.cohere.guided_decoding.tool_grammar import (
+    COMMAND_R_TOOLS_TAG,
+)
 from vllm.cohere.utils import get_text_model_name
 from vllm.config.reasoning import ReasoningConfig
+from vllm.reasoning.cohere_command_reasoning_parser import (
+    COMMAND_A_TOOLS_TAG,
+    MODEL_TO_TAG_STYLE,
+)
 from vllm.sampling_params import StructuredOutputsParams
 
 CURRENT_DIR = os.getcwd()
@@ -171,26 +175,28 @@ def find_text_between(response, prefix, postfix):
 
 
 def get_tool_schema(model_architecture, tool_schema):
+    """Per-tool JSON Schema strings aligned with ``collect_tool_schema_v2``."""
+    tool_style = MODEL_TO_TAG_STYLE[model_architecture].tools
     schema_list = []
     for tool in tool_schema:
         tool_name = tool["name"]
         tool_parameters = json.dumps(tool["parameters"])
-        if MODEL_TO_TOOL_SCHEME[model_architecture] == "command-a-tools":
+        if tool_style == COMMAND_A_TOOLS_TAG:
             json_schema = f"""{{
-                                "type": "object",
-                                "properties": {{
-                                    "tool_call_id": {{
-                                        "type": "string",
-                                        "pattern": "^[0-9]+$"
-                                    }},
-                                    "tool_name": {{
-                                        "type": "string",
-                                        "const": "{tool_name}"
-                                    }},
-                                    "parameters": {tool_parameters}
-                                    }}
-                                    }}"""
-        elif MODEL_TO_TOOL_SCHEME[model_architecture] == "command-r-tools":
+                            "type": "object",
+                            "properties": {{
+                                "tool_call_id": {{
+                                    "type": "string",
+                                    "pattern": "^[0-9]+$"
+                                }},
+                                "tool_name": {{
+                                    "type": "string",
+                                    "const": "{tool_name}"
+                                }},
+                                "parameters": {tool_parameters}
+                                }}
+                                }}"""
+        elif tool_style == COMMAND_R_TOOLS_TAG:
             json_schema = f"""{{
                             "type": "object",
                             "properties": {{
@@ -201,6 +207,10 @@ def get_tool_schema(model_architecture, tool_schema):
                                 "parameters": {tool_parameters}
                                 }}
                                 }}"""
+        else:
+            raise ValueError(
+                f"Unsupported tool tag style for {model_architecture!r}: {tool_style!r}"
+            )
         schema_list.append(json_schema)
     return schema_list
 

@@ -27,7 +27,7 @@ from vllm import SamplingParams, TokensPrompt
 from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # noqa: E501
     convert_schema_to_structural_tags,
 )
-from vllm.cohere.guided_decoding.tool_grammar import get_text_model_name
+from vllm.cohere.utils import get_text_model_name
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -40,7 +40,7 @@ def check_if_tool_output_is_valid(batch_results, model_architecture, tool_schema
     for request_id, output in enumerate(batch_results):
         if (
             model_architecture == "Cohere2ForCausalLM"
-            or model_architecture == "Cohere2MoeForCausalLM"
+            or model_architecture == "Cohere2VisionForConditionalGeneration"
         ):
             output = find_text_between(output, "<|START_ACTION|>", "<|END_ACTION|>")
         else:
@@ -63,6 +63,7 @@ def check_if_tool_output_is_valid(batch_results, model_architecture, tool_schema
                     validate(tool, json.loads(matching_strings))
                     print("✅ JSON is valid")
             except Exception:
+                print("❌ JSON is invalid", tool)
                 invalid.append(request_id)
 
     return invalid
