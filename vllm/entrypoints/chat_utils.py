@@ -1451,6 +1451,40 @@ MM_PARSER_MAP: dict[
     ).get("name", None),
 }
 
+# Fields already consumed by the content part parser. Any field NOT in this
+# set is treated as an extra field and passed through to the chat template
+# when using the OpenAI (wrap_dicts) content format.
+_KNOWN_CONTENT_PART_FIELDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "text",
+        "refusal",
+        "thinking",
+        "input_text",
+        "output_text",
+        "closed",
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "detail",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+        "input_image",
+        "uuid",
+    }
+)
+
+
+def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
+    """Collect fields from a content part that are not consumed by the parser.
+
+    This allows model-specific metadata (e.g., language codes for translation
+    models) to flow through to the chat template.
+    """
+    return {k: v for k, v in part.items() if k not in _KNOWN_CONTENT_PART_FIELDS}
+
 
 def _parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
@@ -1661,7 +1695,9 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
-            return {"type": "text", "text": str_content}
+            result: dict[str, Any] = {"type": "text", "text": str_content}
+            result.update(_collect_extra_fields(cast(dict[str, Any], part)))
+            return result
         else:
             return str_content
 
@@ -1726,7 +1762,9 @@ def _parse_chat_message_content_part(
             # emit the single sentinel token as text so the template renders
             # it inline. The renderer later expands it to N tokens post-tokenize.
             return {"type": "text", "text": PROMPT_EMBEDS_PLACEHOLDER_TOKEN}
-        return {"type": modality}
+        result = {"type": modality}
+        result.update(_collect_extra_fields(cast(dict[str, Any], part)))
+        return result
     if modality == "prompt_embeds":
         # Emit the renderer token inline regardless of `interleave_strings`,
         # prompt_embeds are spliced at the token offset so position matters.
