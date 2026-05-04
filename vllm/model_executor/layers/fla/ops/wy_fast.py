@@ -14,14 +14,18 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+from .utils import is_navi
+
+_WY_WARPS = [2, 4] if is_navi else [2, 4, 8]
+_WY_STAGES = [2] if is_navi else [2, 3, 4]
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_warps in _WY_WARPS
+        for num_stages in _WY_STAGES
     ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
 )

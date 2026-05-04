@@ -56,6 +56,10 @@ def select_2d_config(
             # Note: this may disable the fast path (TILE_SIZE == BLOCK_SIZE)
             # for non-power-of-2 block sizes
             TILE_SIZE = triton.next_power_of_2(block_size)
+            if head_size > 128:
+                # Cap TILE_SIZE to fit in 64KB LDS on navi.
+                # TILE_SIZE=256 requires 128KB, TILE_SIZE=128 fits.
+                TILE_SIZE = min(TILE_SIZE, 128)
 
         if max_seqlen_q >= 256:
             BLOCK_M = 128
@@ -110,6 +114,8 @@ def select_3d_config(
             # Note: this may disable the fast path (TILE_SIZE == BLOCK_SIZE)
             # for non-power-of-2 block sizes
             TILE_SIZE = triton.next_power_of_2(block_size)
+            if head_size > 128:
+                TILE_SIZE = min(TILE_SIZE, 128)
             MIN_SEGMENTS = 16 if TILE_SIZE <= 16 else 8
         else:
             TILE_SIZE = 64
