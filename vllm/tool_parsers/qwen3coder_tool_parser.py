@@ -25,12 +25,18 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.structural_tag_registry import (
+    get_enable_structured_outputs_in_reasoning,
+    get_model_structural_tag,
+)
 from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
+    supports_required_and_named: bool = False
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -681,3 +687,11 @@ class Qwen3CoderToolParser(ToolParser):
                 return result
 
         return None
+
+    def get_structural_tag(self, request: ChatCompletionRequest):
+        return get_model_structural_tag(
+            model="qwen_3_5",
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=get_enable_structured_outputs_in_reasoning(),
+        )
