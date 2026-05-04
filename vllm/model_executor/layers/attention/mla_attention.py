@@ -644,31 +644,36 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q: torch.Tensor,
         layer_name_encoded: LayerNameType,
     ) -> torch.Tensor | None:
-        """Run the lifted decode q-prep (q-absorb + cat + FP8 quant).
+        """Run the lifted decode q-prep (slice + q-absorb + cat + FP8 quant).
 
-        Returns the FP8-quantized ``mqa_q`` (shape ``(B, N, kv_lora_rank +
-        qk_rope_head_dim)``) when the trace-time gate is enabled, otherwise
-        ``None`` and ``forward_impl`` runs the legacy in-place path.
+        Returns the FP8-quantized ``mqa_q`` (shape ``(num_decode_tokens,
+        num_heads, kv_lora_rank + qk_rope_head_dim)``) when the trace-time
+        gate is enabled, otherwise ``None`` and ``forward_impl`` runs the
+        legacy in-place path.
 
-        We compute the prep over the full input ``q`` (decode + prefill).
-        ``forward_impl`` slices it to ``[:num_mqa_tokens]`` for the decode
-        kernel; prefill rows continue to flow through ``forward_mha`` with
-        the original BF16 ``q``. This wastes a small amount of compute on
-        mixed/pure-prefill batches but keeps the prep trace-time-constant
-        and graph-visible, which is the whole point.
+        The first FX node is ``vllm::mla_decode_q_take``, which trims ``q``
+        to the decode rows (``q[:num_decode_tokens]``) by reading
+        ``attn_metadata`` from the forward context at execution time. The
+        BMM, cat and FP8 quant therefore operate on decode-only tokens —
+        prefill rows and cudagraph padding never enter the lifted prep.
         """
         if not self._lift_q_decode_quant:
             return None
 
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        # Discrete FX node #1: take only the decode rows.
+        q_decode = torch.ops.vllm.mla_decode_q_take(q, layer_name_encoded)
 
-        # Discrete FX node #1: q-absorption BMM (BF16 output).
+        q_nope, q_pe = q_decode.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+
+        # Discrete FX node #2: q-absorption BMM (BF16 output).
         ql_nope = torch.ops.vllm.unified_mla_q_absorb(q_nope, layer_name_encoded)
 
-        # Discrete FX node #2: concat along head_dim.
+        # Discrete FX node #3: concat along head_dim.
         q_full = torch.cat((ql_nope, q_pe), dim=-1)
 
-        # Discrete FX node #3: static per-tensor FP8 quantization.
+        # Discrete FX node #4: static per-tensor FP8 quantization.
         # Reshape mirrors ``_DecodeConcatQuantFP8.forward`` so QuantFP8 sees
         # the same 2-D shape it has always been called with.
         q_flat = q_full.reshape(q_full.shape[0], -1)
@@ -744,8 +749,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
-        if prepared_mqa_q is not None:
-            prepared_mqa_q = prepared_mqa_q[:num_actual_toks, ...]
+        # ``prepared_mqa_q`` arrives sized to ``num_decode_tokens`` (sliced
+        # by ``vllm::mla_decode_q_take`` inside ``_maybe_prepare_decode_mqa_q``),
+        # which is ``<= num_actual_toks``, so no cudagraph-padding trim is
+        # needed here. The decode-row slice below also becomes a no-op.
 
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
@@ -781,11 +788,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             if prepared_mqa_q is not None:
                 # Lifted decode q-prep path: caller has already produced a
-                # quantized ``mqa_q`` via ``forward()`` so the q-absorb BMM,
-                # head_dim concat, and FP8 quant are visible as discrete FX
-                # nodes. The lifted prep was computed for the full token
-                # extent, so trim it to the decode slice here.
-                mqa_q = prepared_mqa_q[:num_mqa_tokens]
+                # quantized ``mqa_q`` via ``forward()`` so the slice,
+                # q-absorb BMM, head_dim concat, and FP8 quant are visible
+                # as discrete FX nodes. The lift sizes ``prepared_mqa_q``
+                # to ``num_decode_tokens == num_mqa_tokens``, so we can
+                # consume it directly.
+                assert prepared_mqa_q.shape[0] == num_mqa_tokens, (
+                    f"prepared_mqa_q has {prepared_mqa_q.shape[0]} rows "
+                    f"but expected {num_mqa_tokens} (num_decode_tokens). "
+                    "The lift in MLAAttention.forward() should have already "
+                    "trimmed to the decode slice via mla_decode_q_take."
+                )
+                mqa_q = prepared_mqa_q
             else:
                 mqa_q = q[:num_mqa_tokens]
                 mqa_q_nope, mqa_q_pe = mqa_q.split(
@@ -1229,6 +1243,70 @@ direct_register_custom_op(
     op_name="unified_mla_q_absorb",
     op_func=unified_mla_q_absorb,
     fake_impl=unified_mla_q_absorb_fake,
+)
+
+
+def mla_decode_q_take(
+    q: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    """Slice ``q`` to the decode rows (``q[:num_decode_tokens]``).
+
+    Reads ``num_decode_tokens`` from ``forward_context.attn_metadata`` at
+    graph-execution time so the lifted q-prep operates only on the decode
+    portion of the batch, not on prefill rows or cudagraph padding. The op
+    is opaque to Dynamo (the slice index isn't a graph input) but appears
+    as a discrete FX node so a downstream pattern matcher can bind to it.
+
+    Returns a zero-row slice when ``attn_metadata`` is unavailable (profile
+    runs) or when ``num_decode_tokens`` isn't populated; ``forward_impl``'s
+    own ``attn_metadata is None`` early-return handles the empty case.
+
+    We deliberately reach into ``forward_context.attn_metadata`` directly
+    rather than going through ``get_attention_context``: the slice only
+    needs the metadata field, not ``attn_layer`` / ``kv_cache`` / slot
+    mapping, and avoiding that lookup keeps the op cheap.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context = get_forward_context()
+    attn_metadata_raw = forward_context.attn_metadata
+    if attn_metadata_raw is None:
+        return q[:0]
+    # Mirror the dispatch get_attention_context() does: per-layer dict,
+    # list-of-dicts (speculative decoding), or a single attn_metadata.
+    if isinstance(attn_metadata_raw, dict):
+        attn_metadata = attn_metadata_raw.get(layer_name)
+    elif isinstance(attn_metadata_raw, list):
+        attn_metadata = attn_metadata_raw[0].get(layer_name)
+    else:
+        attn_metadata = attn_metadata_raw
+    if attn_metadata is None:
+        return q[:0]
+    num_decode = getattr(attn_metadata, "num_decode_tokens", None)
+    if num_decode is None:
+        return q[:0]
+    return q[:num_decode]
+
+
+def mla_decode_q_take_fake(
+    q: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    # Declare the symbolic shape as the input's shape (an upper bound):
+    # the runtime slice always has ``num_decode_tokens <= q.shape[0]``
+    # rows. Using a backed SymInt (``q.shape[0]``) instead of an unbacked
+    # one keeps downstream ops (``QuantFP8.forward_native``'s
+    # ``group_broadcast``, etc.) free of data-dependent guard failures.
+    # At graph-execution time the real op returns a smaller tensor and
+    # downstream FX nodes operate on its actual runtime shape — same
+    # pattern as ``unified_mla_q_absorb_fake``.
+    return q.new_empty((q.shape[0], q.shape[1], q.shape[2]))
+
+
+direct_register_custom_op(
+    op_name="mla_decode_q_take",
+    op_func=mla_decode_q_take,
+    fake_impl=mla_decode_q_take_fake,
 )
 
 

@@ -89,13 +89,20 @@ class _LiftedQPrep(torch.nn.Module):
         return out
 
 
-def _make_forward_context(layer: MLAAttention):
+def _make_forward_context(layer: MLAAttention, num_decode_tokens: int):
+    """Build a forward context with a stub attn_metadata that only carries
+    ``num_decode_tokens``. The lifted slice op (``mla_decode_q_take``) is
+    the only thing in this test that reads from attn_metadata.
+    """
+    import types
+
     from vllm.forward_context import ForwardContext
 
+    fake_attn_meta = types.SimpleNamespace(num_decode_tokens=num_decode_tokens)
     return ForwardContext(
         no_compile_layers={layer.layer_name: layer},
         all_moe_layers=None,
-        attn_metadata=None,
+        attn_metadata={layer.layer_name: fake_attn_meta},
         slot_mapping={},
         dp_metadata=None,
     )
@@ -104,8 +111,9 @@ def _make_forward_context(layer: MLAAttention):
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="requires GPU")
 @torch.inference_mode()
 def test_lifted_prep_emits_discrete_fx_nodes(default_vllm_config) -> None:
-    """The lifted prep, after Dynamo trace, must show the q-absorb BMM op,
-    the cat, and the FP8 quant op as separate ``call_function`` nodes.
+    """The lifted prep, after Dynamo trace, must show the decode-rows
+    slice op, the q-absorb BMM op, the cat, and the FP8 quant op as
+    separate ``call_function`` nodes.
     """
     device = torch.device("cuda:0")
     dtype = torch.bfloat16
@@ -122,10 +130,14 @@ def test_lifted_prep_emits_discrete_fx_nodes(default_vllm_config) -> None:
         _SEQ_LEN, _NUM_HEADS, _QK_NOPE + _QK_ROPE, dtype=dtype, device=device
     )
 
-    with override_forward_context(_make_forward_context(layer)):
+    # Tell the slice op to keep all rows so the rest of the prep runs on a
+    # non-empty tensor; the FX-node assertions are independent of this size.
+    fctx = _make_forward_context(layer, num_decode_tokens=_SEQ_LEN)
+    with override_forward_context(fctx):
         out = compiled(q)
 
     assert out is not None and out.dtype == current_platform.fp8_dtype()
+    assert out.shape == (_SEQ_LEN, _NUM_HEADS, _KV_LORA + _QK_ROPE), out.shape
     assert backend.graph_pre_pass is not None, (
         "TestBackend never captured a graph; torch.compile may have fallen "
         "through without invoking the post_grad pass hook."
@@ -133,9 +145,19 @@ def test_lifted_prep_emits_discrete_fx_nodes(default_vllm_config) -> None:
     graph = backend.graph_pre_pass
 
     # --- The discrete ops we expect to see as separate FX nodes ---
+    q_take = torch.ops.vllm.mla_decode_q_take
     q_absorb = torch.ops.vllm.unified_mla_q_absorb
     high_level_fp8_quant = torch.ops._C.static_scaled_fp8_quant
     fp8_dtype = current_platform.fp8_dtype()
+
+    q_take_nodes = list(find_op_nodes(q_take, graph))
+    assert len(q_take_nodes) >= 1, (
+        "vllm::mla_decode_q_take is missing from the post-Dynamo graph. "
+        "The decode-rows slice collapsed back into the opaque attention "
+        "op or was inlined by Dynamo, which would re-introduce the "
+        "prefill-rows BMM waste. Graph dump:\n"
+        f"{graph}"
+    )
 
     q_absorb_nodes = list(find_op_nodes(q_absorb, graph))
     assert len(q_absorb_nodes) >= 1, (
@@ -177,20 +199,24 @@ def test_lifted_prep_emits_discrete_fx_nodes(default_vllm_config) -> None:
         f"{graph}"
     )
 
-    # Topology: q_absorb must appear strictly before the (decomposed or
-    # high-level) FP8 quant. Order by graph node index.
+    # Topology: mla_decode_q_take ->  q_absorb -> cat -> FP8 quant.
+    # The pattern matcher in Phase 2 will rely on this ordering.
     quant_nodes = high_level_quant_nodes or fp8_cast_nodes
     indexed = list(graph.nodes)
+    q_take_idx = min(indexed.index(n) for n in q_take_nodes)
     q_absorb_idx = min(indexed.index(n) for n in q_absorb_nodes)
+    cat_idx = min(indexed.index(n) for n in cat_nodes)
     quant_idx = min(indexed.index(n) for n in quant_nodes)
+
+    assert q_take_idx < q_absorb_idx, (
+        "Expected mla_decode_q_take to appear before unified_mla_q_absorb "
+        f"in the FX node ordering. Graph dump:\n{graph}"
+    )
+    assert q_absorb_idx < cat_idx, (
+        f"Expected unified_mla_q_absorb to appear before aten.cat:\n{graph}"
+    )
     assert q_absorb_idx < quant_idx, (
         "Expected unified_mla_q_absorb to appear before the FP8 quant in "
         "the FX node ordering, but they are reversed. Graph dump:\n"
         f"{graph}"
-    )
-
-    # And q_absorb must appear before the cat (cat consumes its output).
-    cat_idx = min(indexed.index(n) for n in cat_nodes)
-    assert q_absorb_idx < cat_idx, (
-        f"Expected unified_mla_q_absorb to appear before aten.cat:\n{graph}"
     )
