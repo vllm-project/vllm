@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,7 @@ from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.gguf_utils import (
     check_gguf_file,
     get_gguf_file_path_from_hf,
+    get_gguf_tokenizer_special_ids,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
@@ -90,6 +92,38 @@ TokenizerRegistry = _TokenizerRegistry(
         for mode, (mod_relname, cls_name) in _VLLM_TOKENIZERS.items()
     }
 )
+
+
+def _maybe_patch_gemma4_gguf_tokenizer(
+    tokenizer: TokenizerLike,
+    model: str | Path,
+    model_type: str | None,
+) -> TokenizerLike:
+    if model_type != "gemma4" or not check_gguf_file(model):
+        return tokenizer
+
+    special_ids = get_gguf_tokenizer_special_ids(model)
+    if not special_ids:
+        return tokenizer
+
+    patched_tokenizer = copy.copy(tokenizer)
+    token_attrs = {
+        "padding_token_id": "pad_token",
+        "bos_token_id": "bos_token",
+        "eos_token_id": "eos_token",
+        "unknown_token_id": "unk_token",
+    }
+    for id_attr, token_attr in token_attrs.items():
+        token_id = special_ids.get(id_attr)
+        if token_id is None:
+            continue
+        tokens = patched_tokenizer.convert_ids_to_tokens([token_id])
+        if not tokens:
+            continue
+        token = tokens[0]
+        setattr(patched_tokenizer, token_attr, token)
+
+    return patched_tokenizer
 
 
 def resolve_tokenizer_args(
@@ -258,11 +292,16 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
 
-    return cached_get_tokenizer(
+    tokenizer = cached_get_tokenizer(
         model_config.tokenizer,
         runner_type=model_config.runner_type,
         tokenizer_mode=model_config.tokenizer_mode,
         revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
+    )
+    return _maybe_patch_gemma4_gguf_tokenizer(
+        tokenizer,
+        model_config.model,
+        getattr(model_config.hf_config, "model_type", None),
     )

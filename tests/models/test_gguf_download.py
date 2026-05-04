@@ -150,14 +150,20 @@ class TestGGUFModelLoader:
         """Test _prepare_weights with repo_id:quant_type format."""
         mock_hf_config = MagicMock()
         mock_hf_config.architectures = ["Qwen3ForCausalLM"]
+        mock_hf_config.model_type = "qwen3"
+        mock_hf_config.quantization_config = None
+        mock_hf_config.compression_config = None
 
         class MockTextConfig:
             max_position_embeddings = 4096
             sliding_window = None
             model_type = "qwen3"
             num_attention_heads = 32
+            quantization_config = None
+            compression_config = None
 
         mock_text_config = MockTextConfig()
+        mock_hf_config.text_config = mock_text_config
         mock_hf_config.get_text_config.return_value = mock_text_config
         mock_hf_config.dtype = "bfloat16"
         mock_get_config.return_value = mock_hf_config
@@ -197,14 +203,20 @@ class TestGGUFModelLoader:
         """Test _prepare_weights with invalid format."""
         mock_hf_config = MagicMock()
         mock_hf_config.architectures = ["Qwen3ForCausalLM"]
+        mock_hf_config.model_type = "qwen3"
+        mock_hf_config.quantization_config = None
+        mock_hf_config.compression_config = None
 
         class MockTextConfig:
             max_position_embeddings = 4096
             sliding_window = None
             model_type = "qwen3"
             num_attention_heads = 32
+            quantization_config = None
+            compression_config = None
 
         mock_text_config = MockTextConfig()
+        mock_hf_config.text_config = mock_text_config
         mock_hf_config.get_text_config.return_value = mock_text_config
         mock_hf_config.dtype = "bfloat16"
         mock_get_config.return_value = mock_hf_config

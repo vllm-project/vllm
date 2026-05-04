@@ -3,7 +3,6 @@
 """GGUF utility functions."""
 
 from functools import cache
-from os import PathLike
 from pathlib import Path
 
 import gguf
@@ -19,8 +18,16 @@ from .repo_utils import list_filtered_repo_files
 logger = init_logger(__name__)
 
 
+_GGUF_TOKENIZER_SPECIAL_ID_FIELDS = {
+    "bos_token_id": "tokenizer.ggml.bos_token_id",
+    "eos_token_id": "tokenizer.ggml.eos_token_id",
+    "unknown_token_id": "tokenizer.ggml.unknown_token_id",
+    "padding_token_id": "tokenizer.ggml.padding_token_id",
+}
+
+
 @cache
-def check_gguf_file(model: str | PathLike) -> bool:
+def check_gguf_file(model: str | Path) -> bool:
     """Check if the file is a GGUF model."""
     model = Path(model)
     if not model.is_file():
@@ -168,6 +175,25 @@ def detect_gguf_multimodal(model: str) -> Path | None:
         return None
     except Exception:
         return None
+
+
+@cache
+def get_gguf_tokenizer_special_ids(model: str | Path) -> dict[str, int]:
+    """Read tokenizer special token ids embedded in a local GGUF file."""
+    if not check_gguf_file(model):
+        return {}
+
+    reader = gguf.GGUFReader(str(model))
+    special_ids: dict[str, int] = {}
+    for key, field_name in _GGUF_TOKENIZER_SPECIAL_ID_FIELDS.items():
+        field = reader.get_field(field_name)
+        if field is None:
+            continue
+        try:
+            special_ids[key] = int(field.parts[-1])
+        except (TypeError, ValueError):
+            logger.warning("Failed to parse GGUF tokenizer field %s", field_name)
+    return special_ids
 
 
 def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
