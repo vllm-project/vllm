@@ -45,6 +45,7 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
+    MambaConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -72,6 +73,7 @@ from vllm.config.cache import (
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -103,7 +105,11 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import (
+    FlexibleArgumentParser,
+    human_readable_int,
+    human_readable_int_or_auto,
+)
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
@@ -254,6 +260,28 @@ def _maybe_add_docs_url(cls: Any) -> str:
     return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
 
 
+def _expand_json_human_readable_numbers(val: str) -> str:
+    """Expand human-readable number suffixes in a JSON string.
+
+    Based on :func:`human_readable_int` so that the ``k/m/g/t`` (decimal) and
+    ``K/M/G/T`` (binary) conventions work out the box.
+    Also works inside JSON config arguments such
+    as ``--kv-transfer-config '{"cpu_bytes_to_use": 80m}'``.
+
+    Only bare (unquoted) tokens are replaced so that JSON string values
+    like ``"model_name"`` are never modified.
+    """
+    # Split on quoted strings so we only touch non-string regions.
+    parts = re.split(r'("(?:[^"\\]|\\.)*")', val)
+    for i in range(0, len(parts), 2):  # even indices = outside strings
+        parts[i] = re.sub(
+            r"\b\d+(?:\.\d+)?[kKmMgGtT]\b",
+            lambda m: str(human_readable_int(m.group())),
+            parts[i],
+        )
+    return "".join(parts)
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
@@ -299,6 +327,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
                 try:
+                    val = _expand_json_human_readable_numbers(val)
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
                     raise argparse.ArgumentTypeError(repr(e)) from e
@@ -416,6 +445,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    numa_bind: bool = ParallelConfig.numa_bind
+    numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
+    numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -510,6 +542,14 @@ class EngineArgs:
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
+    mm_encoder_attn_dtype: str | None = MultiModalConfig.mm_encoder_attn_dtype
+    mm_encoder_fp8_scale_path: str | None = MultiModalConfig.mm_encoder_fp8_scale_path
+    mm_encoder_fp8_scale_save_path: str | None = (
+        MultiModalConfig.mm_encoder_fp8_scale_save_path
+    )
+    mm_encoder_fp8_scale_save_margin: float = (
+        MultiModalConfig.mm_encoder_fp8_scale_save_margin
+    )
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -575,6 +615,7 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
@@ -607,10 +648,12 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
-        CacheConfig.enable_mamba_cache_stochastic_rounding
+        MambaConfig.enable_stochastic_rounding
     )
-    mamba_cache_philox_rounds: int = CacheConfig.mamba_cache_philox_rounds
+    mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -652,6 +695,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.mamba_config, dict):
+            self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
@@ -822,6 +867,22 @@ class EngineArgs:
             "--attention-backend", **attention_kwargs["backend"]
         )
 
+        # Mamba arguments
+        mamba_kwargs = get_kwargs(MambaConfig)
+        mamba_group = parser.add_argument_group(
+            title="MambaConfig",
+            description=MambaConfig.__doc__,
+        )
+        mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument(
+            "--enable-mamba-cache-stochastic-rounding",
+            **mamba_kwargs["enable_stochastic_rounding"],
+        )
+        mamba_group.add_argument(
+            "--mamba-cache-philox-rounds",
+            **mamba_kwargs["stochastic_rounding_philox_rounds"],
+        )
+
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
         structured_outputs_group = parser.add_argument_group(
@@ -860,6 +921,13 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
+        parallel_group.add_argument(
+            "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
+        )
+        parallel_group.add_argument(
+            "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1041,13 +1109,6 @@ class EngineArgs:
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
         cache_group.add_argument(
-            "--enable-mamba-cache-stochastic-rounding",
-            **cache_kwargs["enable_mamba_cache_stochastic_rounding"],
-        )
-        cache_group.add_argument(
-            "--mamba-cache-philox-rounds", **cache_kwargs["mamba_cache_philox_rounds"]
-        )
-        cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
         cache_group.add_argument(
@@ -1125,6 +1186,22 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-encoder-attn-backend",
             **multimodal_kwargs["mm_encoder_attn_backend"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-attn-dtype",
+            **multimodal_kwargs["mm_encoder_attn_dtype"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-path",
+            **multimodal_kwargs["mm_encoder_fp8_scale_path"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-save-path",
+            **multimodal_kwargs["mm_encoder_fp8_scale_save_path"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-save-margin",
+            **multimodal_kwargs["mm_encoder_fp8_scale_save_margin"],
         )
         multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
@@ -1464,6 +1541,10 @@ class EngineArgs:
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
+            mm_encoder_attn_dtype=self.mm_encoder_attn_dtype,
+            mm_encoder_fp8_scale_path=self.mm_encoder_fp8_scale_path,
+            mm_encoder_fp8_scale_save_path=self.mm_encoder_fp8_scale_save_path,
+            mm_encoder_fp8_scale_save_margin=self.mm_encoder_fp8_scale_save_margin,
             pooler_config=self.pooler_config,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
@@ -1578,10 +1659,7 @@ class EngineArgs:
 
         self._check_feature_supported()
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
-        self._set_default_max_num_seqs_and_batched_tokens_args(
-            usage_context, model_config
-        )
-
+        self._set_default_reasoning_config_args()
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1615,11 +1693,34 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
-            enable_mamba_cache_stochastic_rounding=self.enable_mamba_cache_stochastic_rounding,
-            mamba_cache_philox_rounds=self.mamba_cache_philox_rounds,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
+
+        # TurboQuant: auto-skip first/last 2 layers (boundary protection).
+        # These layers are most sensitive to quantization error.
+        # Users can add extra layers via --kv-cache-dtype-skip-layers.
+        if resolved_cache_dtype.startswith("turboquant_"):
+            if model_config.is_hybrid:
+                raise NotImplementedError(
+                    "TurboQuant KV cache is not supported for hybrid "
+                    "(attention + Mamba) models. Boundary layer protection "
+                    "requires uniform attention layers."
+                )
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            merged = sorted(existing | set(boundary), key=lambda x: int(x))
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
+                merged,
+                num_layers,
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -1826,11 +1927,20 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            numa_bind=self.numa_bind,
+            numa_bind_nodes=self.numa_bind_nodes,
+            numa_bind_cpus=self.numa_bind_cpus,
         )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
+        )
+
+        self._set_default_max_num_seqs_and_batched_tokens_args(
+            usage_context,
+            model_config,
+            parallel_config,
         )
 
         assert self.max_num_batched_tokens is not None, (
@@ -1916,6 +2026,35 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+
+        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
+        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
+        if resolved_cache_dtype.startswith("turboquant_") and (
+            attention_config.flash_attn_version is None
+            or attention_config.flash_attn_version >= 3
+        ):
+            logger.warning(
+                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "Overriding flash_attn_version to 2. To silence this "
+                "warning, pass --attention-config.flash_attn_version=2"
+            )
+            attention_config.flash_attn_version = 2
+
+        # Mamba config overrides
+        mamba_config = copy.deepcopy(self.mamba_config)
+        # Convert string to enum if needed (CLI parsing returns a string)
+        if isinstance(self.mamba_backend, str):
+            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
+        else:
+            mamba_config.backend = self.mamba_backend
+        if self.enable_mamba_cache_stochastic_rounding:
+            mamba_config.enable_stochastic_rounding = (
+                self.enable_mamba_cache_stochastic_rounding
+            )
+        if self.mamba_cache_philox_rounds:
+            mamba_config.stochastic_rounding_philox_rounds = (
+                self.mamba_cache_philox_rounds
             )
 
         # Kernel config overrides
@@ -2016,6 +2155,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
@@ -2169,7 +2309,6 @@ class EngineArgs:
                 "This model does not officially support disabling chunked prefill. "
                 "Disabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
-                scope="local",
             )
         elif (
             model_config.runner_type == "pooling"
@@ -2180,7 +2319,6 @@ class EngineArgs:
                 "This model does not officially support chunked prefill. "
                 "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
-                scope="local",
             )
 
         if self.enable_prefix_caching is None:
@@ -2199,7 +2337,6 @@ class EngineArgs:
                 "This model does not officially support prefix caching. "
                 "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
-                scope="local",
             )
 
         # Disable chunked prefill and prefix caching for:
@@ -2220,10 +2357,18 @@ class EngineArgs:
             )
             self.enable_prefix_caching = False
 
+    def _set_default_reasoning_config_args(self):
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
         model_config: ModelConfig,
+        parallel_config: ParallelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
@@ -2235,10 +2380,15 @@ class EngineArgs:
         orig_max_num_seqs = self.max_num_seqs
 
         if self.max_num_batched_tokens is None:
-            self.max_num_batched_tokens = default_max_num_batched_tokens.get(
-                usage_context,
-                SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
+            if parallel_config.use_batched_dp_moe:
+                self.max_num_batched_tokens = (
+                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
+                )
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens.get(
+                    usage_context,
+                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                )
 
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs.get(
@@ -2324,68 +2474,3 @@ def _raise_unsupported_error(feature_name: str):
         f"remove {feature_name} from your config."
     )
     raise NotImplementedError(msg)
-
-
-def human_readable_int(value: str) -> int:
-    """Parse human-readable integers like '1k', '2M', etc.
-    Including decimal values with decimal multipliers.
-
-    Examples:
-    - '1k' -> 1,000
-    - '1K' -> 1,024
-    - '25.6k' -> 25,600
-    """
-    value = value.strip()
-
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
-    if match:
-        decimal_multiplier = {
-            "k": 10**3,
-            "m": 10**6,
-            "g": 10**9,
-            "t": 10**12,
-        }
-        binary_multiplier = {
-            "K": 2**10,
-            "M": 2**20,
-            "G": 2**30,
-            "T": 2**40,
-        }
-
-        number, suffix = match.groups()
-        if suffix in decimal_multiplier:
-            mult = decimal_multiplier[suffix]
-            return int(float(number) * mult)
-        elif suffix in binary_multiplier:
-            mult = binary_multiplier[suffix]
-            # Do not allow decimals with binary multipliers
-            try:
-                return int(number) * mult
-            except ValueError as e:
-                raise argparse.ArgumentTypeError(
-                    "Decimals are not allowed "
-                    f"with binary suffixes like {suffix}. Did you mean to use "
-                    f"{number}{suffix.lower()} instead?"
-                ) from e
-
-    # Regular plain number.
-    return int(value)
-
-
-def human_readable_int_or_auto(value: str) -> int:
-    """Parse human-readable integers like '1k', '2M', etc.
-    Including decimal values with decimal multipliers.
-    Also accepts -1 or 'auto' as a special value for auto-detection.
-
-    Examples:
-    - '1k' -> 1,000
-    - '1K' -> 1,024
-    - '25.6k' -> 25,600
-    - '-1' or 'auto' -> -1 (special value for auto-detection)
-    """
-    value = value.strip()
-
-    if value == "-1" or value.lower() == "auto":
-        return -1
-
-    return human_readable_int(value)

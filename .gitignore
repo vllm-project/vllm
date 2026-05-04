@@ -12,6 +12,9 @@ vllm/third_party/triton_kernels/*
 # FlashMLA interface copied from source
 vllm/third_party/flashmla/flash_mla_interface.py
 
+# DeepGEMM vendored package built from source
+vllm/third_party/deep_gemm/
+
 # triton jit
 .triton
 
@@ -26,6 +29,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!requirements/build/
 cmake-build-*/
 CMakeUserPresets.json
 develop-eggs/
@@ -233,6 +237,7 @@ ep_kernels_workspace/
 
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
+!.buildkite/scripts/lib/
 
 # Generated gRPC protobuf files (compiled at build time from vllm_engine.proto)
 vllm/grpc/vllm_engine_pb2.py

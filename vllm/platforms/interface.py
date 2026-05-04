@@ -86,6 +86,9 @@ class DeviceCapability(NamedTuple):
             return NotImplemented
         return (self.major, self.minor) > (other.major, other.minor)
 
+    def __hash__(self) -> int:
+        return hash((self.major, self.minor))
+
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
 
@@ -389,6 +392,11 @@ class Platform:
         """
         Set the device for the current platform.
         """
+        raise NotImplementedError
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
         raise NotImplementedError
 
     @classmethod
@@ -728,6 +736,18 @@ class Platform:
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        """
+        Returns whether the GPU is an integrated (UMA) device that shares
+        system memory with the CPU.
+
+        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        cudaMemGetInfo may underreport free memory because it does not
+        account for reclaimable OS memory (page cache, buffers).
+        """
+        return False
 
     @classmethod
     def supports_mx(cls) -> bool:

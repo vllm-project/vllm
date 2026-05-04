@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
+
 import numpy as np
 import pybase64 as base64
 import pytest
@@ -10,7 +12,16 @@ import torch
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.serial_utils import tensor2base64
 
+# Prithvi requires terratorch, which is temporarily unavailable while PyPI has
+# `lightning` quarantined (#41376). Skip just the Prithvi case; leave the
+# Qwen3-VL case in the same file untouched.
+_TERRATORCH_AVAILABLE = importlib.util.find_spec("terratorch") is not None
 
+
+@pytest.mark.skipif(
+    not _TERRATORCH_AVAILABLE,
+    reason="terratorch unavailable while PyPI has `lightning` quarantined; see #41376",
+)
 @pytest.mark.parametrize(
     "model_name", ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 )
