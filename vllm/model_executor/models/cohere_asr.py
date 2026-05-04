@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -14,7 +15,7 @@ from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
+from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -48,6 +49,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processors.cohere_asr import (
     INF_VAL,
     CohereASRFeatureExtractor,
@@ -2008,6 +2010,9 @@ class CohereAsrForConditionalGeneration(
     supported_languages = ISO639_1_SUPPORTED_LANGS
     skip_warmup_audio_preprocessing = True
     no_space_languages = {"ja", "zh"}
+    _default_prompt_token_ids_cache: ClassVar[
+        dict[tuple[str | None, str | None, str], tuple[int, ...]]
+    ] = {}
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
@@ -2025,29 +2030,80 @@ class CohereAsrForConditionalGeneration(
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
-        request_prompt = stt_params.request_prompt
+        model_config = stt_params.model_config
 
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the CohereASR prompt"
             )
 
-        # NOTE: this function is used only by online inference and not offline inference
-        # CohereASR doesnt have encoder prompt
-        language_tag = f"<|{language}|><|{language}|>"
-        pnc = True  # TODO(ekagra): make this configurable later
-        pnc_tag = "<|pnc|>" if pnc else "<|nopnc|>"
-        default_prompt = (
-            f"<|startofcontext|><|startoftranscript|>"
-            f"<|emo:undefined|>{language_tag}{pnc_tag}"
-            f"<|noitn|><|notimestamp|><|nodiarize|>"
-        )
-        prompt_text = request_prompt if request_prompt else default_prompt
+        tokenizer = cached_tokenizer_from_config(model_config)
 
-        return TextPrompt(
+        # prompt_text is None because CoherASR uses fast implementation of
+        # sentencepiece tokenizer which needs "▁" as the first token
+        # (which is different from "_") and encode("▁ABC") ignores the first token
+        # so the prompt_text is unreliable. However, prompt_token_ids can be used
+        # to get prompt_text but it wont have the first token "▁".
+        prompt_text = None
+        prompt_token_ids = cls._get_default_prompt_token_ids(
+            tokenizer,
+            model_config,
+            language,
+        )
+
+        return TokensPrompt(
             prompt=prompt_text,
+            prompt_token_ids=prompt_token_ids,
             multi_modal_data={"audio": (audio, stt_config.sample_rate)},
         )
+
+    @classmethod
+    def _get_default_prompt_tokens(cls, language: str) -> tuple[str, ...]:
+        # Use token-level control tags so fast tokenizers do not have to parse
+        # the raw string form of the decoder prefix.
+        return (
+            "▁",
+            "<|startofcontext|>",
+            "<|startoftranscript|>",
+            "<|emo:undefined|>",
+            f"<|{language}|>",
+            f"<|{language}|>",
+            "<|pnc|>",
+            "<|noitn|>",
+            "<|notimestamp|>",
+            "<|nodiarize|>",
+        )
+
+    @classmethod
+    def _get_default_prompt_token_ids(
+        cls,
+        tokenizer: Any,
+        model_config: ModelConfig,
+        language: str,
+    ) -> list[int]:
+        cache_key = (
+            getattr(model_config, "tokenizer", None),
+            getattr(model_config, "tokenizer_revision", None),
+            language,
+        )
+        prompt_token_ids = cls._default_prompt_token_ids_cache.get(cache_key)
+        if prompt_token_ids is None:
+            prompt_tokens = list(cls._get_default_prompt_tokens(language))
+            token_ids = tokenizer.convert_tokens_to_ids(prompt_tokens)
+            if not isinstance(token_ids, list):
+                token_ids = [token_ids]
+            unk_token_id = getattr(tokenizer, "unk_token_id", None)
+            if unk_token_id is not None and any(
+                token_id == unk_token_id for token_id in token_ids
+            ):
+                raise ValueError(
+                    "Failed to resolve the CohereASR decoder control tokens "
+                    "with the configured tokenizer."
+                )
+            prompt_token_ids = tuple(int(token_id) for token_id in token_ids)
+            cls._default_prompt_token_ids_cache[cache_key] = prompt_token_ids
+
+        return list(prompt_token_ids)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
