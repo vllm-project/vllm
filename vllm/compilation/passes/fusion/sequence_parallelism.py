@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
@@ -26,6 +27,9 @@ from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherQuantFP8
 
 logger = init_logger(__name__)
+
+if hasattr(torch.ops._C, "scaled_fp4_quant"):
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
@@ -332,6 +336,133 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         )
 
 
+class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        input = self.empty([1, 8, 16])
+        weight = self.empty([16])
+        input_global_scale = self.empty_f32([1, 1])
+        quant_output = torch.empty([8, 8], device=self.device, dtype=torch.uint8)
+        output_scale = torch.empty([128, 4], device=self.device, dtype=torch.int32)
+        return [input, weight, input_global_scale, quant_output, output_scale]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            input_global_scale: torch.Tensor,
+            quant_output: torch.Tensor,
+            output_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            quant = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=rms,
+                input_scale=input_global_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_output,
+                output_scale=output_scale,
+            )
+            return quant[1], all_reduce, quant[2]
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            input_global_scale: torch.Tensor,
+            quant_output: torch.Tensor,
+            output_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            reduce_scatter = self._reduce_scatter(input)
+            rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
+            quant = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=rms,
+                input_scale=input_global_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_output,
+                output_scale=output_scale,
+            )
+            return (
+                self._all_gather(quant[1]),
+                reduce_scatter,
+                self._all_gather(quant[2]),
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        mm_1 = self.empty([8, 16])
+        residual = self.empty([8, 16])
+        rms_norm_weights = self.empty([16])
+        input_global_scale = self.empty_f32([1, 1])
+        quant_output = torch.empty([8, 8], device=self.device, dtype=torch.uint8)
+        output_scale = torch.empty([128, 4], device=self.device, dtype=torch.int32)
+        return [
+            residual,
+            mm_1,
+            rms_norm_weights,
+            input_global_scale,
+            quant_output,
+            output_scale,
+        ]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+            input_global_scale: torch.Tensor,
+            quant_output: torch.Tensor,
+            output_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(mm_1)
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
+            quant = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=rms,
+                input_scale=input_global_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_output,
+                output_scale=output_scale,
+            )
+            return quant[1], residual_out, quant[2]
+
+        def replacement(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+            input_global_scale: torch.Tensor,
+            quant_output: torch.Tensor,
+            output_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            # Keep this slice in sync with the non-quantized SP replacement:
+            # once the previous SP pattern fires, it becomes a no-op.
+            reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
+            quant = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=rms,
+                input_scale=input_global_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_output,
+                output_scale=output_scale,
+            )
+            return self._all_gather(quant[1]), residual_out, self._all_gather(quant[2])
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class SequenceParallelismPass(VllmPatternMatcherPass):
     """
     This pass enables sequence parallelism for models.
@@ -403,6 +534,14 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             MiddleAllReduceRMSNormStaticFP8Pattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
+
+            if "STATIC_FP4_QUANT_OP" in globals():
+                FirstAllReduceRMSNormStaticNVFP4Pattern(
+                    epsilon, self.model_dtype, self.device
+                ).register(self.patterns)
+                MiddleAllReduceRMSNormStaticNVFP4Pattern(
+                    epsilon, self.model_dtype, self.device
+                ).register(self.patterns)
 
             # Normal RMSNorm patterns
             FirstAllReduceRMSNormPattern(
