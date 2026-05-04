@@ -114,7 +114,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             cum_seq_lens_q=self._prefill_metadata.query_start_loc,
             cum_seq_lens_kv=self._prefill_metadata.query_start_loc,
             enable_pdl=False,
-            is_causal=True,
+            is_causal=self._prefill_metadata.causal,
             return_lse=return_softmax_lse,
             out=out,
         )

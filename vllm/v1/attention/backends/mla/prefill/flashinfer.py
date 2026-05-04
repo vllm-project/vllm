@@ -154,7 +154,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim_qk,
             head_dim_vo=head_dim_vo,
-            causal=True,
+            causal=prefill_metadata.causal,
             sm_scale=global_hyperparameters.sm_scale,
             window_left=global_hyperparameters.window_left,
             logits_soft_cap=global_hyperparameters.logits_soft_cap,

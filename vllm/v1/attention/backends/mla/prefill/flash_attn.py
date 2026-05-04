@@ -150,7 +150,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             max_seqlen_q=self._prefill_metadata.max_query_len,
             max_seqlen_k=self._prefill_metadata.max_query_len,
             softmax_scale=self.scale,
-            causal=True,
+            causal=self._prefill_metadata.causal,
             return_softmax_lse=return_softmax_lse,
         )
 

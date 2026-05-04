@@ -1217,13 +1217,14 @@ class MLACommonBackend(AttentionBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        # The non-causal capability is consulted engine-wide whenever
-        # speculative_config.method == "dflash" (see attention/selector.py).
-        # MLA target layers always run causal attention themselves; only the
-        # DFlash drafter's non-MLA attention actually exercises the non-causal
-        # path. Reporting True here unblocks backend selection for DeepSeek-V3
-        # / Kimi-K2.5 style targets without changing target-side runtime
-        # behavior. See vllm-project/vllm#40632.
+        # MLACommonImpl threads MLACommonPrefillMetadata.causal (mirrored
+        # from CommonAttentionMetadata.causal) into every new-token prefill
+        # backend: flash-attn varlen, FlashInfer ragged, and TRT-LLM ragged.
+        # Decode and chunked-context prefill are unaffected (decode is
+        # per-token; context is already unmasked). DFlash speculative
+        # decoding therefore gets bidirectional attention on the drafter
+        # side without forcing target MLA layers off MLA. See
+        # vllm-project/vllm#40632.
         return True
 
 
@@ -1259,6 +1260,11 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
+    # Whether the new-token prefill should mask future positions. Mirrors
+    # CommonAttentionMetadata.causal so that DFlash speculative decoding
+    # (which sets causal=False for the drafter's bonus + mask tokens) gets
+    # bidirectional attention even when an MLA backend is selected.
+    causal: bool = True
 
 
 @dataclass
@@ -1823,6 +1829,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 output_dtype=self.model_config.dtype,
                 q_data_type=self.q_data_type,
                 prefill_backend=self._prefill_backend,
+                causal=common_attn_metadata.causal,
             )
 
             self._prefill_backend.prepare_metadata(prefill_metadata)
