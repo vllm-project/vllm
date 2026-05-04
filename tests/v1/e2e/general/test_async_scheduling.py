@@ -390,7 +390,7 @@ def run_test(
         # First check that the different parameter configs
         # actually result in different output.
         for (other_test_outs, other_test_logprobs), params in zip(
-            results[1:], sampling_param_tests[1:]
+            results[1:], sampling_param_tests[1:], strict=True
         ):
             with pytest.raises(AssertionError):
                 check_outputs_equal(
@@ -410,10 +410,10 @@ def _all_logprobs_errors(req_a, req_b) -> str | None:
         return None
     if len(req_a) != len(req_b):
         return f"sequence count mismatch: {len(req_a)} vs {len(req_b)}"
-    for seq_idx, (seq_a, seq_b) in enumerate(zip(req_a, req_b)):
+    for seq_idx, (seq_a, seq_b) in enumerate(zip(req_a, req_b, strict=True)):
         if len(seq_a) != len(seq_b):
             return f"seq {seq_idx}: length {len(seq_a)=} vs {len(seq_b)=}"
-        for pos, (a, b) in enumerate(zip(seq_a, seq_b)):
+        for pos, (a, b) in enumerate(zip(seq_a, seq_b, strict=True)):
             err = _logprobs_errors(a, b)
             if err:
                 return f"seq {seq_idx} pos {pos}: {err}"
