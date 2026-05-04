@@ -29,7 +29,7 @@ import torch.nn as nn
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -323,6 +323,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
+
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+            _apply_constrain_to_fx_strides_patch()
+            backend = self.compilation_config.init_backend(self.vllm_config)
+            compilation_counter.stock_torch_compile_count += 1
+            self.model.compile(fullgraph=True, backend=backend)
 
     def get_model(self) -> nn.Module:
         return self.model
