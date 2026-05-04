@@ -386,6 +386,13 @@ class Attention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
+        # KV fake-quant for accuracy studies (bf16/fp8/pertoken/smoothkv/kivi2).
+        # No-op unless configure_kv_quant() was called before LLM(...).
+        from vllm.model_executor.layers.quantization.kv_fake_quant import (
+            attach_kv_quant_to_layer,
+        )
+        attach_kv_quant_to_layer(self, prefix)
+
         # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
         if kv_cache_dtype.startswith("turboquant_"):
             self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
@@ -477,6 +484,11 @@ class Attention(nn.Module, AttentionLayerBase):
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
             )
+        if getattr(self, "_kv_quant_method", None):
+            from vllm.model_executor.layers.quantization.kv_fake_quant import (
+                apply_kv_quant,
+            )
+            key, value = apply_kv_quant(self, key, value)
         output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
