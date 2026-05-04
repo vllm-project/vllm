@@ -542,7 +542,7 @@ class FusedMoE(PluggableLayer):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
