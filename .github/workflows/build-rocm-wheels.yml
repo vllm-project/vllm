@@ -160,6 +160,9 @@ jobs:
 
       - name: GPU sanity check
         run: |
+          echo "=== uname -a ==="
+          uname -a
+          echo ""
           echo "=== /dev/kfd and /dev/dri ==="
           ls -la /dev/kfd /dev/dri || true
           echo ""
