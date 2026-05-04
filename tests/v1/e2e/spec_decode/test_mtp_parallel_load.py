@@ -234,18 +234,22 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch):
     )
 
     async def _generate(args: AsyncEngineArgs, request_id: str) -> tuple[int, ...]:
-        async with AsyncExitStack() as stack:
-            engine = AsyncLLM.from_engine_args(args)
-            stack.callback(engine.shutdown)
-            async for out in engine.generate(
-                request_id=request_id,
-                prompt=PROMPT,
-                sampling_params=sampling_params,
-            ):
-                token_ids = tuple(out.outputs[0].token_ids)
-                assert len(token_ids) == MAX_TOKENS
-                return token_ids
-        raise AssertionError("AsyncLLM produced no output")
+        try:
+            async with AsyncExitStack() as stack:
+                engine = AsyncLLM.from_engine_args(args)
+                stack.callback(engine.shutdown)
+                async for out in engine.generate(
+                    request_id=request_id,
+                    prompt=PROMPT,
+                    sampling_params=sampling_params,
+                ):
+                    token_ids = tuple(out.outputs[0].token_ids)
+                    assert len(token_ids) == MAX_TOKENS
+                    return token_ids
+            raise AssertionError("AsyncLLM produced no output")
+        finally:
+            torch.accelerator.empty_cache()
+            cleanup_dist_env_and_memory()
 
     spec_tokens = await asyncio.wait_for(
         _generate(spec_args, "deepseek-mtp-dp-spec"), timeout=600
