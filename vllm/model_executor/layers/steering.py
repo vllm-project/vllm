@@ -143,10 +143,22 @@ def apply_steering(
     ``steering_index`` is a shared buffer of shape ``(max_tokens,)``
     mapping each token position to its steering table row.  Updated
     in-place by the model runner before each forward pass.
+
+    The compute path dispatches to a fused Triton kernel on CUDA which
+    folds the gather and add into a single pass over ``hidden_states``.
+    The CPU path is a plain eager add. ``steering_table`` is allocated in
+    the model's compute dtype via :func:`register_steering_buffers`, so
+    the gather already matches ``hidden_states.dtype`` and no cast is
+    needed in either path. The output is always a freshly allocated
+    tensor so the ``torch.compile`` graph keeps value semantics — never
+    in place.
     """
-    # ``steering_table`` is allocated in the model's compute dtype via
-    # :func:`register_steering_buffers`, so the gather already matches
-    # ``hidden_states.dtype`` and no cast is needed here.
+    if hidden_states.is_cuda:
+        from vllm.model_executor.layers.steering_kernel import (
+            apply_steering_triton,
+        )
+
+        return apply_steering_triton(hidden_states, steering_table, steering_index)
     return hidden_states + steering_table[steering_index[: hidden_states.shape[0]]]
 
 
