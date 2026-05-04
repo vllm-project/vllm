@@ -1262,19 +1262,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                # require_uniform=True (see split_decodes_and_prefills above)
-                # guarantees every decode-bucket request has the same
-                # query_len. For spec-decode verification, query_len =
-                # 1 + num_spec_tokens > 1 and we route through the prefill
-                # wrapper. A degenerate num_decode_tokens % num_decodes != 0
-                # can show up during dummy_run q_len=0 initialization; treat
-                # that as query_len=1 for robustness.
-                if num_decode_tokens % num_decodes == 0:
-                    query_len = num_decode_tokens // num_decodes
-                else:
+                # FULL CG may add zero rows; derive query_len from nonzero
+                # qo_indptr deltas, not num_decode_tokens / num_decodes.
+                decode_query_lens = (
+                    qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+                )
+                nonzero_query_lens = decode_query_lens[decode_query_lens > 0]
+                if nonzero_query_lens.numel() == 0:
                     query_len = 1
+                else:
+                    query_len = int(nonzero_query_lens[0].item())
+                    is_uniform_or_padding = (decode_query_lens == query_len) | (
+                        decode_query_lens == 0
+                    )
+                    assert bool(is_uniform_or_padding.all().item()), (
+                        f"non-uniform decode bucket: {decode_query_lens.tolist()}"
+                    )
 
-                if query_len == 1:
+                if query_len <= 1:
                     num_input_tokens = num_decode_tokens
 
                     decode_wrapper = self._get_decode_wrapper(
@@ -1307,19 +1312,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
-                        o_data_type=o_dtype,
+                        o_data_type=self.model_config.dtype,
                         fixed_split_size=self.decode_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
                     attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
                 else:
-                    # Spec-decode: uniform query_len > 1 in the decode bucket.
-                    # Route through the prefill wrapper in cudagraph mode.
-                    # zero_rows padding: when the batch is padded for CG,
-                    # trailing request slots have duplicate qo_indptr /
-                    # paged_kv_indptr entries and last_page_len == 0, which
-                    # FlashInfer accepts with bit-identical real-row numerics
-                    # (verified via flashinfer_padded_cg_repro.py).
+                    real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
+                    full_cg_decode = (
+                        use_cudagraph and pure_decode and num_prefill_tokens == 0
+                    )
+                    if real_decode_tokens != num_decode_tokens and not full_cg_decode:
+                        raise RuntimeError(
+                            f"num_decode_tokens ({num_decode_tokens}) != "
+                            f"qo_indptr[-1] ({real_decode_tokens}) outside "
+                            "FULL-CG decode."
+                        )
+                    # FlashInfer prefill uses qo_indptr[-1] as query length;
+                    # full-CG token padding must not leak into forward slice.
+                    attn_metadata.num_decode_tokens = real_decode_tokens
                     spec_wrapper = self._get_spec_decode_prefill_wrapper(
                         num_decodes, use_cudagraph
                     )
