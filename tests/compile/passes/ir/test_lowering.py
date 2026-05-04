@@ -146,5 +146,8 @@ class TestFakeOpLowering:
         result = impl.supports_args(*fake_args)
 
         # This should NOT be a bool - it's a SymBool (Eq(u0, 8))
-        with pytest.raises(AssertionError, match="isinstance"):
-            assert isinstance(result, bool)
+        # indicating the implementation specializes on batch size
+        assert not isinstance(result, bool), (
+            f"supports_args returned {type(result).__name__}, expected SymBool. "
+            f"The impl lambda x: x.size(0) == 8 creates a symbolic comparison."
+        )
