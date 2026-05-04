@@ -33,6 +33,7 @@ from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
+from .kv_cache_quant import KVCacheQuantConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -318,6 +319,10 @@ class VllmConfig:
     """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
+    kv_cache_quant_config: KVCacheQuantConfig | None = None
+    """KV-cache fake-quantization config (bf16 / fp8 / pertoken int4 /
+    smoothkv / smoothkv_fused). When None, KV cache runs in the model's
+    native dtype with no quantization."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None

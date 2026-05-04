@@ -11,84 +11,64 @@ Wired into ``Attention`` via two inline reads (``__init__``: registration,
 monkey-patch -- mirrors the partial-sum pattern in #1.
 
 Public API:
-    configure_kv_quant(method, group_size, bits, calib_path)   # before LLM(...)
-    attach_kv_quant_to_layer(layer, prefix)                    # called from Attention.__init__
-    apply_kv_quant(layer, key, value) -> (key, value)          # called from Attention.forward
+    LLM(model="...", kv_cache_quant_config=KVCacheQuantConfig(method="smoothkv", ...))
+                                                              ^ from vllm.config
+
+Inside the engine:
+    attach_kv_quant_to_layer(layer, prefix)   # called from Attention.__init__
+    apply_kv_quant(layer, key, value)         # called from Attention.forward
+    maybe_run_post_load_fusion(model)         # called from Worker.load_model
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
-
 import torch
 
+from vllm.config import KVCacheQuantConfig, get_current_vllm_config_or_none
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configuration singleton
+# Calib cache (one entry per calib_path, populated lazily inside the worker
+# the first time a smoothkv layer is constructed)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class _KvQuantConfig:
-    method: str = "bf16"            # bf16 | fp16 | fp8 | pertoken | smoothkv | smoothkv_fused
-    group_size: int = 128
-    bits: int = 4
-    # SmoothKV: full (num_layers, full_num_kv_heads, head_dim) tensors on CPU.
-    # Sliced per-layer, per-TP-rank inside attach_kv_quant_to_layer().
-    smoothkv_s_k_cpu: Optional[torch.Tensor] = None
-    smoothkv_s_v_cpu: Optional[torch.Tensor] = None
-    # Cached so we don't reload the calib file per layer.
-    smoothkv_calib_path: Optional[str] = None
+_CALIB_CACHE: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
 
-_CONFIG = _KvQuantConfig()
-
-
-def configure_kv_quant(
-    method: str,
-    group_size: int = 128,
-    bits: int = 4,
-    calib_path: Optional[str] = None,
-    dtype: torch.dtype = torch.bfloat16,
-) -> None:
-    """Set the global KV fake-quant config. Must be called BEFORE ``LLM(...)``.
-
-    Each ``Attention.__init__`` reads this singleton and copies the relevant
-    fields onto the layer instance. SmoothKV calib is loaded once here (CPU)
-    and sliced per-layer/per-TP-rank inside the layer ``__init__``.
-    """
-    if method not in ("bf16", "fp16", "fp8", "pertoken", "smoothkv",
-                      "smoothkv_fused"):
-        raise ValueError(
-            f"Unknown method {method!r}; "
-            "expected bf16/fp16/fp8/pertoken/smoothkv/smoothkv_fused"
-        )
-    if method in ("smoothkv", "smoothkv_fused") and not calib_path:
-        raise ValueError(f"method={method!r} requires calib_path")
-
-    _CONFIG.method = method
-    _CONFIG.group_size = group_size
-    _CONFIG.bits = bits
-
-    if method in ("smoothkv", "smoothkv_fused"):
-        calib = torch.load(calib_path, weights_only=True)
-        _CONFIG.smoothkv_s_k_cpu = calib["s_K"].to(dtype)
-        _CONFIG.smoothkv_s_v_cpu = calib["s_V"].to(dtype)
-        _CONFIG.smoothkv_calib_path = calib_path
-    else:
-        _CONFIG.smoothkv_s_k_cpu = None
-        _CONFIG.smoothkv_s_v_cpu = None
-        _CONFIG.smoothkv_calib_path = None
-
-    logger.info(
-        "[kv_fake_quant] configured method=%s group_size=%s bits=%s%s",
-        method, group_size, bits,
-        f" calib_path={calib_path}" if calib_path else "",
+def _str_to_dtype(name: str) -> torch.dtype:
+    return {"bfloat16": torch.bfloat16, "float16": torch.float16}.get(
+        name, torch.bfloat16
     )
+
+
+def _load_calib_cached(
+    calib_path: str, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load (s_K, s_V) from the calib .pt and keep them on CPU; cache by path
+    so workers only pay the IO cost once."""
+    cached = _CALIB_CACHE.get(calib_path)
+    if cached is not None:
+        return cached
+    calib = torch.load(calib_path, weights_only=True)
+    sk = calib["s_K"].to(dtype)
+    sv = calib["s_V"].to(dtype)
+    _CALIB_CACHE[calib_path] = (sk, sv)
+    return sk, sv
+
+
+def _get_active_config() -> KVCacheQuantConfig | None:
+    """Read the active KV-quant config from the current VllmConfig, or None
+    if no LLM is constructed / no kv_cache_quant_config was set."""
+    vllm_cfg = get_current_vllm_config_or_none()
+    if vllm_cfg is None:
+        return None
+    cfg = vllm_cfg.kv_cache_quant_config
+    if cfg is None or not cfg.is_active():
+        return None
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -294,26 +274,28 @@ def fake_quantize_pertoken(
 # ---------------------------------------------------------------------------
 
 def attach_kv_quant_to_layer(layer, prefix: str) -> None:
-    """Read the global config; if a method is active, set per-instance attrs
-    and (for SmoothKV) register CPU-side calib scales as non-persistent buffers
-    so they auto-migrate to the device when ``module.to(device)`` is called.
+    """Read the active ``KVCacheQuantConfig`` from the current VllmConfig and,
+    if a method is active, set per-instance attrs on the layer plus (for
+    SmoothKV) register CPU-side calib scales as non-persistent buffers so
+    they auto-migrate to the device when ``module.to(device)`` is called.
 
     For ``smoothkv_fused``: at runtime the layer behaves as plain ``pertoken``
     (the s_K / s_V scaling is already folded into qkv_proj / o_proj weights at
     load time by ``maybe_run_post_load_fusion``). So we set the per-layer
     method to ``"pertoken"`` here.
+
+    No-op unless ``LLM(kv_cache_quant_config=KVCacheQuantConfig(...))`` was set.
     """
-    if _CONFIG.method in ("bf16", "fp16"):
+    cfg = _get_active_config()
+    if cfg is None:
         return
 
-    runtime_method = (
-        "pertoken" if _CONFIG.method == "smoothkv_fused" else _CONFIG.method
-    )
+    runtime_method = "pertoken" if cfg.method == "smoothkv_fused" else cfg.method
     layer._kv_quant_method = runtime_method
-    layer._kv_quant_group_size = _CONFIG.group_size
-    layer._kv_quant_bits = _CONFIG.bits
+    layer._kv_quant_group_size = cfg.group_size
+    layer._kv_quant_bits = cfg.bits
 
-    if _CONFIG.method == "smoothkv":
+    if cfg.method == "smoothkv":
         from vllm.distributed import get_tensor_model_parallel_rank
         from vllm.model_executor.models.utils import extract_layer_index
         try:
@@ -327,8 +309,9 @@ def attach_kv_quant_to_layer(layer, prefix: str) -> None:
             tp_rank = get_tensor_model_parallel_rank()
         except Exception:
             tp_rank = 0
-        s_k_full = _CONFIG.smoothkv_s_k_cpu
-        s_v_full = _CONFIG.smoothkv_s_v_cpu
+        s_k_full, s_v_full = _load_calib_cached(
+            cfg.calib_path, _str_to_dtype(cfg.dtype)
+        )
         full_kv_heads = s_k_full.shape[1]
         per_worker = layer.num_kv_heads
         if per_worker == full_kv_heads:
@@ -509,20 +492,15 @@ def fuse_smoothkv_into_model(
 def maybe_run_post_load_fusion(model) -> None:
     """Called once per worker from ``Worker.load_model`` post weight-load.
 
-    No-op unless ``configure_kv_quant("smoothkv_fused", calib_path=...)`` was
-    set before ``LLM(...)``. When active, folds s_K / s_V into the model's
-    projection weights in place. After this returns, the runtime forward path
-    uses plain pertoken int4 (no per-step rescaling).
+    No-op unless ``LLM(kv_cache_quant_config=KVCacheQuantConfig(method=
+    "smoothkv_fused", ...))`` was set. When active, folds s_K / s_V into
+    the model's projection weights in place. After this returns, the runtime
+    forward path uses plain pertoken int4 (no per-step rescaling).
     """
-    if _CONFIG.method != "smoothkv_fused":
+    cfg = _get_active_config()
+    if cfg is None or cfg.method != "smoothkv_fused":
         return
-    sk = _CONFIG.smoothkv_s_k_cpu
-    sv = _CONFIG.smoothkv_s_v_cpu
-    if sk is None or sv is None:
-        raise RuntimeError(
-            "[kv_fake_quant] smoothkv_fused configured but calib not loaded. "
-            "configure_kv_quant() must run before LLM(...)."
-        )
+    sk, sv = _load_calib_cached(cfg.calib_path, _str_to_dtype(cfg.dtype))
     try:
         from vllm.distributed import (
             get_tensor_model_parallel_rank,

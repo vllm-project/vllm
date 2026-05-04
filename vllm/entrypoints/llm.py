@@ -296,6 +296,15 @@ class LLM:
                 # to provide better context to the user.
                 raise ValueError(f"Invalid 'kv_transfer_config' provided: {e}") from e
 
+        if "kv_cache_quant_config" in kwargs and isinstance(
+            kwargs["kv_cache_quant_config"], dict
+        ):
+            from vllm.config.kv_cache_quant import KVCacheQuantConfig
+
+            kwargs["kv_cache_quant_config"] = KVCacheQuantConfig(
+                **kwargs["kv_cache_quant_config"]
+            )
+
         if hf_overrides is None:
             hf_overrides = {}
 

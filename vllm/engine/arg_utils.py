@@ -41,6 +41,7 @@ from vllm.config import (
     ECTransferConfig,
     EPLBConfig,
     KernelConfig,
+    KVCacheQuantConfig,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -619,6 +620,7 @@ class EngineArgs:
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
+    kv_cache_quant_config: KVCacheQuantConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
@@ -2136,6 +2138,7 @@ class EngineArgs:
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            kv_cache_quant_config=self.kv_cache_quant_config,
             ec_transfer_config=self.ec_transfer_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
