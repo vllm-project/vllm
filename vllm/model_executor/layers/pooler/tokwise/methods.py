@@ -52,8 +52,8 @@ class AllPool(TokenPoolingMethod):
             # DispatchPooler passes the full hidden_states tensor.
             # slice out the subgroup once, then split it by
             # per-request token counts
-            group_start = int(pooling_cursor.first_token_indices_gpu[0].item())
-            group_end = int(pooling_cursor.last_token_indices_gpu[-1].item()) + 1
+            group_start = int(pooling_cursor.first_token_indices_cpu[0])
+            group_end = group_start + sum(split_sizes)
             hidden_states_group = hidden_states[group_start:group_end]
             hidden_states_lst = list(hidden_states_group.split(split_sizes))
         else:
