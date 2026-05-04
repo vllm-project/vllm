@@ -1852,6 +1852,9 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            unsupported.append("stock torch.compile")
+
         if (
             self.compilation_config.pass_config.enable_sp
             and self.parallel_config.tensor_parallel_size > 1
