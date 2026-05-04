@@ -86,6 +86,29 @@ COMMON_BROADCAST_SETTINGS = {
 # which cases would be selected and deselected by pytest. In general,
 # this is a good idea for checking your command first, since tests are slow.
 
+
+def _granite4_vision_vllm_to_hf_output(vllm_output, model):
+    """Post-processor for granite4_vision vLLM output.
+
+    Self-contained to avoid calling AutoConfig/AutoTokenizer without
+    trust_remote_code (needed while the model is not in upstream HF).
+    """
+    output_ids, output_str, out_logprobs = vllm_output
+    mm_token_id = 100352
+    hf_output_ids = [
+        token_id
+        for idx, token_id in enumerate(output_ids)
+        if token_id != mm_token_id or idx == 0 or output_ids[idx - 1] != mm_token_id
+    ]
+    hf_output_str = (
+        output_str[1:] if output_str and output_str[0] == " " else output_str
+    )
+    eos_token_id = 100257
+    if hf_output_ids and hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + "<|end_of_text|>"
+    return hf_output_ids, hf_output_str, out_logprobs
+
+
 VLM_TEST_SETTINGS = {
     #### Core tests to always run in the CI
     "llava": VLMTestInfo(
@@ -492,6 +515,20 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         marks=[large_gpu_mark(min_gb=32)],
     ),
+    "granite4_vision": VLMTestInfo(
+        models=["ibm-granite/granite-vision-4.1-4b"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
+        max_model_len=8192,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=_granite4_vision_vllm_to_hf_output,
+        image_size_factors=[(1.0,)],
+        vllm_runner_kwargs={
+            "enable_lora": True,
+            "max_lora_rank": 256,
+            "default_mm_loras": {"image": "ibm-granite/granite-vision-4.1-4b"},
+        },
+    ),
     "h2ovl": VLMTestInfo(
         models=[
             "h2oai/h2ovl-mississippi-800m",
@@ -768,6 +805,32 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "moondream3": VLMTestInfo(
+        models=["moondream/moondream3-preview"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=identity,
+        img_idx_to_prompt=lambda idx: "<|endoftext|><image>",
+        # Common-image coverage here targets query/caption. The native
+        # detect/point skills are not exposed by vLLM.
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image><|md_reserved_0|>query<|md_reserved_1|>What is this sign?<|md_reserved_2|>",  # noqa: E501
+                "cherry_blossom": (
+                    "<vlm_image><|md_reserved_0|>query<|md_reserved_1|>What season is shown?<|md_reserved_2|>"  # noqa: E501
+                ),
+            }
+        ),
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        hf_processor=model_utils.moondream3_processor,
+        patch_hf_runner=model_utils.moondream3_patch_hf_runner,
+        # Single size factor to avoid GPU OOM when running multiple test
+        # cases sequentially (9B MoE model uses ~18 GiB per instance).
+        image_size_factors=[(1.0,)],
+        # Moondream3 is 9B params with MoE, needs significant GPU memory
+        marks=[large_gpu_mark(min_gb=48)],
+    ),
     "ovis1_6-gemma2": VLMTestInfo(
         models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -884,6 +947,7 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        num_logprobs=10,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
