@@ -11,6 +11,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -31,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -682,6 +684,217 @@ def test_schedule_order(enable_chunked_prefill: bool):
         # and scheduling subsequent short requests in advance,
         # even though there is still token budgets remaining.
         assert len(scheduler_output1.scheduled_new_reqs) == 1
+
+
+def _create_mamba_align_scheduler(
+    *,
+    block_size: int = 16,
+    max_num_batched_tokens: int = 64,
+    max_num_scheduled_tokens: int | None = None,
+    max_model_len: int = 256,
+    num_blocks: int = 10000,
+    kv_connector_matched_tokens: int = 0,
+    kv_connector_is_async: bool = False,
+) -> Scheduler:
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=8,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_scheduled_tokens=max_num_scheduled_tokens,
+        max_model_len=max_model_len,
+        disable_chunked_mm_input=False,
+        enable_chunked_prefill=True,
+        async_scheduling=False,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=True,
+        mamba_block_size=block_size,
+        mamba_cache_mode="align",
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=ParallelConfig(),
+        kv_transfer_config=(
+            KVTransferConfig(
+                kv_connector="MockKVConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "matched_tokens": kv_connector_matched_tokens,
+                    "is_async": kv_connector_is_async,
+                },
+            )
+            if kv_connector_matched_tokens > 0
+            else None
+        ),
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            )
+        ],
+    )
+    cache_config.num_gpu_blocks = num_blocks
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        log_stats=False,
+    )
+
+
+def test_mamba_align_prefill_chunk_alignment_clamps_to_block_boundary():
+    scheduler = _create_mamba_align_scheduler(
+        block_size=16,
+        max_num_batched_tokens=30,
+        max_model_len=256,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        block_size=16,
+        req_ids=["long"],
+    )
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["long"] == 16
+
+
+def test_mamba_align_prefill_chunk_alignment_blocks_waiting_queue_on_tiny_budget():
+    scheduler = _create_mamba_align_scheduler(
+        block_size=16,
+        max_num_batched_tokens=32,
+        max_num_scheduled_tokens=8,
+        max_model_len=256,
+    )
+    (long_request,) = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        block_size=16,
+        req_ids=["long"],
+    )
+    (short_request,) = create_requests(
+        num_requests=1,
+        num_tokens=4,
+        block_size=16,
+        req_ids=["short"],
+    )
+
+    scheduler.add_request(long_request)
+    scheduler.add_request(short_request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {}
+    assert [request.request_id for request in scheduler.waiting] == ["long", "short"]
+
+
+def test_prefill_chunk_alignment_policy_is_noop_without_mamba_align():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=30,
+        block_size=16,
+        max_model_len=256,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        block_size=16,
+        req_ids=["long"],
+    )
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["long"] == 30
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_mamba_align_prefill_chunk_alignment_rejects_external_kv_hits(is_async: bool):
+    scheduler = _create_mamba_align_scheduler(
+        block_size=16,
+        max_num_batched_tokens=30,
+        max_model_len=256,
+        kv_connector_matched_tokens=16,
+        kv_connector_is_async=is_async,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        block_size=16,
+        req_ids=["external"],
+    )
+    scheduler.add_request(request)
+
+    with pytest.raises(AssertionError, match="External KV connector"):
+        scheduler.schedule()
+
+
+def test_prefill_chunk_alignment_policy_can_adjust_external_kv_hits():
+    scheduler = _create_mamba_align_scheduler(
+        block_size=16,
+        max_num_batched_tokens=96,
+        max_model_len=256,
+        kv_connector_matched_tokens=24,
+    )
+
+    class ExternalKVAlignmentPolicy:
+        def align_external_cached_tokens(
+            self,
+            request: Request,
+            *,
+            num_local_cached_tokens: int,
+            num_external_cached_tokens: int,
+        ) -> int:
+            assert num_local_cached_tokens == 0
+            assert num_external_cached_tokens == 24
+            return 16
+
+        def align_scheduled_tokens(
+            self,
+            request: Request,
+            num_scheduled_tokens: int,
+            *,
+            num_local_cached_tokens: int = 0,
+            num_external_cached_tokens: int = 0,
+        ) -> int:
+            assert num_external_cached_tokens == 16
+            return num_scheduled_tokens
+
+    # Inject a test-only policy to exercise the scheduler's policy boundary.
+    scheduler.prefill_chunk_alignment_policy = ExternalKVAlignmentPolicy()
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=96,
+        block_size=16,
+        req_ids=["external"],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["external"] == 80
 
 
 def test_preempt_during_execution():
