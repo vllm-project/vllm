@@ -26,13 +26,12 @@ enum ThinkingMode {
 }
 
 /// Tool schema shape rendered inside the `<functions>` block.
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Serialize)]
 struct RenderedToolSchema<'a> {
     name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
     parameters: &'a Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
 }
 

@@ -7,15 +7,16 @@ use crate::error::ApiError;
 /// JSON schema specification nested inside a `json_schema` response format.
 ///
 /// Mirrors the Python vLLM `JsonSchemaResponseFormat` class.
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonSchemaFormat {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub description: Option<String>,
     /// The actual JSON schema object.
     #[serde(alias = "json_schema")]
     pub schema: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub strict: Option<bool>,
 }
 

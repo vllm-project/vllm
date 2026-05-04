@@ -152,34 +152,29 @@ pub enum StopReason {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L36-L107>
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StructuredOutputsParams {
     /// JSON schema (as a dict/object or JSON string) constraining the output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json: Option<serde_json::Value>,
     /// Regular expression the output must match.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regex: Option<String>,
     /// List of allowed output strings (the model must produce one of these).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice: Option<Vec<String>>,
     /// Context-free grammar (in EBNF-like notation) the output must conform to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grammar: Option<String>,
     /// When `true`, output must be valid JSON (free-form, no schema).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_object: Option<bool>,
     /// Disable any additional whitespace in guided JSON output.
-    #[serde(default, skip_serializing_if = "crate::protocol::is_false")]
+    #[serde(skip_serializing_if = "crate::protocol::is_false")]
     pub disable_any_whitespace: bool,
     /// Disable `additionalProperties` in JSON schema output.
-    #[serde(default, skip_serializing_if = "crate::protocol::is_false")]
+    #[serde(skip_serializing_if = "crate::protocol::is_false")]
     pub disable_additional_properties: bool,
     /// Custom whitespace pattern for guided JSON output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whitespace_pattern: Option<String>,
     /// Structural tag configuration (JSON-encoded string).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structural_tag: Option<String>,
 }
 
@@ -192,6 +187,7 @@ pub struct StructuredOutputsParams {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineCoreSamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
@@ -240,33 +236,29 @@ pub struct EngineCoreSamplingParams {
     pub all_stop_token_ids: BTreeSet<u32>,
     /// Logit biases to apply during sampling.
     /// Keys are token IDs
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub logit_bias: Option<HashMap<u32, f32>>,
     /// Restrict output to these token IDs only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Tokenized bad words to avoid during generation.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "_bad_words_token_ids"
-    )]
+    #[serde(default, rename = "_bad_words_token_ids")]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Parameters for configuring structured outputs (guided decoding).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub structured_outputs: Option<StructuredOutputsParams>,
     /// Specific token IDs for which log probabilities should be returned at each position.
     ///
     /// When set, the engine returns logprobs for exactly these tokens in addition to the
     /// sampled/scored token. Mutually exclusive with the `logprobs` count field in practice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub logprob_token_ids: Option<Vec<u32>>,
     /// If `Some(true)`, the request will not attempt to read from the prefix cache; newly
     /// computed blocks may still populate the cache. `None` defers to engine-core defaults.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
 }
 

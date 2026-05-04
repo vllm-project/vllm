@@ -5418,6 +5418,7 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "serde_tuple",
+ "serde_with",
  "task-local",
  "tempfile",
  "thiserror 2.0.18",
