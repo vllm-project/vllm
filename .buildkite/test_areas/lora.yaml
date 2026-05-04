@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: LoRA %N
+  key: lora
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/lora
@@ -13,6 +14,7 @@ steps:
 
 
 - label: LoRA TP (Distributed)
+  key: lora-tp-distributed
   timeout_in_minutes: 30
   num_devices: 4
   source_file_dependencies:
