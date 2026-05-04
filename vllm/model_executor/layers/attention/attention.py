@@ -91,6 +91,22 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
     )
 
 
+def _is_fp8_kv_cache_method(quant_method: QuantizeMethodBase) -> bool:
+    """Returns whether the KV cache quant method is from an fp8 checkpoint.
+
+    This distinguishes fp8-specific KV cache methods (Fp8KVCacheMethod,
+    ModelOptFp8KVCacheMethod) from other BaseKVCacheMethod subclasses like
+    CompressedTensorsKVCacheMethod or QuarkKVCacheMethod, which may be used
+    with non-fp8 checkpoints (e.g., INT4, INT8).
+    """
+    from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8KVCacheMethod,
+    )
+
+    return isinstance(quant_method, (Fp8KVCacheMethod, ModelOptFp8KVCacheMethod))
+
+
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
     """Sets default quantization scales for the layer."""
     if register_buffer:
@@ -164,8 +180,12 @@ def _init_kv_cache_quant(
         assert isinstance(quant_method, BaseKVCacheMethod)
         # TODO (mgoin): kv cache dtype should be specified in the FP8
         # checkpoint config and become the "auto" behavior
-        if layer.kv_cache_dtype == "fp8_e5m2":
-            raise ValueError("fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
+        if layer.kv_cache_dtype == "fp8_e5m2" and _is_fp8_kv_cache_method(
+            quant_method
+        ):
+            raise ValueError(
+                "fp8_e5m2 kv-cache is not supported with fp8 checkpoints."
+            )
         # If quantization is enabled, we make "k_scale" and "v_scale"
         # parameters so that it can be loaded from the model checkpoint.
         # The k/v_scale will then be converted back to native float32
