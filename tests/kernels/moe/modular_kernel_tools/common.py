@@ -771,6 +771,8 @@ def run_modular_kernel(
         [num_tokens] * config.world_size, device="cuda", dtype=torch.int
     )
 
+    torch.distributed.barrier()
+
     with set_forward_context(
         None,
         vllm_config,
