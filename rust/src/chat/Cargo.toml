@@ -8,9 +8,9 @@ test-util = []
 
 [dependencies]
 anyhow.workspace = true
+asynk-strim-attr.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
-futures-async-stream.workspace = true
 minijinja.workspace = true
 minijinja-contrib.workspace = true
 openai-harmony.workspace = true

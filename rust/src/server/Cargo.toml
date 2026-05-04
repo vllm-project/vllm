@@ -5,9 +5,9 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+asynk-strim-attr.workspace = true
 axum.workspace = true
 futures.workspace = true
-futures-async-stream.workspace = true
 http-body.workspace = true
 libc.workspace = true
 prost.workspace = true

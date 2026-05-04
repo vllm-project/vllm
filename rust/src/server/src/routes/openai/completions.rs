@@ -3,15 +3,16 @@ mod types;
 mod validate;
 
 use std::convert::Infallible;
+use std::result::Result;
 use std::sync::Arc;
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
-use futures_async_stream::try_stream;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
@@ -205,7 +206,7 @@ async fn collect_completion(
 }
 
 /// Convert one internal decoded-text stream into OpenAI completions chunks.
-#[try_stream(ok = CompletionSseChunk, error = ApiError)]
+#[try_stream]
 async fn completion_chunk_stream(
     stream: impl TextOutputStream,
     request_id: String,
@@ -217,7 +218,8 @@ async fn completion_chunk_stream(
     requested_logprobs: Option<u32>,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
-) {
+    mut y: TryYielder<CompletionSseChunk, ApiError>,
+) -> Result<(), ApiError> {
     pin_mut!(stream);
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
@@ -238,7 +240,7 @@ async fn completion_chunk_stream(
                         }
                         first_chunk = false;
                     }
-                    yield CompletionSseChunk::Chunk(chunk);
+                    y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
                     let mut chunk =
@@ -247,7 +249,7 @@ async fn completion_chunk_stream(
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
                     first_chunk = false;
-                    yield CompletionSseChunk::Chunk(chunk);
+                    y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 }
             }
             Ok(DecodedTextEvent::TextDelta {
@@ -275,7 +277,7 @@ async fn completion_chunk_stream(
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
                 }
-                yield CompletionSseChunk::Chunk(chunk);
+                y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
@@ -289,15 +291,16 @@ async fn completion_chunk_stream(
                             "completion finished"
                         );
                     }
-                    yield CompletionSseChunk::Chunk(final_chunk(
+                    y.yield_ok(CompletionSseChunk::Chunk(final_chunk(
                         &request_id,
                         &response_model,
                         created,
                         finished.finish_reason,
-                    )?);
+                    )?))
+                    .await;
 
                     if include_usage {
-                        yield CompletionSseChunk::Usage(usage_chunk(
+                        y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &request_id,
                             &response_model,
                             created,
@@ -305,7 +308,8 @@ async fn completion_chunk_stream(
                                 finished.prompt_token_count as u32,
                                 finished.output_token_count as u32,
                             ),
-                        ));
+                        )))
+                        .await;
                     }
                 }
             }
@@ -318,6 +322,7 @@ async fn completion_chunk_stream(
             }
         }
     }
+    Ok(())
 }
 
 fn delta_chunk(
@@ -381,21 +386,25 @@ fn usage_chunk(
 /// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
 /// events followed by `data: [DONE]`, so the transport stream itself stays
 /// infallible even when generation fails after the HTTP response has started.
-#[try_stream(ok = Event, error = Infallible)]
-async fn completion_sse_stream(stream: impl Stream<Item = Result<CompletionSseChunk, ApiError>>) {
+#[try_stream]
+async fn completion_sse_stream(
+    stream: impl Stream<Item = Result<CompletionSseChunk, ApiError>>,
+    mut y: TryYielder<Event, Infallible>,
+) -> Result<(), Infallible> {
     pin_mut!(stream);
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(chunk) => yield to_sse_event(&chunk),
+            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
             Err(error) => {
-                yield to_error_sse_event(&error);
+                y.yield_ok(to_error_sse_event(&error)).await;
                 break;
             }
         }
     }
 
-    yield done_sse_event();
+    y.yield_ok(done_sse_event()).await;
+    Ok(())
 }
 
 /// Serialize one OpenAI chunk payload into one SSE `data:` event.

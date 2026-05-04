@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{Stream, StreamExt};
-use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
@@ -81,14 +81,15 @@ pub enum DecodedTextEvent {
 }
 
 /// Convert the output token stream from the `vllm_llm` layer into incrementally decoded text.
-#[try_stream(ok = DecodedTextEvent, error = Error)]
+#[try_stream]
 pub async fn decoded_text_event_stream(
     request_id: String,
     tokenizer: DynTokenizer,
     mut raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Unpin,
     mut decode_options: TextDecodeOptions,
     intermediate: bool,
-) {
+    mut y: TryYielder<DecodedTextEvent, Error>,
+) -> crate::Result<()> {
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
     let mut token_ids = Vec::new();
@@ -125,7 +126,7 @@ pub async fn decoded_text_event_stream(
             );
             decoder = Some(dec);
 
-            yield DecodedTextEvent::Start {
+            y.yield_ok(DecodedTextEvent::Start {
                 prompt_token_ids: prompt_token_ids.clone(),
                 prompt_logprobs: output
                     .prompt_logprobs()
@@ -138,7 +139,8 @@ pub async fn decoded_text_event_stream(
                         )
                     })
                     .transpose()?,
-            };
+            })
+            .await;
         };
         let decoder = decoder.as_mut().unwrap();
 
@@ -258,7 +260,7 @@ pub async fn decoded_text_event_stream(
                 AbortCause::StopStringMatched.drop_as(raw_stream);
             }
 
-            yield DecodedTextEvent::TextDelta {
+            y.yield_ok(DecodedTextEvent::TextDelta {
                 delta: text,
                 token_ids,
                 logprobs,
@@ -268,21 +270,23 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                 }),
-            };
+            })
+            .await;
             return Ok(());
         }
 
         if intermediate {
-            yield DecodedTextEvent::TextDelta {
+            y.yield_ok(DecodedTextEvent::TextDelta {
                 delta: delta.unwrap_or_default(),
                 token_ids: new_token_ids,
                 logprobs: decoded_logprobs,
                 finished: None,
-            };
+            })
+            .await;
         }
     }
 
-    Err(Error::StreamClosedBeforeTerminalOutput { request_id })?;
+    Err(Error::StreamClosedBeforeTerminalOutput { request_id })
 }
 
 /// If stop string matches, returns tuple

@@ -3,15 +3,16 @@ mod types;
 mod validate;
 
 use std::convert::Infallible;
+use std::result::Result;
 use std::sync::Arc;
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
-use futures_async_stream::try_stream;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
@@ -223,7 +224,7 @@ async fn collect_chat_completion(
 }
 
 /// Convert one internal chat event stream into OpenAI chat-completion chunks.
-#[try_stream(ok = ChatCompletionStreamResponse, error = ApiError)]
+#[try_stream]
 async fn chat_completion_chunk_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
     request_id: String,
@@ -235,7 +236,8 @@ async fn chat_completion_chunk_stream(
     echo: Option<String>,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
-) {
+    mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
+) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
 
     // If the client requested logprobs or token_ids, we need to buffer chunks until we receive
@@ -253,23 +255,31 @@ async fn chat_completion_chunk_stream(
                 if return_token_ids {
                     chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
                 }
-                yield chunk;
+                y.yield_ok(chunk).await;
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
-                    yield block_delta_chunk(
+                    y.yield_ok(block_delta_chunk(
                         &request_id,
                         &response_model,
                         created,
                         AssistantBlockKind::Text,
                         echo_text.clone(),
-                    );
+                    ))
+                    .await;
                 }
             }
             Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_block_delta(kind, delta);
                 } else {
-                    yield block_delta_chunk(&request_id, &response_model, created, kind, delta)
+                    y.yield_ok(block_delta_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        kind,
+                        delta,
+                    ))
+                    .await;
                 }
             }
             Ok(ChatEvent::LogprobsDelta {
@@ -289,10 +299,16 @@ async fn chat_completion_chunk_stream(
                     if let Some(chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
                     {
-                        yield chunk;
+                        y.yield_ok(chunk).await;
                     }
                 } else if let Some(logprobs) = openai_logprobs {
-                    yield logprobs_only_chunk(&request_id, &response_model, created, logprobs);
+                    y.yield_ok(logprobs_only_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        logprobs,
+                    ))
+                    .await;
                 }
             }
             Ok(ChatEvent::BlockStart { kind, .. }) => {
@@ -312,14 +328,15 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_start(tool_index, id, name);
                 } else {
-                    yield tool_call_start_chunk(
+                    y.yield_ok(tool_call_start_chunk(
                         &request_id,
                         &response_model,
                         created,
                         tool_index,
                         id,
                         name,
-                    );
+                    ))
+                    .await;
                 }
             }
             Ok(ChatEvent::ToolCallArgumentsDelta { index, delta }) => {
@@ -327,13 +344,14 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_arguments(tool_index, delta);
                 } else {
-                    yield tool_call_arguments_chunk(
+                    y.yield_ok(tool_call_arguments_chunk(
                         &request_id,
                         &response_model,
                         created,
                         tool_index,
                         delta,
-                    );
+                    ))
+                    .await;
                 }
             }
             Ok(ChatEvent::ToolCallEnd { .. }) => {
@@ -360,7 +378,7 @@ async fn chat_completion_chunk_stream(
                     && let Some(chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
                 {
-                    yield chunk;
+                    y.yield_ok(chunk).await;
                 }
 
                 match final_chunk(
@@ -370,7 +388,7 @@ async fn chat_completion_chunk_stream(
                     finish_reason,
                     saw_tool_calls,
                 ) {
-                    Ok(chunk) => yield chunk,
+                    Ok(chunk) => y.yield_ok(chunk).await,
                     Err(error) => {
                         error!(
                             error = %error.to_error_response().error.message,
@@ -381,12 +399,13 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if include_usage {
-                    yield usage_chunk(
+                    y.yield_ok(usage_chunk(
                         &request_id,
                         &response_model,
                         created,
                         Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
-                    );
+                    ))
+                    .await;
                 }
 
                 return Ok(());
@@ -400,6 +419,7 @@ async fn chat_completion_chunk_stream(
             }
         }
     }
+    Ok(())
 }
 
 fn usage_chunk(
@@ -540,23 +560,25 @@ fn append_delta_text(slot: &mut Option<String>, delta: String) {
 /// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
 /// events followed by `data: [DONE]`, so the transport stream itself stays
 /// infallible even when generation fails after the HTTP response has started.
-#[try_stream(ok = Event, error = Infallible)]
+#[try_stream]
 async fn chat_completion_sse_stream(
     stream: impl Stream<Item = Result<ChatCompletionStreamResponse, ApiError>>,
-) {
+    mut y: TryYielder<Event, Infallible>,
+) -> Result<(), Infallible> {
     pin_mut!(stream);
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(chunk) => yield to_sse_event(&chunk),
+            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
             Err(error) => {
-                yield to_error_sse_event(&error);
+                y.yield_ok(to_error_sse_event(&error)).await;
                 break;
             }
         }
     }
 
-    yield done_sse_event();
+    y.yield_ok(done_sse_event()).await;
+    Ok(())
 }
 
 /// Serialize one OpenAI chunk payload into one SSE `data:` event.

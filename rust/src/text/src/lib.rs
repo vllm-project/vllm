@@ -1,4 +1,3 @@
-#![feature(coroutines)]
 #![feature(trait_alias)]
 #![feature(iterator_try_collect)]
 

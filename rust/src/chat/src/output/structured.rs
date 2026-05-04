@@ -5,8 +5,8 @@
 //! parsing are handled earlier by their own adapters. This stage consumes those
 //! parsed deltas and assembles higher-level assistant content blocks.
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
-use futures_async_stream::try_stream;
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
@@ -227,8 +227,11 @@ impl StructuredEventState {
 }
 
 /// Wrap one parsed assistant stream into the public structured chat event stream.
-#[try_stream(ok = ChatEvent, error = Error)]
-pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStream) {
+#[try_stream]
+pub(crate) async fn structured_chat_event_stream(
+    stream: impl AssistantEventStream,
+    mut y: TryYielder<ChatEvent, Error>,
+) -> Result<()> {
     pin_mut!(stream);
 
     let mut state = StructuredEventState::new();
@@ -239,14 +242,15 @@ pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
-                yield ChatEvent::Start {
+                y.yield_ok(ChatEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
-                }
+                })
+                .await;
             }
             AssistantEvent::TextDelta { kind, delta } => {
                 for next in state.process_text_delta(kind, delta)? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
             }
             AssistantEvent::LogprobsDelta {
@@ -254,17 +258,17 @@ pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                 token_ids,
             } => {
                 for next in state.process_logprobs_delta(logprobs, token_ids)? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
             }
             AssistantEvent::ToolCallStart { id, name } => {
                 for next in state.start_tool_call(id, name)? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
             }
             AssistantEvent::ToolCallArgumentsDelta { delta } => {
                 for next in state.push_tool_call_arguments(delta)? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
             }
             AssistantEvent::Done {
@@ -279,11 +283,12 @@ pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                     finish_reason,
                     kv_transfer_params,
                 )? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

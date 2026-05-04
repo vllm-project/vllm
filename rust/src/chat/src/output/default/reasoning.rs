@@ -5,13 +5,14 @@
 //! separation: `decoded.rs` still only produces plain text deltas, while later
 //! stages consume the semantic `Text` / `Reasoning` split emitted here.
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
-use futures_async_stream::try_stream;
 use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_text::output::DecodedTextEvent;
 
 use super::ContentEvent;
+use crate::Result;
 use crate::error::Error;
 use crate::event::AssistantBlockKind;
 use crate::output::DecodedTextEventStream;
@@ -122,18 +123,19 @@ fn push_reasoning_delta(events: &mut Vec<ContentEvent>, delta: ReasoningDelta) {
 }
 
 /// Wrap one decoded-text stream into the internal reasoning event stream.
-#[try_stream(ok = ContentEvent, error = Error)]
+#[try_stream]
 pub(crate) async fn reasoning_event_stream(
     decoded_stream: impl DecodedTextEventStream,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
-) {
+    mut y: TryYielder<ContentEvent, Error>,
+) -> Result<()> {
     pin_mut!(decoded_stream);
 
     // Without a parser, pass through as plain text deltas.
     let Some(reasoning_parser) = reasoning_parser else {
         while let Some(event) = decoded_stream.next().await.transpose()? {
             for next in ContentEvent::from_decoded_plain_text(event) {
-                yield next;
+                y.yield_ok(next).await;
             }
         }
         return Ok(());
@@ -148,10 +150,11 @@ pub(crate) async fn reasoning_event_stream(
                 prompt_logprobs,
             } => {
                 state.initialize(&prompt_token_ids);
-                yield ContentEvent::Start {
+                y.yield_ok(ContentEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
-                }
+                })
+                .await;
             }
             DecodedTextEvent::TextDelta {
                 delta,
@@ -160,28 +163,31 @@ pub(crate) async fn reasoning_event_stream(
                 finished,
             } => {
                 for next in state.process_delta(delta) {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
                 if logprobs.is_some() || !token_ids.is_empty() {
-                    yield ContentEvent::LogprobsDelta {
+                    y.yield_ok(ContentEvent::LogprobsDelta {
                         logprobs,
                         token_ids,
-                    };
+                    })
+                    .await;
                 }
                 if let Some(finished) = finished {
                     for next in state.finish() {
-                        yield next;
+                        y.yield_ok(next).await;
                     }
-                    yield ContentEvent::Done {
+                    y.yield_ok(ContentEvent::Done {
                         prompt_token_count: finished.prompt_token_count,
                         output_token_count: finished.output_token_count,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
-                    };
+                    })
+                    .await;
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

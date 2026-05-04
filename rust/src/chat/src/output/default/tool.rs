@@ -5,8 +5,8 @@
 //! and translates incremental `tool-parser` output into internal tool-call
 //! events while preserving plain-text fallback behavior.
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
-use futures_async_stream::try_stream;
 use thiserror_ext::AsReport;
 use tracing::warn;
 
@@ -187,11 +187,12 @@ fn push_text_delta(events: &mut Vec<AssistantEvent>, kind: AssistantBlockKind, d
 /// We keep this separate because some adaptor-backed parsers may not correctly handle the full text
 /// passed to incremental `push` interface, but override `parse_complete()` with a dedicated
 /// one-shot implementation to ensure correctness.
-#[try_stream(ok = AssistantEvent, error = Error)]
+#[try_stream]
 async fn final_only_tool_event_stream(
     stream: impl ContentEventStream,
     mut parser: Box<dyn ToolParser>,
-) {
+    mut y: TryYielder<AssistantEvent, Error>,
+) -> Result<()> {
     pin_mut!(stream);
 
     let mut final_text = String::new();
@@ -202,26 +203,28 @@ async fn final_only_tool_event_stream(
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
-                yield AssistantEvent::Start {
+                y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
-                }
+                })
+                .await;
             }
             ContentEvent::TextDelta { kind, delta } => {
                 if kind == AssistantBlockKind::Text {
                     final_text.push_str(&delta);
                 } else {
-                    yield AssistantEvent::TextDelta { kind, delta };
+                    y.yield_ok(AssistantEvent::TextDelta { kind, delta }).await;
                 }
             }
             ContentEvent::LogprobsDelta {
                 logprobs,
                 token_ids,
             } => {
-                yield AssistantEvent::LogprobsDelta {
+                y.yield_ok(AssistantEvent::LogprobsDelta {
                     logprobs,
                     token_ids,
-                };
+                })
+                .await;
             }
             ContentEvent::Done {
                 prompt_token_count,
@@ -232,10 +235,11 @@ async fn final_only_tool_event_stream(
                 match parser.parse_complete(&final_text) {
                     Ok(ToolParseResult { normal_text, calls }) => {
                         if !normal_text.is_empty() {
-                            yield AssistantEvent::TextDelta {
+                            y.yield_ok(AssistantEvent::TextDelta {
                                 kind: AssistantBlockKind::Text,
                                 delta: normal_text,
-                            };
+                            })
+                            .await;
                         }
                         // `parse_complete` currently returns one complete delta
                         // per tool call, so we can surface each one as a start
@@ -249,14 +253,16 @@ async fn final_only_tool_event_stream(
                                     ),
                                 });
                             };
-                            yield AssistantEvent::ToolCallStart {
+                            y.yield_ok(AssistantEvent::ToolCallStart {
                                 id: generate_tool_call_id(),
                                 name,
-                            };
+                            })
+                            .await;
                             if !tool_call.arguments.is_empty() {
-                                yield AssistantEvent::ToolCallArgumentsDelta {
+                                y.yield_ok(AssistantEvent::ToolCallArgumentsDelta {
                                     delta: tool_call.arguments,
-                                };
+                                })
+                                .await;
                             }
                         }
                     }
@@ -265,38 +271,42 @@ async fn final_only_tool_event_stream(
                             error = %error.as_report(),
                             "tool parser full-output parse failed; falling back to plain text"
                         );
-                        yield AssistantEvent::TextDelta {
+                        y.yield_ok(AssistantEvent::TextDelta {
                             kind: AssistantBlockKind::Text,
                             delta: final_text,
-                        };
+                        })
+                        .await;
                     }
                 }
 
-                yield AssistantEvent::Done {
+                y.yield_ok(AssistantEvent::Done {
                     prompt_token_count,
                     output_token_count,
                     finish_reason,
                     kv_transfer_params,
-                };
+                })
+                .await;
                 return Ok(());
             }
         }
     }
+    Ok(())
 }
 
 /// Wrap one semantic assistant stream into the internal tool-aware assistant
 /// stream.
-#[try_stream(ok = AssistantEvent, error = Error)]
+#[try_stream]
 pub(crate) async fn tool_event_stream(
     stream: impl ContentEventStream,
     intermediate: bool,
     parser: Option<Box<dyn ToolParser>>,
-) {
+    mut y: TryYielder<AssistantEvent, Error>,
+) -> Result<()> {
     // Without a parser, pass through the input stream unchanged.
     let Some(parser) = parser else {
         pin_mut!(stream);
         while let Some(event) = stream.next().await.transpose()? {
-            yield event.into();
+            y.yield_ok(event.into()).await;
         }
         return Ok(());
     };
@@ -306,7 +316,7 @@ pub(crate) async fn tool_event_stream(
         let final_stream = final_only_tool_event_stream(stream, parser);
         pin_mut!(final_stream);
         while let Some(event) = final_stream.next().await.transpose()? {
-            yield event;
+            y.yield_ok(event).await;
         }
         return Ok(());
     }
@@ -320,24 +330,26 @@ pub(crate) async fn tool_event_stream(
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
-                yield AssistantEvent::Start {
+                y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
-                }
+                })
+                .await;
             }
             ContentEvent::TextDelta { kind, delta } => {
                 for next in state.process_text_delta(kind, delta)? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
             }
             ContentEvent::LogprobsDelta {
                 logprobs,
                 token_ids,
             } => {
-                yield AssistantEvent::LogprobsDelta {
+                y.yield_ok(AssistantEvent::LogprobsDelta {
                     logprobs,
                     token_ids,
-                };
+                })
+                .await;
             }
             ContentEvent::Done {
                 prompt_token_count,
@@ -346,18 +358,20 @@ pub(crate) async fn tool_event_stream(
                 kv_transfer_params,
             } => {
                 for next in state.finish()? {
-                    yield next;
+                    y.yield_ok(next).await;
                 }
 
-                yield AssistantEvent::Done {
+                y.yield_ok(AssistantEvent::Done {
                     prompt_token_count,
                     output_token_count,
                     finish_reason,
                     kv_transfer_params,
-                };
+                })
+                .await;
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

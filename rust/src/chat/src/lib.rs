@@ -1,4 +1,3 @@
-#![feature(coroutines)]
 #![feature(trait_alias)]
 
 //! Minimal chat facade above [`vllm_text`].

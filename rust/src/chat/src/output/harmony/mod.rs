@@ -7,8 +7,8 @@
 use std::sync::LazyLock;
 
 use anyhow::Context;
+use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
-use futures_async_stream::try_stream;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
 use openai_harmony::{
     HarmonyEncoding, HarmonyEncodingName, StreamableParser, load_harmony_encoding,
@@ -324,12 +324,13 @@ impl HarmonyState {
 }
 
 /// Convert decoded token updates into internal assistant events with Harmony parsing.
-#[try_stream(ok = AssistantEvent, error = Error)]
+#[try_stream]
 async fn harmony_assistant_event_stream(
     decoded: DynDecodedTextEventStream,
     encoding: &'static HarmonyEncoding,
     tool_calls_enabled: bool,
-) {
+    mut y: TryYielder<AssistantEvent, Error>,
+) -> Result<()> {
     let mut state = HarmonyState::new(encoding.clone(), tool_calls_enabled)?;
     futures::pin_mut!(decoded);
 
@@ -339,10 +340,11 @@ async fn harmony_assistant_event_stream(
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
-                yield AssistantEvent::Start {
+                y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
-                };
+                })
+                .await;
             }
             DecodedTextEvent::TextDelta {
                 delta: _, // harmony takes raw token IDs as input, so we ignore text deltas here
@@ -351,33 +353,36 @@ async fn harmony_assistant_event_stream(
                 finished,
             } => {
                 for event in state.process_token_ids(&token_ids)? {
-                    yield event;
+                    y.yield_ok(event).await;
                 }
 
                 if finished.is_some() {
                     for event in state.process_eos()? {
-                        yield event;
+                        y.yield_ok(event).await;
                     }
                 }
 
                 if logprobs.is_some() || !token_ids.is_empty() {
-                    yield AssistantEvent::LogprobsDelta {
+                    y.yield_ok(AssistantEvent::LogprobsDelta {
                         logprobs,
                         token_ids,
-                    };
+                    })
+                    .await;
                 }
 
                 if let Some(finished) = finished {
-                    yield AssistantEvent::Done {
+                    y.yield_ok(AssistantEvent::Done {
                         prompt_token_count: finished.prompt_token_count,
                         output_token_count: finished.output_token_count,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
-                    };
+                    })
+                    .await;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Lazily load the shared GPT-OSS Harmony encoding once per process.

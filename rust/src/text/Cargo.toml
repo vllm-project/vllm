@@ -5,12 +5,12 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+asynk-strim-attr.workspace = true
 base64.workspace = true
 easy-ext.workspace = true
 enum-as-inner.workspace = true
 fastokens.workspace = true
 futures.workspace = true
-futures-async-stream.workspace = true
 hf-hub.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
