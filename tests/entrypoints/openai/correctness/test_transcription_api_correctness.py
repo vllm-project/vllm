@@ -26,6 +26,9 @@ from vllm.tokenizers import get_tokenizer
 from ....models.registry import HF_EXAMPLE_MODELS
 from ....utils import RemoteOpenAIServer
 
+# Tuned to prevent OOM on 18GB GPUs in transcription correctness tests.
+MAX_SEQS_FOR_TRANSCRIPTION_TEST = 32
+
 
 def to_bytes(y, sr):
     buffer = io.BytesIO()
@@ -167,9 +170,8 @@ def run_evaluation(
     "model_config",
     [
         ("openai/whisper-large-v3", 12.744980),
-        # TODO (ekagra): turn on after asr release
         # CohereASR is used to test the variable encoder length code paths
-        # ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        ("CohereLabs/cohere-transcribe-03-2026", 11.92),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -185,6 +187,7 @@ def test_wer_correctness(
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
+        f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
