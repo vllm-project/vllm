@@ -946,13 +946,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "Custom config cannot be loaded with Transformers "
-                "v5 because `text_config` is not always set"
-            )
-        },
     ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",

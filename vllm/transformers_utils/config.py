@@ -101,6 +101,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
+    hyperclovax_vlm="HCXVisionConfig",
     hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
     isaac="IsaacConfig",
@@ -217,8 +218,9 @@ class HFConfigParser(ConfigParserBase):
             )
         else:
             if model_type in _CONFIG_REGISTRY:
-                # Register the config class to AutoConfig to ensure it's used in future
-                # calls to `from_pretrained`
+                # Register the config class to AutoConfig to ensure it's used
+                # in future calls to `from_pretrained` (e.g. from
+                # AutoTokenizer or AutoProcessor).
                 config_class = _CONFIG_REGISTRY[model_type]
                 config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
