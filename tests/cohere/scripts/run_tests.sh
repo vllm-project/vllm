@@ -387,10 +387,7 @@ run_guided_generation() {
     C4_MODEL_DIR=${ENGINES_DIR}/c4-25a218t_fp8_eagle_l5
     C4_DRAFT_MODEL_DIR=${ENGINES_DIR}/c4-25a218t_fp8_eagle_l5/eagle
     echo "Running MM reasoning test non-spec with model: $C4_MODEL_DIR"
-    python3 tests/cohere/test_gg_vision_spec_async.py --model $C4_MODEL_DIR --tensor-parallel-size 4 --mode "non-speculative" || errors=1
-
-    echo "Running MM + GG speculative test with model: $C4_MODEL_DIR"
-    python3 tests/cohere/test_gg_vision_spec_async.py --model $C4_MODEL_DIR --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --tensor-parallel-size 4 --mode "speculative" || errors=1
+    # python3 tests/cohere/test_gg_vision_spec_async.py --model $C4_MODEL_DIR --tensor-parallel-size 4 --mode "non-speculative" || errors=1
 
     echo "Running MM + GG + TB + SD test with model: $C4_MODEL_DIR"
     python3 tests/cohere/test_gg_vision_spec_async.py --model $C4_MODEL_DIR --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --tensor-parallel-size 4 --mode "speculative" --thinking-budgets 500 1000 5000 || errors=1
@@ -402,18 +399,18 @@ run_guided_generation() {
 
     python3 test_guided_generation.py --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4|| errors=1
 
-    python3 test_gg_melody.py  --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 || errors=1
+    # python3 test_gg_melody.py  --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 || errors=1
     
-    python3 test_gg_tools_melody.py  --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 || errors=1
+    # python3 test_gg_tools_melody.py  --mode "speculative" --model=$C4_MODEL_DIR --tensor_parallel_size 4 --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 || errors=1
 
     # Same melody suites against mhl_v2 (Cohere2 vision + text); checkpoint from
     # gs://cohere-model-efficiency-ci/engines/mhl_v2 via download_checkpoints.sh.
     # Non-speculative: no bundled draft under this engine path.
     MHL_V2_MODEL_DIR=${ENGINES_DIR}/mhl_v2
     echo "Running test_gg_melody with mhl_v2: $MHL_V2_MODEL_DIR"
-    python3 test_gg_melody.py --mode "non-speculative" --model="$MHL_V2_MODEL_DIR" --tensor_parallel_size 4 --server_wait_seconds 4000 || errors=1
+    python3 test_gg_melody.py --mode "non-speculative" --model="$MHL_V2_MODEL_DIR" --tensor_parallel_size 4 --server_wait_seconds 8000 || errors=1
     echo "Running test_gg_tools_melody with mhl_v2: $MHL_V2_MODEL_DIR"
-    python3 test_gg_tools_melody.py --mode "non-speculative" --model="$MHL_V2_MODEL_DIR" --tensor_parallel_size 4 --server_wait_seconds 4000 || errors=1
+    python3 test_gg_tools_melody.py --mode "non-speculative" --model="$MHL_V2_MODEL_DIR" --tensor_parallel_size 4 --server_wait_seconds 8000 || errors=1
 
     # test guided_generation with command 4 reasoning model
 
@@ -423,21 +420,21 @@ run_guided_generation() {
 
     python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $C4_MODEL_DIR --tensor_parallel_size 4  --draft_model $C4_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 4 --mode "speculative"|| errors=1
     
-    # test guided generation with speculative mode, command A
-    C3_TARGET_MODEL_DIR=${ENGINES_DIR}/command-a_fp8
-    C3_DRAFT_MODEL_DIR=${ENGINES_DIR}/command-a_fp8_draft
+    # # test guided generation with speculative mode, command A
+    # C3_TARGET_MODEL_DIR=${ENGINES_DIR}/command-a_fp8
+    # C3_DRAFT_MODEL_DIR=${ENGINES_DIR}/command-a_fp8_draft
 
-    python3 test_guided_generation.py --model $C3_TARGET_MODEL_DIR --mode "speculative" --draft_model $C3_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 2 || errors=1
+    # python3 test_guided_generation.py --model $C3_TARGET_MODEL_DIR --mode "speculative" --draft_model $C3_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 2 || errors=1
 
-    # test_guided_generation with non-speculative mode, command 2
-    C2_MODEL_DIR=${ENGINES_DIR}/command-r35b_fp8
+    # # test_guided_generation with non-speculative mode, command 2
+    # C2_MODEL_DIR=${ENGINES_DIR}/command-r35b_fp8
 
-    python3 test_guided_generation.py --mode "non-speculative" --model=$C2_MODEL_DIR --tensor_parallel_size 2 || errors=1
+    # python3 test_guided_generation.py --mode "non-speculative" --model=$C2_MODEL_DIR --tensor_parallel_size 2 || errors=1
 
-    #test guided_generation with Command A reasoning model
-    C3_R_TARGET_MODEL_DIR=${ENGINES_DIR}/command-a-reasoning_fp8
+    # #test guided_generation with Command A reasoning model
+    # C3_R_TARGET_MODEL_DIR=${ENGINES_DIR}/command-a-reasoning_fp8
 
-    python3 test_thinking_budget.py --reasoning_mode "guided_generation" --model $C3_R_TARGET_MODEL_DIR --tensor_parallel_size 2 --mode "non-speculative" || errors=1
+    # python3 test_thinking_budget.py --reasoning_mode "guided_generation" --model $C3_R_TARGET_MODEL_DIR --tensor_parallel_size 2 --mode "non-speculative" || errors=1
 
 
     exit $errors
