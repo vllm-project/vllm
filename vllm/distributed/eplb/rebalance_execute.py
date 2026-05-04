@@ -513,11 +513,11 @@ def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
     expert_weights: Sequence[Sequence[torch.Tensor]],
+    expert_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     communicator: EplbCommunicator,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
-    expert_buffer: Sequence[torch.Tensor] | None = None,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -532,15 +532,14 @@ def rearrange_expert_weights_inplace(
             of tensors of shape (num_local_physical_experts, hidden_size_i).
             For example, a linear layer may have up and down projection,
             so weight_count = 2. Each weight's hidden size can be different.
+        expert_buffer: Pre-allocated receive buffer tensors (one per
+            weight tensor in a single layer).
         ep_group: The device process group for expert parallelism.
         communicator: EplbCommunicator instance for P2P communication.
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
-        expert_buffer: Pre-allocated receive buffer tensors (one per
-            weight tensor in a single layer).  When provided, reuses
-            this buffer instead of allocating a fresh one.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -590,10 +589,7 @@ def rearrange_expert_weights_inplace(
                 )
         return
 
-    if expert_buffer is not None:
-        weights_buffer = list(expert_buffer)
-    else:
-        weights_buffer = [torch.empty_like(w) for w in first_layer_weights]
+    weights_buffer = list(expert_buffer)
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!

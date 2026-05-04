@@ -767,6 +767,7 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
+                    eplb_model_state.expert_buffer,
                     ep_group,
                     eplb_model_state.communicator,
                     is_profile,

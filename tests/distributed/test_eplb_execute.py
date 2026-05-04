@@ -478,10 +478,9 @@ def _test_rearrange_expert_weights_with_redundancy(
             old_indices,
             new_indices,
             expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
-            communicator=communicator,
-            expert_buffer=expert_buffer,
+            communicator,
         )
 
     # Verify the rearrangement result
@@ -614,10 +613,9 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             indices,
             indices,  # Same indices
             expert_weights,
+            expert_buffer,
             ep_group,
             communicator,
-            is_profile=False,
-            expert_buffer=expert_buffer,
         )
 
     # Verify that the weights have not changed
@@ -750,10 +748,10 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             old_indices,
             new_indices,
             expert_weights,
+            expert_buffer,
             ep_group,
             communicator,
-            is_profile=True,  # Profile mode
-            expert_buffer=expert_buffer,
+            is_profile=True,
         )
 
     # In profile mode, the weights should remain unchanged

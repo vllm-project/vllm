@@ -226,10 +226,9 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
             indices,
             shuffled_indices,
             rank_expert_weights,
+            expert_buffer,
             ep_group,
-            communicator=communicator,
-            is_profile=False,
-            expert_buffer=expert_buffer,
+            communicator,
         )
 
         num_local_experts = test_config.num_local_experts
