@@ -22,10 +22,11 @@ ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install some basic utilities
-RUN apt-get update -q -y && apt-get install -q -y \
+RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl \
-    libnuma-dev
+    libnuma-dev && \
+    rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --upgrade pip
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
