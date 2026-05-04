@@ -327,8 +327,7 @@ class HCXVisionConfig(PretrainedConfig):
 
         self.vision_config = None
         if vision_config is not None:
-            _vision_config = AutoConfig.for_model(
-                vision_config["model_type"])
+            _vision_config = AutoConfig.for_model(vision_config["model_type"])
             self.vision_config = _vision_config.from_dict(vision_config)
 
         self.use_nth_layer = use_nth_layer
