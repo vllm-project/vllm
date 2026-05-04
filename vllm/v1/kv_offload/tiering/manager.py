@@ -379,19 +379,12 @@ class TieringOffloadingManager(OffloadingManager):
             success: Whether the GPU→primary transfer succeeded.
             req_context: Per-request context forwarded to primary.prepare_read().
         """
-        # Materialize only if success=True (needed for cascading to secondary tiers)
-        keys_list = list(keys) if success else keys
-
         # Step 1: Complete store in primary tier (makes blocks loadable)
-        self.primary_tier.complete_store(keys_list, success)
+        self.primary_tier.complete_store(keys, success)
 
         if not success:
             # If GPU→Primary transfer failed, don't cascade to secondary tiers
             return
-
-        # At this point, success=True is guaranteed, so keys_list
-        # is list[OffloadKey]
-        assert isinstance(keys_list, list)
 
         # Step 2: Cascade to ALL secondary tiers
         # For each secondary tier, call primary.prepare_read() to get the
@@ -401,9 +394,7 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             # Get spec for reading from primary tier AND increment ref_cnt
             # TODO: pass the actual req_context instead of None
-            primary_blocks_spec = self.primary_tier.prepare_read(
-                keys_list, ReqContext()
-            )
+            primary_blocks_spec = self.primary_tier.prepare_read(keys, ReqContext())
 
             # Submit async store job: primary→secondary
             job_id = self._next_job_id()
@@ -412,7 +403,7 @@ class TieringOffloadingManager(OffloadingManager):
             assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
             job_metadata = JobMetadata(
                 job_id=job_id,
-                keys=keys_list,
+                keys=keys,
                 block_ids=primary_blocks_spec.block_ids,
             )
             self._store_jobs[job_id] = job_metadata
