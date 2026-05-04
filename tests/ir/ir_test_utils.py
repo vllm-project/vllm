@@ -10,6 +10,8 @@ This module provides:
 3. Lowering test helpers (assert_supports_args_returns_bool, assert_op_e2e_correctness)
 """
 
+from collections.abc import Callable
+
 import pytest
 import torch
 from torch import nn
@@ -231,3 +233,48 @@ def assert_dispatch_matches_direct(
         out_dispatched = op(*args)
     out_direct = op.impls[provider].impl_fn(*args)
     torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
+
+
+# ============================================================
+# Fixture for registering test ops with automatic cleanup
+# ============================================================
+
+
+@pytest.fixture
+def registered_test_op():
+    """
+    Fixture to register a test IR op with automatic cleanup.
+
+    Usage:
+        def test_something(registered_test_op):
+            op = registered_test_op(
+                name="_my_test_op",
+                native_fn=my_native_fn,
+                input_generator=my_input_gen,
+                impls={"impl1": (supports_fn, impl_fn)},
+            )
+            # ... test with op ...
+            # Cleanup is automatic when test ends
+    """
+    registered_names: list[str] = []
+
+    def _register(
+        name: str,
+        native_fn: Callable[..., torch.Tensor],
+        input_generator: Callable[[], tuple],
+        impls: dict[str, tuple[Callable[..., bool] | None, Callable]],
+    ) -> IrOp:
+        from vllm import ir
+        op = ir.register_op(name=name)(native_fn)
+        op.register_input_generator(input_generator)
+
+        for impl_name, (supports_args, impl_fn) in impls.items():
+            op.register_impl(impl_name, supports_args=supports_args)(impl_fn)
+
+        registered_names.append(name)
+        return op
+
+    yield _register
+
+    for name in registered_names:
+        IrOp.registry.pop(name, None)
