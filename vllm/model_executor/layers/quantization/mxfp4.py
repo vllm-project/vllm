@@ -402,6 +402,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             gemm1_alpha=1.702,
             gemm1_beta=1.0,
             swiglu_limit=7.0,
+            layer=layer,
         )
 
     def select_gemm_impl(
@@ -504,7 +505,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -707,7 +708,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self,
+        layer: RoutedExperts,
     ) -> FusedMoEQuantConfig | None:
         w1_scale = layer.w13_weight_scale
         w2_scale = layer.w2_weight_scale
@@ -728,12 +730,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             swiglu_limit=swiglu_limit,
+            layer=layer,
         )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel "
