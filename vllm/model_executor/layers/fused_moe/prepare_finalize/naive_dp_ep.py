@@ -40,6 +40,7 @@ def _quantize_and_setup_dispatch(
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape,
             is_fp4_scale_swizzled=False,
+            mx_alignment=quant_config.mx_alignment,
         )
 
     # Skip gathering scales if we have static quantization
