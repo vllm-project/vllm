@@ -1728,10 +1728,13 @@ def test_get_kv_cache_config_one_worker():
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
-        num_blocks=32,
+        num_blocks=16,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=mem_per_block_per_layer * 32, shared_by=["layer_1", "layer_2"]
+                size=mem_per_block_per_layer * 16, shared_by=["layer_1"]
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 16, shared_by=["layer_2"]
             ),
         ],
         kv_cache_groups=[
@@ -1766,6 +1769,37 @@ def test_get_kv_cache_config_one_worker():
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())],
     )
+
+
+def test_kv_cache_tensor_sharing_requires_uniform_block_size():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(head_size=64),
+        "layer_2": new_sliding_window_spec(head_size=32),
+    }
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
+    )[0]
+
+    # These layers have equal page_size_bytes after block-size alignment, but
+    # their slot IDs are still computed with different block sizes.
+    layer_to_block_size = {
+        layer_name: group.kv_cache_spec.block_size
+        for group in kv_cache_config_hybrid.kv_cache_groups
+        for layer_name in group.layer_names
+    }
+    for tensor in kv_cache_config_hybrid.kv_cache_tensors:
+        layer_block_sizes = {
+            layer_name: layer_to_block_size[layer_name]
+            for layer_name in tensor.shared_by
+        }
+        assert len(set(layer_block_sizes.values())) == 1, (
+            "Layers sharing one raw KV cache tensor must use the same block size. "
+            f"Got {layer_block_sizes}."
+        )
 
 
 def test_get_kv_cache_configs_attention_free():

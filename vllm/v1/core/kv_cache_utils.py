@@ -1283,31 +1283,65 @@ def get_kv_cache_config_from_groups(
         )
     else:
         # General case:
-        # We will have group_size memory pools, each is shared by one layer from
-        # each group. As layers of different groups have different block table,
-        # they will use different parts of the shared Tensor.
+        # When all groups have the same block size, we will have group_size
+        # memory pools, each shared by one layer from each group. As layers of
+        # different groups have different block table, they will use different
+        # parts of the shared Tensor.
         # The memory layout for 3 groups (full.0, full.1), (sw.0, sw.2),
         # (sw.1, padding) will be: (group_size = 2)
         # full.0, sw.0, sw.1: share a Tensor with size=available_memory//2
         # full.1, sw.2: share another Tensor with size=available_memory//2
-        group_size = max(len(group.layer_names) for group in kv_cache_groups)
-
         page_size = get_uniform_page_size(
             [group.kv_cache_spec for group in kv_cache_groups]
         )
-        assert group_size > 0, "group_size must be greater than 0"
-        num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
-        )
-        kv_cache_tensors = []
-        for i in range(group_size):
-            shared_by = []
-            for j in range(len(kv_cache_groups)):
-                if i < len(kv_cache_groups[j].layer_names):
-                    shared_by.append(kv_cache_groups[j].layer_names[i])
-            kv_cache_tensors.append(
-                KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
+        groups_by_block_size: dict[int, list[KVCacheGroupSpec]] = defaultdict(list)
+        for group in kv_cache_groups:
+            groups_by_block_size[group.kv_cache_spec.block_size].append(group)
+
+        if len(groups_by_block_size) > 1:
+            # A shared raw KV tensor is indexed by slot IDs, not page-byte
+            # offsets. Since slot = block_id * block_size + offset, groups
+            # with different block sizes can map distinct blocks to the same
+            # slot even when page_size_bytes matches (e.g., 2 * 16 == 1 * 32).
+            # Split them so each shared tensor has one slot namespace.
+            tensor_group_size = sum(
+                max(len(group.layer_names) for group in groups)
+                for groups in groups_by_block_size.values()
             )
+            assert tensor_group_size > 0, "tensor_group_size must be greater than 0"
+            num_blocks = get_num_blocks(
+                vllm_config, tensor_group_size, available_memory, page_size
+            )
+            kv_cache_tensors = []
+            for groups in groups_by_block_size.values():
+                group_size = max(len(group.layer_names) for group in groups)
+                for i in range(group_size):
+                    shared_by = []
+                    for group in groups:
+                        if i < len(group.layer_names):
+                            shared_by.append(group.layer_names[i])
+                    kv_cache_tensors.append(
+                        KVCacheTensor(
+                            size=page_size * num_blocks,
+                            shared_by=shared_by,
+                        )
+                    )
+        else:
+            group_size = max(len(group.layer_names) for group in kv_cache_groups)
+
+            assert group_size > 0, "group_size must be greater than 0"
+            num_blocks = get_num_blocks(
+                vllm_config, group_size, available_memory, page_size
+            )
+            kv_cache_tensors = []
+            for i in range(group_size):
+                shared_by = []
+                for j in range(len(kv_cache_groups)):
+                    if i < len(kv_cache_groups[j].layer_names):
+                        shared_by.append(kv_cache_groups[j].layer_names[i])
+                kv_cache_tensors.append(
+                    KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
+                )
 
     return KVCacheConfig(
         num_blocks=num_blocks,
