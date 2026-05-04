@@ -25,7 +25,10 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+from vllm.tool_parsers.structural_tag_registry import (
+    get_enable_structured_outputs_in_reasoning,
+    get_model_structural_tag,
+)
 from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
@@ -690,7 +693,5 @@ class Qwen3CoderToolParser(ToolParser):
             model="qwen_3_5",
             tools=request.tools,
             tool_choice=request.tool_choice,
-            # The reasoning parser gates structured output until reasoning ends.
-            # Constrain only the post-reasoning tool-call suffix here.
-            reasoning=False,
+            reasoning=get_enable_structured_outputs_in_reasoning(),
         )

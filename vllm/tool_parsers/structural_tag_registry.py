@@ -5,6 +5,7 @@
 # builtin structural tag implementations:
 # https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/builtin_structural_tag.py
 
+import time
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -13,7 +14,6 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     JSONSchemaFormat,
-    QwenXMLParameterFormat,
     SequenceFormat,
     TagFormat,
     TagsWithSeparatorFormat,
@@ -108,6 +108,31 @@ def _get_function_parameters(function: Any) -> dict[str, Any] | bool:
     if function.parameters is None:
         return True
     return function.parameters
+
+
+_enable_structured_outputs_in_reasoning: bool = False
+
+
+def set_enable_structured_outputs_in_reasoning(enabled: bool) -> None:
+    """Publish the engine's ``enable_in_reasoning`` flag to tool parsers.
+
+    Called once during APIServer startup so request-time parsers can read
+    it without going through the EngineCore-only contextvar.
+    """
+
+    global _enable_structured_outputs_in_reasoning
+    _enable_structured_outputs_in_reasoning = bool(enabled)
+
+
+def get_enable_structured_outputs_in_reasoning() -> bool:
+    """Whether structured outputs are active during the reasoning phase.
+
+    When ``True``, the structural tag will cover the reasoning part:
+    ``<think>...</think>`` prefix (if available); when ``False`` (default), the tag only
+    constrains the post-reasoning suffix.
+    """
+
+    return _enable_structured_outputs_in_reasoning
 
 
 @register_model_structural_tag("deepseek_v4")
@@ -230,7 +255,6 @@ def get_qwen_3_5_structural_tag(
     This format is used for Qwen3-Coder/Qwen3.5/Qwen3.6 and is compatible with
     Qwen variants that use the same XML tool-call format.
     """
-
     tool_call_begin_prefix = "<tool_call>\n<function="
     tool_call_begin_suffix = ">\n"
     tool_call_end = "\n</function>\n</tool_call>"
@@ -247,7 +271,7 @@ def get_qwen_3_5_structural_tag(
             tags.append(
                 TagFormat(
                     begin=f"{tool_call_begin_prefix}{function.name}{tool_call_begin_suffix}",
-                    content=QwenXMLParameterFormat(json_schema=parameters),
+                    content=JSONSchemaFormat(json_schema=parameters, style="qwen_xml"),
                     end=tool_call_end,
                 )
             )
@@ -267,8 +291,9 @@ def get_qwen_3_5_structural_tag(
         function = tools[0].function
         suffix_tag = TagFormat(
             begin=f"{tool_call_begin_prefix}{function.name}{tool_call_begin_suffix}",
-            content=QwenXMLParameterFormat(
-                json_schema=_get_function_parameters(function)
+            content=JSONSchemaFormat(
+                json_schema=_get_function_parameters(function),
+                style="qwen_xml",
             ),
             end=tool_call_end,
         )
@@ -281,7 +306,7 @@ def get_qwen_3_5_structural_tag(
             tags.append(
                 TagFormat(
                     begin=f"{tool_call_begin_prefix}{function.name}{tool_call_begin_suffix}",
-                    content=QwenXMLParameterFormat(json_schema=parameters),
+                    content=JSONSchemaFormat(json_schema=parameters, style="qwen_xml"),
                     end=tool_call_end,
                 )
             )
@@ -293,12 +318,14 @@ def get_qwen_3_5_structural_tag(
         )
 
     if not reasoning:
-        return StructuralTag(format=suffix_tag)
+        result = StructuralTag(format=suffix_tag)
+    else:
+        prefix_tag = SequenceFormat(
+            elements=[
+                TagFormat(begin="", content=AnyTextFormat(), end=think_tag_end),
+                ConstStringFormat(value=think_suffix),
+            ]
+        )
+        result = StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
 
-    prefix_tag = SequenceFormat(
-        elements=[
-            TagFormat(begin="", content=AnyTextFormat(), end=think_tag_end),
-            ConstStringFormat(value=think_suffix),
-        ]
-    )
-    return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
+    return result

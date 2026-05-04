@@ -5,7 +5,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
-from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+from vllm.tool_parsers.structural_tag_registry import (
+    get_enable_structured_outputs_in_reasoning,
+    get_model_structural_tag,
+)
 
 
 class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
@@ -24,5 +27,5 @@ class DeepSeekV4ToolParser(DeepSeekV32ToolParser):
             model="deepseek_v4",
             tools=request.tools,
             tool_choice=request.tool_choice,
-            reasoning=request.include_reasoning,
+            reasoning=get_enable_structured_outputs_in_reasoning(),
         )
