@@ -269,6 +269,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
+        self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
@@ -362,6 +363,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 input_size_per_partition,
                 self.weight_block_size,
                 weight_loader,
+                scale_dtype=(torch.float8_e8m0fnu if self.is_scale_e8m0 else None),
             )
             # The weight_scale_inv name is intentional for deepseekv3
             layer.register_parameter("weight_scale_inv", scale)
@@ -866,6 +868,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1018,10 +1021,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
-
-        if current_platform.is_xpu():
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(

@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
+from .matcher_utils import MatcherQuantFP8
 
 logger = init_logger(__name__)
 
@@ -31,6 +31,7 @@ logger = init_logger(__name__)
 # Only apply sequence parallelism for models with hidden_size >= threshold
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
     90: 8192,  # H100: only for models with hidden_size >= 8192
+    100: 8192,  # Blackwell family: only for models with hidden_size >= 8192
 }
 
 # Min size per GPU per device capability for sequence parallelism
@@ -38,6 +39,8 @@ SP_MIN_HIDDEN_SIZE: dict[int, int] = {
 # This ensures the threshold scales appropriately with tensor parallelism
 SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
     90: 8,  # 8MB per GPU for H100
+    # Use a more conservative threshold on Blackwell so TP8 starts later.
+    100: 32,
 }
 
 
@@ -67,7 +70,12 @@ def get_sequence_parallelism_threshold(
     capability = current_platform.get_device_capability()
     if capability is None:
         return None
-    device_capability = capability.to_int()
+
+    # Collapse Blackwell variants (sm100/sm103/...) into one policy bucket.
+    if current_platform.is_device_capability_family(100):
+        device_capability = 100
+    else:
+        device_capability = capability.to_int()
 
     # Check if device has configured thresholds
     min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
@@ -166,7 +174,6 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -187,7 +194,9 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             rms_norm_weights: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(mm_1)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, rms_norm_weights, residual)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
             return rmsnorm[0], rmsnorm[1]
 
         def replacement(
@@ -200,7 +209,9 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
             residual = residual[0 : reduce_scatter.size(0), ...]
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
             all_gather = self._all_gather(rmsnorm[0])
             # shape of residual changes but that's fine,
             # next node is already slicing it, now becomes a noop
@@ -263,7 +274,6 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -282,8 +292,8 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(mm_1)
-            rms, residual_out = self.rmsnorm_matcher(
-                all_reduce, rms_norm_weights, residual
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
             )
             quant, _ = self.quant_matcher(rms, scale)
             return quant, residual_out
@@ -300,8 +310,8 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
             residual = residual[0 : reduce_scatter.size(0), ...]
-            rms, residual_out = self.rmsnorm_matcher(
-                reduce_scatter, rms_norm_weights, residual
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
             )
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
@@ -341,22 +351,18 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     significantly reduce communication overhead and improve overall model
     performance.
 
+    This pass is only supported when compiling the whole graph (fullgraph
+    mode, i.e. using Inductor graph partition or empty splitting_ops).
+    Piecewise compilation is not supported because the residual tensor
+    gets split across TP ranks, causing size mismatches at subgraph
+    boundaries.
 
-    This pass splits up the residual tensor across TP ranks and hence divides its size.
-    Because the pattern matcher starts at the end of the graph, the replacement
-    contains a slice that temporarily conforms the input residual to the correct size.
-    After all patterns have been matched, we use a NoOpEliminationPass to clean up
-    what have now become no-op slices.
-
-    Note that an older version of the pass did not need this as it operated only on
-    custom rms_norm and fused_rms_norm_add custom ops which did not complain about
-    mismatched shapes during replacement. So this approach has the same assumption that
-    correctness is only maintained if all rms_norm operations are split across ranks.
-
-    Correctness-wise, this is approach strictly better than before - before,
-    the graph was incorrect semantically and shape-wise during the pass.
-    With this approach there's only semantic incorrectness during the pass.
-    Both approaches restore a correct graph once all patterns are matched.
+    This pass splits up the residual tensor across TP ranks and hence
+    divides its size. Because the pattern matcher starts at the end of
+    the graph, the replacement contains a slice that temporarily conforms
+    the input residual to the correct size. After all patterns have been
+    matched, we use a NoOpEliminationPass to clean up what have now
+    become no-op slices.
     """
 
     @enable_fake_mode
@@ -419,19 +425,13 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         and gathering tensors across TP ranks outweighs the benefits.
 
         Returns False (SP disabled) when:
-        - Using piecewise compilation with non-concrete or TP-indivisible sizes
         - min_token_num is None (SP disabled for this device/config)
         - The compile range starts below the minimum token threshold
         """
-        # For piecewise compilation (not using inductor graph partition),
-        # we need concrete sizes that are divisible by TP for correct splitting
-        if (
-            not self.compilation_config.use_inductor_graph_partition
-            and self.compilation_config.splitting_ops
-        ):
-            tp_size = get_tensor_model_parallel_world_size()
-            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
-                return False
+        assert (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
+        ), "SequenceParallelismPass requires full-graph compilation"
 
         # min_token_num is None when SP is disabled for this device/config
         # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)
