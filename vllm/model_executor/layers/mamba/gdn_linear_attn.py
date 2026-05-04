@@ -62,7 +62,6 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 logger = init_logger(__name__)
@@ -121,9 +120,9 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        backend_cfg = get_current_vllm_config().additional_config.get(
-            "gdn_prefill_backend", "auto"
-        )
+        additional_config = get_current_vllm_config().additional_config
+        assert isinstance(additional_config, dict)
+        backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
 
         supports_flashinfer = (
@@ -144,15 +143,14 @@ class ChunkGatedDeltaRule(CustomOp):
             use_flashinfer = supports_flashinfer
 
         if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel", scope="local")
+            logger.info_once("Using FlashInfer GDN prefill kernel")
             logger.info_once(
                 "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
                 "take a while to compile. Set `--gdn-prefill-backend triton` to "
                 "avoid JIT compile time.",
-                scope="local",
             )
         else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel", scope="local")
+            logger.info_once("Using Triton/FLA GDN prefill kernel")
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -620,53 +618,20 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 2: Core Attention
         # ============================================================
-        forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
         z = torch.empty_like(core_attn_out)
-        if attn_metadata is not None:
-            attn_metadata = attn_metadata[self.prefix]
 
-            # TODO: xpu does not support this param yet
-            spec_sequence_masks = attn_metadata.spec_sequence_masks
-            assert spec_sequence_masks is None
-
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-            )
-
-            conv_state = self.kv_cache[0]
-            ssm_state = self.kv_cache[1]
-
-            torch.ops._xpu_C.gdn_attention(
-                core_attn_out,
-                z,
-                projected_states_qkvz,
-                projected_states_ba,
-                self.num_k_heads,
-                self.num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
-                conv_weights=conv_weights,
-                conv_bias=self.conv1d.bias,
-                activation=self.activation,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_prefills=attn_metadata.num_prefills,
-                num_decodes=attn_metadata.num_decodes,
-                has_initial_state=attn_metadata.has_initial_state,
-                non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
-                non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
-                num_actual_tokens=attn_metadata.num_actual_tokens,
-                tp_size=self.tp_size,
-                reorder_input=not self.gqa_interleaved_layout,
-            )
+        torch.ops.vllm.gdn_attention_core_xpu(
+            core_attn_out,
+            z,
+            projected_states_qkvz,
+            projected_states_ba,
+            self.prefix,
+        )
 
         # ============================================================
         # Part 3: Output Projection
@@ -792,16 +757,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         core_attn_out: torch.Tensor,
     ):
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata is None:
+        if attn_metadata_raw is None:
             # V1 profile run — warm up prefill kernels so that
             # autotuning completes before KV cache allocation.
             self._warmup_prefill_kernels(mixed_qkv)
             return
 
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata_raw, dict)
+        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
@@ -860,14 +825,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            # spec_state_indices_tensor is always set when spec_sequence_masks is set
+            assert spec_state_indices_tensor is not None
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][
-                    : attn_metadata.num_spec_decodes
+                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
                 ],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
@@ -900,8 +867,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_actual_tokens
+                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                    : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
                 validate_data=True,
             )
@@ -965,8 +932,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                     v=value_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc[
-                        : attn_metadata.num_spec_decodes + 1
+                    cu_seqlens=spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_spec_decodes
+                        + 1  # type: ignore[attr-defined]
                     ],
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
@@ -978,8 +946,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
+            assert non_spec_state_indices_tensor is not None
+            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()  # type: ignore[index]
+            assert has_initial_state is not None
+            initial_state[~has_initial_state, ...] = 0  # type: ignore[operator]
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1012,8 +982,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                     v=value_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                        : attn_metadata.num_decodes
+                        + 1  # type: ignore[attr-defined]
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
@@ -1073,7 +1044,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             conv_weights,
             self.conv1d.bias,
             self.activation,
-            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
@@ -1086,7 +1057,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             scale=self.head_k_dim**-0.5,
             initial_state=ssm_state,
             out=out_buf,
-            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             use_qk_l2norm_in_kernel=True,
         )
         return
