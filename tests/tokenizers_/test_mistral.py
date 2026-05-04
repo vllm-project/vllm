@@ -2233,6 +2233,4 @@ class TestMistralTokenizer:
         )
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
 
-        assert "[THINK]" in decoded
-        assert "2+2 equals 4" in decoded
-        assert "[/THINK]" in decoded
+        assert "[THINK]2+2 equals 4[/THINK]" in decoded
