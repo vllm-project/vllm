@@ -20,41 +20,155 @@ model_parameter_sweep:
   label_format: "{backend}_{value}h"
 
 batch_specs:
-  # Pure prefill
+  # =============================================
+  # Pure prefill - single request
+  # =============================================
+  - "1q256"
   - "1q512"
   - "1q1k"
   - "1q2k"
   - "1q4k"
   - "1q8k"
+  - "1q16k"
+  - "1q32k"
+  - "1q64k"
+  - "1q128k"
 
-  # Batched pure prefill
+  # =============================================
+  # Pure prefill - small batches
+  # =============================================
+  - "2q256"
   - "2q512"
   - "2q1k"
   - "2q2k"
   - "2q4k"
   - "2q8k"
+  - "2q16k"
+
+  - "4q256"
   - "4q512"
   - "4q1k"
   - "4q2k"
   - "4q4k"
   - "4q8k"
+  - "4q16k"
+
+  - "8q256"
   - "8q512"
   - "8q1k"
   - "8q2k"
   - "8q4k"
   - "8q8k"
+  - "8q16k"
 
-  # Extend
+  # =============================================
+  # Pure prefill - medium batches
+  # =============================================
+  - "16q256"
+  - "16q512"
+  - "16q1k"
+  - "16q2k"
+  - "16q4k"
+  - "16q8k"
+
+  - "32q256"
+  - "32q512"
+  - "32q1k"
+  - "32q2k"
+  - "32q4k"
+
+  # =============================================
+  # Extend - single request
+  # =============================================
+  # Short prefill, varying KV cache
+  - "1q256s1k"
+  - "1q256s4k"
+  - "1q256s8k"
+  - "1q256s16k"
+  - "1q256s64k"
+
+  - "1q512s1k"
   - "1q512s4k"
   - "1q512s8k"
+  - "1q512s16k"
+  - "1q512s64k"
+
+  # Medium prefill, varying KV cache
+  - "1q1ks4k"
   - "1q1ks8k"
+  - "1q1ks16k"
+  - "1q1ks64k"
+
+  - "1q2ks4k"
   - "1q2ks8k"
   - "1q2ks16k"
+  - "1q2ks64k"
+
+  # Long prefill, long KV cache
+  - "1q4ks8k"
   - "1q4ks16k"
+  - "1q4ks32k"
+
+  - "1q8ks16k"
+  - "1q8ks32k"
+  - "1q8ks64k"
+
+  - "1q16ks32k"
+  - "1q16ks64k"
+
+  # =============================================
+  # Extend - small batches
+  # =============================================
+  - "2q256s4k"
+  - "2q256s16k"
+  - "2q512s4k"
+  - "2q512s8k"
+  - "2q512s16k"
+  - "2q1ks8k"
+  - "2q1ks16k"
+  - "2q2ks8k"
+  - "2q2ks16k"
+  - "2q4ks16k"
+
+  - "4q256s4k"
+  - "4q256s16k"
+  - "4q512s4k"
+  - "4q512s8k"
+  - "4q512s16k"
+  - "4q1ks8k"
+  - "4q1ks16k"
+  - "4q2ks8k"
+  - "4q2ks16k"
+  - "4q4ks16k"
+
+  - "8q256s4k"
+  - "8q512s4k"
+  - "8q512s8k"
+  - "8q1ks8k"
+  - "8q1ks16k"
+  - "8q2ks8k"
+  - "8q2ks16k"
+
+  # =============================================
+  # Extend - medium batches
+  # =============================================
+  - "16q256s4k"
+  - "16q512s4k"
+  - "16q512s8k"
+  - "16q1ks4k"
+  - "16q1ks8k"
+  - "16q2ks8k"
+
+  - "32q256s4k"
+  - "32q512s4k"
+  - "32q512s8k"
+  - "32q1ks4k"
+  - "32q1ks8k"
 
 backends:
   - FLASHMLA_SPARSE
   - FLASHINFER_MLA_SPARSE
+  - FLASH_ATTN_MLA_SPARSE
 
 device: "cuda:0"
 repeats: 10

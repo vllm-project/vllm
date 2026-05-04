@@ -93,6 +93,7 @@ def _get_backend_priorities(
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                     AttentionBackendEnum.FLASHMLA_SPARSE,
+                    AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                 ]
             else:
                 # BF16 KV Cache
@@ -101,11 +102,13 @@ def _get_backend_priorities(
                     sparse_backends = [
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                         AttentionBackendEnum.FLASHMLA_SPARSE,
+                        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                     ]
                 else:
                     sparse_backends = [
                         AttentionBackendEnum.FLASHMLA_SPARSE,
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                     ]
 
             return [

@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer MLA Sparse Attention Backend.
+"""FlashAttention MLA Sparse Attention Backend.
 
-This backend uses the FlashInfer TRT-LLM MLA kernel with sparse_mla_top_k
-for models like DeepSeek-V3.2 that use index-based sparse attention.
+This backend uses FlashAttention 4's MLA weight-absorbed kernel with topk
+sparsity (gather_kv_indices) for models like DeepSeek-V3.2 that use
+index-based sparse attention.
 
-For sparse MLA:
-- block_tables shape changes from [batch_size, max_num_blocks] (dense)
-  to [batch_size, q_len_per_request, sparse_mla_top_k] (sparse)
-- The sparse indices represent physical cache slot positions to attend to
-- sparse_mla_top_k parameter must be set to the topk value
+The FA4 MLA absorbed attention computes:
+    O = softmax(scale * (Q_pe @ K_pe.T + Q_nope @ KV_c.T)) @ KV_c
+
+where Q_pe has head_dim=64 and Q_nope/KV_c have head_dim_v=512.
+
+For sparse attention, gather_kv_indices specifies per-query-token which
+KV cache positions to attend to. Page table indirection is baked into these
+indices via triton_convert_req_index_to_global_index, since FA4's sparse
+MLA kernel does not support paged attention directly.
 """
 
 from dataclasses import dataclass
@@ -17,16 +22,13 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -38,54 +40,44 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     SparseMLAAttentionImpl,
 )
+from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
-logger = init_logger(__name__)
 
-FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
-
-
-class FlashInferMLASparseBackend(AttentionBackend):
-    """FlashInfer MLA backend with sparse attention support.
-
-    This backend uses the FlashInfer TRT-LLM MLA kernel with sparse_mla_top_k
-    for models like DeepSeek-V3.2 that use index-based sparse attention.
-    """
-
+class FlashAttentionMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "float16",
         "bfloat16",
-        "fp8",
-        "fp8_e4m3",
     ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [32, 64]
+        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_MLA_SPARSE"
+        return "FLASH_ATTN_MLA_SPARSE"
 
     @staticmethod
-    def get_impl_cls() -> type["FlashInferMLASparseImpl"]:
-        return FlashInferMLASparseImpl
+    def get_impl_cls() -> type["FlashAttentionMLASparseImpl"]:
+        return FlashAttentionMLASparseImpl
 
     @staticmethod
-    def get_builder_cls() -> type["FlashInferMLASparseMetadataBuilder"]:
-        return FlashInferMLASparseMetadataBuilder
+    def get_builder_cls() -> type["FlashAttentionMLASparseMetadataBuilder"]:
+        return FlashAttentionMLASparseMetadataBuilder
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        # kv_lora_rank (512) + qk_rope_head_dim (64) = 576
         return [576]
 
     @classmethod
@@ -98,7 +90,7 @@ class FlashInferMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # FlashInfer sparse MLA targets Blackwell (SM 10.x)
+        # FA4 MLA absorbed kernel requires SM100 (Blackwell) or SM110.
         return capability.major == 10
 
     @classmethod
@@ -113,21 +105,43 @@ class FlashInferMLASparseBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA sparse kernel requires qk_nope_head_dim in [128, 192]
+        if not is_fa_version_supported(4):
+            return "FlashAttention 4 is not available"
+
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
-            qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-            if qk_nope_head_dim not in [128, 192]:
+
+            # FA4 MLA absorbed kernel requires head_dim=64, head_dim_v=512
+            qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", 0)
+            kv_lora_rank = getattr(hf_text_config, "kv_lora_rank", 0)
+            if qk_rope_head_dim != 64:
                 return (
-                    "FlashInfer MLA Sparse kernel requires qk_nope_head_dim "
-                    f"in [128, 192], but got {qk_nope_head_dim}"
+                    "FlashAttention MLA Sparse kernel requires "
+                    f"qk_rope_head_dim=64, but got {qk_rope_head_dim}"
                 )
-            # Check for index_topk which indicates sparse model
+            if kv_lora_rank != 512:
+                return (
+                    "FlashAttention MLA Sparse kernel requires "
+                    f"kv_lora_rank=512, but got {kv_lora_rank}"
+                )
+
             if not hasattr(hf_text_config, "index_topk"):
-                return "FlashInfer MLA Sparse requires model with index_topk config"
+                return "FlashAttention MLA Sparse requires model with index_topk config"
+
+            num_q_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            num_kv_heads = vllm_config.model_config.get_num_kv_heads(
+                vllm_config.parallel_config
+            )
+            if num_kv_heads > 0 and num_q_heads // num_kv_heads != 128:
+                return (
+                    "FA4 MLA sparse kernel requires MQA with 128 query heads "
+                    f"per KV head, but got {num_q_heads // num_kv_heads}"
+                )
         return None
 
     @staticmethod
@@ -140,21 +154,14 @@ class FlashInferMLASparseBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
-
 
 @dataclass
-class FlashInferMLASparseMetadata(AttentionMetadata):
-    """Attention metadata for FlashInfer MLA Sparse backend."""
-
+class FlashAttentionMLASparseMetadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
     max_seq_len: int
     num_actual_tokens: int
 
-    # Query start locations
     query_start_loc: torch.Tensor
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
@@ -163,16 +170,13 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     # Sequence lengths for all requests (context + query)
     seq_lens: torch.Tensor
 
-    # Sparse-specific
     block_size: int = 64
     topk_tokens: int = 2048
 
 
-class FlashInferMLASparseMetadataBuilder(
-    AttentionMetadataBuilder[FlashInferMLASparseMetadata]
+class FlashAttentionMLASparseMetadataBuilder(
+    AttentionMetadataBuilder[FlashAttentionMLASparseMetadata]
 ):
-    """Builder for FlashInfer MLA Sparse attention metadata."""
-
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
@@ -202,7 +206,7 @@ class FlashInferMLASparseMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> FlashInferMLASparseMetadata:
+    ) -> FlashAttentionMLASparseMetadata:
         cm = common_attn_metadata
         num_tokens = cm.num_actual_tokens
 
@@ -220,7 +224,7 @@ class FlashInferMLASparseMetadataBuilder(
         )
         req_id_per_token_tensor = self.req_id_per_token_buffer[:num_tokens]
 
-        return FlashInferMLASparseMetadata(
+        return FlashAttentionMLASparseMetadata(
             num_reqs=cm.num_reqs,
             max_query_len=cm.max_query_len,
             max_seq_len=cm.max_seq_len,
@@ -235,28 +239,9 @@ class FlashInferMLASparseMetadataBuilder(
         )
 
 
-# Global workspace buffer (lazily initialized)
-_fi_sparse_workspace: torch.Tensor | None = None
-
-
-def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
-    global _fi_sparse_workspace
-    if _fi_sparse_workspace is None:
-        _fi_sparse_workspace = torch.zeros(
-            FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device=device,
-        )
-    return _fi_sparse_workspace
-
-
-class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata]):
-    """FlashInfer MLA Sparse implementation.
-
-    Uses the TRT-LLM MLA kernel with sparse_mla_top_k parameter for
-    sparse attention computation.
-    """
-
+class FlashAttentionMLASparseImpl(
+    SparseMLAAttentionImpl[FlashAttentionMLASparseMetadata]
+):
     def __init__(
         self,
         num_heads: int,
@@ -277,16 +262,14 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
-                "FlashInferMLASparseImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap"
+                "FlashAttentionMLASparseImpl does not support one of the "
+                "following: alibi_slopes, sliding_window, logits_soft_cap"
             )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "FlashInferMLASparseImpl"
+                "Encoder self-attention and encoder/decoder cross-attention "
+                "are not implemented for FlashAttentionMLASparseImpl"
             )
 
         self.num_heads = num_heads
@@ -303,63 +286,72 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         assert indexer is not None, "Indexer required for sparse MLA"
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
 
-        self._workspace_buffer: torch.Tensor | None = None
-        self.bmm1_scale: float | None = None
-        self.bmm2_scale: float | None = None
+        max_tokens = self.topk_indices_buffer.shape[0]
+        device = self.topk_indices_buffer.device
 
-        # fp8 query quantization is required when using fp8 kv_cache,
-        # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
-        # for query and kv_cache (mixed bf16+fp8 is not supported).
-        self.supports_quant_query_input = True
+        # Pre-allocate cu_seqlens_k (all zeros) and seqused_k buffers.
+        # cu_seqlens_k=0 means all batches share K at offset 0.
+        # seqused_k=total_k tells the kernel how large K actually is,
+        # preventing seqlen-based masking from zeroing the output.
+        self.cu_seqlens_k_buffer = torch.zeros(
+            max_tokens + 1, dtype=torch.int32, device=device
+        )
+        self.seqused_k_buffer = torch.zeros(
+            max_tokens, dtype=torch.int32, device=device
+        )
 
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: FlashInferMLASparseMetadata,
-        layer: AttentionLayer,
+        attn_metadata: FlashAttentionMLASparseMetadata,
+        layer: AttentionLayer,  # noqa: ARG002
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if isinstance(q, tuple):
-            q = torch.cat(q, dim=-1)
+            q_nope, q_pe = q
+        else:
+            q_nope, q_pe = torch.split(
+                q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
 
-        num_actual_toks = q.shape[0]
+        num_actual_toks = q_pe.shape[0]
+
+        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
+        k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        topk_tokens = topk_indices.shape[1]
 
-        topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
+        total_k = k_pe_cache.shape[0] * k_pe_cache.shape[1]
+
+        gather_kv_indices = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
+            NUM_TOPK_TOKENS=topk_tokens,
         )
 
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q.device)
+        num_reqs = attn_metadata.num_reqs
+        cu_seqlens_k = self.cu_seqlens_k_buffer[: num_reqs + 1]
+        seqused_k = self.seqused_k_buffer[:num_reqs]
+        seqused_k.fill_(total_k)
 
-        if self.bmm1_scale is None:
-            self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-        if self.bmm2_scale is None:
-            self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm2_scale *= layer._k_scale_float
-
-        o = trtllm_batch_decode_with_kv_cache_mla(
-            query=q.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=seq_lens,
-            max_seq_len=attn_metadata.topk_tokens,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
+        attn_out = flash_attn_varlen_func(
+            q=q_pe,
+            k=k_pe_cache.reshape(total_k, 1, self.qk_rope_head_dim),
+            v=kv_c_cache.reshape(total_k, 1, self.kv_lora_rank),
+            q_v=q_nope,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            cu_seqlens_k=cu_seqlens_k,
+            seqused_k=seqused_k,
+            max_seqlen_q=max(attn_metadata.max_query_len, 1),
+            max_seqlen_k=total_k,
+            softmax_scale=self.scale,
+            causal=False,
+            fa_version=4,
+            gather_kv_indices=gather_kv_indices,
         )
-        return o.view(-1, o.shape[-2], o.shape[-1]), None
+
+        return attn_out, None

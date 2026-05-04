@@ -35,6 +35,10 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttentionMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseBackend,
 )
@@ -174,8 +178,8 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [FlashMLASparseBackend, FlashInferMLASparseBackend],
-    ids=["FlashMLA", "FlashInfer"],
+    [FlashMLASparseBackend, FlashInferMLASparseBackend, FlashAttentionMLASparseBackend],
+    ids=["FlashMLA", "FlashInfer", "FlashAttn"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
@@ -207,8 +211,7 @@ def test_sparse_backend_decode_correctness(
             "fp8_ds_mla kv-cache dtype"
         )
 
-    supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
-    if block_size not in supported_block_sizes:
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )
@@ -220,6 +223,13 @@ def test_sparse_backend_decode_correctness(
     elif backend_cls == FlashInferMLASparseBackend:
         if not current_platform.has_device_capability(100):
             pytest.skip("FlashInferMLASparseBackend requires SM 10.0 or higher")
+    elif backend_cls == FlashAttentionMLASparseBackend:
+        if not current_platform.has_device_capability(100):
+            pytest.skip("FlashAttentionMLASparseBackend requires SM 10.0 or higher")
+        if not is_fa_version_supported(4):
+            pytest.skip("FlashAttentionMLASparseBackend requires FA4")
+        if tensor_parallel_size > 1:
+            pytest.skip("FA4 MLA sparse kernel requires MQA with 128 query heads")
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
@@ -237,7 +247,7 @@ def test_sparse_backend_decode_correctness(
     qk_rope_head_dim = 64
     v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
-    topk_tokens = 128
+    topk_tokens = 256
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)

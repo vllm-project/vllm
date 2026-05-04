@@ -216,8 +216,9 @@ def flash_attn_supports_mla():
                 3
             ) and current_platform.is_device_capability_family(90)
 
-            # NOTE(Lucas): FA4 CuteDSL does NOT currently support MLA's non-standard
-            # head dimensions (576 for qk, 512 for v) due to TMEM capacity limits.
+            # NOTE(Matt): FA4 supports MLA's non-standard head dimensions (576 for qk,
+            # 512 for v) as of https://github.com/Dao-AILab/flash-attention/pull/2441,
+            # but does not yet support paged cache.
 
         except (ImportError, AssertionError):
             pass

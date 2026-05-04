@@ -20,37 +20,220 @@ model_parameter_sweep:
   label_format: "{backend}_{value}h"
 
 batch_specs:
-  # Small batches, varying sequence lengths
-  - "16q1s512"     # 16 requests, 512 KV cache
-  - "16q1s1k"      # 16 requests, 1k KV cache
-  - "16q1s2k"      # 16 requests, 2k KV cache
-  - "16q1s4k"      # 16 requests, 4k KV cache
+  # =============================================
+  # Standard decode (q1)
+  # =============================================
+
+  # Single request - baseline latency
+  - "1q1s512"
+  - "1q1s1k"
+  - "1q1s4k"
+  - "1q1s16k"
+  - "1q1s64k"
+  - "1q1s128k"
+
+  # Tiny batches
+  - "4q1s512"
+  - "4q1s1k"
+  - "4q1s4k"
+  - "4q1s16k"
+  - "4q1s64k"
+
+  - "8q1s512"
+  - "8q1s1k"
+  - "8q1s4k"
+  - "8q1s8k"
+  - "8q1s16k"
+  - "8q1s64k"
+
+  # Small batches
+  - "16q1s512"
+  - "16q1s1k"
+  - "16q1s2k"
+  - "16q1s4k"
+  - "16q1s8k"
+  - "16q1s16k"
+  - "16q1s32k"
 
   # Medium batches
-  - "32q1s1k"      # 32 requests, 1k KV cache
-  - "32q1s2k"      # 32 requests, 2k KV cache
-  - "32q1s4k"      # 32 requests, 4k KV cache
-  - "32q1s8k"      # 32 requests, 8k KV cache
+  - "32q1s512"
+  - "32q1s1k"
+  - "32q1s2k"
+  - "32q1s4k"
+  - "32q1s8k"
+  - "32q1s16k"
+  - "32q1s32k"
+  - "32q1s64k"
 
   # Large batches
-  - "64q1s1k"      # 64 requests, 1k KV cache
-  - "64q1s2k"      # 64 requests, 2k KV cache
-  - "64q1s4k"      # 64 requests, 4k KV cache
-  - "64q1s8k"      # 64 requests, 8k KV cache
+  - "64q1s512"
+  - "64q1s1k"
+  - "64q1s2k"
+  - "64q1s4k"
+  - "64q1s8k"
+  - "64q1s16k"
+  - "64q1s32k"
 
   # Very large batches
-  - "128q1s1k"     # 128 requests, 1k KV cache
-  - "128q1s2k"     # 128 requests, 2k KV cache
-  - "128q1s4k"     # 128 requests, 4k KV cache
-  - "128q1s8k"     # 128 requests, 8k KV cache
+  - "128q1s512"
+  - "128q1s1k"
+  - "128q1s2k"
+  - "128q1s4k"
+  - "128q1s8k"
+  - "128q1s16k"
+  - "128q1s32k"
 
-  # Long context
-  - "32q1s16k"     # 32 requests, 16k KV cache
-  - "32q1s32k"     # 32 requests, 32k KV cache
+  - "256q1s512"
+  - "256q1s1k"
+  - "256q1s2k"
+  - "256q1s4k"
+  - "256q1s8k"
+  - "256q1s16k"
+
+  # =============================================
+  # Speculative decoding (q2)
+  # =============================================
+
+  # Single request
+  - "1q2s512"
+  - "1q2s1k"
+  - "1q2s4k"
+  - "1q2s16k"
+  - "1q2s64k"
+  - "1q2s128k"
+
+  # Tiny batches
+  - "4q2s512"
+  - "4q2s1k"
+  - "4q2s4k"
+  - "4q2s16k"
+  - "4q2s64k"
+
+  - "8q2s512"
+  - "8q2s1k"
+  - "8q2s4k"
+  - "8q2s8k"
+  - "8q2s16k"
+  - "8q2s64k"
+
+  # Small batches
+  - "16q2s512"
+  - "16q2s1k"
+  - "16q2s2k"
+  - "16q2s4k"
+  - "16q2s8k"
+  - "16q2s16k"
+  - "16q2s32k"
+
+  # Medium batches
+  - "32q2s512"
+  - "32q2s1k"
+  - "32q2s2k"
+  - "32q2s4k"
+  - "32q2s8k"
+  - "32q2s16k"
+  - "32q2s32k"
+  - "32q2s64k"
+
+  # Large batches
+  - "64q2s512"
+  - "64q2s1k"
+  - "64q2s2k"
+  - "64q2s4k"
+  - "64q2s8k"
+  - "64q2s16k"
+  - "64q2s32k"
+
+  # Very large batches
+  - "128q2s512"
+  - "128q2s1k"
+  - "128q2s2k"
+  - "128q2s4k"
+  - "128q2s8k"
+  - "128q2s16k"
+  - "128q2s32k"
+
+  - "256q2s512"
+  - "256q2s1k"
+  - "256q2s2k"
+  - "256q2s4k"
+  - "256q2s8k"
+  - "256q2s16k"
+
+  # =============================================
+  # Speculative decoding (q4)
+  # =============================================
+
+  # Single request
+  - "1q4s512"
+  - "1q4s1k"
+  - "1q4s4k"
+  - "1q4s16k"
+  - "1q4s64k"
+  - "1q4s128k"
+
+  # Tiny batches
+  - "4q4s512"
+  - "4q4s1k"
+  - "4q4s4k"
+  - "4q4s16k"
+  - "4q4s64k"
+
+  - "8q4s512"
+  - "8q4s1k"
+  - "8q4s4k"
+  - "8q4s8k"
+  - "8q4s16k"
+  - "8q4s64k"
+
+  # Small batches
+  - "16q4s512"
+  - "16q4s1k"
+  - "16q4s2k"
+  - "16q4s4k"
+  - "16q4s8k"
+  - "16q4s16k"
+  - "16q4s32k"
+
+  # Medium batches
+  - "32q4s512"
+  - "32q4s1k"
+  - "32q4s2k"
+  - "32q4s4k"
+  - "32q4s8k"
+  - "32q4s16k"
+  - "32q4s32k"
+  - "32q4s64k"
+
+  # Large batches
+  - "64q4s512"
+  - "64q4s1k"
+  - "64q4s2k"
+  - "64q4s4k"
+  - "64q4s8k"
+  - "64q4s16k"
+  - "64q4s32k"
+
+  # Very large batches
+  - "128q4s512"
+  - "128q4s1k"
+  - "128q4s2k"
+  - "128q4s4k"
+  - "128q4s8k"
+  - "128q4s16k"
+  - "128q4s32k"
+
+  - "256q4s512"
+  - "256q4s1k"
+  - "256q4s2k"
+  - "256q4s4k"
+  - "256q4s8k"
+  - "256q4s16k"
 
 backends:
   - FLASHMLA_SPARSE
   - FLASHINFER_MLA_SPARSE
+  - FLASH_ATTN_MLA_SPARSE
 
 device: "cuda:0"
 repeats: 100
