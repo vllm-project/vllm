@@ -150,6 +150,7 @@ def FusedMoE(
     apply_routed_scale_to_output: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    routed_experts_cls: type[RoutedExperts] | None = None,
 ) -> MoERunner:
     # TODO update comment
     """FusedMoE layer builder for MoE models.
@@ -305,7 +306,9 @@ def FusedMoE(
 
     # Create RoutedExperts instance BEFORE create_weights()
     # This will hold all expert weight parameters
-    routed_experts = RoutedExperts(
+    if routed_experts_cls is None:
+        routed_experts_cls = RoutedExperts
+    routed_experts = routed_experts_cls(
         layer_name,
         params_dtype,
         moe_config,

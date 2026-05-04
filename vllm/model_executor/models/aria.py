@@ -16,6 +16,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -216,17 +217,7 @@ class AriaProjector(nn.Module):
         return out
 
 
-class AriaFusedMoE(torch.nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-        self.moe = FusedMoE(*args, **kwargs)
-
-    def forward(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
-    ) -> torch.Tensor:
-        return self.moe(hidden_states, router_logits)
-
-    # TODO(bnell): this probably requires a subclass of RoutedExperts
+class AriaRoutedExperts(RoutedExperts):
     def weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
     ) -> None:
@@ -235,7 +226,7 @@ class AriaFusedMoE(torch.nn.Module):
         # up weights for each expert.
         # Note: Loading expert weights with quantization is not supported
         tp_rank = get_tensor_model_parallel_rank()
-        tp_size = self.moe.moe_config.tp_size
+        tp_size = self.moe_config.tp_size
         if shard_id == "w13":
             # the shape of loaded_weight is
             # (num_experts, hidden_size, 2 * moe_intermediate_size)
@@ -289,7 +280,7 @@ class AriaTextMoELayer(nn.Module):
             bias=config.mlp_bias,
         )
 
-        self.experts = AriaFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_topk,
@@ -297,6 +288,7 @@ class AriaTextMoELayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            routed_experts_cls=AriaRoutedExperts,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -362,8 +354,8 @@ class AriaTextModel(LlamaModel, SupportsQuant):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            ("experts.moe.routed_experts.w13_weight", "experts.fc1.weight", "w13"),
-            ("experts.moe.routed_experts.w2_weight", "experts.fc2.weight", "w2"),
+            ("experts.routed_experts.w13_weight", "experts.fc1.weight", "w13"),
+            ("experts.routed_experts.w2_weight", "experts.fc2.weight", "w2"),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
