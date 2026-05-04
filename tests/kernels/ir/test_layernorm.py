@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Tests for layernorm IR ops.
+
+Each op has its own test class containing all related tests:
+- Registration checks
+- Symbolic tests (supports_args + SymInt compatibility)
+- Numerical tests (impl correctness)
+- Lowering tests (torch.compile integration)
+"""
+
 import pytest
 import torch
 
@@ -9,6 +19,8 @@ from tests.ir.ir_test_utils import (
     COMMON_HIDDEN_SIZES,
     NUM_TOKENS,
     assert_close,
+    assert_op_e2e_correctness,
+    assert_supports_args_returns_bool,
     clone_args,
     supported_providers,
 )
@@ -16,45 +28,68 @@ from tests.kernels.allclose_default import get_default_rtol
 from vllm import ir
 from vllm.platforms import current_platform
 
-rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
+
+# ============================================================
+# RMSNorm
+# ============================================================
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
-def test_rms_norm_registration():
-    expected = {
-        "native": True,
-        "vllm_c": current_platform.is_cuda_alike(),
-        "aiter": current_platform.is_rocm(),
-        "oink": current_platform.has_device_capability(100)
-        and hasattr(torch.ops, "oink")
-        and hasattr(torch.ops.oink, "rmsnorm"),
-        "xpu_kernels": current_platform.is_xpu(),
-    }
+class TestRmsNorm:
+    """Tests for the rms_norm IR op."""
 
-    actual = {
-        provider: impl.supported for provider, impl in ir.ops.rms_norm.impls.items()
-    }
-
-    assert actual == expected
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("n_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
-@pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
-class TestRMSNorm:
     @classmethod
-    def setup_class(cls, **kwargs):
+    def setup_class(cls):
         torch.set_default_device(current_platform.device_type)
 
+    # --- Registration ---
+
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_registration(self):
+        expected = {
+            "native": True,
+            "vllm_c": current_platform.is_cuda_alike(),
+            "aiter": current_platform.is_rocm(),
+            "oink": current_platform.has_device_capability(100)
+            and hasattr(torch.ops, "oink")
+            and hasattr(torch.ops.oink, "rmsnorm"),
+            "xpu_kernels": current_platform.is_xpu(),
+        }
+
+        actual = {
+            provider: impl.supported for provider, impl in ir.ops.rms_norm.impls.items()
+        }
+
+        assert actual == expected
+
+    # --- Symbolic ---
+
+    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.rms_norm))
+    def test_supports_args_returns_bool(self, provider: str):
+        """Verify supports_args returns bool with unbacked SymInts."""
+        assert_supports_args_returns_bool(
+            ir.ops.rms_norm,
+            provider,
+            num_tokens=8,
+            hidden_size=64,
+            dtype=torch.bfloat16,
+            epsilon=1e-5,
+        )
+
+    # --- Numerical ---
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
         x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
             num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
         )
@@ -81,13 +116,21 @@ class TestRMSNorm:
         weight1 = torch.ones_like(weight)
         out3 = rms_norm_native(x, weight1, epsilon=epsilon)
         out4 = rms_norm_native(x, None, epsilon=epsilon)
-        torch.testing.assert_close(out3, out4)
+        assert_close(ir.ops.rms_norm, out3, out4)
 
     @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
-    def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_impls(self, provider, dtype, n_tokens, hidden_size):
+        rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
         impl = ir.ops.rms_norm.impls[provider]
         x, weight, eps = ir.ops.rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
         )
         args = (x, weight, eps)
 
@@ -114,73 +157,111 @@ class TestRMSNorm:
         assert_close(ir.ops.rms_norm, out_no_weight, out_unit_weight)
 
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
-    def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_torch_opcheck(self, dtype, provider):
         if not ir.ops.rms_norm.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
 
         args = ir.ops.rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=32, hidden_size=2048, dtype=dtype, epsilon=1e-5
         )
 
         # When checking the torch op, we have to set priority and use dispatch
         with ir.ops.rms_norm.set_priority([provider, "native"]):
             torch.library.opcheck(torch.ops.vllm_ir.rms_norm, args)
 
+    # --- Lowering ---
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="aiter is only supported on ROCm",
-)
-def test_aiter_rejects_unsupported_dtypes():
-    torch.set_default_device(current_platform.device_type)
-    impl = ir.ops.rms_norm.impls["aiter"]
-    for dtype in [torch.float32, torch.float64]:
+    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.rms_norm))
+    def test_e2e_correctness(self, provider: str, default_vllm_config):
+        """Verify lowering produces correct results."""
         args = ir.ops.rms_norm.generate_inputs(
-            num_tokens=8, hidden_size=4096, dtype=dtype, epsilon=1e-5
+            num_tokens=8, hidden_size=16, dtype=torch.bfloat16, epsilon=1e-5
         )
-        assert not impl.supports_args(*args), f"aiter should reject dtype={dtype}"
+        assert_op_e2e_correctness(ir.ops.rms_norm, provider, args)
+
+    # --- Platform-specific ---
+
+    @pytest.mark.skipif(
+        not current_platform.is_rocm(),
+        reason="aiter is only supported on ROCm",
+    )
+    def test_aiter_rejects_unsupported_dtypes(self):
+        impl = ir.ops.rms_norm.impls["aiter"]
+        for dtype in [torch.float32, torch.float64]:
+            args = ir.ops.rms_norm.generate_inputs(
+                num_tokens=8, hidden_size=4096, dtype=dtype, epsilon=1e-5
+            )
+            assert not impl.supports_args(*args), f"aiter should reject dtype={dtype}"
 
 
-fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
+# ============================================================
+# FusedAddRmsNorm
+# ============================================================
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
-def test_fused_add_rms_norm_registration():
-    expected = {
-        "native": True,
-        "vllm_c": current_platform.is_cuda_alike(),
-        "aiter": current_platform.is_rocm(),
-        "oink": current_platform.has_device_capability(100)
-        and hasattr(torch.ops, "oink")
-        and hasattr(torch.ops.oink, "fused_add_rms_norm"),
-        "xpu_kernels": current_platform.is_xpu(),
-    }
+class TestFusedAddRmsNorm:
+    """Tests for the fused_add_rms_norm IR op."""
 
-    actual = {
-        provider: impl.supported
-        for provider, impl in ir.ops.fused_add_rms_norm.impls.items()
-    }
-
-    assert actual == expected
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("n_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
-@pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
-class TestFusedAddRMSNorm:
     @classmethod
-    def setup_class(cls, **kwargs):
+    def setup_class(cls):
         torch.set_default_device(current_platform.device_type)
 
+    # --- Registration ---
+
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_registration(self):
+        expected = {
+            "native": True,
+            "vllm_c": current_platform.is_cuda_alike(),
+            "aiter": current_platform.is_rocm(),
+            "oink": current_platform.has_device_capability(100)
+            and hasattr(torch.ops, "oink")
+            and hasattr(torch.ops.oink, "fused_add_rms_norm"),
+            "xpu_kernels": current_platform.is_xpu(),
+        }
+
+        actual = {
+            provider: impl.supported
+            for provider, impl in ir.ops.fused_add_rms_norm.impls.items()
+        }
+
+        assert actual == expected
+
+    # --- Symbolic ---
+
+    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.fused_add_rms_norm))
+    def test_supports_args_returns_bool(self, provider: str):
+        """Verify supports_args returns bool with unbacked SymInts."""
+        assert_supports_args_returns_bool(
+            ir.ops.fused_add_rms_norm,
+            provider,
+            num_tokens=8,
+            hidden_size=64,
+            dtype=torch.bfloat16,
+            epsilon=1e-5,
+        )
+
+    # --- Numerical ---
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
+        fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
             num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
         )
@@ -221,13 +302,21 @@ class TestFusedAddRMSNorm:
         weight1 = torch.ones_like(weight)
         out3, _ = fused_add_rms_norm_native(x, x_residual, weight1, eps)
         out4, _ = fused_add_rms_norm_native(x, x_residual, None, eps)
-        torch.testing.assert_close(out3, out4)
+        assert_close(ir.ops.fused_add_rms_norm, out3, out4)
 
     @pytest.mark.parametrize("provider", supported_providers(ir.ops.fused_add_rms_norm))
-    def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_impls(self, provider, dtype, n_tokens, hidden_size):
+        fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
         impl = ir.ops.fused_add_rms_norm.impls[provider]
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
         )
         args = (x, x_residual, weight, eps, None)
 
@@ -249,15 +338,15 @@ class TestFusedAddRMSNorm:
         )
 
         # none of these support variance_size override
-        assert not impl.supports_args(x, x_residual, weight, epsilon, 4)
-        assert not impl.supports_args(x, x_residual, weight, epsilon, variance_size=4)
+        assert not impl.supports_args(x, x_residual, weight, eps, 4)
+        assert not impl.supports_args(x, x_residual, weight, eps, variance_size=4)
 
         # test weight=None behavior
         out_no_weight, residual_no_weight = impl.impl_fn(
-            x.clone(), x_residual.clone(), None, epsilon
+            x.clone(), x_residual.clone(), None, eps
         )
         out_unit_weight, residual_unit_weight = impl.impl_fn(
-            x.clone(), x_residual.clone(), torch.ones_like(weight), epsilon
+            x.clone(), x_residual.clone(), torch.ones_like(weight), eps
         )
         assert_close(ir.ops.fused_add_rms_norm, out_no_weight, out_unit_weight)
         assert_close(
@@ -265,7 +354,12 @@ class TestFusedAddRMSNorm:
         )
 
     @pytest.mark.parametrize("provider", ["vllm_c"])
-    def test_inplace_semantics(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_inplace_semantics(self, dtype, provider):
         """Test that inplace implementations reuse inputs,
         for maybe_inplace overload but not for default overload."""
         impl = ir.ops.fused_add_rms_norm.impls[provider]
@@ -273,7 +367,7 @@ class TestFusedAddRMSNorm:
             pytest.skip(f"{provider} impl not supported on this platform")
 
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=32, hidden_size=2048, dtype=dtype, epsilon=1e-5
         )
 
         # Test default overload - should NOT modify inputs even with inplace impl
@@ -315,9 +409,14 @@ class TestFusedAddRMSNorm:
         )
 
     @pytest.mark.parametrize("provider", supported_providers(ir.ops.fused_add_rms_norm))
-    def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_torch_opcheck(self, dtype, provider):
         args = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=32, hidden_size=2048, dtype=dtype, epsilon=1e-5
         )
         args = args + (None,)  # Add variance_size parameter
 
@@ -333,3 +432,13 @@ class TestFusedAddRMSNorm:
                 torch.library.opcheck(
                     torch.ops.vllm_ir.fused_add_rms_norm.maybe_inplace, args
                 )
+
+    # --- Lowering ---
+
+    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.fused_add_rms_norm))
+    def test_e2e_correctness(self, provider: str, default_vllm_config):
+        """Verify lowering produces correct results."""
+        args = ir.ops.fused_add_rms_norm.generate_inputs(
+            num_tokens=8, hidden_size=16, dtype=torch.bfloat16, epsilon=1e-5
+        )
+        assert_op_e2e_correctness(ir.ops.fused_add_rms_norm, provider, args)
