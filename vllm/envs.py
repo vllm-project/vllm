@@ -226,6 +226,7 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_SYSTEM_START_DATE: str | None = None
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
+    VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
@@ -245,7 +246,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
-    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 4096
+    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1231,8 +1232,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if 1, force use indexed gemm
     # if 0, force use grouped gemm
     # if None, choose better gemm type automatically
-    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: maybe_convert_bool(
-        os.environ.get("VLLM_HUMMING_MOE_GEMM_TYPE", None)
+    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: os.environ.get(
+        "VLLM_HUMMING_MOE_GEMM_TYPE", None
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with
@@ -1593,6 +1594,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
         int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
+    # When 1,the model structural tags will be used to enforce the model
+    # output conforming to the model's tool-calling format and schema.
+    # Default 0 (off).
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: bool(
+        int(os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"))
+    ),
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0"))
@@ -1686,10 +1693,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tokens the FP8 main GEMM has idle SMs to share with the bf16 aux GEMMs
     # and overlap is a 5-45% win; above it the FP8 GEMM saturates the device
     # and the cross-stream sync becomes pure overhead. Set to 0 to disable
-    # the multi-stream path entirely. Empirical crossover on B300 (148 SMs)
-    # is ~4096; B200 (132 SMs) is expected ~3072.
+    # the multi-stream path entirely. See #PR 41526 for the empirical result
+    # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
-        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "4096")
+        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
