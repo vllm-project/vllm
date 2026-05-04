@@ -80,7 +80,9 @@ run_cpu_tests() {
         kernels/quantization/test_scaled_mm_kernel_selection.py \
         test_inputs.py test_outputs.py \
         -m cpu_test \
+        `# marked cpu_test but imports GPUModelRunner, which pulls in CUDA deps at import time` \
         --deselect v1/streaming_input/test_gpu_model_runner_v2_streaming.py \
+        `# requires ffmpeg to extract audio from video; not available in CI container` \
         --deselect multimodal/media/test_audio.py::test_audio_media_io_from_video
 
     # ── Tests that are CPU-safe but not marked with cpu_test ──
@@ -92,6 +94,7 @@ run_cpu_tests() {
     pytest -v -s entrypoints/openai/tool_parsers \
         --ignore=entrypoints/openai/tool_parsers/test_openai_tool_parser.py \
         --ignore=entrypoints/openai/tool_parsers/test_hermes_tool_parser.py \
+        `# requires RemoteOpenAIServer (GPU) but collected in CPU-only parser run` \
         --deselect entrypoints/openai/tool_parsers/test_granite4_tool_parser.py::test_stop_sequence_interference
 
     # V1 output dataclass tests
