@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from typing import Any
 
 import llguidance
@@ -2116,3 +2117,122 @@ class TestMistralTokenizer:
         # Test caching
         llg_tokenizer_2 = mistral_tokenizer.llg_tokenizer
         assert llg_tokenizer is llg_tokenizer_2
+
+    @pytest.mark.parametrize(
+        "messages,tools,tekken_expected_substrings,spm_expected_substrings",
+        [
+            pytest.param(
+                [{"role": "user", "content": "Hello"}],
+                [{"type": "function", "function": {"name": "do_nothing"}}],
+                ["do_nothing", '"description": ""', '"parameters": {}'],
+                ["do_nothing", '"description":▁""', '"parameters":▁{}'],
+                id="tool_without_description_and_parameters",
+            ),
+            pytest.param(
+                [
+                    {"role": "user", "content": "Do nothing"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "123456789",
+                                "type": "function",
+                                "function": {
+                                    "name": "do_nothing",
+                                    "arguments": None,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "123456789",
+                        "content": "done",
+                    },
+                ],
+                [{"type": "function", "function": {"name": "do_nothing"}}],
+                ["do_nothing"],
+                ["do_nothing"],
+                id="tool_call_with_none_arguments",
+            ),
+        ],
+    )
+    def test_apply_chat_template_tool_optional_fields(
+        self,
+        mistral_tokenizer: MistralTokenizer,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tekken_expected_substrings: list[str],
+        spm_expected_substrings: list[str],
+    ) -> None:
+        output = mistral_tokenizer.apply_chat_template(
+            messages, tools=tools, add_generation_prompt=True
+        )
+        decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
+
+        expected = (
+            tekken_expected_substrings
+            if mistral_tokenizer.is_tekken
+            else spm_expected_substrings
+        )
+        for substring in expected:
+            assert substring in decoded
+
+    def test_apply_chat_template_tools_not_mutated(
+        self, mistral_tokenizer: MistralTokenizer
+    ) -> None:
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+        ]
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Gets weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        ]
+        original_tools = copy.deepcopy(tools)
+
+        mistral_tokenizer.apply_chat_template(
+            messages, tools=tools, add_generation_prompt=True
+        )
+
+        assert tools == original_tools
+
+    @pytest.mark.parametrize(
+        "reasoning_key",
+        ["reasoning", "reasoning_content"],
+    )
+    def test_apply_chat_template_reasoning_assistant(
+        self, mistral_tokenizer: MistralTokenizer, reasoning_key: str
+    ) -> None:
+        if not mistral_tokenizer.is_tekken:
+            pytest.skip("Reasoning tokens only supported on tekken tokenizers")
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "What is 2+2?"},
+            {
+                "role": "assistant",
+                "content": "4",
+                reasoning_key: "2+2 equals 4",
+            },
+            {"role": "user", "content": "Are you sure?"},
+        ]
+
+        output = mistral_tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True
+        )
+        decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
+
+        assert "[THINK]" in decoded
+        assert "2+2 equals 4" in decoded
+        assert "[/THINK]" in decoded
