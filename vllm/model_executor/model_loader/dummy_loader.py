@@ -43,6 +43,15 @@ class DummyModelLoader(BaseModelLoader):
                 # random values to the weights.
                 initialize_dummy_weights(layer, model_config)
 
+        # Some models build derived weights from loaded parameters instead of
+        # storing them in checkpoints. Rebuild those tensors for dummy load.
+        for layer in model.modules():
+            fuse_shared_expert_act_quant = getattr(
+                layer, "fuse_shared_expert_act_quant", None
+            )
+            if callable(fuse_shared_expert_act_quant):
+                fuse_shared_expert_act_quant()
+
     def _process_online_quant_layer(
         self,
         layer: nn.Module,
