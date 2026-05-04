@@ -43,7 +43,7 @@ import uvloop
 
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.utils import log_version_and_model
+from vllm.entrypoints.utils import cli_env_setup, log_version_and_model
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -167,6 +167,7 @@ async def serve_grpc(args: argparse.Namespace):
 
 def main():
     """Main entry point for python -m vllm.entrypoints.grpc_server."""
+    cli_env_setup()
     parser = FlexibleArgumentParser(
         description="vLLM gRPC Server",
     )
