@@ -48,9 +48,9 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
     GateLinear,
-    RoutingMethodType,
-    SharedFusedMoE,
+    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -82,7 +82,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    sequence_parallel_chunk,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -311,7 +314,7 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -337,16 +340,21 @@ class DeepseekV2MoE(nn.Module):
             else None,
         )
 
-        # NOTE(rob): this is a hack until we finish off the PR for
-        # merging TRTLLM kernels into the MK framework. Then we can
-        # query the MonolithicMK for the expected router logits.
-        # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
-        self.gate.set_out_dtype(
-            torch.float32
-            if self.experts.quant_method.is_monolithic
-            and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
-            else torch.bfloat16
-        )
+        # Pre-cast the bias to match the gate output dtype so the
+        # conversion is not repeated on every forward pass.  All
+        # downstream references (FusedMoE, router) share the same
+        # nn.Parameter object, so mutating .data propagates everywhere.
+        # Weight loading uses copy_(), which handles the dtype conversion.
+        # Only needed on ROCm where the aiter biased_grouped_topk kernel
+        # requires the bias dtype to match the gating output dtype.
+        if (
+            self.is_rocm_aiter_moe_enabled
+            and self.gate.e_score_correction_bias is not None
+        ):
+            gate_out_dtype = self.gate.out_dtype or self.gate.weight.dtype
+            self.gate.e_score_correction_bias.data = (
+                self.gate.e_score_correction_bias.data.to(gate_out_dtype)
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -667,30 +675,45 @@ class Indexer(nn.Module):
     ) -> torch.Tensor:
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
-        q_pe, q_nope = torch.split(
-            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
-        # Fused wk + weights_proj: one GEMM, then split
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        weights = kw[:, self.head_dim :]
 
-        k = self.k_norm(k)
-        k_pe, k_nope = torch.split(
-            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
+        if current_platform.is_rocm():
+            # This path should works on all platform, will remove extra
+            # branches in the future
+            # Fused wk + weights_proj: one GEMM, then split
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
 
-        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        # Note: RoPE (NeoX) can introduce extra leading dimensions during compilation
-        # so we need to reshape back to token-flattened shapes
-        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+            k = self.k_norm(k)
 
-        # `rotary_emb` is shape-preserving; `q_pe` is already
-        # [num_tokens, n_head, rope_dim].
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
-        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            rotary_emb(
+                positions, q[..., : self.rope_dim], k[..., : self.rope_dim].unsqueeze(1)
+            )
+        else:
+            q_pe, q_nope = torch.split(
+                q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
+            # Fused wk + weights_proj: one GEMM, then split
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
+
+            k = self.k_norm(k)
+            k_pe, k_nope = torch.split(
+                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
+
+            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+            # Note: RoPE (NeoX) can introduce extra leading dimensions during
+            # compilation so we need to reshape back to token-flattened shapes
+            q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+            # `rotary_emb` is shape-preserving; `q_pe` is already
+            # [num_tokens, n_head, rope_dim].
+            q = torch.cat([q_pe, q_nope], dim=-1)
+            # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
+            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -959,6 +982,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.is_v32 = hasattr(config, "index_topk")
 
+        _skip_topk = False
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
@@ -976,6 +1000,21 @@ class DeepseekV2MLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
+
+            # Enable IndexCache for DeepSeek models to reduce redundant top-k
+            # token selection computations in sparse attention.
+            use_index_cache = getattr(config, "use_index_cache", False)
+            if use_index_cache:
+                # IndexCache config
+                # Refer: https://arxiv.org/abs/2603.12201 for more details.
+                _index_topk_freq = getattr(config, "index_topk_freq", 1)
+                _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+                layer_id = extract_layer_index(prefix)
+                if _index_topk_pattern is None:
+                    _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
+                elif 0 <= layer_id < len(_index_topk_pattern):
+                    _skip_topk = _index_topk_pattern[layer_id] == "S"
+
         else:
             self.indexer_rope_emb = None
             self.indexer = None
@@ -1013,6 +1052,7 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            skip_topk=_skip_topk,
         )
 
     def forward(
@@ -1432,7 +1472,7 @@ class DeepseekV2ForCausalLM(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return SharedFusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1474,7 +1514,7 @@ class DeepseekV2ForCausalLM(
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
