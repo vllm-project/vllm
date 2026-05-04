@@ -7,6 +7,7 @@ Define activation steering functionality mixin for model runners.
 import math
 from typing import TYPE_CHECKING, cast
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -81,6 +82,18 @@ class SteeringModelRunnerMixin:
     # ``SteeringManager`` calls so non-local tensors are never
     # materialized on this rank.
     _locally_owned_layers: frozenset[int]
+    # CPU scratch arrays used by ``_update_steering_buffers`` to build
+    # the per-token row mapping in a single ``np.repeat`` + non-blocking
+    # H2D copy, replacing the per-request slice-assign loop.  The
+    # per-request scratches are sized to ``max_num_seqs``; the
+    # row-per-token scratch is a pinned-memory torch tensor sized to
+    # ``max_num_batched_tokens`` so the H2D copy can actually overlap
+    # compute (``non_blocking=True`` on a non-pinned source silently
+    # falls back to a synchronous copy).  ``None`` when steering is
+    # inactive.
+    _steering_rows_scratch: np.ndarray | None = None
+    _steering_n_tokens_scratch: np.ndarray | None = None
+    _steering_index_pinned: torch.Tensor | None = None
 
     # Attributes provided by the concrete model runner that mixes this
     # class in.  Declared here purely so static type checking can see
@@ -148,6 +161,29 @@ class SteeringModelRunnerMixin:
             steering_config.max_steering_configs,
             device=table_device,
         )
+
+        # Pre-allocate CPU scratch buffers for the vectorized
+        # steering_index build in ``_update_steering_buffers``.  The
+        # per-request numpy buffers hold one entry per request in the
+        # batch (bounded by ``max_num_seqs``); the pinned torch tensor
+        # holds the expanded per-token row array (bounded by
+        # ``max_num_batched_tokens``) and is the source of the single
+        # H2D copy each step.  Pinning lets ``non_blocking=True`` on
+        # the copy actually overlap with model compute.
+        scheduler_config = getattr(self.vllm_config, "scheduler_config", None)
+        if scheduler_config is not None:
+            max_tokens = int(scheduler_config.max_num_batched_tokens)
+            max_seqs = int(getattr(scheduler_config, "max_num_seqs", max_tokens))
+            self._steering_rows_scratch = np.zeros(max_seqs, dtype=np.int64)
+            self._steering_n_tokens_scratch = np.zeros(max_seqs, dtype=np.int64)
+            try:
+                self._steering_index_pinned = torch.zeros(
+                    max_tokens, dtype=torch.long, pin_memory=True
+                )
+            except RuntimeError:
+                # Pinned memory unavailable (e.g. CPU-only test
+                # environment); fall back to a regular CPU tensor.
+                self._steering_index_pinned = torch.zeros(max_tokens, dtype=torch.long)
 
     # -----------------------------------------------------------------------
     # Steerable-layer discovery and vector-spec validation
@@ -542,8 +578,30 @@ class SteeringModelRunnerMixin:
         num_reqs = self.input_batch.num_reqs
         req_ids = self.input_batch.req_ids
 
-        # Walk requests in batch order, assigning each token's table row
-        token_offset = 0
+        # Vectorized build: walk requests once to record each request's
+        # table row + token count into pre-allocated CPU int64 scratch
+        # buffers, then expand the row-per-request array into a
+        # row-per-token array via ``np.repeat`` and copy the whole
+        # thing to the GPU in a single non-blocking H2D.  Replaces
+        # ``num_reqs`` independent ``_set_item`` kernel launches per
+        # step with one ``copy_``.
+        rows_scratch = self._steering_rows_scratch
+        n_tokens_scratch = self._steering_n_tokens_scratch
+        index_pinned = self._steering_index_pinned
+        assert rows_scratch is not None
+        assert n_tokens_scratch is not None
+        assert index_pinned is not None
+
+        # Grow per-request scratches if the batch ever exceeds the
+        # initial sizing.  This is defensive — ``max_num_seqs`` should
+        # bound ``num_reqs`` — but cheap to handle.
+        if rows_scratch.shape[0] < num_reqs:
+            rows_scratch = np.zeros(num_reqs, dtype=np.int64)
+            n_tokens_scratch = np.zeros(num_reqs, dtype=np.int64)
+            self._steering_rows_scratch = rows_scratch
+            self._steering_n_tokens_scratch = n_tokens_scratch
+
+        active_count = 0
         for i in range(num_reqs):
             req_id = req_ids[i]
             n_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
@@ -552,9 +610,11 @@ class SteeringModelRunnerMixin:
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
-                # Request not in batch yet (shouldn't happen but guard)
-                steering_index[token_offset : token_offset + n_tokens] = 0
-                token_offset += n_tokens
+                # Request not in batch yet (shouldn't happen but guard).
+                # Row 0 is the no-steering sentinel.
+                rows_scratch[active_count] = 0
+                n_tokens_scratch[active_count] = n_tokens
+                active_count += 1
                 continue
 
             # Determine phase from num_computed vs num_prompt
@@ -570,10 +630,13 @@ class SteeringModelRunnerMixin:
                 row = self._steering_manager.get_row_for_config(
                     prefill_hash, is_prefill=True
                 )
-                steering_index[token_offset : token_offset + n_tokens] = row
+                rows_scratch[active_count] = row
+                n_tokens_scratch[active_count] = n_tokens
 
                 # Check if this request will transition to decode after
-                # this step's tokens are processed.
+                # this step's tokens are processed. Must happen in this
+                # same pass — the registration / refcount semantics are
+                # externally observable.
                 num_computed_after = num_computed + n_tokens
                 if num_computed_after >= num_prompt:
                     self._handle_steering_transition(req_id, req_index, prefill_hash)
@@ -585,13 +648,38 @@ class SteeringModelRunnerMixin:
                 row = self._steering_manager.get_row_for_config(
                     decode_hash, is_prefill=False
                 )
-                steering_index[token_offset : token_offset + n_tokens] = row
+                rows_scratch[active_count] = row
+                n_tokens_scratch[active_count] = n_tokens
 
-            token_offset += n_tokens
+            active_count += 1
 
-        # Zero out remaining positions
-        if token_offset < steering_index.shape[0]:
-            steering_index[token_offset:].zero_()
+        # Single non-blocking H2D copy: expand per-request rows into
+        # the per-token row array (written into the pre-allocated
+        # pinned-memory scratch), then copy that prefix to the GPU
+        # in one shot.
+        if active_count > 0:
+            expanded = np.repeat(
+                rows_scratch[:active_count],
+                n_tokens_scratch[:active_count],
+            )
+            n_expanded = int(expanded.shape[0])
+            # Cap to the device buffer size; the scheduler enforces
+            # this bound but cap defensively to avoid out-of-range
+            # writes if upstream invariants ever drift.
+            n_expanded = min(n_expanded, index_pinned.shape[0], steering_index.shape[0])
+            # Stage in the pinned scratch so the copy is genuinely
+            # asynchronous on CUDA devices.
+            index_pinned[:n_expanded].copy_(torch.from_numpy(expanded[:n_expanded]))
+            steering_index[:n_expanded].copy_(
+                index_pinned[:n_expanded], non_blocking=True
+            )
+        else:
+            n_expanded = 0
+
+        # Zero out remaining positions so old tokens past the active
+        # prefix read row 0 (the no-steering sentinel).
+        if n_expanded < steering_index.shape[0]:
+            steering_index[n_expanded:].zero_()
 
         # Mark the index as having non-zero row references this step. The
         # no-active-state short-circuit on a future step will zero the index
