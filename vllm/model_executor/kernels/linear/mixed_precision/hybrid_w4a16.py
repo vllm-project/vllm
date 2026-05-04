@@ -30,7 +30,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
-SUPPORTED_GROUP_SIZES = [32, 64, 128, 256]
+SUPPORTED_GROUP_SIZES = [32, 64, 128]
 
 # Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
 # up to 5).  When M exceeds this AND K*M fits in LDS, the skinny kernel is

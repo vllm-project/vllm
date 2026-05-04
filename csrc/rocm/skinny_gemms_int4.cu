@@ -713,7 +713,7 @@ static int mindiv_int4(int N, int div1, int div2) {
 // in_zero_points: optional raw zero points [M, K/group_size] (fp16/bf16)
 //   If provided, kernel dequants as (nibble - zp_raw) * scale (asymmetric).
 //   If absent, kernel dequants as (nibble - 8) * scale (symmetric uint4b8).
-// group_size: 32 or 128
+// group_size: 32, 64, or 128
 
 // Dispatch macros for wvSplitK_int4_g grouped kernel.
 // These are defined once and shared by wvSplitK_int4_g and
@@ -748,6 +748,8 @@ static int mindiv_int4(int N, int div1, int div2) {
 #define WVSPLIT_INT4G_GS(_YTILE, _UNRL, _N, _HAS_ZP) \
   if (group_size == 32)                              \
     WVSPLITK_INT4G(_YTILE, _UNRL, _N, 32, _HAS_ZP)   \
+  else if (group_size == 64)                         \
+    WVSPLITK_INT4G(_YTILE, _UNRL, _N, 64, _HAS_ZP)   \
   else                                               \
     WVSPLITK_INT4G(_YTILE, _UNRL, _N, 128, _HAS_ZP)
 
@@ -1017,8 +1019,8 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       "Activation must be float16 or bfloat16");
   TORCH_CHECK(in_scale.dtype() == in_b.dtype(),
               "Scale dtype must match activation dtype");
-  TORCH_CHECK(group_size == 32 || group_size == 128,
-              "group_size must be 32 or 128, got ", group_size);
+  TORCH_CHECK(group_size == 32 || group_size == 64 || group_size == 128,
+              "group_size must be 32, 64, or 128, got ", group_size);
   TORCH_CHECK(K_in % group_size == 0,
               "K must be divisible by group_size=", group_size);
   int64_t num_groups = K_in / group_size;
@@ -1170,8 +1172,8 @@ torch::Tensor wvSplitK_int4g_sweep(
               "Sweep only supports float16 activations");
   TORCH_CHECK(in_scale.dtype() == torch::kFloat16,
               "Sweep only supports float16 scale");
-  TORCH_CHECK(group_size == 32 || group_size == 128,
-              "group_size must be 32 or 128, got ", group_size);
+  TORCH_CHECK(group_size == 32 || group_size == 64 || group_size == 128,
+              "group_size must be 32, 64, or 128, got ", group_size);
   TORCH_CHECK(K_in % group_size == 0,
               "K must be divisible by group_size=", group_size);
   int64_t num_groups = K_in / group_size;
@@ -1277,12 +1279,16 @@ torch::Tensor wvSplitK_int4g_sweep(
   if (THRDS == 32) {
     if (group_size == 128) {
       SWEEP_G_ACHUNK(32, 128)
+    } else if (group_size == 64) {
+      SWEEP_G_ACHUNK(32, 64)
     } else {
       SWEEP_G_ACHUNK(32, 32)
     }
   } else {
     if (group_size == 128) {
       SWEEP_G_ACHUNK(64, 128)
+    } else if (group_size == 64) {
+      SWEEP_G_ACHUNK(64, 64)
     } else {
       SWEEP_G_ACHUNK(64, 32)
     }
@@ -1314,8 +1320,8 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
               "Sweep only supports float16 activations");
   TORCH_CHECK(in_scale.dtype() == torch::kFloat16,
               "Sweep only supports float16 scale");
-  TORCH_CHECK(group_size == 32 || group_size == 128,
-              "group_size must be 32 or 128, got ", group_size);
+  TORCH_CHECK(group_size == 32 || group_size == 64 || group_size == 128,
+              "group_size must be 32, 64, or 128, got ", group_size);
   TORCH_CHECK(K_in % group_size == 0,
               "K must be divisible by group_size=", group_size);
   int64_t num_groups = K_in / group_size;
@@ -1421,6 +1427,8 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
   if (THRDS == 32) {
     if (group_size == 128) {
       SWEEP_GHF_ACHUNK(32, 128)
+    } else if (group_size == 64) {
+      SWEEP_GHF_ACHUNK(32, 64)
     } else if (group_size == 32) {
       SWEEP_GHF_ACHUNK(32, 32)
     } else {
@@ -1429,6 +1437,8 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
   } else {
     if (group_size == 128) {
       SWEEP_GHF_ACHUNK(64, 128)
+    } else if (group_size == 64) {
+      SWEEP_GHF_ACHUNK(64, 64)
     } else if (group_size == 32) {
       SWEEP_GHF_ACHUNK(64, 32)
     } else {

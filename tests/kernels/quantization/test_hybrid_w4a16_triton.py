@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the Triton path of the hybrid W4A16 kernel.
+"""Tests for the hybrid W4A16 kernel (Triton prefill + HIP skinny decode).
 
 The hybrid kernel stores weights in ExLlama shuffle format [N, K//8] int32.
-This test validates the Triton GEMM (triton_w4a16_skinny_fmt_gemm) that reads
-from this layout.
+Tests validate:
+  - Triton GEMM (triton_w4a16_skinny_fmt_gemm) for prefill path
+  - HIP wvSplitK_int4_g for decode path
+  - Full hybrid dispatch (torch.ops.vllm.hybrid_w4a16_apply) routing
 
 Run `pytest tests/kernels/quantization/test_hybrid_w4a16_triton.py`.
 """
@@ -194,4 +196,112 @@ def test_triton_w4a16_skinny_fmt_gemm_asymmetric(dtype, M, K, N, G, random_seed:
     )
 
     # bf16 accumulation at larger shapes needs slightly looser tolerance
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+# ---------------------------------------------------------------------------
+# Tests for the HIP wvSplitK_int4_g decode kernel
+# ---------------------------------------------------------------------------
+
+
+def _hip_skinny_reference(
+    a_mk: torch.Tensor,
+    w_int4_nk: torch.Tensor,
+    scales_nkg: torch.Tensor,
+    *,
+    group_size: int,
+    zp_bias: int,
+) -> torch.Tensor:
+    """Reference for symmetric HIP skinny: C = A @ (W - zp_bias) * S."""
+    K = a_mk.shape[1]
+    N = w_int4_nk.shape[0]
+    num_groups = K // group_size
+
+    w_fp = (w_int4_nk.to(torch.float32) - zp_bias).view(N, num_groups, group_size)
+    s = scales_nkg.to(torch.float32).unsqueeze(-1)
+    w_dequant = (w_fp * s).view(N, K)
+
+    return (a_mk.to(torch.float32) @ w_dequant.t()).to(a_mk.dtype)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "M,K,N,G",
+    [
+        # M<=5 ensures the HIP skinny path is taken
+        (1, 256, 256, 32),
+        (1, 256, 256, 64),
+        (1, 512, 256, 128),
+        (2, 512, 256, 64),
+        (3, 256, 512, 64),
+    ],
+)
+def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, random_seed: int):
+    """Test HIP wvSplitK_int4_g kernel directly via _custom_ops."""
+    import vllm._custom_ops as ops
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(random_seed)
+
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+
+    b_packed_i32 = pack_int4_exllama_shuffle(w_int4_nk)
+    b_packed_i8 = b_packed_i32.view(torch.int8)
+
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+
+    cu_count = num_compute_units()
+    out = ops.wvSplitK_int4_g(b_packed_i8, a, scales, cu_count, G)
+
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
+
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+# ---------------------------------------------------------------------------
+# Tests for the full hybrid dispatch (HIP decode + Triton prefill)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "M,K,N,G",
+    [
+        # M=1: HIP skinny decode path
+        (1, 256, 256, 64),
+        (1, 512, 256, 32),
+        (1, 512, 256, 128),
+        # M>5: Triton prefill path
+        (32, 512, 256, 64),
+        (64, 1024, 256, 128),
+    ],
+)
+def test_hybrid_w4a16_dispatch(dtype, M, K, N, G, random_seed: int):
+    """Test the full hybrid dispatch via the custom op."""
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(random_seed)
+
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+
+    b_packed_i32 = pack_int4_exllama_shuffle(w_int4_nk)
+    b_packed_i8 = b_packed_i32.view(torch.int8)
+
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+
+    cu_count = num_compute_units()
+    out = torch.ops.vllm.hybrid_w4a16_apply(
+        a, b_packed_i8, scales, b_packed_i32, None, None, cu_count, G
+    )
+
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
+
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
