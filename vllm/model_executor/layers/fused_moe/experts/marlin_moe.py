@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     disable_inplace,
+    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -49,8 +50,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-
-from .utils import swiglu_limit_func
 
 
 def _fused_marlin_moe(
