@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import KVTransferConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -2165,3 +2165,29 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def test_hma_not_disabled_for_supported_kv_connector():
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+    )
+
+    vllm_config = VllmConfig(
+        kv_transfer_config=kv_transfer_config,
+    )
+
+    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False
+
+
+def test_hma_disabled_for_unsupported_kv_connector():
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="ExampleConnector",
+        kv_role="kv_both",
+    )
+
+    vllm_config = VllmConfig(
+        kv_transfer_config=kv_transfer_config,
+    )
+
+    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is True
