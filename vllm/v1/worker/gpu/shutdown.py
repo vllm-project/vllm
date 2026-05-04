@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -14,6 +16,17 @@ def free_before_shutdown(vllm_config: VllmConfig) -> None:
     cache_config.num_gpu_blocks = None
 
     compilation_config = vllm_config.compilation_config
+    for layer in compilation_config.static_forward_context.values():
+        if hasattr(layer, "kv_cache"):
+            kv_cache = layer.kv_cache
+            layer.kv_cache = (
+                torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+            )
+        if hasattr(layer, "impl"):
+            if hasattr(layer.impl, "_k_scale_cache"):
+                layer.impl._k_scale_cache = None
+            if hasattr(layer.impl, "_v_scale_cache"):
+                layer.impl._v_scale_cache = None
     compilation_config.static_forward_context.clear()
 
     _ROPE_DICT.clear()
