@@ -170,11 +170,17 @@ def _get_gcn_arch() -> str:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-        logger.warning_once(
-            "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
-            "This will initialize CUDA and may cause "
-            "issues if CUDA_VISIBLE_DEVICES is not set yet."
-        )
+        
+    arch_env = os.environ.get("PYTORCH_ROCM_ARCH", "")
+    if arch_env:
+        logger.info("Using PYTORCH_ROCM_ARCH=%s for GCN arch", arch_env)
+        return arch_env
+
+    logger.warning(
+        "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
+        "This will initialize CUDA and may cause "
+        "issues if CUDA_VISIBLE_DEVICES is not set yet."
+    )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
