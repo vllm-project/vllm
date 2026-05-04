@@ -94,6 +94,12 @@ class EngineCoreRequest(
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
 
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). `True` means the position is a real
+    # token ID; `False` means the position uses a pre-computed entry from
+    # `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    prompt_is_token_ids: list[bool] | None = None
+
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
     client_index: int = 0
@@ -114,6 +120,7 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
