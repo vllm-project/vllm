@@ -189,7 +189,7 @@ def test_wer_correctness(
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
         f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
-        f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}"
+        f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}",
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
