@@ -107,7 +107,7 @@ def assert_supports_args_returns_bool(
     Args:
         op: The IrOp to test.
         provider: The provider/implementation to test.
-        **generate_kwargs: Keyword arguments passed to op.generate_symbolic_inputs().
+        **generate_kwargs: Keyword arguments passed to op.generate_inputs().
 
     Raises:
         AssertionError: If supports_args returns a non-bool (SymBool).
@@ -116,7 +116,7 @@ def assert_supports_args_returns_bool(
     if not impl.supported:
         return  # Skip unsupported implementations
 
-    fake_args = op.generate_symbolic_inputs(**generate_kwargs)
+    fake_args = generate_symbolic_inputs(op, **generate_kwargs)
     result = impl.supports_args(*fake_args)
     assert isinstance(result, bool), (
         f"supports_args for {op.name}/{provider} returned {type(result).__name__}, "
@@ -238,6 +238,43 @@ def assert_dispatch_matches_direct(
 # ============================================================
 # Fixture for registering test ops with automatic cleanup
 # ============================================================
+
+
+def generate_symbolic_inputs(op: IrOp, **kwargs) -> tuple:
+    """
+    Generate inputs with unbacked SymInts for the first dimension.
+
+    This is useful for testing that `supports_args` works correctly
+    with symbolic shapes during torch.compile graph tracing.
+
+    Args:
+        op: The IrOp to generate inputs for.
+        **kwargs: Keyword arguments passed to op.generate_inputs().
+
+    Returns:
+        Tuple of arguments with the first tensor's first dimension
+        replaced by an unbacked SymInt.
+    """
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    args = op.generate_inputs(**kwargs)
+    shape_env = ShapeEnv()
+    sym_num_tokens = shape_env.create_unbacked_symint()
+
+    result = []
+    first_tensor_found = False
+    for arg in args:
+        if (
+            isinstance(arg, torch.Tensor)
+            and arg.dim() >= 1
+            and not first_tensor_found
+        ):
+            first_tensor_found = True
+            new_shape = (sym_num_tokens,) + arg.shape[1:]
+            result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
+        else:
+            result.append(arg)
+    return tuple(result)
 
 
 @pytest.fixture

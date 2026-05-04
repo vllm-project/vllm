@@ -5,7 +5,11 @@ import pytest
 import torch
 
 import vllm.kernels  # noqa: F401 to register kernels
-from tests.ir.ir_test_utils import _make_simple_model, registered_test_op
+from tests.ir.ir_test_utils import (
+    _make_simple_model,
+    generate_symbolic_inputs,
+    registered_test_op,
+)
 from vllm import ir
 from vllm.compilation.passes.ir.lowering_pass import (
     VllmIRLoweringPass,
@@ -141,7 +145,7 @@ class TestFakeOpLowering:
                 "batch_dep_impl": (lambda x: x.size(0) == 8, _batch_dep_impl_fn),
             },
         )
-        fake_args = batch_op.generate_symbolic_inputs()
+        fake_args = generate_symbolic_inputs(batch_op)
         impl = batch_op.impls["batch_dep_impl"]
         result = impl.supports_args(*fake_args)
 

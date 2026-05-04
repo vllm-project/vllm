@@ -383,33 +383,6 @@ class IrOp:
         self._input_generator = fn
         return fn
 
-    def _make_symbolic(self, args: tuple) -> tuple[Any, ...]:
-        """Replace the first dimension of the first tensor with an unbacked SymInt.
-
-        Only the first tensor (typically the input) gets its first dimension
-        replaced with a SymInt. Other parameters like weight, bias, epsilon
-        remain unchanged.
-        """
-        from torch.fx.experimental.symbolic_shapes import ShapeEnv
-
-        shape_env = ShapeEnv()
-        sym_num_tokens = shape_env.create_unbacked_symint()
-
-        result: list[Any] = []
-        first_tensor_found = False
-        for arg in args:
-            if (
-                isinstance(arg, torch.Tensor)
-                and arg.dim() >= 1
-                and not first_tensor_found
-            ):
-                first_tensor_found = True
-                new_shape = (sym_num_tokens,) + arg.shape[1:]
-                result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
-            else:
-                result.append(arg)
-        return tuple(result)
-
     def generate_inputs(self, **kwargs: Any) -> tuple[Any, ...]:
         if self._input_generator is None:
             raise RuntimeError(
@@ -417,21 +390,6 @@ class IrOp:
                 f"Use @ir.ops.{self.name}.register_input_generator"
             )
         return self._input_generator(**kwargs)
-
-    def generate_symbolic_inputs(self, **kwargs: Any) -> tuple[Any, ...]:
-        """Generate inputs with unbacked SymInts for the first dimension.
-
-        This is useful for testing that `supports_args` works correctly
-        with symbolic shapes during torch.compile graph tracing.
-
-        Example:
-            fake_args = rms_norm.generate_symbolic_inputs(
-                num_tokens=128, hidden_size=4096, dtype=torch.float16
-            )
-            # fake_args[0].shape[0] is a SymInt, not a concrete number
-        """
-        args = self.generate_inputs(**kwargs)
-        return self._make_symbolic(args)
 
     def override_tolerance(
         self, dtype: torch.dtype, *, atol: float, rtol: float
