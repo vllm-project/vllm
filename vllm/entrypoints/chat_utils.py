@@ -24,7 +24,6 @@ from typing import (
     cast,
     get_args,
     get_origin,
-    is_typeddict,
 )
 
 from openai.types.chat import (
@@ -1473,7 +1472,7 @@ def _collect_known_content_part_fields() -> frozenset[str]:
         node = stack.pop()
         if get_origin(node) in (Union, types.UnionType):
             stack.extend(get_args(node))
-        elif is_typeddict(node):
+        elif hasattr(node, "__required_keys__"):
             fields |= node.__required_keys__ | node.__optional_keys__
     return frozenset(fields)
 
