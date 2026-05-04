@@ -125,9 +125,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
 
         return (
-            rocm_aiter_ops.is_enabled()
-            and rocm_aiter_ops.is_rmsnorm_enabled()
-            and cfg.parallel_config.tensor_parallel_size > 1
+            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
         )
 
     return (
@@ -138,12 +136,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
-        # tp-dp combination broken:
-        # https://github.com/vllm-project/vllm/issues/34458
-        and cfg.parallel_config.data_parallel_size == 1
-        # tp-pp combination broken:
-        # https://github.com/vllm-project/vllm/issues/35426
-        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -165,10 +157,9 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        rocm_aiter_ops.is_rmsnorm_enabled()
+        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -218,7 +209,9 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "enable_flashinfer_autotune": True,
+        # Disabled for now due to correctness issues:
+        # https://github.com/flashinfer-ai/flashinfer/issues/3197
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -238,7 +231,9 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "enable_flashinfer_autotune": True,
+        # Disabled for now due to correctness issues:
+        # https://github.com/flashinfer-ai/flashinfer/issues/3197
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -1622,7 +1617,7 @@ class VllmConfig:
                 max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
             else:
                 max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
-            if max_size is not None:
+            if max_size is not None and self.model_config is not None:
                 assert isinstance(self.model_config.dtype, torch.dtype)
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size()
