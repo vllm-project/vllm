@@ -160,8 +160,10 @@ def response_input_to_harmony(
             for i, c in enumerate(content):
                 text = c.get("text")
                 if text is None:
+                    item_type = c.get("type", "<missing>")
                     raise VLLMValidationError(
-                        f"Content item missing 'text' field: {c}",
+                        f"Content item of type {item_type!r} is missing "
+                        f"required 'text' field",
                         parameter="input",
                     )
                 # Only prepend the developer "Instructions:" prefix to the

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for vllm.entrypoints.openai.responses.harmony."""
 
+import pytest
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -13,8 +14,10 @@ from openai_harmony import Author, Message, Role, TextContent
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     parser_state_to_response_output,
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 class TestResponsePreviousInputToHarmony:
@@ -461,3 +464,126 @@ def test_parser_state_to_response_output_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestResponseInputToHarmony:
+    """
+    Tests for response_input_to_harmony with multi-part chat-format content.
+
+    Regression coverage for the previous unconditional ``c["text"]`` indexing
+    that crashed with ``KeyError: 'text'`` -> HTTP 500 on valid OpenAI
+    multimodal content items such as ``input_image`` or ``input_file`` (which
+    do not carry a ``text`` field). These now raise
+    :class:`VLLMValidationError` -> HTTP 400 with a sanitized message.
+    """
+
+    def test_input_text_only_content_accepted(self):
+        """Single text content item should round-trip without error."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Summarize this letter."},
+            ],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert len(msg.content) == 1
+        assert msg.content[0].text == "Summarize this letter."
+
+    def test_input_file_without_text_raises_validation_error(self):
+        """Content item without 'text' (e.g. input_file) -> 400, not 500."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_file", "file_url": "https://example.com/x.pdf"},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+
+    def test_input_image_without_text_raises_validation_error(self):
+        """Content item input_image (image_url, no text) -> 400, not 500."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/x.png"},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+
+    def test_mixed_text_and_file_content_raises_on_non_text_item(self):
+        """Mixed input_text + input_file is rejected on the non-text item."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Read this:"},
+                {"type": "input_file", "file_url": "https://example.com/x.pdf"},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+
+    def test_validation_error_message_includes_type_not_payload(self):
+        """The 400 error must cite the item type without echoing url/data
+        fields, which can be customer-sensitive (signed URLs, base64 file
+        contents, etc.)."""
+        sensitive_url = "https://customer-bucket.example.com/secret-token"
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_file", "file_url": sensitive_url},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        message = str(exc_info.value)
+        assert "input_file" in message
+        assert sensitive_url not in message
+        assert "file_url" not in message
+
+    def test_developer_prefix_only_on_first_multipart_item(self):
+        """Developer messages with multi-part content prepend the
+        'Instructions:\\n' prefix only to the first item, not every item."""
+        chat_msg = {
+            "role": "developer",
+            "content": [
+                {"type": "input_text", "text": "First instruction."},
+                {"type": "input_text", "text": "Second instruction."},
+                {"type": "input_text", "text": "Third instruction."},
+            ],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert len(msg.content) == 3
+        assert msg.content[0].text == "Instructions:\nFirst instruction."
+        assert msg.content[1].text == "Second instruction."
+        assert msg.content[2].text == "Third instruction."
+
+    def test_developer_prefix_on_string_content_unchanged(self):
+        """String (non-list) developer content keeps the existing single
+        prefix behavior."""
+        chat_msg = {
+            "role": "developer",
+            "content": "Be concise.",
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert msg.content[0].text == "Instructions:\nBe concise."
