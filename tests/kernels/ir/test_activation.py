@@ -66,6 +66,27 @@ class TestSiluAndMul:
             out_dispatched = ir.ops.silu_and_mul(x)
         torch.testing.assert_close(out_dispatched, out_impl, rtol=0.0, atol=0.0)
 
+    @pytest.mark.parametrize("compile", [False, True])
+    def test_native_impl_compile(self, dtype, n_tokens, d, compile):
+        impl = ir.ops.silu_and_mul.impls["native"]
+        assert impl.supported, "native implementation must be supported!"
+        (x,) = silu_and_mul_inputs(n_tokens, d, dtype)
+        out_impl = impl.impl_fn(x)
+        out_native = silu_and_mul_native(x)
+        torch.testing.assert_close(
+            out_impl, out_native, rtol=get_default_rtol(out_impl), atol=1e-3
+        )
+        with ir.ops.silu_and_mul.set_priority(["native"], compile=compile):
+            out_dispatched = ir.ops.silu_and_mul(x)
+
+            if compile:
+                assert isinstance(
+                    ir.ops.silu_and_mul.dispatch(x), ir.op.IrOpImplCompiledWrapper
+                ), (
+                    "When `set_priority` with compile=True, the implementation is expected to be wrapped with compile."
+                )
+        torch.testing.assert_close(out_dispatched, out_impl, rtol=0.0, atol=0.0)
+
     @pytest.mark.parametrize("provider", ["vllm_c", "xpu_kernels", "native"])
     def test_torch_opcheck(self, dtype, n_tokens, d, provider):
         if not ir.ops.silu_and_mul.impls[provider].supported:

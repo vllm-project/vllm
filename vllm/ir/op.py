@@ -355,7 +355,7 @@ class IrOp:
         return [p.provider for p in self._priority_impls]
 
     @contextlib.contextmanager
-    def set_priority(self, priority: list[str], *, compile: bool = False):
+    def set_priority(self, priority: list[str], *, compile: bool = True):
         """
         Context manager to set the dispatch priority for implementations for this op.
 
