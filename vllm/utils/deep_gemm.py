@@ -295,9 +295,93 @@ def fp8_gemm_nt(*args, **kwargs):
     return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
+def _dequant_fp8_block(x: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
+    if scale is None:
+        return x.to(torch.float32)
+
+    if scale.dtype == torch.float8_e8m0fnu:
+        scale_f = torch.exp2(scale.view(torch.uint8).to(torch.float32) - 127.0)
+    else:
+        scale_f = scale.to(torch.float32)
+
+    flat_scale = scale_f.reshape(-1)
+    if flat_scale.numel() == 1:
+        return x.to(torch.float32) * flat_scale[0]
+
+    if x.numel() % flat_scale.numel() != 0:
+        # Keep the fallback best-effort for unusual scale layouts; the real
+        # DeepGEMM path remains authoritative on CUDA.
+        return x.to(torch.float32) * flat_scale.mean()
+
+    block_size = x.numel() // flat_scale.numel()
+    expanded_scale = flat_scale.repeat_interleave(block_size)
+    return (x.reshape(-1).to(torch.float32) * expanded_scale).reshape(x.shape)
+
+
+def _reshape_to_subscripts(
+    tensor: torch.Tensor,
+    subscripts: str,
+    dim_map: dict[str, int],
+) -> torch.Tensor:
+    target_ndim = len(subscripts)
+    if tensor.ndim == target_ndim:
+        return tensor
+
+    known_shape = [dim_map.get(dim) for dim in subscripts]
+    known_product = 1
+    unknown_count = 0
+    for dim in known_shape:
+        if dim is None:
+            unknown_count += 1
+        else:
+            known_product *= dim
+
+    if unknown_count == 0:
+        return tensor.reshape(known_shape)
+    if unknown_count == 1 and tensor.numel() % known_product == 0:
+        unknown_dim = tensor.numel() // known_product
+        shape = [dim if dim is not None else unknown_dim for dim in known_shape]
+        return tensor.reshape(shape)
+
+    # Let torch.einsum raise the shape error with the original tensor.
+    return tensor
+
+
+def _rocm_fp8_einsum_fallback(
+    equation: str,
+    a_tuple: tuple[torch.Tensor, torch.Tensor | None],
+    b_tuple: tuple[torch.Tensor, torch.Tensor | None],
+    out: torch.Tensor,
+    recipe: tuple[int, ...] | None = None,
+) -> None:
+    del recipe
+    a, a_scale = a_tuple
+    b, b_scale = b_tuple
+    a_f = _dequant_fp8_block(a, a_scale)
+    b_f = _dequant_fp8_block(b, b_scale)
+
+    lhs, _ = equation.split("->")
+    a_subs, b_subs = lhs.split(",")
+    dim_map: dict[str, int] = {}
+    if a_f.ndim == len(a_subs):
+        dim_map.update(zip(a_subs, a_f.shape))
+    if b_f.ndim == len(b_subs):
+        dim_map.update(zip(b_subs, b_f.shape))
+
+    a_f = _reshape_to_subscripts(a_f, a_subs, dim_map)
+    if a_f.ndim == len(a_subs):
+        dim_map.update(zip(a_subs, a_f.shape))
+    b_f = _reshape_to_subscripts(b_f, b_subs, dim_map)
+
+    result = torch.einsum(equation, a_f, b_f)
+    out.copy_(result.to(out.dtype))
+
+
 def fp8_einsum(*args, **kwargs):
     _lazy_init()
     if _fp8_einsum_impl is None:
+        if current_platform.is_rocm():
+            return _rocm_fp8_einsum_fallback(*args, **kwargs)
         return _missing(*args, **kwargs)
     return _fp8_einsum_impl(*args, **kwargs)
 
