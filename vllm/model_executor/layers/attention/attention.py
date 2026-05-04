@@ -484,7 +484,7 @@ class Attention(nn.Module, AttentionLayerBase):
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
             )
-        if getattr(self, "_kv_quant_method", None):
+        if getattr(self, "kv_quant_state", None) is not None:
             from vllm.model_executor.layers.quantization.kv_fake_quant import (
                 apply_kv_quant,
             )
