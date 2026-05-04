@@ -19,9 +19,10 @@ from tests.ir.ir_test_utils import (
     COMMON_HIDDEN_SIZES,
     NUM_TOKENS,
     assert_close,
+    assert_dispatch_matches_direct,
+    assert_impl_numerical,
     assert_op_e2e_correctness,
     assert_supports_args_returns_bool,
-    clone_args,
     supported_providers,
 )
 from tests.kernels.allclose_default import get_default_rtol
@@ -126,32 +127,60 @@ class TestRmsNorm:
         not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
         reason="Currently only kernels on CUDA, ROCm and XPU",
     )
-    def test_impls(self, provider, dtype, n_tokens, hidden_size):
-        rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
-        impl = ir.ops.rms_norm.impls[provider]
-        x, weight, eps = ir.ops.rms_norm.generate_inputs(
+    def test_impl_numerical(self, provider, dtype, n_tokens, hidden_size):
+        """Test impl produces same results as native."""
+        args = ir.ops.rms_norm.generate_inputs(
             num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
         )
-        args = (x, weight, eps)
+        assert_impl_numerical(ir.ops.rms_norm, provider, args)
 
-        if not impl.supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_dispatch_consistency(self, provider, dtype, n_tokens, hidden_size):
+        """Test dispatch matches direct impl call."""
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
+        )
+        assert_dispatch_matches_direct(ir.ops.rms_norm, provider, args)
 
-        ref_output = rms_norm_native(*clone_args(args))
-        output = impl.impl_fn(*clone_args(args))
-        assert_close(ir.ops.rms_norm, output, ref_output)
-
-        # check that dispatched call matches direct call
-        with ir.ops.rms_norm.set_priority([provider, "native"]):
-            out_dispatched = ir.ops.rms_norm(*args)
-        out_direct = impl.impl_fn(*args)
-        torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
-
-        # none of these support variance_size override
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_variance_size_not_supported(self, provider, dtype, n_tokens, hidden_size):
+        """Test that variance_size override is not supported."""
+        args = ir.ops.rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
+        )
+        impl = ir.ops.rms_norm.impls[provider]
+        x, weight, eps = args
         assert not impl.supports_args(x, weight, eps, 4)
         assert not impl.supports_args(x, weight, eps, variance_size=4)
 
-        # test weight=None behavior
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_weight_none(self, provider, dtype, n_tokens, hidden_size):
+        """Test weight=None equals weight=ones."""
+        x, weight, eps = ir.ops.rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
+        )
+        impl = ir.ops.rms_norm.impls[provider]
         out_no_weight = impl.impl_fn(x, None, eps)
         out_unit_weight = impl.impl_fn(x, torch.ones_like(weight), eps)
         assert_close(ir.ops.rms_norm, out_no_weight, out_unit_weight)
@@ -312,36 +341,60 @@ class TestFusedAddRmsNorm:
         not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
         reason="Currently only kernels on CUDA, ROCm and XPU",
     )
-    def test_impls(self, provider, dtype, n_tokens, hidden_size):
-        fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
-        impl = ir.ops.fused_add_rms_norm.impls[provider]
+    def test_impl_numerical(self, provider, dtype, n_tokens, hidden_size):
+        """Test impl produces same results as native."""
+        args = ir.ops.fused_add_rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
+        )
+        args = args + (None,)  # variance_size parameter
+        assert_impl_numerical(ir.ops.fused_add_rms_norm, provider, args)
+
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.fused_add_rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_dispatch_consistency(self, provider, dtype, n_tokens, hidden_size):
+        """Test dispatch matches direct impl call."""
+        args = ir.ops.fused_add_rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
+        )
+        assert_dispatch_matches_direct(ir.ops.fused_add_rms_norm, provider, args)
+
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.fused_add_rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_variance_size_not_supported(self, provider, dtype, n_tokens, hidden_size):
+        """Test that variance_size override is not supported."""
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
             num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
         )
-        args = (x, x_residual, weight, eps, None)
-
-        if not impl.supports_args(*args):
-            pytest.skip(f"{provider} does not support args")
-
-        ref_output, ref_residual = fused_add_rms_norm_native(*clone_args(args))
-        output, residual = impl.impl_fn(*clone_args(args))
-        assert_close(ir.ops.fused_add_rms_norm, output, ref_output)
-        assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
-
-        # check that dispatched call matches direct call
-        with ir.ops.fused_add_rms_norm.set_priority([provider, "native"]):
-            out_dispatched, residual_dispatched = ir.ops.fused_add_rms_norm(*args[:4])
-        out_direct, residual_direct = impl.impl_fn(*clone_args(args))
-        torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
-        torch.testing.assert_close(
-            residual_dispatched, residual_direct, rtol=0.0, atol=0.0
-        )
-
-        # none of these support variance_size override
+        impl = ir.ops.fused_add_rms_norm.impls[provider]
         assert not impl.supports_args(x, x_residual, weight, eps, 4)
         assert not impl.supports_args(x, x_residual, weight, eps, variance_size=4)
 
-        # test weight=None behavior
+    @pytest.mark.parametrize("provider", supported_providers(ir.ops.fused_add_rms_norm))
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+        reason="Currently only kernels on CUDA, ROCm and XPU",
+    )
+    def test_weight_none(self, provider, dtype, n_tokens, hidden_size):
+        """Test weight=None equals weight=ones."""
+        x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
+            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=1e-5
+        )
+        impl = ir.ops.fused_add_rms_norm.impls[provider]
         out_no_weight, residual_no_weight = impl.impl_fn(
             x.clone(), x_residual.clone(), None, eps
         )
