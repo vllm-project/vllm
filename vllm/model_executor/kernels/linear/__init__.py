@@ -144,6 +144,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.rocm_int8 import (
+    ROCmInt8SkinnyGemmLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
@@ -163,7 +166,11 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
         CutlassInt8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
     ],
-    PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
+    PlatformEnum.ROCM: [
+        ROCmInt8SkinnyGemmLinearKernel,
+        AiterInt8ScaledMMLinearKernel,
+        TritonInt8ScaledMMLinearKernel,
+    ],
 }
 
 # in priority/performance order (when available)

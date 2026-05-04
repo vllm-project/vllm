@@ -1222,17 +1222,37 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int8.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
+    "csrc/rocm/skinny_gemms_w8a8.cu"
+    "csrc/rocm/skinny_gemms_w8a8/instantiate_n1.cu"
+    "csrc/rocm/skinny_gemms_w8a8/instantiate_n2.cu"
+    "csrc/rocm/skinny_gemms_w8a8/instantiate_n3.cu"
+    "csrc/rocm/skinny_gemms_w8a8/instantiate_n4.cu"
+    "csrc/rocm/skinny_gemms_w8a8/instantiate_n5.cu"
     "csrc/rocm/attention.cu")
+
+  set(VLLM_ROCM_FLAGS ${VLLM_GPU_FLAGS})
+
+  if(VLLM_SKINNY_GEMM_SWEEP OR (DEFINED ENV{VLLM_SKINNY_GEMM_SWEEP} AND NOT $ENV{VLLM_SKINNY_GEMM_SWEEP} STREQUAL "0"))
+    list(APPEND VLLM_ROCM_FLAGS "-DVLLM_SKINNY_GEMM_SWEEP=1")
+    set(_ROCM_SWEEP_ENABLED TRUE)
+    message(STATUS "Building with VLLM_SKINNY_GEMM_SWEEP enabled")
+  endif()
 
   define_extension_target(
     _rocm_C
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_ROCM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    COMPILE_FLAGS ${VLLM_ROCM_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  # COMPILE_FLAGS only apply to HIP-language files (via generator expression).
+  # torch_bindings.cpp is compiled as CXX so needs the define separately.
+  if(_ROCM_SWEEP_ENABLED)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_SKINNY_GEMM_SWEEP=1)
+  endif()
 endif()
 
 # For CUDA and HIP builds also build the triton_kernels external package.
