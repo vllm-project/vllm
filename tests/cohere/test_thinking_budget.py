@@ -22,7 +22,7 @@ from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN
 from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # noqa: E501
     convert_schema_to_structural_tags,
 )
-from vllm.cohere.guided_decoding.tool_grammar import get_text_model_name
+from vllm.cohere.utils import get_text_model_name
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
