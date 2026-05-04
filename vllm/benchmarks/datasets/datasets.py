@@ -31,10 +31,7 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
-try:
-    import soundfile as sf
-except ImportError:
-    sf = PlaceholderModule("soundfile")
+
 from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
@@ -63,6 +60,11 @@ try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
+
+try:
+    import soundfile as sf
+except ImportError:
+    sf = PlaceholderModule("soundfile")
 
 
 logger = logging.getLogger(__name__)
@@ -1858,7 +1860,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
         input_requests = dataset.sample(
-        input_requests = dataset.sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
@@ -2378,23 +2379,47 @@ class CustomAudioDataset(CustomDataset):
         output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        skip_chat_template: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         self.num_available_samples = len(self.data)
-        sampled_requests = []
+        if num_requests <= 0:
+            num_requests = self.num_available_samples
 
+        sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item.get("prompt", "")
-            prompt_len = len(tokenizer(prompt).input_ids)
             y, sr = process_audio(item["audio"])
             mm_content = {"audio": (y, sr)}
+
+            if tokenizer is None:
+                prompt_len = 1
+                new_output_len = output_len if output_len is not None and output_len != -1 else 256
+            else:
+                if not skip_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+                prompt_len = len(tokenizer(prompt).input_ids)
+
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    new_output_len = int(item["output_tokens"])
+
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len if output_len is not None else 256,
+                    expected_output_len=new_output_len,
                     multi_modal_data=mm_content,
                     request_id=request_id_prefix + str(i),
                 )
