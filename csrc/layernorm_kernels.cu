@@ -218,7 +218,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   VLLM_DISPATCH_RANK234(num_dims, [&] {
     VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
       const int calculated_vec_size =
-          std::gcd(16 / sizeof(scalar_t), hidden_size);
+          std::gcd(static_cast<int>(16 / sizeof(scalar_t)), hidden_size);
       const int block_size =
           std::min(hidden_size / calculated_vec_size, max_block_size);
       dim3 block(block_size);
