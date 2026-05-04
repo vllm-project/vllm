@@ -8,14 +8,21 @@
 from collections.abc import Callable
 from typing import Any, Literal
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam, ChatCompletionToolsParam)
-
 from xgrammar import StructuralTag
-from xgrammar.structural_tag import (AnyTextFormat, ConstStringFormat,
-                                     JSONSchemaFormat, SequenceFormat,
-                                     TagFormat, TagsWithSeparatorFormat,
-                                     TriggeredTagsFormat)
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    ConstStringFormat,
+    JSONSchemaFormat,
+    SequenceFormat,
+    TagFormat,
+    TagsWithSeparatorFormat,
+    TriggeredTagsFormat,
+)
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionToolsParam,
+)
 
 SimplifiedToolChoice = Literal["auto", "required", "forced"]
 ToolChoice = (
