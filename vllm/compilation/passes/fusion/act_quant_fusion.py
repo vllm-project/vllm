@@ -190,6 +190,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         is_scale_transposed: bool = False,
         is_e8m0: bool = False,
         is_tma_aligned: bool = False,
+        match_aiter: bool = False,
     ) -> None:
         super().__init__(quant_key)
         self.quant_matcher = MatcherQuantFP8(
