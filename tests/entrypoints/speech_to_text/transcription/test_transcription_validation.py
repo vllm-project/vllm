@@ -2,12 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # imports for structured outputs tests
+import io
 import json
+import math
+import os
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from tests.entrypoints.speech_to_text.conftest import add_attention_backend
 from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from vllm.multimodal.media.audio import load_audio
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -17,6 +23,24 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format",
     "mistral",
 ]
+PARAKEET_HF_MODEL_NAME = "nvidia/parakeet-tdt-0.6b-v3"
+PARAKEET_MODEL_NAME = os.environ.get("PARAKEET_TEST_MODEL", PARAKEET_HF_MODEL_NAME)
+
+
+def make_long_audio(file, *, repeats: int) -> tuple[io.BytesIO, int]:
+    file.seek(0)
+    audio, sr = load_audio(file)
+    # Add small silence after each repeat for repeatable chunk splitting.
+    audio = np.pad(audio, (0, int(sr * 0.1)))
+    repeated_audio = np.tile(audio, repeats)
+
+    buffer = io.BytesIO()
+    buffer.name = "long_audio.wav"
+    sf.write(buffer, repeated_audio, sr, format="WAV")
+    buffer.seek(0)
+
+    expected_seconds = math.ceil(len(repeated_audio) / sr)
+    return buffer, expected_seconds
 
 
 async def transcribe_and_check(
@@ -154,3 +178,58 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
             language="it",
             expected_text="ove il mio corpo fanciulletto",
         )
+
+
+@pytest.fixture(scope="module")
+def parakeet_server(rocm_aiter_fa_attention):
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+        "--max-num-batched-tokens",
+        "512",
+        "--max-num-seqs",
+        "1",
+    ]
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
+
+    with RemoteOpenAIServer(
+        PARAKEET_MODEL_NAME,
+        server_args,
+        max_wait_seconds=480,
+        env_dict=ROCM_ENV_OVERRIDES,
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_basic_audio_parakeet(mary_had_lamb, parakeet_server):
+    async with parakeet_server.get_async_client() as client:
+        await transcribe_and_check(
+            client,
+            PARAKEET_MODEL_NAME,
+            mary_had_lamb,
+            language="en",
+            expected_text="Mary had a little lamb",
+            expected_seconds=16,
+        )
+
+
+@pytest.mark.asyncio
+async def test_long_audio_parakeet(mary_had_lamb, parakeet_server):
+    long_audio, expected_seconds = make_long_audio(mary_had_lamb, repeats=3)
+
+    async with parakeet_server.get_async_client() as client:
+        transcription = await client.audio.transcriptions.create(
+            model=PARAKEET_MODEL_NAME,
+            file=long_audio,
+            language="en",
+            response_format="text",
+            temperature=0.0,
+        )
+
+    out = json.loads(transcription)
+    out_text = out["text"]
+    count = out_text.lower().count("mary had a little lamb")
+    assert count == 3, f"Expected 3 repeats, found {count}: {out_text!r}"
+    assert out["usage"]["seconds"] == expected_seconds

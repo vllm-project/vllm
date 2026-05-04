@@ -1166,6 +1166,16 @@ class SupportsTranscription(Protocol):
         ...
 
     @classmethod
+    def get_transcription_stop_token_ids(cls, model_config: ModelConfig) -> list[int]:
+        """
+        Get additional token IDs that should stop transcription generation.
+
+        Models can override this when their transcription EOS semantics are
+        not exposed through tokenizer metadata.
+        """
+        return []
+
+    @classmethod
     def get_num_audio_tokens(
         cls,
         audio_duration_s: float,
