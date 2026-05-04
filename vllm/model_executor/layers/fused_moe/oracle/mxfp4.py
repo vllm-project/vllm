@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import Union
 
 import torch
 
@@ -11,6 +11,7 @@ from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -32,10 +33,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
-
 
 logger = init_logger(__name__)
 
@@ -1285,12 +1282,11 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
     else:
         return ocp_mx_moe_quant_config(
@@ -1311,7 +1307,7 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: "RoutedExperts | None" = None,
+    layer: RoutedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
