@@ -44,13 +44,15 @@ __device__ __forceinline__ void atomicAdd_half2(half2* address, half2 val) {
 //
 
 #if defined(__CUDA_ARCH__) || defined(USE_ROCM)
-  #if __CUDA_ARCH__ < 700 || defined(USE_ROCM)
+  #if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700) || \
+      (defined(USE_ROCM) && HIP_VERSION < 71326173)
 
 __device__ __forceinline__ void atomicAdd(half* address, half val) {
   atomicAdd_half(address, val);
 }
 
-    #if __CUDA_ARCH__ < 600 || defined(USE_ROCM)
+    #if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600) || \
+        (defined(USE_ROCM) && HIP_VERSION < 71326173)
 __device__ __forceinline__ void atomicAdd(half2* address, half2 val) {
   atomicAdd_half2(address, val);
 }
