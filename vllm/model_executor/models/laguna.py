@@ -50,7 +50,13 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 logger = init_logger(__name__)
 
 
@@ -554,7 +560,7 @@ class LagunaDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class LagunaModel(nn.Module):
+class LagunaModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -633,8 +639,17 @@ class LagunaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -642,6 +657,8 @@ class LagunaModel(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -821,7 +838,7 @@ class LagunaModel(nn.Module):
         return loaded_params
 
 
-class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -884,3 +901,4 @@ class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
