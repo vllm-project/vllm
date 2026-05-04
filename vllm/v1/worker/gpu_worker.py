@@ -321,6 +321,12 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            # KV fake-quant smoothkv_fused: fold s_K/s_V into projection weights.
+            # No-op unless configure_kv_quant("smoothkv_fused", ...) was set.
+            from vllm.model_executor.layers.quantization.kv_fake_quant import (
+                maybe_run_post_load_fusion,
+            )
+            maybe_run_post_load_fusion(self.model_runner.model)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
