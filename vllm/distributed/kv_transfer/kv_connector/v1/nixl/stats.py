@@ -1,6 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stats and Prometheus metrics for the NIXL connector."""
+"""Stats and Prometheus metrics for the NIXL KV cache connector.
+
+This module implements the **observe → aggregate → reduce → log** pipeline
+for NIXL disaggregated-prefill KV cache transfers:
+
+1. **Observe** – ``NixlConnectorWorker`` calls ``record_transfer()``
+   (or ``record_failed_*``/``record_kv_expired_req()``) after each NIXL
+   operation completes, appending raw telemetry to per-metric lists.
+
+2. **Aggregate** – The ``MultiprocExecutor`` gathers per-worker stats
+   via ``get_kv_connector_stats()`` (which calls ``clone_and_reset()``)
+   and merges them into a single ``NixlKVConnectorStats`` with
+   ``aggregate()``.  The aggregated ``data`` dict is then serialized and
+   forwarded to the engine/logger process.
+
+3. **Reduce** – ``KVConnectorLogging.log()`` calls ``reduce()`` to
+   collapse the accumulated lists into human-readable scalars (averages,
+   P90 latencies, throughput) suitable for periodic CLI log lines.
+
+4. **Log / Export** – Two parallel sinks consume the raw ``data`` dict:
+   - ``KVConnectorLogging`` logs the reduced summary via the Python
+     logger at each logging interval.
+   - ``NixlPromMetrics.observe()`` pushes every individual observation
+     into Prometheus histograms/counters for scraping.
+
+Metrics tracked
+~~~~~~~~~~~~~~~
+
++---------------------------+------+-----------------------------------------+
+| Key                       | Unit | Description                             |
++===========================+======+=========================================+
+| transfer_duration         | s    | RDMA transfer wall-clock time           |
++---------------------------+------+-----------------------------------------+
+| post_duration             | s    | Post-transfer bookkeeping time          |
++---------------------------+------+-----------------------------------------+
+| bytes_transferred         | B    | Payload size of the transfer            |
++---------------------------+------+-----------------------------------------+
+| num_descriptors           | –    | NIXL descriptors used per transfer      |
++---------------------------+------+-----------------------------------------+
+| num_failed_transfers      | –    | Counter of failed transfer operations   |
++---------------------------+------+-----------------------------------------+
+| num_failed_notifications  | –    | Counter of failed send_notif calls      |
++---------------------------+------+-----------------------------------------+
+| num_kv_expired_reqs       | –    | Counter of requests whose KV expired    |
+|                           |      | before being consumed (P-instance only) |
++---------------------------+------+-----------------------------------------+
+"""
 
 import copy
 from dataclasses import dataclass
@@ -21,15 +67,34 @@ from vllm.v1.metrics.utils import create_metric_per_engine
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Accumulates per-transfer NIXL telemetry for a single logging interval.
+
+    Each worker owns one instance.  Individual RDMA completions are
+    recorded via ``record_transfer()``; failure events via the
+    ``record_failed_*`` helpers.  At the end of each scheduler step the
+    worker snapshots its stats with ``clone_and_reset()`` and hands them
+    to the executor, which ``aggregate()``s across TP ranks before the
+    data reaches ``reduce()`` (for CLI logging) or
+    ``NixlPromMetrics.observe()`` (for Prometheus export).
+
+    All fields in ``data`` are plain lists so the object is
+    pickle-serializable across process boundaries.
+
+    See Also:
+        :class:`KVConnectorStats` – abstract base class defining the
+        ``reset``/``aggregate``/``reduce``/``is_empty`` contract.
+    """
 
     def __post_init__(self):
         if not self.data:
-            # Empty container init, no data is passed in.
             self.reset()
 
     def reset(self):
-        # Must be serializable
+        """Clear all accumulated observations for the next interval.
+
+        Each key maps to a list that ``record_*`` methods append to.
+        Durations are stored in **seconds**; byte counts in **bytes**.
+        """
         self.data: dict[str, list[float | int]] = {
             "transfer_duration": [],
             "post_duration": [],
@@ -41,7 +106,14 @@ class NixlKVConnectorStats(KVConnectorStats):
         }
 
     def record_transfer(self, res: nixlXferTelemetry):
-        # Keep metrics units consistent with rest of the code: time us->s
+        """Append telemetry from one successful NIXL transfer.
+
+        Args:
+            res: Telemetry struct returned by
+                ``nixl_wrapper.get_xfer_telemetry()``.  Durations in the
+                struct are in **microseconds**; they are converted to
+                seconds here so all time values share a common unit.
+        """
         self.data["transfer_duration"].append(res.xferDuration / 1e6)
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
@@ -56,16 +128,28 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["num_failed_notifications"].append(1)
 
     def record_kv_expired_req(self):
-        """Record a request that had its KV blocks expire."""
+        """Record a request whose KV blocks expired before consumption."""
         self.data["num_kv_expired_reqs"].append(1)
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
+        """Snapshot the current stats and reset for the next interval.
+
+        Returns a shallow copy of this object (with the accumulated
+        lists) while resetting ``self`` to empty lists.  Called by the
+        worker's ``get_kv_connector_stats()`` so the executor can read
+        the snapshot without racing against new ``record_*`` calls.
+        """
         old = copy.copy(self)
         self.reset()
         return old
 
     def is_empty(self) -> bool:
-        # Do not discard metrics update that are entirely failures related.
+        """True when no observations (successes *or* failures) were recorded.
+
+        Failure-only intervals are **not** considered empty so that
+        Prometheus counters still get incremented even when every
+        transfer in the interval failed.
+        """
         return (
             self.num_successful_transfers == 0
             and len(self.data["num_failed_transfers"]) == 0
@@ -74,6 +158,12 @@ class NixlKVConnectorStats(KVConnectorStats):
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """Merge another stats snapshot (typically from a different TP rank).
+
+        Extends each list in ``self.data`` with the corresponding list
+        from *other*, combining observations from multiple workers into
+        a single container before ``reduce()`` is called.
+        """
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
@@ -82,10 +172,23 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        """Collapse accumulated observations into CLI-friendly scalars.
+
+        Produces a dict whose keys are human-readable metric labels and
+        whose values are rounded numbers suitable for a single log line.
+        This is the final step of the pipeline before
+        ``KVConnectorLogging.log()`` emits the summary.
+
+        Returns:
+            A dict with keys like ``"Avg xfer time (ms)"``,
+            ``"Throughput (MB/s)"``, etc.  When no successful transfers
+            were recorded the dict is all-zeros—failure-only intervals
+            are reported exclusively through Prometheus counters.
+        """
         if self.num_successful_transfers == 0:
-            # CLI logging only reports successful transfers stats. If all requests in
-            # the interval were unsuccessful, Prom will report failures stats instead.
+            # Nothing to summarize for the CLI.  Failures are still
+            # exported by NixlPromMetrics.observe() through the
+            # counter_nixl_num_failed_* counters.
             return {
                 "Num successful transfers": 0,
                 "Avg xfer time (ms)": 0,
@@ -97,10 +200,11 @@ class NixlKVConnectorStats(KVConnectorStats):
                 "Avg number of descriptors": 0,
             }
 
+        # Convert the per-transfer lists to numpy arrays for vectorized
+        # statistics.  Durations are in seconds (converted at record time).
         xfer_time = np.asarray(self.data["transfer_duration"])
         post_time = np.asarray(self.data["post_duration"])
-        # Convert to MB for CLI logging.
-        mb = np.asarray(self.data["bytes_transferred"]) / 2**20
+        mb = np.asarray(self.data["bytes_transferred"]) / 2**20  # B → MiB
         descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
         n = len(descs)
         assert n == self.num_successful_transfers
@@ -108,6 +212,8 @@ class NixlKVConnectorStats(KVConnectorStats):
         total_mb = mb.sum()
         avg_mb = total_mb / n
 
+        # Throughput = total payload / total wall-clock transfer time,
+        # giving an aggregate MB/s across all transfers in the interval.
         total_time_seconds = xfer_time.sum()
         throughput_mb_s = total_mb / total_time_seconds
 
@@ -124,10 +230,23 @@ class NixlKVConnectorStats(KVConnectorStats):
 
     @property
     def num_successful_transfers(self) -> int:
+        """Count of successful transfers (those with recorded telemetry)."""
         return len(self.data["transfer_duration"])
 
 
 class NixlPromMetrics(KVConnectorPromMetrics):
+    """Prometheus metrics for NIXL KV cache transfers.
+
+    Registers per-engine histograms for transfer latency, post-processing
+    time, bytes transferred, and descriptor counts, plus counters for
+    failure events.  ``observe()`` is called by ``KVConnectorProm`` with
+    the raw ``data`` dict from ``NixlKVConnectorStats`` so every
+    individual observation is recorded (as opposed to the reduced
+    averages emitted by CLI logging).
+
+    Metric names all share the ``vllm:nixl_`` prefix.
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -171,8 +290,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         self.nixl_histogram_post_time = create_metric_per_engine(
             nixl_histogram_post_time, self.per_engine_labelvalues
         )
-        # uniform 2kb to 16gb range
-        buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
+        buckets = [2 ** (10 + i) for i in range(1, 25, 2)]  # 2 KiB → 16 GiB
         nixl_histogram_bytes_transferred = self._histogram_cls(
             name="vllm:nixl_bytes_transferred",
             documentation="Histogram of bytes transferred per NIXL KV Cache transfers.",
@@ -236,6 +354,19 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        """Push raw per-transfer observations to Prometheus metrics.
+
+        Unlike ``reduce()`` which computes summary statistics, this
+        method feeds each individual value into the corresponding
+        histogram or counter so Prometheus can compute its own
+        aggregations over arbitrary time windows.
+
+        Args:
+            transfer_stats_data: The ``data`` dict from a
+                ``NixlKVConnectorStats`` instance.
+            engine_idx: Index identifying which engine's label set to
+                record against (for multi-engine deployments).
+        """
         for prom_obj, list_item_key in zip(
             [
                 self.nixl_histogram_xfer_time,
