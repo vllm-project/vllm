@@ -153,6 +153,29 @@ void launch_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
                 "workspace too small, need ", state_bytes, " bytes");
 
+    // Zero the per-group RadixRowState region before launch — only when the
+    // radix path will actually run (max_seq_len > RADIX_THRESHOLD). The
+    // RadixRowState fields (arrival_counter, histograms) are only touched by
+    // radix_topk; the decode/medium paths inside the persistent kernel
+    // operate purely in shared memory and never read these globals, so a
+    // stale workspace is harmless for them.
+    //
+    // Why we need the memset (when needs_cooperative is true):
+    //   1. arrival_counter accumulates within a launch and is never reset,
+    //      so a prior call leaves it at a large positive value. Without this
+    //      reset, the very first wait_ge in the next call sees counter >>
+    //      target and returns instantly, breaking the barrier.
+    //   2. The previous in-kernel init only ran in CTA-0 with intra-CTA
+    //      __syncthreads(), so it had no happens-before edge to CTA-1+'s
+    //      first red_release. cudaMemsetAsync is stream-ordered: the zero
+    //      is globally visible before any CTA runs.
+    if (needs_cooperative) {
+      cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0,
+                                           state_bytes, stream);
+      TORCH_CHECK(mz_err == cudaSuccess,
+                  "row_states memset failed: ", cudaGetErrorString(mz_err));
+    }
+
     P::PersistentTopKParams params;
     params.input = logits.data_ptr<float>();
     params.output = output.data_ptr<int32_t>();
