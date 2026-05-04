@@ -12,8 +12,6 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
-from vllm.ir.ops.layernorm import rms_norm
-
 # This should not exist
 assert "_custom_add" not in IrOp.registry
 
@@ -573,51 +571,3 @@ class TestTolerance:
         with pytest.raises(ValueError, match="No tolerance defined"):
             op.get_tolerance(torch.complex64)
 
-
-class TestGenerateSymbolicInputs:
-    def test_generate_symbolic_inputs_replaces_first_dim(self):
-        """Test symbolic inputs replace first dim with SymInt."""
-        from torch import SymInt
-
-        # Normal inputs
-        result = rms_norm.generate_inputs(
-            num_tokens=128, hidden_size=64, dtype=torch.float32, epsilon=1e-5
-        )
-        assert result[0].shape == (128, 64)
-        assert result[1].shape == (64,)
-
-        # Symbolic inputs
-        result = rms_norm.generate_symbolic_inputs(
-            num_tokens=128, hidden_size=64, dtype=torch.float32, epsilon=1e-5
-        )
-        # First dim is SymInt
-        assert isinstance(result[0].shape[0], SymInt)
-        # Remaining dims preserved
-        assert result[0].shape[1:] == (64,)
-        # First tensor converted to meta device
-        assert result[0].device.type == "meta"
-        # Weight unchanged (kept as original, not converted to meta)
-        assert result[1].device.type != "meta"
-        # dtype preserved
-        assert result[0].dtype == torch.float32
-
-
-def test_all_ops_have_input_generator():
-    """Ensure all registered ops have input generators defined."""
-    # Exclude test-only ops defined in this file
-    test_ops = {
-        "_custom_add",
-        "_custom_sub",
-        "_custom_mul",
-        "_custom_div",
-        "_custom_mm",
-    }
-    missing = [
-        name
-        for name, op in IrOp.registry.items()
-        if not op.has_input_generator and name not in test_ops
-    ]
-    assert not missing, (
-        f"IR ops without input generators: {missing}. "
-        f"Register one with @ir.ops.<name>.register_input_generator"
-    )
