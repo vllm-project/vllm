@@ -1025,9 +1025,9 @@ class VllmBackend:
 
         (
             env_hash,
+            config_hash,
             env_factors,
             config_factors,
-            config_hash,
         ) = compute_env_and_config_hashes(vllm_config)
         compiler_factors = self.compiler_manager.compile_factors(vllm_config)
         compiler_hash = hash_factors(compiler_factors)
@@ -1041,6 +1041,12 @@ class VllmBackend:
         )
         code_factors = get_code_factors(forward_code_files)
         code_hash = hash_factors({"files": code_factors})
+        all_factors: dict[str, object] = {
+            "env": env_factors,
+            "config": config_factors,
+            "code": {"files": code_factors},
+            "compiler": compiler_factors,
+        }
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
@@ -1048,12 +1054,6 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            all_factors: dict[str, object] = {
-                "env": env_factors,
-                "config": config_factors,
-                "code": {"files": code_factors},
-                "compiler": compiler_factors,
-            }
             # Use SHA-256 for cache key hashing to be consistent across
             # compile_factors functions. Truncate for a short cache dir name.
             hash_key = hash_factors(all_factors)[:10]
@@ -1111,10 +1111,7 @@ class VllmBackend:
                 with open(meta_path, "w") as f:
                     json.dump(
                         {
-                            "env": env_factors,  # raw factors used for env_hash
-                            "config": vllm_config.compile_factors(),
-                            "compiler": self.compilation_config.compile_factors(),
-                            "code": {"files": forward_code_files},
+                            **all_factors,
                             "config_hash": config_hash,
                             "code_hash": code_hash,
                             "compiler_hash": compiler_hash,
