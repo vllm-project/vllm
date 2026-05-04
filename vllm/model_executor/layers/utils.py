@@ -164,7 +164,7 @@ def rocm_unquantized_gemm_impl(
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
     if use_aiter_triton_gemm(n, m, k, x.dtype):
-        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+        from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
 

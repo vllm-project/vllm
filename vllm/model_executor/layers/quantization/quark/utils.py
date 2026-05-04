@@ -112,7 +112,7 @@ def quark_quantize_weight_to_mxfp4(w: torch.Tensor):
         "Quark dynamic quantization is supported only for fp16 weights and only to MXF4"
     )
 
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    from aiter.ops.triton.quant.quant import dynamic_mxfp4_quant
 
     *dims, d = w.shape
     w, w_scales = dynamic_mxfp4_quant(w.reshape(-1, d))

@@ -132,7 +132,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         logger.info_once(
             "Using aiter unified attention for RocmAiterUnifiedAttentionImpl"
         )
-        from aiter.ops.triton.unified_attention import unified_attention
+        from aiter.ops.triton.attention.unified_attention import unified_attention
 
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True

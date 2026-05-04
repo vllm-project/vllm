@@ -38,11 +38,11 @@ logger = init_logger(__name__)
 
 try:
     from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import (
+    from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import (
         gemm_afp4wfp4,
         gemm_afp4wfp4_preshuffled_weight_scales,
     )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    from aiter.ops.triton.quant.quant import dynamic_mxfp4_quant
 
     from vllm.utils.torch_utils import direct_register_custom_op
 

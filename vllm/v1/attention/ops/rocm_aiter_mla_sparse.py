@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
-import importlib
-from importlib.util import find_spec
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -273,23 +271,6 @@ def fp8_paged_mqa_logits_torch(
     return logits
 
 
-@functools.lru_cache
-def paged_mqa_logits_module():
-    paged_mqa_logits_module_path = None
-    if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
-        paged_mqa_logits_module_path = "aiter.ops.triton.pa_mqa_logits"
-    elif find_spec("aiter.ops.triton.attention.pa_mqa_logits") is not None:
-        paged_mqa_logits_module_path = "aiter.ops.triton.attention.pa_mqa_logits"
-
-    if paged_mqa_logits_module_path is not None:
-        try:
-            module = importlib.import_module(paged_mqa_logits_module_path)
-            return module
-        except ImportError:
-            return None
-    return None
-
-
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -320,20 +301,15 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    aiter_paged_mqa_logits_module = None
-    # if rocm_aiter_ops.is_enabled():
-    batch_size, next_n, heads, head_dim = q_fp8.shape
-    num_blocks, block_size, _, _ = kv_cache_fp8.shape
 
     if rocm_aiter_ops.is_enabled():
-        aiter_paged_mqa_logits_module = paged_mqa_logits_module()
-
-    if aiter_paged_mqa_logits_module is not None:
-        deepgemm_fp8_paged_mqa_logits = (
-            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
+        from aiter.ops.triton.attention.pa_mqa_logits import (
+            deepgemm_fp8_paged_mqa_logits,
         )
+
+        batch_size, next_n, heads, head_dim = q_fp8.shape
+        num_blocks, block_size, _, _ = kv_cache_fp8.shape
+
         batch_size, next_n, heads, _ = q_fp8.shape
         out_logits = torch.full(
             [batch_size * next_n, max_model_len],
@@ -406,23 +382,6 @@ def fp8_mqa_logits_torch(
     return logits
 
 
-@functools.lru_cache
-def mqa_logits_module():
-    mqa_logits_module_path = None
-    if find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
-        mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
-    elif find_spec("aiter.ops.triton.attention.fp8_mqa_logits") is not None:
-        mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
-
-    if mqa_logits_module_path is not None:
-        try:
-            module = importlib.import_module(mqa_logits_module_path)
-            return module
-        except ImportError:
-            return None
-    return None
-
-
 def rocm_fp8_mqa_logits(
     q: torch.Tensor,
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -448,16 +407,9 @@ def rocm_fp8_mqa_logits(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
 
-    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
-    # path after aiter merge this kernel into main
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
-        aiter_mqa_logits_module = mqa_logits_module()
+        from aiter.ops.triton.attention.fp8_mqa_logits import fp8_mqa_logits
 
-    if aiter_mqa_logits_module is not None:
-        fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
         k_fp8, scale = kv
         return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
     else:
