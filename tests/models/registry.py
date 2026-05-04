@@ -238,6 +238,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
+    "CohereMoeForCausalLM": _HfExamplesInfo(
+        "/host/engines/cohere-moe",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     # FIXME: databricks/dbrx-instruct has been deleted
     "DbrxForCausalLM": _HfExamplesInfo(
@@ -260,6 +265,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
+    "DeepseekV4ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
@@ -369,6 +377,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
+    "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-8B-A1B",
@@ -590,6 +599,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
+    ),
+    "MiMoV2ForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True
     ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
@@ -934,13 +946,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "Custom config cannot be loaded with Transformers "
-                "v5 because `text_config` is not always set"
-            )
-        },
     ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
@@ -958,6 +963,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom Isaac code is not compatible with Transformers v5. "
+                "The model should be upstreamed to Transformers for "
+                "long-term support."
+            ),
+            "hf": (
+                "Isaac's remote model and processor code import or configure "
+                "APIs that changed in Transformers v5."
+            ),
+        },
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1",
@@ -1054,6 +1071,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
+    "MiMoV2OmniForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni", trust_remote_code=True, is_available_online=False
+    ),
     "MiniCPMO": _HfExamplesInfo(
         "openbmb/MiniCPM-o-2_6",
         trust_remote_code=True,
@@ -1095,6 +1115,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
     ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
+    "HfMoondream": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
     "Molmo2ForConditionalGeneration": _HfExamplesInfo(
         "allenai/Molmo2-8B",
         extras={"olmo": "allenai/Molmo2-O-7B"},
@@ -1111,30 +1141,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
         max_model_len=4096,
-        # NemotronH layers are constructed via `hybrid_override_pattern`:
+        # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,  # Trigger image dynamic res
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                # Trigger conv3d:
-                video_temporal_patch_size=2,
-            ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
+            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
     ),
-    # NemotronH_Nano_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2
-    # Use the same registry test as NemotronH_Nano_VL_V2 above
     "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
         max_model_len=4096,
+        # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
             "vision_config": PretrainedConfig(
@@ -1144,35 +1161,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                     "model": "vit_huge_patch16_224",
                 },
                 video_temporal_patch_size=2,
+                # TODO(nhaber): This is `true` in the official `config.json`,
+                # but this causes a processor exception in the tests due to a known bug
+                # with mixed-resolution video when `true`. To be resolved.
+                video_maintain_aspect_ratio=False,
             ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
+            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
     ),
-    # NemotronH_Super_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2 as well
-    # Use the same registry test as NemotronH_Nano_VL_V2 above
     "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
-        max_model_len=4096,
-        use_original_num_layers=True,
-        hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                video_temporal_patch_size=2,
-            ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
-        },
-        trust_remote_code=True,
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
@@ -1369,9 +1368,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     # [Encoder-decoder]
     "CohereAsrForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/cohere-transcribe-03-2026",
-        trust_remote_code=True,
-        is_available_online=False,  # TODO (ekagra): revert after asr release
+        "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
@@ -1442,6 +1439,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
         tokenizer="MiniMaxAI/MiniMax-M2",
     ),
+    "EagleMistralForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Medium-3.5-128B",
+        speculative_model="mistralai/Mistral-Medium-3.5-128B-EAGLE",
+        is_available_online=False,
+    ),
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
@@ -1481,6 +1483,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepSeekV4MTPModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
@@ -1530,6 +1538,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-7B-RL",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
+    ),
+    "MiMoV2MTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Pro",
+        is_available_online=False,
+    ),
+    "MiMoV2OmniMTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
         "nvidia/Nemotron-Super-Placeholder",
