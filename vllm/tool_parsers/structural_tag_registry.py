@@ -5,7 +5,6 @@
 # builtin structural tag implementations:
 # https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/builtin_structural_tag.py
 
-import time
 from collections.abc import Callable
 from typing import Any, Literal
 
