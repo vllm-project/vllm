@@ -1,6 +1,7 @@
 use std::io::Cursor;
 
 use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
+use itertools::Itertools as _;
 
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::wire::{WireArrayData, WireNdArray};

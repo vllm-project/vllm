@@ -1,6 +1,3 @@
-#![feature(trait_alias)]
-#![feature(iterator_try_collect)]
-
 //! Shared text-generation support used by chat and future raw completions.
 //!
 //! This crate intentionally stays below chat semantics:
@@ -20,6 +17,7 @@ pub use output::{
     DecodedTextEvent, DecodedTokenLogprob, Finished, TextDecodeOptions, TextOutputStreamExt,
 };
 pub use request::{Prompt, SamplingParams, TextRequest};
+use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
@@ -34,8 +32,10 @@ pub mod output;
 mod request;
 pub mod tokenizer;
 
-/// Shared streamed text output type used by raw completions and other text-only northbound paths.
-pub trait TextOutputStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
+trait_set! {
+    /// Shared streamed text output type used by raw completions and other text-only northbound paths.
+    pub trait TextOutputStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
+}
 
 /// Raw text facade above [`Llm`].
 ///

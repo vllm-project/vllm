@@ -24,6 +24,7 @@ thiserror.workspace = true
 thiserror-ext.workspace = true
 tool-parser.workspace = true
 tracing.workspace = true
+trait-set.workspace = true
 uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true

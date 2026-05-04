@@ -89,6 +89,7 @@ tower-http = { version = "0.6.8", features = ["trace"] }
 tracing = { version = "0.1.44", features = ["release_max_level_debug"] }
 tracing-futures = { version = "0.2.5", features = ["futures-03"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+trait-set = "0.3.0"
 uuid = { version = "1.22.0", features = ["v4"] }
 validator = { version = "0.20.0", features = ["derive"] }
 vllm-chat = { path = "src/chat" }

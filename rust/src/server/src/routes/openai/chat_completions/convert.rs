@@ -1,3 +1,4 @@
+use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
@@ -49,11 +50,11 @@ pub(crate) fn prepare_chat_request(
         .echo
         .then(|| extract_last_assistant_content(&request.messages))
         .flatten();
-    let messages = request
+    let messages: Vec<_> = request
         .messages
         .into_iter()
         .map(convert_message)
-        .try_collect::<Vec<_>>()?;
+        .try_collect()?;
     let generation_prompt_mode = normalize_generation_prompt_mode(
         request.add_generation_prompt,
         request.continue_final_message,

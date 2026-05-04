@@ -170,14 +170,14 @@ impl InProcCoordinatorRunner {
         mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
         inner: Arc<ClientInner>,
     ) {
-        let Err(error) = try {
+        let result: Result<()> = async {
             loop {
                 tokio::select! {
                     // Received frontend-originated command from the handle.
                     command = self.command_rx.recv() => {
                         let Some(command) = command else {
                             warn!("coordinator command channel closed, shutting down coordinator runner");
-                            return;
+                            return Ok(());
                         };
                         self.handle_command(command).await?;
                     }
@@ -185,13 +185,15 @@ impl InProcCoordinatorRunner {
                     outputs = output_rx.recv() => {
                         let Some(outputs) = outputs else {
                             warn!("coordinator output channel closed, shutting down coordinator runner");
-                            return;
+                            return Ok(());
                         };
                         self.handle_outputs(outputs?).await?;
                     }
                 }
             }
-        };
+        }
+        .await;
+        let Err(error) = result else { return };
 
         warn!(error = %error.as_report(), "coordinator runner exiting with error");
         inner.close_registries(Arc::new(error));

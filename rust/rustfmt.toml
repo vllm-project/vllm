@@ -1,11 +1,1 @@
-unstable_features = true
 style_edition = "2024"
-comment_width = 100
-format_code_in_doc_comments = true
-format_macro_matchers = true
-normalize_comments = true
-normalize_doc_attributes = true
-imports_granularity = "Module"
-group_imports = "StdExternalCrate"
-reorder_impl_items = true
-wrap_comments = true

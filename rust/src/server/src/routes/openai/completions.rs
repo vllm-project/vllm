@@ -431,6 +431,7 @@ fn done_sse_event() -> Event {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt as _, stream};
+    use itertools::Itertools as _;
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
         FinishReason, Finished,
@@ -540,9 +541,9 @@ mod tests {
         .collect::<Vec<_>>()
         .await;
 
-        let chunks = chunks
+        let chunks: Vec<_> = chunks
             .into_iter()
-            .try_collect::<Vec<_>>()
+            .try_collect()
             .expect("stream should succeed");
 
         match &chunks[0] {

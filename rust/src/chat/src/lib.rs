@@ -1,5 +1,3 @@
-#![feature(trait_alias)]
-
 //! Minimal chat facade above [`vllm_text`].
 //!
 //! This crate keeps the northbound boundary intentionally small:

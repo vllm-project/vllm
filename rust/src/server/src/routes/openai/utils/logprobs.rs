@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use itertools::Itertools as _;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
     DecodedTokenLogprob,

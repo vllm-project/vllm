@@ -434,7 +434,7 @@ impl EngineCoreClient {
             .inner
             .register_request(request_id.clone(), data_parallel_rank)?;
 
-        let result = try {
+        let result: Result<()> = async {
             if let Some(coordinator) = self.coordinator.as_ref() {
                 let snapshot = coordinator.snapshot();
                 req.current_wave = snapshot.current_wave;
@@ -452,7 +452,9 @@ impl EngineCoreClient {
             self.inner
                 .send_to_engine(&engine_id, EngineCoreRequestType::Add, &req)
                 .await?;
-        };
+            Ok(())
+        }
+        .await;
 
         // Failed to send the request to the engine, roll back the registration.
         if let Err(error) = result {

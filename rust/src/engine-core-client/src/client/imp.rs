@@ -272,7 +272,7 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
-    let Err(error) = try {
+    let result: Result<()> = async {
         loop {
             let outputs = match output_rx.recv().await {
                 Some(outputs) => outputs,
@@ -350,7 +350,9 @@ pub(crate) async fn run_output_dispatcher_loop(
                 }
             }
         }
-    };
+    }
+    .await;
+    let Err(error) = result else { return };
 
     warn!(error = %error.as_report(), "output dispatcher exiting with error");
     inner.close_registries(Arc::new(error));

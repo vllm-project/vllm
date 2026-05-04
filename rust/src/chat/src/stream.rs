@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::Stream;
+use trait_set::trait_set;
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -118,7 +119,9 @@ impl Stream for ChatEventStream {
     }
 }
 
-pub trait ChatEventStreamTrait = Stream<Item = Result<ChatEvent>> + Send + 'static;
+trait_set! {
+    pub trait ChatEventStreamTrait = Stream<Item = Result<ChatEvent>> + Send + 'static;
+}
 
 #[cfg(test)]
 mod tests {

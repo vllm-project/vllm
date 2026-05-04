@@ -133,14 +133,14 @@ impl ExternalCoordinatorService {
     /// Drive the coordinator event loop until either side of the control plane
     /// is closed or a fatal error is observed.
     pub(crate) async fn run(mut self, inner: Arc<ClientInner>) {
-        let Err(error) = try {
+        let result: Result<()> = async {
             loop {
                 tokio::select! {
                     // Received frontend-originated command from the handle.
                     command = self.command_rx.recv() => {
                         let Some(command) = command else {
                             warn!("external coordinator command channel closed, shutting down service");
-                            return;
+                            return Ok(());
                         };
                         self.handle_command(command).await?;
                     }
@@ -151,7 +151,9 @@ impl ExternalCoordinatorService {
                     }
                 }
             }
-        };
+        }
+        .await;
+        let Err(error) = result else { return };
 
         warn!(
             error = %error.as_report(),

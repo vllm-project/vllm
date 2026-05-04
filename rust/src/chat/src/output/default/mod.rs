@@ -7,6 +7,7 @@ use std::sync::Once;
 
 use futures::{Stream, StreamExt as _};
 use tracing::info;
+use trait_set::trait_set;
 use vllm_text::tokenizer::DynTokenizer;
 
 use self::reasoning::reasoning_event_stream;
@@ -23,7 +24,9 @@ use crate::parser::tool::{ToolParser, ToolParserFactory};
 use crate::request::{ChatRequest, ChatToolChoice};
 use crate::{Error, Result as ChatResult};
 
-trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
+trait_set! {
+    trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
+}
 
 /// Default request-scoped output processor used by Hugging Face style chat backends.
 ///

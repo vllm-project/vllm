@@ -1,3 +1,4 @@
+use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use vllm_llm::{Logprobs, PositionLogprobs};
 
