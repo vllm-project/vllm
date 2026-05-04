@@ -44,8 +44,8 @@ class QuarkNVFP4(QuarkScheme):
 
         if not isinstance(self.kernel, EmulationNvFp4LinearKernel):
             logger.warning_once(
-                "Only EmulationNvFp4LinearKernel is tested with"
-                " QuarkNVFP4, got kernel=%s. Use at your own risk.",
+                "Only EmulationNvFp4LinearKernel NVFP4 dense implementation is "
+                "tested with QuarkNVFP4, got kernel=%s. Correctness is not validated.",
                 type(self.kernel).__name__,
             )
 
