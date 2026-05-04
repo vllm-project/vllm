@@ -609,7 +609,7 @@ def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
     backend: str | None,
     expert_weights: Sequence[Sequence[torch.Tensor]],
-    expert_buffer: Sequence[torch.Tensor] | None = None,
+    expert_buffer: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
     """Create an EPLB communicator for the given backend.
 
@@ -629,8 +629,7 @@ def create_eplb_communicator(
             NixlEplbCommunicator registers all layers with NIXL for
             zero-copy RDMA reads.
         expert_buffer: Pre-allocated receive buffer tensors (one per
-            weight tensor in a single layer).  Required for the NIXL
-            backend; ignored by other backends.
+            weight tensor in a single layer).
     """
     if backend is None:
         backend = "torch_nccl"
@@ -704,8 +703,6 @@ def create_eplb_communicator(
                 "EPLB communicator 'nixl' supports only cuda-like devices "
                 f"(got {tensor_device_type})."
             )
-        if expert_buffer is None:
-            raise RuntimeError("EPLB communicator 'nixl' requires expert_buffer.")
         try:
             return NixlEplbCommunicator(
                 cpu_group=group_coordinator.cpu_group,

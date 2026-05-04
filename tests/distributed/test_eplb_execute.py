@@ -278,7 +278,7 @@ def assert_verification_synced(local_ok: bool, msg: str) -> None:
 
 
 def create_eplb_communicator_or_raise(
-    *, group_coordinator, backend, expert_weights, expert_buffer=None
+    *, group_coordinator, backend, expert_weights, expert_buffer
 ):
     try:
         return create_eplb_communicator(
