@@ -261,11 +261,19 @@ def _rocm_aiter_topk_softmax_impl(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> None:
     from aiter import topk_softmax
 
     topk_softmax(
-        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        num_shared_experts,
+        shared_expert_scoring_func,
     )
 
 
@@ -275,6 +283,8 @@ def _rocm_aiter_topk_softmax_fake(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> None:
     pass
 
@@ -1206,6 +1216,9 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    # Lazily probed: whether aiter.topk_softmax supports the
+    # num_shared_experts / shared_expert_scoring_func args (7-arg form).
+    _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
 
     _ALL_REDUCE_MAX_SIZE: int = 8192 * 1024 * 8 * 2
     _CUSTOM_ALL_REDUCE: AiterCustomAllreduceProto | None = None
@@ -1321,6 +1334,33 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def topk_softmax_supports_fused_sigmoid(cls) -> bool:
+        """Check if topk_softmax supports fused shared expert activation."""
+        if cls._TOPK_SOFTMAX_FUSED_SIGMOID is None:
+            try:
+                import inspect
+
+                from aiter import topk_softmax
+
+                params = inspect.signature(topk_softmax).parameters
+                if "num_shared_experts" in params:
+                    cls._TOPK_SOFTMAX_FUSED_SIGMOID = True
+                else:
+                    # @compile_ops wrapper loses the original signature.
+                    # Fall back to the torch custom op schema.
+                    import torch
+
+                    schema = getattr(
+                        getattr(torch.ops.aiter, "topk_softmax", None), "default", None
+                    )
+                    schema_str = str(getattr(schema, "_schema", ""))
+                    cls._TOPK_SOFTMAX_FUSED_SIGMOID = "num_shared_experts" in schema_str
+            except (ImportError, ValueError):
+                cls._TOPK_SOFTMAX_FUSED_SIGMOID = False
+        return cls._TOPK_SOFTMAX_FUSED_SIGMOID
 
     @classmethod
     @if_aiter_supported
@@ -1776,9 +1816,17 @@ class rocm_aiter_ops:
         token_expert_indices: torch.Tensor,
         gating_output: torch.Tensor,
         renormalize: bool,
+        num_shared_experts: int = 0,
+        shared_expert_scoring_func: str = "",
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_softmax(
-            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
         )
         return topk_weights, topk_indices
 

@@ -73,10 +73,15 @@ def fused_topk(
     renormalize: bool,
     indices_type: torch.dtype | None = None,
     scoring_func: str = "softmax",
+    num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
     M, _ = hidden_states.size()
+
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        aiter_topK_meta_data,
+    )
 
     topk_weights = torch.empty(
         M, topk, dtype=torch.float32, device=hidden_states.device
@@ -92,14 +97,77 @@ def fused_topk(
     )
 
     if scoring_func == "softmax":
-        topk_func = dispatch_topk_softmax_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        # Check if we can fuse the shared expert activation (sigmoid)
+        # into the topk_softmax kernel, so routing softmax and shared
+        # expert scoring happen in a single kernel launch.
+        fuse_sigmoid_in_kernel = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            and rocm_aiter_ops.is_fused_moe_enabled()
+            and rocm_aiter_ops.topk_softmax_supports_fused_sigmoid()
+            and aiter_topK_meta_data is not None
+            and num_fused_shared_experts > 0
         )
-        topk_weights, topk_ids = topk_func(
-            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
-        )
+        if fuse_sigmoid_in_kernel:
+            # gating_output is [M, num_experts + num_shared] from fused gate.
+            # The kernel applies routing softmax on [:num_experts] and
+            # shared expert sigmoid on the last num_shared columns,
+            # writing results into the pre-allocated buffer.
+            assert aiter_topK_meta_data is not None
+            total_topk_weights, total_topk_ids = aiter_topK_meta_data
+            total_topk_weights_slice = total_topk_weights[:M]
+            topk_ids_slice = total_topk_ids[:M, :topk]
 
-        return topk_weights, topk_ids, token_expert_indices
+            topk_func = dispatch_topk_softmax_func(use_rocm_aiter=True)
+            topk_func(
+                total_topk_weights_slice,
+                topk_ids_slice,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                num_fused_shared_experts,
+                "sigmoid",
+            )
+            return (total_topk_weights_slice, total_topk_ids[:M], token_expert_indices)
+        else:
+            # When num_fused_shared_experts > 0 but kernel fusion is
+            # unavailable, gating_output may be [M, num_experts + num_shared]
+            # from the fused gate matmul.  Standard topk_softmax must only
+            # see the routing columns to compute softmax correctly.
+            if num_fused_shared_experts > 0:
+                routing_logits = gating_output[:, :-num_fused_shared_experts]
+                shared_logits = gating_output[:, -num_fused_shared_experts:]
+            else:
+                routing_logits = gating_output
+                shared_logits = None
+
+            topk_func = dispatch_topk_softmax_func(
+                use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+            )
+            topk_weights, topk_ids = topk_func(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                routing_logits,
+                renormalize,
+            )
+
+            # Non-fused fallback: compute shared expert activation
+            # (sigmoid) and inject weights into buffer manually.
+            if shared_logits is not None and aiter_topK_meta_data is not None:
+                from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                    inject_shared_expert_weights,
+                )
+
+                shared_weights = torch.sigmoid(shared_logits)
+                topk_weights, topk_ids = inject_shared_expert_weights(
+                    topk_weights,
+                    topk_ids,
+                    topk=topk,
+                    num_fused_shared_experts=num_fused_shared_experts,
+                    shared_expert_weights=shared_weights,
+                )
+
+            return topk_weights, topk_ids, token_expert_indices
     elif scoring_func == "sigmoid":
         topk_func = dispatch_topk_sigmoid_func(
             use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
@@ -153,6 +221,7 @@ class FusedTopKRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
+        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using standard fused top-k."""
         topk_weights, topk_ids, token_expert_indices = fused_topk(
@@ -162,6 +231,7 @@ class FusedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             indices_type=indices_type,
             scoring_func=self.scoring_func,
+            num_fused_shared_experts=num_fused_shared_experts,
         )
 
         return topk_weights, topk_ids
