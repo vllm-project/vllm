@@ -29,10 +29,15 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
+    mxfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    MarlinExperts,
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
@@ -1005,6 +1010,61 @@ def test_fused_marlin_moe(
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
+
+
+def test_marlin_experts_apply_forwards_gemm1_clamp_limit(monkeypatch):
+    captured: dict[str, float | None] = {}
+
+    def fake_fused_marlin_moe(**kwargs):
+        captured["clamp_limit"] = kwargs.get("clamp_limit")
+        kwargs["output"].zero_()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.fused_marlin_moe."
+        "fused_marlin_moe",
+        fake_fused_marlin_moe,
+    )
+
+    clamp_limit = 10.0
+    moe_config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=16,
+        intermediate_size_per_partition=8,
+        num_local_experts=2,
+        num_logical_experts=2,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=torch.empty(0),
+        w2_scale=torch.empty(0),
+        gemm1_clamp_limit=clamp_limit,
+    )
+    experts = MarlinExperts(moe_config=moe_config, quant_config=quant_config)
+
+    experts.apply(
+        output=torch.empty((1, 16), dtype=torch.bfloat16),
+        hidden_states=torch.empty((1, 16), dtype=torch.bfloat16),
+        w1=torch.empty((2, 1, 1), dtype=torch.int32),
+        w2=torch.empty((2, 1, 1), dtype=torch.int32),
+        topk_weights=torch.ones((1, 1), dtype=torch.float32),
+        topk_ids=torch.zeros((1, 1), dtype=torch.int32),
+        activation=MoEActivation.SILU,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    assert captured["clamp_limit"] == clamp_limit
 
 
 @pytest.mark.flaky(reruns=2)

@@ -769,6 +769,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 sort_indices2=self.w2_g_idx_sort_indices,
                 is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
+                clamp_limit=self.gemm1_clamp_limit,
             )
             return
 
