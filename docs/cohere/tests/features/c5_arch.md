@@ -13,8 +13,8 @@
    `run_bee_samples` with `MODELS=c5-3a30t_fp8 TP_SIZE=1`.
    - [`tests/cohere/scripts/run_tests.sh` L599](../../../../tests/cohere/scripts/run_tests.sh)
 2. Starts `vllm serve` with reasoning config (thinking tokens), hardware
-   profile args, `--mm-processor-cache-type shm`, and
-   `--disable-log-stats`.
+   profile args, `--mm-processor-cache-type shm`, `--disable-log-stats`, and
+   parsers (`--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4`)
    - [`tests/cohere/scripts/run_tests.sh` L276-330](../../../../tests/cohere/scripts/run_tests.sh)
 3. Invokes `pytest tests/cohere/test_bee_samples.py` with configuration
    passed via env vars (`BEE_MODEL`, `BEE_DATA_DIR`, etc.). The pytest
@@ -64,7 +64,8 @@ CI entry: [`tests/cohere/scripts/run_tests.sh` L276](../../../../tests/cohere/sc
 
 1. `vllm serve` with `--tensor-parallel-size 1`, `--reasoning-config`
    (thinking start/end tokens), `--disable-log-stats`,
-   `--mm-processor-cache-type shm`.
+   `--mm-processor-cache-type shm` and parsers
+   (`--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4`)
 2. Hardware profile args applied via `VLLM_HARDWARE_PROFILE_ARGS`.
 3. Thinking budget disabled (`ENABLE_THINKING_BUDGET=0`); no
    `thinking_token_budget` sent to the server.
@@ -135,7 +136,8 @@ Runner map: [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/co
 
 1. `vllm serve` with `--tensor-parallel-size 1`, `--reasoning-config`
    (thinking start/end tokens), `--disable-log-stats`,
-   `--mm-processor-cache-type shm`.
+   `--mm-processor-cache-type shm` and parsers
+   (`--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4`)
 2. Hardware profile args applied via `VLLM_HARDWARE_PROFILE_ARGS`.
 3. `ENABLE_THINKING_BUDGET=1` env var passed to pytest, activating per-task
    `thinking_token_budget` from `TASK_CONFIG` (default 2048, aime 16384,

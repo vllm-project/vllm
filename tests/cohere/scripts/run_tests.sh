@@ -301,7 +301,8 @@ run_bee_samples() {
         think_start=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import START_THINKING_TOKEN; print(START_THINKING_TOKEN)")
         think_end=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN; print(END_THINKING_TOKEN)")
         local reasoning_json="{\"reasoning_start_str\":\"${think_start}\",\"reasoning_end_str\":\"${think_end}\"}"
-        local server_cmd="vllm serve ${MODEL_PATH} ${VLLM_HARDWARE_PROFILE_ARGS:-} --tensor-parallel-size ${TP_SIZE} --served-model-name ${MODEL_NAME} --disable-log-stats --mm-processor-cache-type shm --reasoning-config '${reasoning_json}'"
+        local parsers="--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4"
+        local server_cmd="vllm serve ${MODEL_PATH} ${VLLM_HARDWARE_PROFILE_ARGS:-} --tensor-parallel-size ${TP_SIZE} --served-model-name ${MODEL_NAME} --disable-log-stats --mm-processor-cache-type shm ${parsers} --reasoning-config '${reasoning_json}'"
 
         if [[ "${MODEL_NAME}" == *"eagle"* ]]; then
             local eagle_path="${MODEL_PATH}/eagle"
