@@ -114,29 +114,27 @@ class ServingEmbedding(PoolingServing):
             num_prompt_tokens = 0
 
             for idx, final_res in enumerate(final_res_batch):
-                item = {
-                    "index": idx,
-                    "object": "embedding",
-                    "embedding": encode_pooling_output_float_or_ndarray(final_res),
-                }
-                prompt_token_ids = final_res.prompt_token_ids
-
+                item = EmbeddingResponseData(
+                    index=idx, embedding=[],
+                ).model_dump()
+                item["embedding"] = encode_pooling_output_float_or_ndarray(
+                    final_res)
                 items.append(item)
-                num_prompt_tokens += len(prompt_token_ids)
+                num_prompt_tokens += len(final_res.prompt_token_ids)
 
-            response = {
-                "id": request_id,
-                "object": "list",
-                "created": created_time,
-                "model": model_name,
-                "data": items,
-                "usage": {
-                    "prompt_tokens": num_prompt_tokens,
-                    "total_tokens": num_prompt_tokens,
-                    "completion_tokens": 0,
-                    "prompt_tokens_details": None,
-                },
-            }
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
+            )
+            response = EmbeddingResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                data=[],  # type: ignore[arg-type]
+                usage=usage,
+            ).model_dump()
+            response["data"] = items
+
             return self.json_response_cls(content=response)
 
         encode_fn = cast(
