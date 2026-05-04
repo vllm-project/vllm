@@ -23,18 +23,6 @@
     "C4-25a218t-INT4A16-ruler-4k.yaml",
     "C4-25a218t-INT4A16-ruler-128k.yaml"
   ],
-  "c4-v2-25a218t_int4a16_gs32_gptq": [
-    "C4-V2-25a218t-INT4A16-GS32-GPTQ-mbpp.yaml",
-    "C4-V2-25a218t-INT4A16-GS32-GPTQ-metabench.yaml",
-    "C4-V2-25a218t-INT4A16-GS32-GPTQ-ruler-4k.yaml",
-    "C4-V2-25a218t-INT4A16-GS32-GPTQ-ruler-128k.yaml"
-  ],
-  "c4-v2-25a218t_int4a16_gs32_awq_gptq": [
-    "C4-V2-25a218t-INT4A16-GS32-AWQ-GPTQ-mbpp.yaml",
-    "C4-V2-25a218t-INT4A16-GS32-AWQ-GPTQ-metabench.yaml",
-    "C4-V2-25a218t-INT4A16-GS32-AWQ-GPTQ-ruler-4k.yaml",
-    "C4-V2-25a218t-INT4A16-GS32-AWQ-GPTQ-ruler-128k.yaml"
-  ],
   "c4-25a218t_w4a8": [
     "C4-25a218t-W4A8-mbpp.yaml",
     "C4-25a218t-W4A8-metabench.yaml",
