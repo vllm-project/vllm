@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -89,10 +90,6 @@ logger = init_logger(__name__)
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    # ------------------------------------------------------------------
-    # Plan executors (static — no self access)
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _build_remote_descs_from_plan(
         plan: EngineTransferPlan,
@@ -130,6 +127,12 @@ class NixlConnectorWorker:
 
         num_fa_descs = num_fa_regions * num_blocks
 
+        # All-attention fast path: single vectorized broadcast.
+        if num_ssm_regions == 0:
+            block_arr = np.concatenate(block_ids)[None, :]
+            region_ids = np.arange(num_fa_regions)[:, None]
+            return (region_ids * num_blocks + block_arr).flatten()
+
         # NOTE (NickLucche) With HMA, every kv group has the same number
         # of layers and layers from different groups share the same kv
         # tensor.  Therefore we compute desc IDs per group using the
@@ -140,13 +143,12 @@ class NixlConnectorWorker:
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
-            spec_type = plan.group_spec_types[i]
-            if _is_attention_spec(spec_type):
+            if _is_attention_spec(plan.group_spec_types[i]):
                 fa_region_ids = np.arange(num_fa_regions)[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
-            elif _is_ssm_spec(spec_type):
+            elif _is_ssm_spec(plan.group_spec_types[i]):
                 # NOTE (NickLucche) SSM and Attention block regions can
                 # be exchanged arbitrarily by manager.  Therefore, descs
                 # are laid out as:
@@ -163,47 +165,18 @@ class NixlConnectorWorker:
                     ).flatten()
                 )
             else:
-                raise ValueError(f"Unknown spec type {spec_type} at index {i}")
+                raise ValueError(
+                    f"Unknown spec type {plan.group_spec_types[i]} at index {i}"
+                )
 
         return np.concatenate(all_descs)
-
-    @staticmethod
-    def _compute_read_specs_from_plan(
-        plan: EngineTransferPlan,
-        local_block_ids: BlockIds,
-        remote_block_ids: BlockIds,
-    ) -> list[ReadSpec]:
-        """Compute read specs from plan.
-
-        For each source rank, includes only the groups whose
-        source_ranks_per_group contains that rank.
-        """
-        num_groups = len(local_block_ids)
-        return [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=[
-                    list(local_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-                remote_block_ids=[
-                    list(remote_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-            )
-            for rank in plan.all_source_ranks
-        ]
 
     @staticmethod
     def _build_local_splits_from_plan(
         plan: EngineTransferPlan,
         src_blocks_data: list[tuple[int, int, int]],
         num_fa_descs: int,
-    ) -> list[list[tuple[int, int, int]]]:
+    ) -> Iterator[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario.
 
         num_fa_descs is the boundary between FA and SSM descriptors.
@@ -217,8 +190,6 @@ class NixlConnectorWorker:
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
         ssm_num_splits = len(plan.source_ranks_per_group[-1]) if has_ssm_descs else 0
 
-        result: list[list[tuple[int, int, int]]] = []
-
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
 
@@ -230,48 +201,7 @@ class NixlConnectorWorker:
                 else:
                     chunk = local_len // ssm_num_splits
                     handle.append((addr + p_idx * chunk, chunk, dev))
-            result.append(handle)
-
-        return result
-
-    def _build_local_descs(
-        self,
-        base_addresses: list[int],
-        block_size_ratio: int,
-    ) -> list[tuple[int, int, int]]:
-        """Build local (src) descriptor tuples for NIXL registration."""
-        assert self.transfer_topo is not None
-        fa_regions = build_fa_local_regions(
-            self.num_blocks,
-            block_size_ratio,
-            self.block_len_per_layer,
-            self.transfer_topo.is_kv_layout_blocks_first,
-        )
-        if self._has_mamba:
-            # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the
-            # 3-read split is unnecessary — a single conv desc per block
-            # suffices. Consider adding a fast path. Currently we always
-            # register 4 regions because local descs are created before
-            # knowing the remote TP.
-            assert self._conv_decomp is not None
-            mamba_regions = build_mamba_local_regions(
-                self.block_len_per_layer,
-                self._logical_num_blocks,
-                block_size_ratio,
-                self._conv_decomp,
-                self._mamba_ssm_size,
-                self._physical_blocks_per_logical_kv_block,
-            )
-        else:
-            mamba_regions = []
-
-        result: list[tuple[int, int, int]] = []
-        for region in fa_regions + mamba_regions:
-            base = base_addresses[region.layer_idx]
-            for blk in range(region.num_blocks):
-                addr = base + blk * region.page_stride + region.offset_in_page
-                result.append((addr, region.descriptor_bytes, self.device_id))
-        return result
+            yield handle
 
     def __init__(
         self,
@@ -1054,7 +984,37 @@ class NixlConnectorWorker:
         block_size_ratio = self.block_size // block_size
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
-        blocks_data = self._build_local_descs(local_base_addresses, block_size_ratio)
+        fa_regions = build_fa_local_regions(
+            self.num_blocks,
+            block_size_ratio,
+            self.block_len_per_layer,
+            self.transfer_topo.is_kv_layout_blocks_first,
+        )
+        if self._has_mamba:
+            # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the
+            # 3-read split is unnecessary — a single conv desc per block
+            # suffices. Consider adding a fast path. Currently we always
+            # register 4 regions because local descs are created before
+            # knowing the remote TP.
+            assert self._conv_decomp is not None
+            mamba_regions = build_mamba_local_regions(
+                self.block_len_per_layer,
+                self._logical_num_blocks,
+                block_size_ratio,
+                self._conv_decomp,
+                self._mamba_ssm_size,
+                self._physical_blocks_per_logical_kv_block,
+            )
+        else:
+            mamba_regions = []
+
+        blocks_data: list[tuple[int, int, int]] = []
+        for region in fa_regions + mamba_regions:
+            base = local_base_addresses[region.layer_idx]
+            for blk in range(region.num_blocks):
+                addr = base + blk * region.page_stride + region.offset_in_page
+                blocks_data.append((addr, region.descriptor_bytes, self.device_id))
+
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
@@ -1777,11 +1737,26 @@ class NixlConnectorWorker:
             plan.remote_expansion_stride,
         )
         remote_block_ids = meta.remote.block_ids
-        read_specs = self._compute_read_specs_from_plan(
-            plan,
-            local_block_ids=meta.local_physical_block_ids,
-            remote_block_ids=remote_block_ids,
-        )
+        local_block_ids = meta.local_physical_block_ids
+        num_groups = len(local_block_ids)
+        read_specs = [
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=[
+                    list(local_block_ids[g])
+                    if rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
+                ],
+                remote_block_ids=[
+                    list(remote_block_ids[g])
+                    if rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
+                ],
+            )
+            for rank in plan.all_source_ranks
+        ]
 
         # D may have to perform multiple reads from different remote ranks.
         # MLA opt: when P TP > D TP, only a single read is executed for
@@ -1790,15 +1765,12 @@ class NixlConnectorWorker:
             read_specs = read_specs[:1]
 
         for i, spec in enumerate(read_specs):
-            remote_rank = spec.remote_rank
-            local_block_ids = spec.local_block_ids
-            remote_block_ids = spec.remote_block_ids
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
                 meta.remote.engine_id,
-                remote_rank,
+                spec.remote_rank,
                 remote_block_size,
                 req_id,
             )
@@ -1817,16 +1789,14 @@ class NixlConnectorWorker:
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                remote_rank
+                spec.remote_rank
             ]
 
             self._read_blocks(
+                read_spec=spec,
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
-                local_block_ids=local_block_ids,
-                remote_block_ids=remote_block_ids,
-                remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
@@ -1843,12 +1813,10 @@ class NixlConnectorWorker:
 
     def _read_blocks(
         self,
-        local_block_ids: BlockIds,
-        remote_block_ids: BlockIds,
+        read_spec: ReadSpec,
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
-        remote_rank: int,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
     ):
@@ -1857,6 +1825,10 @@ class NixlConnectorWorker:
         a single remote worker.
         """
         assert self.transfer_topo is not None
+        remote_rank = read_spec.remote_rank
+        local_block_ids = read_spec.local_block_ids
+        remote_block_ids = read_spec.remote_block_ids
+
         plan = self._transfer_plans[dst_engine_id]
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
         block_size_ratio = self.transfer_topo.block_size_ratio(

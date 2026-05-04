@@ -4,6 +4,28 @@
 
 Data structures, plan generators, and local descriptor builders
 for NIXL KV cache transfers.
+
+Reference diagram::
+
+                        KVCacheTensor (Shared)
+                               /       \\
+                              /         \\
+                             /           \\
+        Attention (FlashInfer) View      Mamba View
+                  |                          |
+                  |                          |
+           +-------------------+         +-------------------+
+           | KVCacheTensor     |         | KVCacheTensor      |
+           |                   |         |                    |
+           |<----- page ------>|         |<----- page ------->|
+           |       size        |         |       size         |
+           |  Key 0  |  Val 0  |         |Conv 0  |   SSM 0   |
+           |  Key 1  |  Val 1  |         |Conv 1  |   SSM 1   |
+           |   ...   |   ...   |         |  ...   |    ...    |
+           | Key N-2 | Val N-2 |         |Conv N-2|   SSM N-2 |
+           | Key N-1 | Val N-1 |         |Conv N-1|   SSM N-1 |
+           +-------------------+         +--------------------+
+           |1st_split-2nd_split|         |1st_split-2nd_split |
 """
 
 from __future__ import annotations
@@ -85,7 +107,8 @@ class EngineTransferPlan:
     # Per-group KVCacheSpec type — used for descriptor indexing.
     group_spec_types: tuple[type[KVCacheSpec], ...]
 
-    # Per-group ordered source ranks. Position = local piece index.
+    # Remote TP ranks that this local rank reads from, per group.
+    # Position = local piece index.
     source_ranks_per_group: tuple[tuple[int, ...], ...]
 
     # Superset of all source ranks (union of all groups).
