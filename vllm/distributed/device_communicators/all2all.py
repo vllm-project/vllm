@@ -768,12 +768,13 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
     Uses NCCL Gin backend with analytical SM calculation.
     """
 
-    def __init__(self, cpu_group, tcp_store_group=None):
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
         assert has_deep_ep_v2(), (
             "DeepEP v2 (ElasticBuffer) not available. Requires DeepEP >= 2.0 "
             "(https://github.com/deepseek-ai/DeepEP) and NCCL >= 2.30.4."
         )
         super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
         self.handle_cache = Cache()
         self._num_sms: int | None = None
 
@@ -785,7 +786,8 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         use_fp8_dispatch: bool,
     ) -> dict:
         return dict(
-            group=self.cpu_group,
+            group=self._device_group if self._device_group is not None
+            else self.cpu_group,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             hidden=hidden,
             num_topk=num_topk,
