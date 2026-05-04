@@ -80,6 +80,7 @@ from vllm.config.model import (
     LogprobsMode,
     ModelDType,
     RunnerOption,
+    TokenizerBackend,
     TokenizerMode,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
@@ -414,6 +415,7 @@ class EngineArgs:
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode | str = ModelConfig.tokenizer_mode
+    tokenizer_backend: TokenizerBackend | str = ModelConfig.tokenizer_backend
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
@@ -755,6 +757,9 @@ class EngineArgs:
         model_group.add_argument("--convert", **model_kwargs["convert"])
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode", **model_kwargs["tokenizer_mode"])
+        model_group.add_argument(
+            "--tokenizer-backend", **model_kwargs["tokenizer_backend"]
+        )
         model_group.add_argument(
             "--trust-remote-code", **model_kwargs["trust_remote_code"]
         )
@@ -1504,6 +1509,7 @@ class EngineArgs:
             convert=self.convert,
             tokenizer=self.tokenizer,  # type: ignore[arg-type]
             tokenizer_mode=self.tokenizer_mode,
+            tokenizer_backend=self.tokenizer_backend,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,

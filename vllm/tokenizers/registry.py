@@ -193,6 +193,24 @@ def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
+def _apply_fastokens_patch() -> None:
+    """Install the fastokens monkey-patches for the lifetime of the process.
+
+    fastokens replaces ``tokenizers.Tokenizer`` (so ``AutoTokenizer.from_pretrained``
+    builds a shim-backed fast tokenizer) and ``tokenizers.decoders.DecodeStream``
+    (so the streaming detokenizer accepts the shim). Both must remain in place
+    after the tokenizer is built — downstream consumers reference the patched
+    ``DecodeStream`` at request time. ``patch_transformers()`` is idempotent.
+    """
+    try:
+        import fastokens
+    except ImportError as e:
+        raise ImportError(
+            "The 'fastokens' package is required for tokenizer_backend='fastokens'."
+        ) from e
+    fastokens.patch_transformers()
+
+
 def get_tokenizer(
     tokenizer_name: str | Path,
     *args,
@@ -200,6 +218,7 @@ def get_tokenizer(
     trust_remote_code: bool = False,
     revision: str | None = None,
     download_dir: str | None = None,
+    tokenizer_backend: str = "huggingface",
     **kwargs,
 ) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
@@ -241,6 +260,10 @@ def get_tokenizer(
     else:
         tokenizer_cls_ = tokenizer_cls
 
+    # Backend selection only applies to HF-backed tokenizers; non-HF modes
+    # (mistral, deepseek_v32, etc.) always use their own tokenizer engines.
+    if tokenizer_mode == "hf" and tokenizer_backend == "fastokens":
+        _apply_fastokens_patch()
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
     if not tokenizer.is_fast:
         logger.warning(
@@ -262,6 +285,7 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         model_config.tokenizer,
         runner_type=model_config.runner_type,
         tokenizer_mode=model_config.tokenizer_mode,
+        tokenizer_backend=model_config.tokenizer_backend,
         revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
