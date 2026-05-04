@@ -174,7 +174,7 @@ __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
                : "l"(ptr));
   #endif
 #else
-  assert(false && "ld256 requires SM100+ with CUDA 12.9+ or ROCm gfx950+");
+  assert(false && "ld256 requires SM100+ with CUDA 12.9+ (ROCm gfx950+ path disabled)");
 #endif
 }
 
@@ -201,7 +201,7 @@ __device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
                : "memory");
   #endif
 #else
-  assert(false && "st256 requires SM100+ with CUDA 12.9+ or ROCm gfx950+");
+  assert(false && "st256 requires SM100+ with CUDA 12.9+ (ROCm gfx950+ path disabled)");
 #endif
 }
 
@@ -259,7 +259,7 @@ __forceinline__ __device__ u32x8_t ld256_cs(const u32x8_t* addr) {
   #endif
   return val;
 #else
-  assert(false && "ld256_cs requires SM100+ with CUDA 12.9+ or ROCm gfx950+");
+  assert(false && "ld256_cs requires SM100+ with CUDA 12.9+ (ROCm gfx950+ path disabled)");
   return u32x8_t{};
 #endif
 }
@@ -283,7 +283,7 @@ __forceinline__ __device__ void st256_cs(u32x8_t* addr, u32x8_t val) {
       "r"(val.d[5]), "r"(val.d[6]), "r"(val.d[7]));
   #endif
 #else
-  assert(false && "st256_cs requires SM100+ with CUDA 12.9+ or ROCm gfx950+");
+  assert(false && "st256_cs requires SM100+ with CUDA 12.9+ (ROCm gfx950+ path disabled)");
 #endif
 }
 
