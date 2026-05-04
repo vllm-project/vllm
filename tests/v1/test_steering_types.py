@@ -106,25 +106,25 @@ class TestResolveEffectiveVectors:
         base = {"hp": {0: [1.0, 2.0]}}
         result = resolve_effective_vectors(base, None)
         assert result is not None
-        assert result["hp"][0] == [1.0, 2.0]
+        assert result["hp"][0].tolist() == [1.0, 2.0]
 
     def test_only_base_with_scale(self):
         base = {"hp": {0: {"vector": [1.0, 2.0], "scale": 3.0}}}
         result = resolve_effective_vectors(base, None)
         assert result is not None
-        assert result["hp"][0] == [3.0, 6.0]
+        assert result["hp"][0].tolist() == [3.0, 6.0]
 
     def test_only_phase_returns_prescaled(self):
         phase = {"hp": {0: [5.0, 10.0]}}
         result = resolve_effective_vectors(None, phase)
         assert result is not None
-        assert result["hp"][0] == [5.0, 10.0]
+        assert result["hp"][0].tolist() == [5.0, 10.0]
 
     def test_only_phase_with_scale(self):
         phase = {"hp": {0: {"vector": [1.0, 2.0], "scale": 0.5}}}
         result = resolve_effective_vectors(None, phase)
         assert result is not None
-        assert result["hp"][0] == [0.5, 1.0]
+        assert result["hp"][0].tolist() == [0.5, 1.0]
 
     def test_additive_merge_same_hook_layer(self):
         """Overlapping (hook, layer) pairs should sum."""
@@ -132,7 +132,7 @@ class TestResolveEffectiveVectors:
         phase = {"hp": {0: [10.0, 20.0]}}
         result = resolve_effective_vectors(base, phase)
         assert result is not None
-        assert result["hp"][0] == [11.0, 22.0]
+        assert result["hp"][0].tolist() == [11.0, 22.0]
 
     def test_additive_merge_with_scales(self):
         """Both base and phase are pre-scaled before summing."""
@@ -141,7 +141,7 @@ class TestResolveEffectiveVectors:
         result = resolve_effective_vectors(base, phase)
         assert result is not None
         # base: [2.0, 4.0], phase: [5.0, 10.0] -> [7.0, 14.0]
-        assert result["hp"][0] == [7.0, 14.0]
+        assert result["hp"][0].tolist() == [7.0, 14.0]
 
     def test_non_overlapping_hooks_pass_through(self):
         """Non-overlapping hook points should pass through unchanged."""
@@ -149,8 +149,8 @@ class TestResolveEffectiveVectors:
         phase = {"hp_b": {0: [2.0]}}
         result = resolve_effective_vectors(base, phase)
         assert result is not None
-        assert result["hp_a"][0] == [1.0]
-        assert result["hp_b"][0] == [2.0]
+        assert result["hp_a"][0].tolist() == [1.0]
+        assert result["hp_b"][0].tolist() == [2.0]
 
     def test_non_overlapping_layers_pass_through(self):
         """Non-overlapping layers within same hook pass through."""
@@ -158,8 +158,8 @@ class TestResolveEffectiveVectors:
         phase = {"hp": {1: [2.0]}}
         result = resolve_effective_vectors(base, phase)
         assert result is not None
-        assert result["hp"][0] == [1.0]
-        assert result["hp"][1] == [2.0]
+        assert result["hp"][0].tolist() == [1.0]
+        assert result["hp"][1].tolist() == [2.0]
 
     def test_mixed_overlap_and_nonoverlap(self):
         """Overlapping entries add; non-overlapping pass through."""
@@ -174,15 +174,15 @@ class TestResolveEffectiveVectors:
         result = resolve_effective_vectors(base, phase)
         assert result is not None
         # hp_a layer 0: overlapping -> 1.0 + 0.5 = 1.5
-        assert result["hp_a"][0] == [1.5]
+        assert result["hp_a"][0].tolist() == [1.5]
         # hp_a layer 1: only base
-        assert result["hp_a"][1] == [10.0]
+        assert result["hp_a"][1].tolist() == [10.0]
         # hp_a layer 2: only phase
-        assert result["hp_a"][2] == [20.0]
+        assert result["hp_a"][2].tolist() == [20.0]
         # hp_b: only base
-        assert result["hp_b"][0] == [100.0]
+        assert result["hp_b"][0].tolist() == [100.0]
         # hp_c: only phase
-        assert result["hp_c"][0] == [200.0]
+        assert result["hp_c"][0].tolist() == [200.0]
 
     def test_mismatched_vector_lengths_raises(self):
         base = {"hp": {0: [1.0, 2.0]}}
@@ -241,21 +241,21 @@ class TestCoLocatedScale:
         spec = {"hp": {0: {"vector": [1.0, 2.0, 3.0], "scale": 2.0}}}
         result = resolve_effective_vectors(spec, None)
         assert result is not None
-        assert result["hp"][0] == [2.0, 4.0, 6.0]
+        assert result["hp"][0].tolist() == [2.0, 4.0, 6.0]
 
     def test_scale_zero_zeros_vector(self):
         """scale=0.0 should zero out the vector."""
         spec = {"hp": {0: {"vector": [1.0, 2.0], "scale": 0.0}}}
         result = resolve_effective_vectors(spec, None)
         assert result is not None
-        assert result["hp"][0] == [0.0, 0.0]
+        assert result["hp"][0].tolist() == [0.0, 0.0]
 
     def test_negative_scale(self):
         """Negative scales should negate the vector."""
         spec = {"hp": {0: {"vector": [1.0, -2.0], "scale": -1.0}}}
         result = resolve_effective_vectors(spec, None)
         assert result is not None
-        assert result["hp"][0] == [-1.0, 2.0]
+        assert result["hp"][0].tolist() == [-1.0, 2.0]
 
     def test_fractional_scale(self):
         """Fractional scale applied correctly."""

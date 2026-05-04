@@ -124,7 +124,7 @@ class SteeringManager:
     def register_config(
         self,
         config_hash: int,
-        vectors: dict[str, dict[int, list[float]]],
+        vectors: dict[str, dict[int, list[float] | np.ndarray]],
         phase: str = "prefill",
         *,
         locally_owned_layers: frozenset[int] | None = None,
@@ -133,7 +133,10 @@ class SteeringManager:
 
         Args:
             config_hash: Deterministic hash identifying the config.
-            vectors: ``{hook_point_str: {layer_idx: [floats]}}``
+            vectors: ``{hook_point_str: {layer_idx: vec}}`` where ``vec`` is
+                either a ``list[float]`` (legacy) or a 1-D ``np.ndarray``
+                (the float64 arrays produced by
+                :func:`resolve_effective_vectors`).
             phase: ``"prefill"`` or ``"decode"``
             locally_owned_layers: If provided, only layers in this set
                 have tensors materialized on this worker.  Layers
@@ -325,7 +328,9 @@ class SteeringManager:
             result = squeezed.clone() if result is None else result + squeezed
         return result
 
-    def _stack_vectors_to_device(self, vecs: list[list[float]]) -> torch.Tensor:
+    def _stack_vectors_to_device(
+        self, vecs: list[list[float] | np.ndarray]
+    ) -> torch.Tensor:
         """Stack a list of equal-length float vectors into a (N, hidden)
         tensor on ``self.device`` via a single batched H2D copy.
 

@@ -11,6 +11,7 @@ from functools import cached_property
 from typing import Any
 
 import msgspec
+import numpy as np
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -767,8 +768,14 @@ class SamplingParams(
     @cached_property
     def effective_prefill_steering(
         self,
-    ) -> dict[str, dict[int, list[float]]] | None:
-        """Resolved prefill steering: base + prefill-specific, pre-scaled."""
+    ) -> dict[str, dict[int, np.ndarray]] | None:
+        """Resolved prefill steering: base + prefill-specific, pre-scaled.
+
+        Returns 1-D ``np.float64`` arrays per (hook, layer); the worker
+        converts to torch tensors when registering with
+        :class:`SteeringManager` and the float→float32 cast for hashing
+        happens once inside ``hash_steering_config``.
+        """
         return resolve_effective_vectors(
             self.steering_vectors, self.prefill_steering_vectors
         )
@@ -776,7 +783,7 @@ class SamplingParams(
     @cached_property
     def effective_decode_steering(
         self,
-    ) -> dict[str, dict[int, list[float]]] | None:
+    ) -> dict[str, dict[int, np.ndarray]] | None:
         """Resolved decode steering: base + decode-specific, pre-scaled."""
         return resolve_effective_vectors(
             self.steering_vectors, self.decode_steering_vectors
