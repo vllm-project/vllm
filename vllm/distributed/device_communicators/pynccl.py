@@ -461,6 +461,14 @@ class PyNcclCommunicator:
                         exc_info=True,
                     )
 
+    def destroy(self):
+        if self.available and not self.disabled:
+            with torch.accelerator.device_index(self.device.index):
+                self.comm.finalize()
+                self.comm.destroy()
+            self.available = False
+            self.disabled = True
+
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:
             return
