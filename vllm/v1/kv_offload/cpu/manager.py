@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable
 from typing import Literal
 
 from vllm.v1.kv_offload.base import (
@@ -90,7 +90,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     def prepare_load(
         self,
-        keys: Sequence[OffloadKey],
+        keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         blocks = []
@@ -102,10 +102,10 @@ class CPUOffloadingManager(OffloadingManager):
             blocks.append(block)
         return self._get_load_store_spec(keys, blocks)
 
-    def touch(self, keys: Sequence[OffloadKey]) -> None:
+    def touch(self, keys: Collection[OffloadKey]) -> None:
         self._policy.touch(keys)
 
-    def complete_load(self, keys: Iterable[OffloadKey]) -> None:
+    def complete_load(self, keys: Collection[OffloadKey]) -> None:
         for key in keys:
             block = self._policy.get(key)
             assert block is not None, f"Block {key!r} not found"
@@ -114,7 +114,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     def prepare_store(
         self,
-        keys: Sequence[OffloadKey],
+        keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         # filter out blocks that are already stored
@@ -167,7 +167,9 @@ class CPUOffloadingManager(OffloadingManager):
             evicted_keys=to_evict,
         )
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True) -> None:
+    def complete_store(
+        self, keys: Collection[OffloadKey], success: bool = True
+    ) -> None:
         stored_keys: list[OffloadKey] = []
 
         if success:

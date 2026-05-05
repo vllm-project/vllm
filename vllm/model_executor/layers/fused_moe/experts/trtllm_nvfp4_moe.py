@@ -112,8 +112,12 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports only SiLU, RELU^2 non-gated and GELU activation."""
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.RELU2_NO_MUL,
+            MoEActivation.GELU,
+        ]
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
@@ -190,7 +194,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert self._supports_activation(activation)
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
@@ -292,7 +296,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> torch.Tensor:
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert self._supports_activation(activation)
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None

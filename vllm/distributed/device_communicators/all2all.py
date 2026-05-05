@@ -577,6 +577,8 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
+        dispatch_dtype_bytes_per_elem: int = 0,
+        dispatch_scale_bytes_per_token: int = 0,
     ):
         """Initialize the MoeAlltoAll workspace."""
         if self.initialized:
@@ -607,9 +609,13 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         ep_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
         )
+        if dispatch_dtype_bytes_per_elem == 0:
+            hidden_bytes = hidden_size // 2
+        else:
+            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
         total_dispatch_payload_size_per_token = (
-            hidden_size // 2  # nvfp4 hidden states
-            + hidden_size // 16  # fp8 scaling factors
+            hidden_bytes
+            + dispatch_scale_bytes_per_token
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )

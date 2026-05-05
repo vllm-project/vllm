@@ -137,3 +137,10 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
+
+- label: MRCR Eval Small Models
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - tests/evals/mrcr/
+  commands:
+    - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
