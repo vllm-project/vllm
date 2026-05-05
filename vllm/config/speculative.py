@@ -761,6 +761,34 @@ class SpeculativeConfig:
                     )
                 )
 
+                draft_max_model_len = self.draft_model_config.max_model_len
+                hf = self.draft_model_config.hf_config
+                max_position_embeddings = getattr(hf, "max_position_embeddings", None)
+                if (
+                    max_position_embeddings is not None
+                    and max_position_embeddings < draft_max_model_len
+                ):
+                    rope = getattr(hf, "rope_scaling", None) or getattr(
+                        hf, "rope_parameters", None
+                    )
+                    has_scaling = rope is not None and rope.get("rope_type") not in (
+                        None,
+                        "default",
+                    )
+                    if has_scaling:
+                        logger.warning(
+                            "Draft model has rope_scaling with "
+                            "max_position_embeddings (%d) < "
+                            "max_model_len (%d). Capping "
+                            "max_model_len to %d.",
+                            max_position_embeddings,
+                            draft_max_model_len,
+                            max_position_embeddings,
+                        )
+                        self.draft_model_config.max_model_len = max_position_embeddings
+                    else:
+                        hf.max_position_embeddings = draft_max_model_len
+
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config, self.draft_tensor_parallel_size
@@ -810,18 +838,13 @@ class SpeculativeConfig:
         draft_max_model_len: int,
         target_max_model_len: int,
     ) -> int:
-        """Determine the max sequence len for the draft model. This is usually
-        the draft_max_model_len, but may be the target_max_model_len if it is
-        less than the draft_max_model_len, or may be speculative_max_model_len
-        if it is specified.
+        """Determine the max sequence len for the draft model.
 
-        This is necessary so that sequences do not exceed the capacity of the
-        draft model or the target model.
-
-        speculative_max_model_len is mainly used for testing that sequences can
-        skip speculation.
+        If speculative_max_model_len is set explicitly, respect it.
+        Otherwise, clamp to at least target_max_model_len so the
+        drafter's buffers can handle any sequence the target can.
+        This prevents DP hangs from per-batch skip decisions.
         """
-
         if speculative_max_model_len is not None:
             if speculative_max_model_len > draft_max_model_len:
                 raise ValueError(
@@ -835,12 +858,29 @@ class SpeculativeConfig:
                     f"larger than {target_max_model_len=}"
                 )
 
+            if speculative_max_model_len < target_max_model_len:
+                logger.warning(
+                    "speculative_max_model_len (%d) < target "
+                    "max_model_len (%d). Sequences longer than "
+                    "%d tokens will skip speculation, which may "
+                    "cause hangs with data parallelism.",
+                    speculative_max_model_len,
+                    target_max_model_len,
+                    speculative_max_model_len,
+                )
             return speculative_max_model_len
 
-        return min(
-            draft_max_model_len,
-            target_max_model_len,
-        )
+        if draft_max_model_len < target_max_model_len:
+            logger.warning(
+                "Draft model max_model_len (%d) < target (%d). "
+                "Overriding to %d for DP safety. Drafts beyond "
+                "%d tokens may be low quality.",
+                draft_max_model_len,
+                target_max_model_len,
+                target_max_model_len,
+                draft_max_model_len,
+            )
+        return max(draft_max_model_len, target_max_model_len)
 
     @staticmethod
     def _verify_and_get_draft_tp(

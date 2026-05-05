@@ -585,11 +585,6 @@ class GPUModelRunner(
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
-            draft_config = self.speculative_config.draft_model_config
-            if draft_config is not None and draft_config.max_model_len is not None:
-                self.effective_drafter_max_model_len = draft_config.max_model_len
-            else:
-                self.effective_drafter_max_model_len = self.max_model_len
         self.use_async_spec_decode = (
             self.use_async_scheduling and self.num_spec_tokens > 0
         )
@@ -861,10 +856,6 @@ class GPUModelRunner(
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
-        if self.speculative_config:
-            draft_config = self.speculative_config.draft_model_config
-            if draft_config is None or draft_config.max_model_len is None:
-                self.effective_drafter_max_model_len = self.max_model_len
 
     def reset_mm_cache(self) -> None:
         """
@@ -4258,77 +4249,31 @@ class GPUModelRunner(
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False
         if spec_config is not None:
-            # Decide whether to run the drafter or zero out draft tokens.
-            input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-                <= self.effective_drafter_max_model_len
-            )
             use_gpu_toks = (
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
-            if use_gpu_toks:
-                # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
-                # as inputs, and does not need to wait for bookkeeping to finish.
-                assert isinstance(
-                    self.drafter,
-                    EagleProposer
-                    | DFlashProposer
-                    | DraftModelProposer
-                    | ExtractHiddenStatesProposer,
-                )
-                sampled_token_ids = sampler_output.sampled_token_ids
-                if input_fits_in_drafter:
+            if spec_decode_common_attn_metadata is not None:
+                if use_gpu_toks:
+                    assert isinstance(
+                        self.drafter,
+                        EagleProposer
+                        | DFlashProposer
+                        | DraftModelProposer
+                        | ExtractHiddenStatesProposer,
+                    )
+                    sampled_token_ids = sampler_output.sampled_token_ids
                     propose_draft_token_ids(sampled_token_ids)
-                elif self.valid_sampled_token_count_event is not None:
-                    assert spec_decode_common_attn_metadata is not None
-                    next_token_ids, valid_sampled_tokens_count = (
-                        self.drafter.prepare_next_token_ids_padded(
-                            sampled_token_ids,
-                            self.requests,
-                            self.input_batch,
-                            self.discard_request_mask.gpu,
-                        )
-                    )
-                    self._copy_valid_sampled_token_count(
-                        next_token_ids, valid_sampled_tokens_count
-                    )
-            elif (
-                spec_config.use_ngram_gpu()
-                and not spec_config.disable_padded_drafter_batch
-            ):
-                assert isinstance(self.drafter, NgramProposerGPU)
-                sampled_token_ids = sampler_output.sampled_token_ids
-                if input_fits_in_drafter:
+                elif (
+                    spec_config.use_ngram_gpu()
+                    and not spec_config.disable_padded_drafter_batch
+                ):
+                    assert isinstance(self.drafter, NgramProposerGPU)
+                    sampled_token_ids = sampler_output.sampled_token_ids
                     propose_draft_token_ids(sampled_token_ids)
-                elif self.valid_sampled_token_count_event is not None:
-                    assert spec_decode_common_attn_metadata is not None
-                    next_token_ids, valid_sampled_tokens_count, _ = (
-                        self.drafter.update_token_ids_ngram(
-                            sampled_token_ids,
-                            self.input_batch,
-                            self.token_ids_gpu_tensor,
-                            self.num_tokens_no_spec_gpu,
-                            self.discard_request_mask.gpu,
-                        )
-                    )
-                    self._copy_valid_sampled_token_count(
-                        next_token_ids, valid_sampled_tokens_count
-                    )
-            else:
-                propose_drafts_after_bookkeeping = input_fits_in_drafter
-
-            if not input_fits_in_drafter:
-                # Zero out draft tokens so the scheduler doesn't schedule
-                # stale drafts from the previous step.
-                # For Nemotron-H: it is necessary to zero out the draft tokens,
-                # otherwise the stale tokens will corrupt Mamba recurrent
-                # state and logprobs for sequences near max_model_len.
-                self._draft_token_ids = torch.zeros(
-                    1, device=self.device, dtype=torch.int32
-                ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
-                self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+                else:
+                    propose_drafts_after_bookkeeping = True
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
