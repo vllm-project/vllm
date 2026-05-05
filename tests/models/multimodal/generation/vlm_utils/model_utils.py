@@ -1553,9 +1553,14 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             return sequences
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+    return hf_model
+
+
 def qianfan_ocr_hf_model_kwargs(model_name: str) -> dict:
     """Return hf_model_kwargs with a patched config for QianfanOCR."""
-    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
+
+    config = QianfanOCRConfig.from_pretrained(model_name)
     vc = config.vision_config
     if isinstance(vc.image_size, int):
         vc.image_size = (vc.image_size, vc.image_size)
