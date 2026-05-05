@@ -142,6 +142,21 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    stream_format: Literal["json", "msgpack", "protobuf"] = Field(
+        default="json",
+        description=(
+            "Binary wire format for streaming token output. "
+            "'json' (default) uses the standard SSE/JSON path. "
+            "'msgpack' streams raw token IDs as msgpack-encoded frames "
+            "(Content-Type: application/x-msgpack). "
+            "'protobuf' streams length-prefixed protobuf CodecFrame messages "
+            "(Content-Type: application/x-protobuf). "
+            "Both binary formats set detokenize=False internally and return "
+            "only token IDs — no text is produced. "
+            "See GET /codec/schema for the protobuf schema."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         description=(
@@ -293,6 +308,7 @@ class CompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        binary_stream = self.stream_format != "json"
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -303,7 +319,8 @@ class CompletionRequest(OpenAIBaseModel):
             top_k=top_k,
             min_p=min_p,
             seed=self.seed,
-            stop=self.stop,
+            # stop strings require detokenization — silently drop when binary
+            stop=self.stop if not binary_stream else None,
             stop_token_ids=self.stop_token_ids,
             logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
@@ -322,7 +339,17 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            detokenize=not binary_stream,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_format(cls, data):
+        fmt = data.get("stream_format", "json")
+        if fmt != "json":
+            # Binary formats require streaming — force it on silently.
+            data["stream"] = True
+        return data
 
     @model_validator(mode="before")
     @classmethod

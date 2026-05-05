@@ -7,6 +7,8 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import TYPE_CHECKING, cast
 
+from vllm.entrypoints.codec_frame import encode_frame
+
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -274,7 +276,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str | bytes, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
@@ -397,6 +399,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 token_ids=(
                                     as_list(output.token_ids)
                                     if request.return_token_ids
+                                    or request.stream_format != "json"
                                     else None
                                 ),
                             )
@@ -419,8 +422,19 @@ class OpenAIServingCompletion(OpenAIServing):
                             total_tokens=prompt_tokens + completion_tokens,
                         )
 
-                    response_json = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {response_json}\n\n"
+                    if request.stream_format != "json":
+                        # Binary path: emit a compact frame of token IDs only.
+                        # Text fields in `chunk` are empty because detokenize=False.
+                        ids = chunk.choices[0].token_ids or []
+                        yield encode_frame(
+                            request.stream_format,
+                            ids,
+                            done=finish_reason is not None,
+                            finish_reason=finish_reason,
+                        )
+                    else:
+                        response_json = chunk.model_dump_json(exclude_unset=True)
+                        yield f"data: {response_json}\n\n"
 
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
@@ -435,7 +449,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     cached_tokens=num_cached_tokens
                 )
 
-            if include_usage:
+            if include_usage and request.stream_format == "json":
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
@@ -453,12 +467,15 @@ class OpenAIServingCompletion(OpenAIServing):
             request_metadata.final_usage_info = final_usage_info
 
         except GenerationError as e:
-            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            if request.stream_format == "json":
+                yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             logger.exception("Error in completion stream generator.")
-            data = self.create_streaming_error_response(e)
-            yield f"data: {data}\n\n"
-        yield "data: [DONE]\n\n"
+            if request.stream_format == "json":
+                data = self.create_streaming_error_response(e)
+                yield f"data: {data}\n\n"
+        if request.stream_format == "json":
+            yield "data: [DONE]\n\n"
 
     def request_output_to_completion_response(
         self,
