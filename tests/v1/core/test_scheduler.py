@@ -106,6 +106,58 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
         assert scheduler.running[i] == request
 
 
+def test_pending_prefix_hit_does_not_block_later_waiting_request():
+    """A pending prefix hit skips only that request, not the waiting queue."""
+    block_size = 4
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        enable_prefix_caching=True,
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        block_size=block_size,
+        num_blocks=16,
+    )
+
+    anchor = create_requests(
+        num_requests=1,
+        num_tokens=9,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["anchor"],
+    )[0]
+    scheduler.add_request(anchor)
+    first_output = scheduler.schedule()
+    assert first_output.num_scheduled_tokens[anchor.request_id] == 9
+    assert first_output.new_cached_blocks
+
+    pending_hit = create_requests(
+        num_requests=1,
+        num_tokens=9,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["pending_hit"],
+    )[0]
+    _, independent = create_requests(
+        num_requests=2,
+        num_tokens=9,
+        same_prompt=False,
+        block_size=block_size,
+        req_ids=["dummy", "independent"],
+    )
+    scheduler.add_request(pending_hit)
+    scheduler.add_request(independent)
+
+    second_output = scheduler.schedule()
+    scheduled_new_req_ids = {
+        req_data.req_id for req_data in second_output.scheduled_new_reqs
+    }
+    assert "pending_hit" not in scheduled_new_req_ids
+    assert "independent" in scheduled_new_req_ids
+    assert pending_hit.request_id in {
+        request.request_id for request in scheduler.skipped_waiting
+    }
+
+
 def test_schedule_multimodal_requests():
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]

@@ -85,7 +85,7 @@ class SingleTypeKVCacheManager(ABC):
         # whose GPU forward pass has not completed yet. These blocks must not
         # be consumed as prefix hits: their block hashes are visible before the
         # model runner has written the corresponding KV data.
-        self.cached_blocks_pending_write: dict[BlockHashWithGroupId, int] = {}
+        self.cached_blocks_pending_write: set[tuple[BlockHashWithGroupId, int]] = set()
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -314,9 +314,8 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block[request.request_id] = num_full_blocks
         if self.enable_caching:
             for cached_block in new_cached_blocks:
-                self.cached_blocks_pending_write[cached_block.block_hash] = (
-                    self.cached_blocks_pending_write.get(cached_block.block_hash, 0)
-                    + 1
+                self.cached_blocks_pending_write.add(
+                    (cached_block.block_hash, cached_block.block_id)
                 )
         return new_cached_blocks
 
@@ -471,7 +470,7 @@ class SingleTypeKVCacheManager(ABC):
         return any(
             not block.is_null
             and block.block_hash is not None
-            and block.block_hash in self.cached_blocks_pending_write
+            and (block.block_hash, block.block_id) in self.cached_blocks_pending_write
             for block in computed_blocks
         )
 
@@ -479,14 +478,9 @@ class SingleTypeKVCacheManager(ABC):
         self, cached_blocks: Sequence[CachedBlockEntry]
     ) -> None:
         for cached_block in cached_blocks:
-            block_hash = cached_block.block_hash
-            pending_count = self.cached_blocks_pending_write.get(block_hash)
-            if pending_count is None:
-                continue
-            if pending_count == 1:
-                del self.cached_blocks_pending_write[block_hash]
-            else:
-                self.cached_blocks_pending_write[block_hash] = pending_count - 1
+            self.cached_blocks_pending_write.discard(
+                (cached_block.block_hash, cached_block.block_id)
+            )
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
