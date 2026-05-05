@@ -2,7 +2,7 @@
 
 MooncakeStoreConnector is a KV cache connector that uses [MooncakeDistributedStore](https://github.com/kvcache-ai/Mooncake) as a shared KV cache pool. Unlike `MooncakeConnector` which does direct point-to-point KV transfer between prefiller and decoder, MooncakeStoreConnector enables KV cache offloading to an external distributed store, supporting:
 
-- **CPU/disk offloading**: Extend effective KV cache capacity by offloading to CPU memory or disk via Mooncake's transfer engine.
+- **CPU offloading**: Extend effective KV cache capacity by offloading to CPU memory via Mooncake's transfer engine.
 - **Prefix caching across instances**: Hash-based deduplication allows multiple vLLM instances to share cached KV blocks through the store.
 - **Single-node and multi-node deployment**: Works both as a standalone KV cache extension and in disaggregated prefill-decode setups.
 
@@ -127,30 +127,12 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 A disaggregation proxy is required to route requests between prefiller and decoder nodes. The proxy assigns `do_remote_prefill=True` / `do_remote_decode=True` to coordinate P2P transfer via `MooncakeConnector`. Refer to the [MooncakeConnector usage guide](mooncake_connector_usage.md) for proxy setup details.
 
-### Disk Offloading
-
-To enable disk offloading for even larger cache capacity, set the following environment variables:
-
-```bash
-export MOONCAKE_ENABLE_OFFLOAD=1
-export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/path/to/offload/dir
-```
-
-You can also control the local staging buffer size:
-
-```bash
-export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1280mb
-```
-
 ## Environment Variables
 
 | Variable | Description | Default |
-|---|---|---|
+| --- | --- | --- |
 | `MOONCAKE_CONFIG_PATH` | Path to Mooncake JSON config file | (required) |
 | `VLLM_MOONCAKE_BOOTSTRAP_PORT` | Bootstrap port for MooncakeConnector P2P transfer (disagg mode only) | 8998 |
-| `MOONCAKE_ENABLE_OFFLOAD` | Enable disk offloading (`1` or `true`) | disabled |
-| `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` | Directory for disk offload files | — |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | Local staging buffer size for disk offload | 1280MB |
 
 ## KV Transfer Config
 
