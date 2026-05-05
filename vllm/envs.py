@@ -107,7 +107,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
-    VLLM_USE_LEGACY_NCCL: bool = False
+    VLLM_DISABLE_NCCL4PY: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -964,10 +964,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
     ),
-    # Use legacy ctypes-based NCCL bindings instead of nccl4py
+    # Disable nccl4py and use legacy ctypes-based NCCL bindings instead
     # Set to true for rollback if nccl4py causes issues
-    "VLLM_USE_LEGACY_NCCL": lambda: (
-        os.getenv("VLLM_USE_LEGACY_NCCL", "False").lower() in ("true", "1")
+    "VLLM_DISABLE_NCCL4PY": lambda: (
+        os.getenv("VLLM_DISABLE_NCCL4PY", "False").lower() in ("true", "1")
     ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.
