@@ -698,7 +698,7 @@ class MoRIIOConnectorWorker:
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
         backend = (
             BackendType.XGMI
-            if envs.VLLM_MORIIO_BACKEND == "xgmi"
+            if envs.VLLM_MORIIO_BACKEND.lower() == "xgmi"
             else BackendType.RDMA
         )
         self.moriio_wrapper.set_backend_type(backend)

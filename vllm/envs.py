@@ -1488,7 +1488,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MORIIO_NUM_WORKERS": lambda: int(os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")),
     # Controls the MoRIIO transfer backend ("rdma" or "xgmi"). Use "xgmi" for
     # single-node intra-GPU transfers via Infinity Fabric without RDMA NICs.
-    "VLLM_MORIIO_BACKEND": lambda: os.getenv("VLLM_MORIIO_BACKEND", "rdma").lower(),
+    "VLLM_MORIIO_BACKEND": env_with_choices(
+        "VLLM_MORIIO_BACKEND",
+        "rdma",
+        ["rdma", "xgmi"],
+        case_sensitive=False,
+    ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
