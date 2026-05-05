@@ -183,7 +183,6 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
 @pytest.fixture(scope="module")
 def parakeet_server(rocm_aiter_fa_attention):
     server_args = [
-        "--enforce-eager",
         "--max-model-len",
         "512",
         "--max-num-batched-tokens",
