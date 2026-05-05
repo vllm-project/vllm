@@ -16,6 +16,7 @@ from vllm.distributed import (
     get_pcp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -539,9 +540,11 @@ class FusedMoE(PluggableLayer):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
+        if not self.moe_config.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
         if enable_eplb and not self.quant_method.supports_eplb:
@@ -1104,9 +1107,6 @@ class FusedMoE(PluggableLayer):
         return_success: bool = False,
     ) -> bool | None:
         quant_config_name = self.quant_config and self.quant_config.get_name()
-        if quant_config_name == "humming":
-            assert hasattr(self.quant_method, "weight_schema")
-            quant_config_name = self.quant_method.weight_schema.quant_method
         if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
@@ -1519,30 +1519,41 @@ class FusedMoE(PluggableLayer):
         num_experts: int,
         num_redundant_experts: int = 0,
     ) -> list[tuple[str, str, int, str]]:
-        """
-        Create expert parameter mapping for weight loading.
+        num_physical_experts = num_experts + num_redundant_experts
 
-        Delegates to EplbManager for proper handling of redundant experts.
-
-        Args:
-            model: The model containing the MoE layer
-            ckpt_gate_proj_name: Name of gate projection in checkpoint
-            ckpt_down_proj_name: Name of down projection in checkpoint
-            ckpt_up_proj_name: Name of up projection in checkpoint
-            num_experts: Number of logical (non-redundant) experts
-            num_redundant_experts: Number of redundant experts
-
-        Returns:
-            List of tuples (param_name, weight_name, expert_id, shard_id)
-        """
-        return EplbManager.make_expert_params_mapping(
-            model,
-            ckpt_gate_proj_name,
-            ckpt_down_proj_name,
-            ckpt_up_proj_name,
-            num_experts,
-            num_redundant_experts,
+        # In the returned mapping:
+        # - `expert_id` is the physical expert id
+        # - `weight_name` contains the weight name of the logical expert
+        # So that we should map the expert id to logical in `weight_name`
+        physical_to_logical_map = (
+            EplbState.build_initial_global_physical_to_logical_map(
+                num_experts, num_redundant_experts
+            )
         )
+
+        base_layer = (
+            "base_layer."
+            if any(".base_layer." in name for name, _ in model.named_parameters())
+            else ""
+        )
+
+        return [
+            # (param_name, weight_name, expert_id, shard_id)
+            (
+                f"experts.{base_layer}w13_"
+                if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
+                else f"experts.{base_layer}w2_",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
+                expert_id,
+                shard_id,
+            )
+            for expert_id in range(num_physical_experts)
+            for shard_id, weight_name in [
+                ("w1", ckpt_gate_proj_name),
+                ("w2", ckpt_down_proj_name),
+                ("w3", ckpt_up_proj_name),
+            ]
+        ]
 
     @property
     def hidden_size(self) -> int:
