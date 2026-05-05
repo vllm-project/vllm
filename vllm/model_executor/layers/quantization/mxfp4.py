@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
-    select_gpt_oss_mxfp4_moe_backend,
+    select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -140,7 +140,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_gpt_oss_mxfp4_moe_backend(moe)
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
@@ -468,7 +468,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
 
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
