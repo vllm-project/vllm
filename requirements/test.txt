@@ -220,7 +220,6 @@ filelock==3.16.1
     #   huggingface-hub
     #   ray
     #   torch
-    #   transformers
     #   virtualenv
 fiona==1.10.1
     # via torchgeo
@@ -306,7 +305,7 @@ h5py==3.13.0
     # via terratorch
 harfile==0.3.0
     # via schemathesis
-hf-xet==1.1.7
+hf-xet==1.4.3
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
@@ -320,6 +319,7 @@ httpx==0.27.2
     # via
     #   -r requirements/test.in
     #   diffusers
+    #   huggingface-hub
     #   perceptron
     #   schemathesis
 huggingface-hub==1.13.0
@@ -927,7 +927,7 @@ referencing==0.35.1
     # via
     #   jsonschema
     #   jsonschema-specifications
-regex==2024.9.11
+regex==2026.4.4
     # via
     #   diffusers
     #   nltk
@@ -945,7 +945,6 @@ requests==2.32.3
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
-    #   huggingface-hub
     #   lightly
     #   lm-eval
     #   mistral-common
@@ -957,7 +956,6 @@ requests==2.32.3
     #   starlette-testclient
     #   tacoreader
     #   tiktoken
-    #   transformers
     #   wandb
 responses==0.25.3
     # via genai-perf
@@ -1229,7 +1227,6 @@ tqdm==4.67.3
     #   transformers
 transformers==5.5.3
     # via
-    #   -r requirements/test.in
     #   genai-perf
     #   peft
     #   sentence-transformers
@@ -1248,7 +1245,9 @@ typepy==1.3.2
 typer==0.15.2
     # via
     #   fastsafetensors
+    #   huggingface-hub
     #   perceptron
+    #   transformers
 types-python-dateutil==2.9.0.20241206
     # via arrow
 typeshed-client==2.8.2

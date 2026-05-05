@@ -108,27 +108,10 @@ def validate_output(engine_output, schema_list, model_architecture):
 
 def _create_reasoning_config():
     """Create a ReasoningConfig instance with proper initialization."""
-
-    try:
-        config = ReasoningConfig()
-        config.reasoning_start_str = "<|START_THINKING|>"
-        config.reasoning_end_str = "<|END_THINKING|>"
-        return config
-    except Exception as e:
-        print(f"Failed to create ReasoningConfig: {e}")
-        from dataclasses import replace
-
-        try:
-            default_config = ReasoningConfig()
-            config = replace(
-                default_config,
-                reasoning_start_str="<|START_THINKING|>",
-                reasoning_end_str="<|END_THINKING|>",
-            )
-            return config
-        except Exception as e2:
-            print(f"Failed with replace too: {e2}")
-            raise
+    return ReasoningConfig(
+        reasoning_start_str="<|START_THINKING|>",
+        reasoning_end_str="<|END_THINKING|>",
+    )
 
 
 def add_system_prompt(example_input):

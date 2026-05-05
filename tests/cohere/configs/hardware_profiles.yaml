@@ -5,7 +5,7 @@ profiles:
   - name: vllm-default
     when: server.type == "vllm"
     args:
-      gpu-memory-utilization: "0.90"
+      gpu-memory-utilization: "0.95"
       enable-chunked-prefill: ""
       max-num-batched-tokens: "8192"
       max-num-seqs: "128"
@@ -16,7 +16,7 @@ profiles:
       VLLM_WORKER_MULTIPROC_METHOD: spawn
   
   # We use a flashinfer backend since we end up with a 
-  # illegal memeory access error which originates from
+  # illegal memory access error which originates from
   # moe fp8 kernel
   - name: vllm-h100
     when: server.type == "vllm" && matches(gpu.name, "h100")

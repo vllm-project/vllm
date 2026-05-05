@@ -131,6 +131,7 @@ COPY requirements/test.in requirements/cpu-test.in
 
 RUN \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    # terratorch requires gdal system libs (libgdal-dev)
     sed -i '/terratorch/d' requirements/cpu-test.in && \
     remove_packages_not_supported_on_aarch64() { \
     case "$(uname -m)" in \

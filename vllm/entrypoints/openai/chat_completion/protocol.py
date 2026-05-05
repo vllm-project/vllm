@@ -504,9 +504,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # cohere start
         thinking_token_budget = self.thinking_token_budget
         if thinking_token_budget is None:
-            thinking_token_budget = default_sampling_params.get(
-                "thinking_token_budget", None
-            )
+            thinking_token_budget = default_sampling_params.get("thinking_token_budget")
         continue_thinking = self.continue_thinking
         if continue_thinking is None:
             continue_thinking = default_sampling_params.get("continue_thinking", False)

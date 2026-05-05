@@ -1608,7 +1608,7 @@ def test_thinking_budget_edge_case_budget_none_early_return(device: str):
     ]
     batch = _thinking_budget_batch_update(1, added=added)
     proc.update_state(batch, [[]])
-    proc._state[0]["thinking_token_budget"] = None
+    proc._state[0]["thinking_token_budget"] = -1
     proc._state[0]["output_tok_ids"] = THINK_BUDGET_START_IDS + [4, 5, 6]
     proc.update_state(None, [[]])
     logits = torch.randn(1, VOCAB_SIZE, device=torch.device(device))
