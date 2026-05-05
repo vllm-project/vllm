@@ -436,6 +436,33 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
+      - block: "Publish release images to DockerHub"
+        key: block-publish-release-images
+        depends_on:
+          - annotate-release-workflow
+          - create-multi-arch-manifest-cuda-12-9
+          - create-multi-arch-manifest-ubuntu2404
+          - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+          - build-rocm-release-image
+          - input-release-version
+        if: build.env("NIGHTLY") != "1"
+
+      - label: "Publish release images to DockerHub"
+        depends_on:
+          - block-publish-release-images
+        id: publish-release-images-dockerhub
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/publish-release-images.sh"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
   - group: "Publish wheels"
     key: "publish-wheels"
     steps:
