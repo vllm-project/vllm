@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import json
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
@@ -13,6 +14,7 @@ from openai.types.responses import (
 from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -23,6 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
+from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
@@ -83,13 +86,39 @@ class ToolParser:
         return self.model_tokenizer.get_vocab()
 
     def adjust_request(
-        self, request: ChatCompletionRequest | ResponsesRequest
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """
-        Static method that used to adjust the request parameters.
-        """
+        # If there are no tools, return the request as is.
         if not request.tools:
             return request
+
+        # Step 1 (highest priority for ChatCompletionRequest): apply
+        # vLLM-owned structural tag support for model-specific tool formats.
+        if (
+            isinstance(request, ChatCompletionRequest)
+            and VLLM_ENFORCE_STRICT_TOOL_CALLING
+        ):
+            need_tool_calling = (
+                request.tool_choice == "auto"
+                or request.tool_choice == "required"
+                or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            )
+            if need_tool_calling:
+                structure_tag = self.get_structural_tag(request)
+                if structure_tag is not None:
+                    if request.structured_outputs is None:
+                        request.structured_outputs = StructuredOutputsParams(
+                            structural_tag=json.dumps(structure_tag.model_dump()),
+                        )
+                    else:
+                        request.structured_outputs.structural_tag = json.dumps(
+                            structure_tag.model_dump()
+                        )
+                    return request
+
+        # Step 2: set structured output params when tool constraints are
+        # derived from the tool schema.
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
@@ -103,16 +132,26 @@ class ToolParser:
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseTextConfig()
-                request.text.format = ResponseFormatTextJSONSchemaConfig(
-                    name="tool_calling_response",
-                    schema=json_schema_from_tool,
-                    type="json_schema",
-                    description="Response format for tool calling",
-                    strict=True,
+                # Single-shot construction so Pydantic v2 tracks `format`
+                # in __fields_set__ — assigning to `.format` after the bare
+                # `ResponseTextConfig()` constructor does not, which can
+                # drop the nested config from `model_dump`. Also drop the
+                # `description` kwarg: it is not a field on
+                # ResponseFormatTextJSONSchemaConfig and was being silently
+                # passed through as extra.
+                request.text = ResponseTextConfig(
+                    format=ResponseFormatTextJSONSchemaConfig(
+                        type="json_schema",
+                        name="tool_calling_response",
+                        schema=json_schema_from_tool,
+                        strict=True,
+                    )
                 )
 
         return request
+
+    def get_structural_tag(self, request: ChatCompletionRequest):
+        return None
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest

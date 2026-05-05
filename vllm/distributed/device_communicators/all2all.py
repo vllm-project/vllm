@@ -10,7 +10,6 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -36,115 +35,6 @@ if has_flashinfer_nvlink_one_sided():
 
 
 logger = init_logger(__name__)
-
-
-class NaiveAll2AllManager(All2AllManagerBase):
-    """
-    A naive implementation of all2all communication.
-    It uses all-reduce under the hood, which is not
-    efficient at all. The main purpose is for testing and
-    debugging.
-    """
-
-    def __init__(self, cpu_group, tcp_store_group=None):
-        super().__init__(cpu_group, tcp_store_group)
-
-    def naive_multicast(
-        self,
-        x: torch.Tensor,
-        cu_tokens_across_sp_cpu: torch.Tensor,
-        is_sequence_parallel: bool,
-    ) -> torch.Tensor:
-        assert len(x.shape) == 2
-        buffer = torch.empty(
-            (cu_tokens_across_sp_cpu[-1], x.size(1)), device=x.device, dtype=x.dtype
-        )
-
-        rank = self.rank if is_sequence_parallel else self.dp_rank
-        world_size = self.world_size if is_sequence_parallel else self.dp_world_size
-
-        start = 0 if rank == 0 else cu_tokens_across_sp_cpu[rank - 1]
-        end = cu_tokens_across_sp_cpu[rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(world_size):
-            start = 0 if idx == 0 else cu_tokens_across_sp_cpu[idx - 1]
-            end = cu_tokens_across_sp_cpu[idx]
-            get_ep_group().broadcast(buffer[start:end, :], idx)
-
-        return buffer
-
-    def dispatch_router_logits(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        is_sequence_parallel: bool = False,
-        extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if extra_tensors is not None:
-            raise NotImplementedError(
-                "extra_tensors is not supported for NaiveAll2AllManager"
-            )
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
-
-        hidden_states = self.naive_multicast(
-            hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        router_logits = self.naive_multicast(
-            router_logits, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-
-        return hidden_states, router_logits
-
-    def dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        is_sequence_parallel: bool = False,
-        extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if extra_tensors is not None:
-            raise NotImplementedError(
-                "extra_tensors is not supported for NaiveAll2AllManager"
-            )
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
-
-        hidden_states = self.naive_multicast(
-            hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        topk_weights = self.naive_multicast(
-            topk_weights, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        topk_ids = self.naive_multicast(
-            topk_ids, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        return hidden_states, topk_weights, topk_ids
-
-    def combine(
-        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
-    ) -> torch.Tensor:
-        ep_rank = self.rank if is_sequence_parallel else self.dp_rank
-
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
-
-        start = 0 if ep_rank == 0 else cu_tokens_across_sp_cpu[ep_rank - 1]
-        end = cu_tokens_across_sp_cpu[ep_rank]
-
-        all_hidden_states = get_ep_group().all_reduce(hidden_states)
-        hidden_states = all_hidden_states[start:end, :]
-        return hidden_states
-
-    def destroy(self):
-        pass
 
 
 class AgRsAll2AllManager(All2AllManagerBase):
@@ -334,11 +224,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
+            explicitly_destroy=True,
         )
-        if not current_platform.is_rocm():
-            kwargs.update(
-                explicitly_destroy=True,
-            )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -412,13 +299,10 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=num_qps_per_rank,
+            allow_nvlink_for_low_latency_mode=True,
+            allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
+            explicitly_destroy=True,
         )
-        if not current_platform.is_rocm():
-            kwargs.update(
-                allow_nvlink_for_low_latency_mode=True,
-                allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
-                explicitly_destroy=True,
-            )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -601,15 +485,18 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        dp_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
             fabric_page_size=1 << 29,  # 512MB
             allocation_granularity=0,  # Auto-detect
         )
 
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, dp_config)
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
         self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, dp_config
+            self.mapping, ep_config
         )
 
         self.world_size = world_size
@@ -690,6 +577,8 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
+        dispatch_dtype_bytes_per_elem: int = 0,
+        dispatch_scale_bytes_per_token: int = 0,
     ):
         """Initialize the MoeAlltoAll workspace."""
         if self.initialized:
@@ -714,12 +603,19 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        dp_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
         )
+        if dispatch_dtype_bytes_per_elem == 0:
+            hidden_bytes = hidden_size // 2
+        else:
+            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
         total_dispatch_payload_size_per_token = (
-            hidden_size // 2  # nvfp4 hidden states
-            + hidden_size // 16  # fp8 scaling factors
+            hidden_bytes
+            + dispatch_scale_bytes_per_token
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
@@ -737,7 +633,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             top_k=top_k,
             num_experts=num_experts,
             workspace_size_per_rank=self.workspace_size,
-            mnnvl_config=dp_config,
+            mnnvl_config=ep_config,
         )
 
         self.gpus_per_node = gpus_per_node
