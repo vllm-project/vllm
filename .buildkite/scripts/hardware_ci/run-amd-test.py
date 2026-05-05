@@ -102,10 +102,10 @@ def make_results_dir(artifact_mode: bool) -> Path:
         return Path(tempfile.mkdtemp(prefix="vllm-ci-results-"))
 
     candidates = [
+        Path(os.environ.get("HF_HOME", "")) / "amd-ci-results",
         Path.cwd() / "amd-ci-results",
         Path(os.environ.get("BUILDKITE_BUILD_CHECKOUT_PATH", "")) / "amd-ci-results",
         Path(os.environ.get("BUILDKITE_BUILD_PATH", "")) / "amd-ci-results",
-        Path(os.environ.get("HF_HOME", "")) / "amd-ci-results",
     ]
     seen: set[Path] = set()
     for candidate in candidates:
@@ -210,6 +210,9 @@ class RunRequest:
         base_image: str,
         configured_image: str | None,
     ) -> str | None:
+        if env_flag("VLLM_CI_DISABLE_FALLBACK") or env_flag("ROCM_CI_ARTIFACT_ONLY"):
+            return None
+
         fallback_image = env_text("VLLM_CI_FALLBACK_IMAGE")
         if not fallback_image and configured_image and configured_image != base_image:
             fallback_image = configured_image
