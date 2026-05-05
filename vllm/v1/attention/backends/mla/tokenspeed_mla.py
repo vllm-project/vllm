@@ -175,6 +175,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # we know it for sure at forward time when we see the input tensor.
         self._workspace_buffer: torch.Tensor | None = None
         self.softmax_scale: float | None = None
+        self.output_scale: float | None = None
 
     def forward_mqa(
         self,
@@ -192,6 +193,17 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q_nope, q_pe = q
             q = torch.cat([q_nope, q_pe], dim=-1)
 
+        # supports_quant_query_input=True (set in MLACommonImpl) tells the
+        # pipeline to concat+FP8-quantize Q upstream via _decode_concat_quant_fp8_op.
+        # The kernel is shape-specialized for FP8 Q + FP8 KV, so anything else
+        # here means the upstream quant didn't run and the kernel will produce
+        # garbage.
+        assert q.dtype == torch.float8_e4m3fn, (
+            f"TokenspeedMLAImpl expected FP8 query (supports_quant_query_input=True), "
+            f"got {q.dtype}. Pipeline isinstance(q, tuple)={isinstance(q, tuple)}, "
+            f"q_scale={layer._q_scale_float}, k_scale={layer._k_scale_float}."
+        )
+
         # tokenspeed_mla_decode expects query shape
         # (num_decodes, q_len_per_request, num_heads, head_dim).
         if attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
@@ -206,10 +218,13 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         if self.softmax_scale is None:
             # FP8 KV cache is mandatory for this backend, so q_scale/k_scale
-            # always apply.
+            # always apply. softmax_scale is bmm1; output_scale is bmm2 — both
+            # required to recover the correct attention output from the FP8
+            # KV cache (V is stored as V_real/k_scale).
             self.softmax_scale = (
                 self.scale * layer._q_scale_float * layer._k_scale_float
             )
+            self.output_scale = layer._k_scale_float
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace(
@@ -228,6 +243,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             seq_lens=attn_metadata.decode.seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
             softmax_scale=self.softmax_scale,
+            output_scale=self.output_scale,
             enable_pdl=False,
         )
 
