@@ -79,6 +79,8 @@ def compute_tp_mapping(
         # All heads replicated across all ranks.
         attn_ranks = [0]
     elif tp_size >= remote_tp_size:
+        # D (local TP) > P (remote TP): multiple local ranks read different chunks from
+        # *one* remote rank, corresponding to different kv heads.
         attn_ranks = [tp_rank * remote_tp_size // tp_size]
     else:
         # P (remote TP) > D (local TP): one local rank
@@ -122,12 +124,14 @@ def compute_tp_mapping(
 
     # --- Rank offset factor ---
     if is_mla or tp_size <= remote_tp_size:
+        # We don't index into remote for reading, no offset needed.
         rank_offset_factor = 0
     elif tp_size > total_num_kv_heads:
         local_head = tp_rank * total_num_kv_heads // tp_size
         p_start = attn_ranks[0] * total_num_kv_heads // remote_tp_size
         rank_offset_factor = local_head - p_start
     else:
+        # D TP > P TP: we index into remote to read different heads depending on rank.
         rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
 
     return TPMapping(

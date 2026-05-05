@@ -976,6 +976,8 @@ class NixlConnectorWorker:
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
+            # Jump one page_size, but ssm page_size may be bigger when kernel
+            # locks block size to a specific value (physical_per_logical scale).
             page_stride = (
                 self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
             )
@@ -1006,15 +1008,21 @@ class NixlConnectorWorker:
         sub-projection slice from the P rank."""
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
+        # Mamba conv state is always TP-sharded, even when attention KV
+        # is replicated (num_kv_heads < tp_size).
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
 
         if tp_ratio >= 1:
+            # D_TP >= P_TP: P page is larger, D reads its slice.
             conv_offsets = self._conv_decomp.remote_conv_offsets(
                 local_offset, effective_ratio
             )
             ssm_read_size = self._mamba_ssm_size[1]
         else:
+            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
+            # are smaller than D's. self._conv_decomp has D-sized dimensions,
+            # but we need P-sized offsets. Scale down by |tp_ratio|.
             abs_ratio = -tp_ratio
             xb_p = self._conv_decomp.x_bytes // abs_ratio
             bb_p = self._conv_decomp.b_bytes // abs_ratio
@@ -1026,11 +1034,14 @@ class NixlConnectorWorker:
         device_id = nixl_agent_meta.device_id
 
         result: list[tuple[int, int, int]] = []
+        # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
+        # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append((base_addr + blk * page_stride + off, sz, device_id))
+            # SSM temporal state is also TP-sharded on the heads dimension.
             for blk in range(num_blocks):
                 ssm_addr = (
                     base_addr
@@ -1064,6 +1075,9 @@ class NixlConnectorWorker:
                 result.append((addr, kv_block_len, self.device_id))
 
             if self.transfer_topo.is_kv_layout_blocks_first:
+                # Separate and interleave K/V regions to maintain the same
+                # descs ordering. This is needed for selecting contiguous heads
+                # when split across TP ranks.
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
                 )
@@ -1082,18 +1096,20 @@ class NixlConnectorWorker:
     ) -> list[tuple[int, int, int]]:
         """Build remote FA descriptors for all layers."""
         assert self.transfer_topo is not None
-        fa_idx = next(
+        fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        num_attn_reads = len(plan.source_ranks_per_group[fa_idx])
+        num_attn_reads = len(plan.source_ranks_per_group[fa_group_idx])
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            # Read our whole local region size from remote..
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
             )
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
+                # ..using remote kv_block_len as transfer unit
                 local_block_len = remote_kv_block_len
 
             local_block_len = local_block_len // num_attn_reads
@@ -1102,10 +1118,13 @@ class NixlConnectorWorker:
             page_size = nixl_agent_meta.block_lens[i]
             for block_id in range(num_blocks):
                 block_offset = block_id * page_size
+                # For each block, grab the kv heads chunk belonging to current local
+                # tp rank of size local_block_len.
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
             if self.transfer_topo.is_kv_layout_blocks_first:
+                # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
                 )
@@ -1113,6 +1132,7 @@ class NixlConnectorWorker:
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_size
                     addr = base_addr + block_offset + rank_offset
+                    # Hop over the first split of remote page, K, to read V.
                     v_addr = addr + nixl_agent_meta.block_lens[i] // 2
                     result.append((v_addr, second_split, nixl_agent_meta.device_id))
         return result
@@ -1146,8 +1166,8 @@ class NixlConnectorWorker:
         )
         if self._has_mamba:
             assert self.num_descs == len(blocks_data)
-            # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-read split is
-            # unnecessary — a single conv desc per block suffices.  Consider
+            # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
+            # is unnecessary — a single conv desc per block suffices.  Consider
             # adding a fast path that falls back to the standard 2-region
             # registration (_build_fa_local mamba=True) when no hetero-TP
             # remote has been seen.  Currently we always register 4 regions
@@ -1308,6 +1328,12 @@ class NixlConnectorWorker:
                 self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         ### Register remote agent memory regions
+        # With homogeneous TP, D pulls the whole kv cache from corresponding rank. With
+        # heterogeneous TP, prepare the descriptors by splitting the P KV cache along
+        # kv_head dim, of D worker's kv_head size (D>P).
+        # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
+
+        # Register all remote blocks, but only the corresponding kv heads.
         blocks_data = self._build_fa_remote(
             plan,
             nixl_agent_meta,
