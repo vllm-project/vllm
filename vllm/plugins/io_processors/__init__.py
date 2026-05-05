@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 import logging
 
 from vllm.config import VllmConfig
@@ -11,6 +10,23 @@ from vllm.renderers import BaseRenderer
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = logging.getLogger(__name__)
+
+
+def has_io_processor(
+    vllm_config: VllmConfig,
+    plugin_from_init: str | None = None,
+):
+    if plugin_from_init:
+        model_plugin = plugin_from_init
+    else:
+        # A plugin can be specified via the model config
+        # Retrieve the model specific plugin if available
+        # This is using a custom field in the hf_config for the model
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        config_plugin = hf_config.get("io_processor_plugin")
+        model_plugin = config_plugin
+
+    return model_plugin is not None
 
 
 def get_io_processor(
@@ -67,16 +83,6 @@ def get_io_processor(
             f"Available plugins: {list(loadable_plugins.keys())}"
         )
 
-    activated_plugin_cls = loadable_plugins[model_plugin]
+    activated_plugin_cls = resolve_obj_by_qualname(loadable_plugins[model_plugin])
 
-    activated_plugin_typ = resolve_obj_by_qualname(activated_plugin_cls)
-
-    # for backward compatibility, the plugin does not have a renderer argument
-    if "renderer" not in inspect.signature(activated_plugin_typ.__init__).parameters:
-        logger.warning(
-            "The renderer argument will be required in v0.18, "
-            "please update your IOProcessor plugin: %s",
-            activated_plugin_cls,
-        )
-        return activated_plugin_typ(vllm_config)
-    return activated_plugin_typ(vllm_config, renderer)
+    return activated_plugin_cls(vllm_config, renderer)

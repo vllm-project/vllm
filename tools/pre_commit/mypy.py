@@ -25,23 +25,14 @@ import regex as re
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
-SEPARATE_GROUPS = [
-    "tests",
-    # v0 related
-    "vllm/model_executor",
-]
+SEPARATE_GROUPS = ["tests"]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
-    # Ignore triton kernels in ops.
-    "vllm/v1/attention/ops",
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
-    "vllm/config",
-    "vllm/reasoning",
-    "vllm/tool_parser",
 ]
 
 

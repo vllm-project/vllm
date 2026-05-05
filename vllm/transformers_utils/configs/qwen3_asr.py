@@ -342,12 +342,14 @@ class Qwen3ASRThinkerConfig(PretrainedConfig):
         audio_start_token_id=151647,
         user_token_id=872,
         initializer_range=0.02,
+        classify_num=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.user_token_id = user_token_id
         self.audio_start_token_id = audio_start_token_id
         self.initializer_range = initializer_range
+        self.classify_num = classify_num
 
         if isinstance(audio_config, dict):
             audio_config = Qwen3ASRAudioEncoderConfig(**audio_config)
@@ -406,9 +408,10 @@ class Qwen3ASRConfig(PretrainedConfig):
         self,
         thinker_config=None,
         support_languages=None,
+        timestamp_token_id=None,
+        timestamp_segment_time=None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
         if thinker_config is None:
             thinker_config = {}
             logger.info(
@@ -417,6 +420,9 @@ class Qwen3ASRConfig(PretrainedConfig):
 
         self.thinker_config = Qwen3ASRThinkerConfig(**thinker_config)
         self.support_languages = support_languages
+        self.timestamp_token_id = timestamp_token_id
+        self.timestamp_segment_time = timestamp_segment_time
+        super().__init__(**kwargs)
 
     def get_text_config(self, decoder=False) -> "PretrainedConfig":
         """

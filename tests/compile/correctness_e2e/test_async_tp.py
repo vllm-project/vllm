@@ -31,7 +31,12 @@ def test_async_tp_pass_correctness(
     distributed_backend: str,
     eager_mode: bool,
     num_gpus_available: int,
+    monkeypatch,
 ):
+    # Disable FlashInfer FP8 scaled_mm kernel as it is incompatible with
+    # async TP patterns. No-op on H100 (kernel requires CC >= 100).
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
     model_info.check_available_online(on_fail="skip")

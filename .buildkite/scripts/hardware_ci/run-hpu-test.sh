@@ -42,7 +42,7 @@ WORKDIR /workspace/vllm
 ENV no_proxy=localhost,127.0.0.1
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
-RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)'
+RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build/cuda.txt)'
 RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
 RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
 
@@ -76,7 +76,7 @@ docker run --rm --runtime=habana --name="${container_name}" --network=host \
   -e PT_HPU_LAZY_MODE=1 \
   "${image_name}" \
   /bin/bash -c '
-  cd vllm; timeout 120s python -u examples/offline_inference/basic/generate.py --model facebook/opt-125m
+  cd vllm; timeout 120s python -u examples/basic/offline_inference/generate.py --model facebook/opt-125m
 '
 
 EXITCODE=$?

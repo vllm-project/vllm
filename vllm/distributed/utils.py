@@ -6,6 +6,7 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
+import functools
 import os
 import pickle
 import socket
@@ -139,6 +140,29 @@ def get_pp_indices(
     return (start_layer, end_layer)
 
 
+def create_tcp_store(
+    host: str,
+    port: int,
+    listen_socket: socket.socket | None = None,
+    **kwargs: Any,
+) -> TCPStore:
+    """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
+    if listen_socket is None:
+        return TCPStore(host_name=host, port=port, **kwargs)
+
+    listen_fd = listen_socket.detach()
+    try:
+        return TCPStore(
+            host_name=host,
+            port=port,
+            master_listen_fd=listen_fd,
+            **kwargs,
+        )
+    except Exception:
+        socket.close(listen_fd)
+        raise
+
+
 @dataclasses.dataclass
 class StatelessProcessGroup:
     """A dataclass to hold a metadata store, and the rank, world_size of the
@@ -149,9 +173,6 @@ class StatelessProcessGroup:
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
-
-    # stores a reference to the socket so that the file descriptor stays alive
-    socket: socket.socket | None
 
     data_expiration_seconds: int = 3600  # 1 hour
 
@@ -419,6 +440,7 @@ class StatelessProcessGroup:
         world_size: int,
         data_expiration_seconds: int = 3600,
         store_timeout: int = 300,
+        listen_socket: socket.socket | None = None,
     ) -> "StatelessProcessGroup":
         """A replacement for `torch.distributed.init_process_group` that does not
         pollute the global state.
@@ -436,34 +458,37 @@ class StatelessProcessGroup:
         C, and D can call `StatelessProcessGroup.create` to form another group.
         """  # noqa
         launch_server = rank == 0
-        if launch_server:
-            # listen on the specified interface (instead of 0.0.0.0)
+        if launch_server and listen_socket is None:
             listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listen_socket.bind((host, port))
             listen_socket.listen()
-            listen_fd = listen_socket.fileno()
-        else:
-            listen_socket = None
-            listen_fd = None
-
-        store = TCPStore(
-            host_name=host,
-            port=port,
+        store = create_tcp_store(
+            host,
+            port,
+            listen_socket=listen_socket,
             world_size=world_size,
             is_master=launch_server,
             timeout=timedelta(seconds=store_timeout),
             use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
-            master_listen_fd=listen_fd,
         )
 
         return StatelessProcessGroup(
             rank=rank,
             world_size=world_size,
             store=store,
-            socket=listen_socket,
             data_expiration_seconds=data_expiration_seconds,
         )
+
+
+@functools.lru_cache(maxsize=1)
+def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
+    """Return a cached TCPStore client.
+
+    Cached so that every call with the same ``(host, port)`` reuses the
+    same connection.  A new ``(host, port)`` evicts the old entry.
+    """
+    return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
 
 def init_gloo_process_group(
@@ -504,6 +529,7 @@ def stateless_init_torch_distributed_process_group(
     backend: str,
     group_name: str | None = None,
     return_store: bool = False,
+    listen_socket: socket.socket | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -535,14 +561,30 @@ def stateless_init_torch_distributed_process_group(
     are the same as process 1 and 5, the main communication channel is
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
+
+    When *listen_socket* is provided, the rendezvous step
+    is skipped and a ``TCPStore`` server is created directly using the
+    pre-bound socket.  This is useful for eliminating TOCTOU races
+    between port allocation and binding.
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 
-    store, rank, world_size = next(
-        rendezvous(init_method, rank, world_size, timeout=timeout)
-    )
+    if listen_socket is not None:
+        store = create_tcp_store(
+            host,
+            port,
+            listen_socket=listen_socket,
+            world_size=world_size,
+            is_master=True,
+            timeout=timeout,
+            multi_tenant=True,
+        )
+    else:
+        store, rank, world_size = next(
+            rendezvous(init_method, rank, world_size, timeout=timeout)
+        )
     store.set_timeout(timeout)
 
     group_rank = rank

@@ -1,71 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
+
+from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
-from dataclasses import dataclass, field
+from concurrent.futures import Executor
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar
 
+import torch
 from fastapi import Request
-from pydantic import ConfigDict
+from fastapi.responses import Response
 from starlette.datastructures import Headers
-from starlette.responses import JSONResponse
 
-from vllm import (
-    PoolingParams,
-    PoolingRequestOutput,
-    PromptType,
-    SamplingParams,
-    envs,
-)
-from vllm.config import ModelConfig
+from vllm import PoolingParams, PoolingRequestOutput, envs
+from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-    ChatTemplateContentFormatOption,
-)
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest, AnyPoolingResponse
-from vllm.inputs import ProcessorInputs
+from vllm.exceptions import VLLMNotFoundError
+from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer
+from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs.preprocess import extract_prompt_components
-from vllm.sampling_params import BeamSearchParams
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.async_utils import make_async, merge_async_iterators
 
-from ...utils import create_error_response
+from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
-PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
-
-@dataclass(kw_only=True)
-class PoolingServeContext(Generic[PoolingRequestT]):
-    request: PoolingRequestT
-    raw_request: Request | None = None
-    model_name: str
-    request_id: str
-    created_time: int = field(default_factory=lambda: int(time.time()))
-    lora_request: LoRARequest | None = None
-    engine_prompts: list[ProcessorInputs] | None = None
-
-    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
-        None
-    )
-    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-class PoolingServing:
+class PoolingServingBase(ABC):
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -74,86 +45,87 @@ class PoolingServing:
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
+        chat_template_config: ChatTemplateConfig,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
     ):
-        super().__init__()
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
+        self.renderer = models.renderer
+        self.vllm_config = engine_client.vllm_config
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
-        self.chat_template_config = ChatTemplateConfig(
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            trust_request_chat_template=trust_request_chat_template,
-        )
-        self.io_processor = self.init_io_processor(
-            model_config=models.model_config,
-            renderer=models.renderer,
-            chat_template_config=self.chat_template_config,
-        )
+        self.chat_template_config = chat_template_config
 
-    def init_io_processor(
-        self,
-        model_config: ModelConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
-    ) -> PoolingIOProcessor:
-        raise NotImplementedError
+        # Shared thread pool executor for preprocessing and postprocessing.
+        self._executor: Executor = models.renderer._executor
+        self._preprocessing_async = make_async(
+            self._preprocessing, executor=self._executor
+        )
+        self._postprocessing_async = make_async(
+            self._postprocessing, executor=self._executor
+        )
 
     async def __call__(
         self,
         request: AnyPoolingRequest,
-        raw_request: Request,
-    ) -> JSONResponse:
-        try:
-            model_name = self.models.model_name()
-            request_id = (
-                f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
-            )
+        raw_request: Request | None = None,
+    ) -> Response:
+        io_processor = self.get_io_processor(request)
+        ctx = await self._init_ctx(io_processor, request, raw_request)
+        await self._preprocessing_async(io_processor, ctx)
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+        return await self._postprocessing_async(io_processor, ctx)
 
-            await self._check_model(request)
+    @abstractmethod
+    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
+        raise NotImplementedError
 
-            ctx = PoolingServeContext(
-                request=request,
-                raw_request=raw_request,
-                model_name=model_name,
-                request_id=request_id,
-            )
-
-            self._validate_request(ctx)
-            self._maybe_get_adapters(ctx)
-            await self._preprocess(ctx)
-            await self._prepare_generators(ctx)
-            await self._collect_batch(ctx)
-            response = await self._build_response(ctx)
-            return JSONResponse(content=response.model_dump())
-        except Exception as e:
-            error_response = create_error_response(e)
-            return JSONResponse(
-                content=error_response.model_dump(),
-                status_code=error_response.error.code,
-            )
-
-    async def _preprocess(
-        self,
-        ctx: PoolingServeContext,
+    @torch.inference_mode()
+    def _preprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        ctx.engine_prompts = await self.io_processor.pre_process_online_async(
-            ctx.request
+        return io_processor.pre_process_online(ctx)
+
+    @torch.inference_mode()
+    def _postprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        io_processor.post_process_online(ctx)
+        return self._build_response(ctx)
+
+    async def _init_ctx(
+        self,
+        io_processor: PoolingIOProcessor,
+        request: AnyPoolingRequest,
+        raw_request: Request | None = None,
+    ):
+        model_name = self.models.model_name()
+        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+        await self._check_model(request)
+
+        pooling_params = io_processor.create_pooling_params(request)
+        ctx = PoolingServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            pooling_params=pooling_params,
+            request_id=request_id,
         )
+
+        self._validate_request(ctx)
+        self._maybe_get_adapters(ctx)
+        return ctx
 
     async def _prepare_generators(
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -164,22 +136,39 @@ class PoolingServing:
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
 
-        pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        assert ctx.pooling_params is not None
+        pooling_params = ctx.pooling_params
 
-        for i, engine_prompt in enumerate(ctx.engine_prompts):
-            request_id_item = f"{ctx.request_id}-{i}"
+        if isinstance(pooling_params, list):
+            for params in pooling_params:
+                params.verify(self.model_config)
+        else:
+            pooling_params.verify(self.model_config)
+
+        for i, engine_input in enumerate(ctx.engine_inputs):
+            prompt_request_id = (
+                f"{ctx.request_id}-{i}"
+                if ctx.prompt_request_ids is None
+                else ctx.prompt_request_ids[i]
+            )
+
+            params = (
+                pooling_params[i]
+                if isinstance(pooling_params, list)
+                else pooling_params
+            )
 
             self._log_inputs(
-                request_id_item,
-                engine_prompt,
-                params=pooling_params,
+                prompt_request_id,
+                engine_input,
+                params=params,
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
-                engine_prompt,
-                pooling_params,
-                request_id_item,
+                engine_input,
+                params,
+                prompt_request_id,
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
                 priority=getattr(ctx.request, "priority", 0),
@@ -193,15 +182,15 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
         if ctx.result_generator is None:
             raise ValueError("Result generator not available")
 
-        num_prompts = len(ctx.engine_prompts)
+        num_inputs = len(ctx.engine_inputs)
         final_res_batch: list[PoolingRequestOutput | None]
-        final_res_batch = [None] * num_prompts
+        final_res_batch = [None] * num_inputs
 
         async for i, res in ctx.result_generator:
             final_res_batch[i] = res
@@ -211,10 +200,11 @@ class PoolingServing:
 
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-    async def _build_response(
+    @abstractmethod
+    def _build_response(
         self,
         ctx: PoolingServeContext,
-    ) -> AnyPoolingResponse:
+    ) -> Response:
         raise NotImplementedError
 
     @staticmethod
@@ -266,8 +256,9 @@ class PoolingServing:
             raise ValueError(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
+                " Please request a smaller truncation size."
             )
+
         return None
 
     async def _get_trace_headers(
@@ -304,7 +295,7 @@ class PoolingServing:
             return None
 
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError(f"The model `{request.model}` does not exist.")
+        raise VLLMNotFoundError(f"The model `{request.model}` does not exist.")
 
     def _get_active_default_mm_loras(
         self, request: AnyPoolingRequest
@@ -359,8 +350,8 @@ class PoolingServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType | ProcessorInputs,
-        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        inputs: EngineInput,
+        params: PoolingParams,
         lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:
@@ -376,3 +367,26 @@ class PoolingServing:
             params=params,
             lora_request=lora_request,
         )
+
+
+class PoolingServing(PoolingServingBase, ABC):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.io_processor = self.init_io_processor(
+            vllm_config=self.vllm_config,
+            renderer=self.renderer,
+            chat_template_config=self.chat_template_config,
+        )
+
+    @abstractmethod
+    def init_io_processor(
+        self,
+        vllm_config: VllmConfig,
+        renderer: BaseRenderer,
+        chat_template_config: ChatTemplateConfig,
+    ) -> PoolingIOProcessor:
+        raise NotImplementedError
+
+    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
+        return self.io_processor

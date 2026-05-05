@@ -37,6 +37,7 @@ class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]
     num_reqs: int
+    num_reqs_after_padding: int
 
     # batch_idx -> req_state_idx
     idx_mapping: torch.Tensor
@@ -59,6 +60,8 @@ class InputBatch:
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
+    # [num_reqs] CPU upper bound on seq_lens (see CommonAttentionMetadata).
+    seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
 
@@ -120,9 +123,12 @@ class InputBatch:
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        # Dummy: seq_len == query_len (fresh-prefill shape).
+        seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
@@ -134,6 +140,7 @@ class InputBatch:
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
             input_ids=input_ids,
             positions=positions,
@@ -330,7 +337,8 @@ def combine_sampled_and_draft_tokens(
     cu_num_logits: torch.Tensor,
     num_logits: int,
 ) -> torch.Tensor:
-    num_reqs = seq_lens.shape[0]
+    # use idx_mapping.shape[0] for actual request count
+    num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
     logits_indices = torch.empty(
@@ -435,16 +443,19 @@ def _post_update_kernel(
 
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
-        token_ptr = (
-            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
-        )
-        count = tl.load(token_ptr)
-        count += 1
-        tl.store(token_ptr, count)
         tl.store(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
             token_id,
         )
+
+        if output_bin_counts_ptr is not None:
+            token_ptr = (
+                output_bin_counts_ptr
+                + req_state_idx * output_bin_counts_stride
+                + token_id
+            )
+            count = tl.load(token_ptr)
+            tl.store(token_ptr, count + 1)
 
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -464,7 +475,7 @@ def post_update(
     # [max_num_reqs]
     last_sampled_tokens: torch.Tensor,
     # [max_num_reqs, vocab_size]
-    output_bin_counts: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
     # [num_reqs, num_speculative_steps + 1]
     sampled_tokens: torch.Tensor,
     # [num_reqs]
@@ -484,7 +495,7 @@ def post_update(
         num_computed_tokens,
         last_sampled_tokens,
         output_bin_counts,
-        output_bin_counts.stride(0),
+        output_bin_counts.stride(0) if output_bin_counts is not None else 0,
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,

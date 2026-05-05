@@ -29,7 +29,7 @@ def main(
     scale = torch.randn(1, 1, dtype=torch.float32) if static_scale else None
 
     def run_cuda_benchmark(num_iters: int, profile: bool = False) -> float:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
@@ -39,7 +39,7 @@ def main(
                 ops.scaled_int8_quant(x, scale)
             else:
                 ops.scaled_fp8_quant(x, scale)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         end_time = time.perf_counter()
         if profile:

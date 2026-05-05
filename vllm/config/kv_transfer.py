@@ -13,6 +13,12 @@ KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
 
+def kv_buffer_device_default_factory() -> str:
+    from vllm.platforms import current_platform
+
+    return current_platform.device_type
+
+
 @config
 class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
@@ -24,9 +30,9 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str = "cuda"
-    """The device used by kv connector to buffer the KV cache. Choices are 
-    'cuda' and 'cpu'."""
+    kv_buffer_device: str = field(default_factory=kv_buffer_device_default_factory)
+    """The device used by kv connector to buffer the KV cache. Choices are
+    'cuda', 'cpu' and 'xpu'."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of

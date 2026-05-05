@@ -22,6 +22,7 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    get_mla_prefill_scale,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -41,6 +42,8 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASHINFER_MLA,
     AttentionBackendEnum.TRITON_MLA,
 ]
+
+DEVICE_TYPE = current_platform.device_type
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
@@ -266,22 +269,6 @@ def create_and_prepopulate_kv_cache(
     return kv_cache
 
 
-class MockAttentionLayer:
-    """A mock attention layer for testing."""
-
-    def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
-    def forward(self, *_args, **_kwargs):
-        raise NotImplementedError
-
-
 class MockSparseMLAAttentionLayer:
     """A mock sparse MLA attention layer for testing.
 
@@ -304,6 +291,8 @@ class MockSparseMLAAttentionLayer:
         device: torch.device,
         W_UK: torch.Tensor,
         W_UV: torch.Tensor,
+        q_scale: float,
+        k_scale: float,
     ):
         self.impl = impl
         self.num_heads = num_heads
@@ -319,13 +308,19 @@ class MockSparseMLAAttentionLayer:
         self.W_UV = W_UV.transpose(0, 1)
 
         # Scale attributes needed by attention backends
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._q_scale = torch.tensor(q_scale, device=device)
+        self._k_scale = torch.tensor(k_scale, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale_float = q_scale
+        self._k_scale_float = k_scale
+        self._v_scale_float = float("nan")
+
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
+        )
 
     def forward_impl(
         self,
@@ -338,6 +333,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        fp8_attention = kv_cache_dtype.startswith("fp8")
 
         # Write to KV cache
         if kv_cache.numel() > 0:
@@ -349,6 +345,9 @@ class MockSparseMLAAttentionLayer:
                 kv_cache_dtype=kv_cache_dtype,
                 scale=self._k_scale,
             )
+
+        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]
 
@@ -367,8 +366,14 @@ class MockSparseMLAAttentionLayer:
         # Convert from (N, B, L) to (B, N, L)
         mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-        # Pass as tuple to forward_mqa
-        mqa_q = (mqa_ql_nope, mqa_q_pe)
+        if fp8_attention and self.impl.supports_quant_query_input:
+            assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+            assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+            mqa_q = self._decode_concat_quant_fp8_op(
+                mqa_ql_nope, mqa_q_pe, self._q_scale
+            )
+        else:
+            mqa_q = (mqa_ql_nope, mqa_q_pe)
 
         attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
 
@@ -404,6 +409,8 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         kv_lora_rank: int,
         device: torch.device,
         kv_b_proj,
+        q_scale: float,
+        k_scale: float,
     ):
         self.impl = impl
         self.num_heads = num_heads
@@ -427,13 +434,13 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
         # Scale attributes needed by attention backends
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._q_scale = torch.tensor(q_scale, device=device)
+        self._k_scale = torch.tensor(k_scale, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale_float = q_scale
+        self._k_scale_float = k_scale
+        self._v_scale_float = float("nan")
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -552,6 +559,8 @@ def run_attention_backend(
     qk_rope_head_dim: int,
     v_head_dim: int,
     mock_kv_b_proj,
+    q_scale: float,
+    k_scale: float,
     kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
@@ -609,6 +618,8 @@ def run_attention_backend(
             kv_lora_rank=kv_lora_rank,
             device=device,
             kv_b_proj=mock_kv_b_proj,
+            q_scale=q_scale,
+            k_scale=k_scale,
         )
 
         # Populate static_forward_context with mock attention layers
@@ -658,13 +669,17 @@ def run_attention_backend(
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
+    workspace_init,
     batch_spec_name: str,
     model: str,
     tensor_parallel_size: int,
     kv_cache_dtype: str,
+    q_scale: float,
+    k_scale: float,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -693,6 +708,11 @@ def test_backend_correctness(
         for b in BACKENDS_TO_TEST
         if kv_cache_dtype in b.get_class().supported_kv_cache_dtypes
     ]
+    if (
+        q_scale != 1.0 or k_scale != 1.0
+    ) and AttentionBackendEnum.CUTLASS_MLA in backends_to_test:
+        # CUTLASS_MLA does not support non-1 Q/K scales
+        backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
 
@@ -747,7 +767,7 @@ def test_backend_correctness(
             method="ngram", num_speculative_tokens=query_len - 1
         )
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -766,7 +786,8 @@ def test_backend_correctness(
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
     )
-    scale = 1.0 / (total_head_size**0.5)
+    decode_scale = 1.0 / (total_head_size**0.5)
+    prefill_scale = get_mla_prefill_scale(vllm_config.model_config)
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -883,7 +904,7 @@ def test_backend_correctness(
         v_sdpa_in = v_mqa.unsqueeze(0).transpose(1, 2)
 
         sdpa_out_i_decode = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=decode_scale
         )
         sdpa_out_i_decode = sdpa_out_i_decode.transpose(1, 2).squeeze(
             0
@@ -919,7 +940,7 @@ def test_backend_correctness(
 
         # Single attention call with custom mask
         sdpa_out_i_prefill = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=prefill_scale
         )
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
@@ -1013,6 +1034,7 @@ def test_backend_correctness(
             common_attn_metadata=common_attn_metadata,
             randomize_blocks=True,
             kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
         )
         kv_cache_per_block_size[block_size] = kv_cache
 
@@ -1056,6 +1078,8 @@ def test_backend_correctness(
             qk_rope_head_dim,
             v_head_dim,
             mock_kv_b_proj,
+            q_scale=q_scale,
+            k_scale=k_scale,
             kv_cache_dtype=kv_cache_dtype,
         )
 

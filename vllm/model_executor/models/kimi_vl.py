@@ -54,12 +54,12 @@ from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -77,7 +77,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
+from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig, MoonViTConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
@@ -307,7 +307,7 @@ def bench_run(
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     cutlass_stream = torch.cuda.Stream()
     cutlass_graph = torch.cuda.CUDAGraph()
@@ -330,7 +330,7 @@ def bench_run(
             e=num_experts,
             device=device,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     triton_stream = torch.cuda.Stream()
     triton_graph = torch.cuda.CUDAGraph()
@@ -345,7 +345,7 @@ def bench_run(
             w2_fp8scale,
             a_fp8_scale,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     min_run_time = 5
     num_warmup = 5

@@ -27,7 +27,7 @@ def set_eagle3_aux_hidden_state_layers(
     if aux_layers:
         logger.info("Using Eagle3 auxiliary layers from config: %s", aux_layers)
     else:
-        aux_layers = eagle3_model.get_eagle3_aux_hidden_state_layers()
+        aux_layers = eagle3_model.get_eagle3_default_aux_hidden_state_layers()
         logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
 

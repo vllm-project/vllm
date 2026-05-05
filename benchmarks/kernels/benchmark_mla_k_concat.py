@@ -47,13 +47,13 @@ def benchmark_method(
     # Warmup
     for _ in range(num_warmup):
         _ = method(k_nope, k_pe)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Benchmark
     start = time.perf_counter()
     for _ in range(num_iters):
         _ = method(k_nope, k_pe)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end = time.perf_counter()
 
     return (end - start) / num_iters * 1000  # Convert to ms
