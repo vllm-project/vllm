@@ -11,6 +11,8 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    MarlinNvFp4LinearKernel,
+    NvFp4LinearLayerConfig,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -66,10 +68,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    apply_fp4_marlin_linear,
-    prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
@@ -1249,13 +1247,19 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     W4A16 path reciprocates only because CT stores the inverse on disk.
     """
 
-    backend = "marlin"
-
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
-        # Set externally by ModelOptNvFp4Config.get_quant_method when backend
-        # is "marlin"; left as None if the dispatch path hasn't run.
+        # Vestigial slot mirrored from ModelOptNvFp4LinearMethod: the parent
+        # config's get_quant_method only fills marlin_input_dtype when
+        # backend == "marlin"; we don't set that since we pin the kernel
+        # below, but we keep the attribute for shape parity.
         self.marlin_input_dtype = None
+        # Direct-instantiate the Marlin NVFP4 adapter rather than going through
+        # init_nvfp4_linear_kernel(): the latter's priority list returns a
+        # cutlass W4A4 kernel as first-pick on this hardware, which would
+        # silently try to quantize activations (we have no input_scale). For
+        # W4A16 there is exactly one valid kernel, so we pin it.
+        self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
 
     def create_weights(
         self,
@@ -1330,13 +1334,14 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
 
         # Rename weight_scale_2 -> weight_global_scale. NO reciprocation:
         # ModelOpt already stores amax/2688, which is exactly what Marlin
-        # consumes via prepare_fp4_layer_for_marlin / nvfp4_marlin_process_global_scale.
+        # consumes via nvfp4_marlin_process_global_scale (called inside the
+        # Marlin adapter's process_weights_after_loading).
         layer.weight_global_scale = Parameter(
             layer.weight_scale_2.max().to(torch.float32), requires_grad=False
         )
         del layer.weight_scale_2
 
-        prepare_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1344,16 +1349,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_fp4_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            weight_global_scale=layer.weight_global_scale,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias,
-        )
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
