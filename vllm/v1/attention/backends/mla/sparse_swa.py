@@ -291,6 +291,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         if num_decode_tokens > 0:
             self.decode_swa_lens[num_decode_tokens:] = 0
+            self.decode_swa_indices[num_decode_tokens:] = 0
             _compute_swa_indices_and_lens_kernel[(num_decode_tokens,)](
                 self.decode_swa_indices,
                 self.decode_swa_indices.stride(0),
@@ -305,6 +306,19 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 self.block_size,
                 TRITON_BLOCK_SIZE=1024,
             )
+            self.decode_swa_lens[:num_decode_tokens].fill_(self.window_size)
+            """
+            from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+            if get_tensor_model_parallel_rank() == 0 and num_decode_tokens <= 2:
+                swa_len_val = self.decode_swa_lens[0].item()
+                indices_slice = self.decode_swa_indices[0, 0, :min(10, self.window_size)].tolist()
+                slot_mappings_slice = slot_mapping[:min(10, slot_mapping.shape[0])].tolist()
+                print(f"[SWA DEBUG] num_decode_tokens={num_decode_tokens} "
+                      f"swa_lens[0]={swa_len_val} "
+                      f"swa_indices[0,0,:10]={indices_slice} "
+                      f"seq_lens={seq_lens[:num_decodes].tolist()} "
+                      f"slot_mappings[:10]={slot_mappings_slice}", flush=True)
+            """
 
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
         deepseek_v4_fields = self._build_deepseek_v4_metadata(
@@ -484,7 +498,7 @@ def _compute_swa_indices_and_lens_kernel(
         block_offsets = pos_offset % block_size
         slot_ids = block_numbers * block_size + block_offsets
 
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+        slot_ids = tl.where(offset < swa_len, slot_ids, 0)
         tl.store(
             swa_indices_ptr + token_idx * swa_indices_stride + offset,
             slot_ids,
