@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.platforms import current_platform
@@ -33,7 +34,7 @@ class INCWna16Scheme(INCScheme):
         prefix: str,
         layer_config: "INCLayerConfig",
     ):
-        del config, layer
+        del config
         if current_platform.is_xpu():
             if layer_config.bits == 4 and layer_config.sym:
                 from .inc_wna16_linear import (
@@ -76,7 +77,13 @@ class INCWna16Scheme(INCScheme):
                 return INCLinearMethod(INCWNA16LinearScheme(layer_config))
             raise NotImplementedError(f"INC on CPU: unsupported config {layer_config}")
 
-        from .inc_wna16_linear import INCWNA16LinearScheme
+        from .inc_wna16_linear import (
+            INCGPTQRowParallelTailLinearScheme,
+            INCWNA16LinearScheme,
+        )
+
+        if _needs_gptq_row_parallel_tail_fallback(layer, layer_config):
+            return INCLinearMethod(INCGPTQRowParallelTailLinearScheme(layer_config))
 
         return INCLinearMethod(INCWNA16LinearScheme(layer_config))
 
@@ -100,6 +107,23 @@ class INCWna16Scheme(INCScheme):
         if layer_config.is_awq:
             return _resolve_awq_moe(layer, layer_config)
         raise NotImplementedError(f"WNA16 MoE does not support config {layer_config}")
+
+
+def _needs_gptq_row_parallel_tail_fallback(
+    layer: "torch.nn.Module", layer_config: "INCLayerConfig"
+) -> bool:
+    if not layer_config.is_gptq or layer_config.group_size <= 0:
+        return False
+    if not isinstance(layer, LinearBase):
+        return False
+
+    input_size = getattr(layer, "input_size", None)
+    input_size_per_partition = getattr(layer, "input_size_per_partition", input_size)
+    if input_size is None or input_size_per_partition is None:
+        return False
+
+    is_row_parallel = input_size_per_partition != input_size
+    return is_row_parallel and input_size_per_partition % layer_config.group_size != 0
 
 
 def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):

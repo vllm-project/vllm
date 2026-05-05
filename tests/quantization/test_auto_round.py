@@ -8,8 +8,12 @@ Validating the configuration and printing results for manual checking.
 Run `pytest tests/quantization/test_auto_round.py`.
 """
 
-import pytest
+from fractions import Fraction
 
+import pytest
+import torch
+
+from vllm.model_executor import parameter as parameter_module
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -25,6 +29,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import (
     INCARKLinearMethod,
+    INCGPTQRowParallelTailLinearScheme,
     INCWNA16LinearScheme,
     INCXPULinearMethod,
 )
@@ -33,6 +38,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_scheme import
     _resolve_gptq_moe,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.parameter import RowvLLMParameter
 from vllm.platforms import current_platform
 
 MODELS = [
@@ -79,6 +85,21 @@ class DummyLayer:
 
 class DummyFusedMoE:
     pass
+
+
+def make_linear_base_stub(
+    *,
+    input_size: int,
+    input_size_per_partition: int,
+    output_size: int = 64,
+    output_size_per_partition: int = 64,
+):
+    layer = object.__new__(LinearBase)
+    layer.input_size = input_size
+    layer.input_size_per_partition = input_size_per_partition
+    layer.output_size = output_size
+    layer.output_size_per_partition = output_size_per_partition
+    return layer
 
 
 def make_config(**overrides) -> INCConfig:
@@ -439,6 +460,90 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
     assert captured["cfg"].weight_bits == 4
     assert captured["cfg"].group_size == 128
     assert captured["cfg"].is_sym is True
+
+
+def test_inc_gptq_row_tail_fallback_still_precedes_marlin(monkeypatch) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear."
+        "check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    layer = make_linear_base_stub(input_size=256, input_size_per_partition=192)
+
+    method = make_config().get_quant_method(layer, "model.layers.0.mlp.down_proj")
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCGPTQRowParallelTailLinearScheme)
+
+
+def test_inc_gptq_dense_misaligned_shape_does_not_use_row_tail_fallback(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class DummyMethod:
+        def __init__(self, cfg):
+            captured["cfg"] = cfg
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear."
+        "check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.auto_gptq.AutoGPTQLinearMethod",
+        DummyMethod,
+    )
+    layer = make_linear_base_stub(input_size=192, input_size_per_partition=192)
+
+    method = make_config().get_quant_method(layer, "model.layers.0.mlp.gate_proj")
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCWNA16LinearScheme)
+    assert isinstance(method.scheme.inner_method, DummyMethod)
+    assert isinstance(captured["cfg"], AutoGPTQConfig)
+
+
+@pytest.mark.parametrize("weight_bits", [2, 3, 4, 8])
+def test_inc_gptq_row_tail_fallback_supports_all_inc_bit_widths(
+    weight_bits,
+) -> None:
+    scheme = INCGPTQRowParallelTailLinearScheme(
+        make_layer_config(bits=weight_bits, sym=True)
+    )
+
+    assert scheme.weight_bits == weight_bits
+    assert scheme.pack_factor == Fraction(32, weight_bits)
+
+
+def test_inc_gptq_row_tail_fallback_registers_row_g_idx(monkeypatch) -> None:
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    scheme = INCGPTQRowParallelTailLinearScheme(make_layer_config(bits=4, sym=True))
+    layer = torch.nn.Module()
+    layer.tp_rank = 1
+
+    scheme.create_weights(
+        layer=layer,
+        input_size_per_partition=192,
+        output_partition_sizes=[64],
+        input_size=256,
+        output_size=64,
+        params_dtype=torch.float16,
+    )
+
+    assert isinstance(layer.g_idx, RowvLLMParameter)
+    assert layer.g_idx.shape == (192,)
+    assert layer.g_idx[0].item() == 1
+    assert layer.g_idx[-1].item() == 2
 
 
 def test_wna16_linear_gptq_unsupported_config_raises() -> None:
