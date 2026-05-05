@@ -75,7 +75,7 @@ from vllm.v1.worker.gpu.input_batch import (
     expand_idx_mapping,
     get_num_sampled_and_rejected,
     post_update,
-    post_update_pool,
+    post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -88,7 +88,7 @@ from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
-from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
+from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -141,6 +141,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
+
+        # PP broadcast/recv helper. Runs the collective on a side stream.
+        self.pp_handler: PPHandler | None = None
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -202,6 +205,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+
+        if self.use_pp:
+            self.pp_handler = PPHandler(
+                num_speculative_steps=self.num_speculative_steps, device=self.device
+            )
 
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
@@ -687,11 +695,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._remove_request(req_id)
 
             prompt_len = len(new_req_data.prompt_token_ids)
+            sampling_params = new_req_data.sampling_params
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
+                max_tokens=sampling_params.max_tokens if sampling_params else 0,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
 
@@ -721,6 +731,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.sampler.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        # For non-last PP ranks, update decode requests with sampler output from
+        # the prior step in which they were scheduled (pp_size steps ago).
+        if self.pp_handler is not None:
+            outputs = self.pp_handler.get_prev_step_sampled_outputs()
+            if outputs is not None:
+                self.postprocess_sampled(**outputs.received_tensors)
+
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
@@ -734,7 +751,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, req_new_block_ids, overwrite=False
                 )
 
-        # Update num_computed_prefill_tokens.
+        # Update CPU num_computed_prefill_tokens.
         np.minimum(
             self.req_states.num_computed_tokens_np,
             self.req_states.prefill_len.np,
@@ -964,12 +981,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return sampler_output, num_sampled, num_rejected
 
-    def postprocess(
+    def postprocess_sampled(
         self,
-        input_batch: InputBatch,
+        idx_mapping: torch.Tensor,
         sampled_tokens: torch.Tensor,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
         if self.is_last_pp_rank:
@@ -978,19 +996,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             output_bin_counts = None
         post_update(
-            input_batch.idx_mapping,
+            idx_mapping,
             self.req_states.num_computed_tokens.gpu,
             self.req_states.last_sampled_tokens,
             output_bin_counts,
             sampled_tokens,
             num_sampled,
             num_rejected,
-            input_batch.query_start_loc,
+            query_start_loc,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
         )
 
-        self.model_state.postprocess_state(input_batch, num_sampled)
+        self.model_state.postprocess_state(idx_mapping, num_sampled)
 
     @torch.inference_mode()
     def execute_model(
@@ -1208,10 +1226,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: hidden_states is None because this rank produced
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
-            sampled, num_sampled, num_rejected = pp_receive(
-                input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
-            )
-            self.postprocess(input_batch, sampled, num_sampled, num_rejected)
+            assert self.pp_handler is not None
+            all_decode_next = self.pp_handler.receive(input_batch, self.req_states)
+            # Optimistically update num_computed_tokens for entire batch here.
+            # Will be adjusted for rejections if necessary in update_requests.
+            self.postprocess_num_computed_tokens(input_batch)
+            if not all_decode_next:
+                # Might contain non-final prefill chunks, which will be scheduled
+                # in the immediate next step (rather than in pp_size steps).
+                # TODO(nick) this is just for mamba, see if we can simplify
+                self.model_state.postprocess_state(
+                    input_batch.idx_mapping, torch.zeros_like(input_batch.idx_mapping)
+                )
             return None
 
         # Last rank: sample tokens
@@ -1219,9 +1245,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
 
-        if self.use_pp:
+        if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
-            pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
+            self.pp_handler.broadcast(
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch,
+                self.req_states,
+            )
 
         assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
@@ -1276,8 +1308,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
-        self.postprocess(
-            input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
+        self.postprocess_sampled(
+            input_batch.idx_mapping,
+            sampler_output.sampled_token_ids,
+            num_sampled,
+            num_rejected,
+            input_batch.query_start_loc,
         )
 
         if self.speculator is not None:
@@ -1327,7 +1363,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
-            self.postprocess_pool(input_batch)
+            self.postprocess_num_computed_tokens(input_batch)
             return None
 
         assert self.pooling_runner is not None
@@ -1349,14 +1385,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
         )
 
-        self.postprocess_pool(input_batch)
+        self.postprocess_num_computed_tokens(input_batch)
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
 
-    def postprocess_pool(self, input_batch: InputBatch) -> None:
+    def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.
-        post_update_pool(
+        post_update_num_computed_tokens(
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens.gpu,
             input_batch.query_start_loc,

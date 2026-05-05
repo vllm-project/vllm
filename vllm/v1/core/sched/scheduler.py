@@ -366,21 +366,34 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            if (
-                request.num_output_placeholders > 0
-                # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
-                # Since output placeholders are also included in the computed tokens
-                # count, we subtract (num_output_placeholders - 1) to remove any draft
-                # tokens, so that we can be sure no further steps are needed even if
-                # they are all rejected.
-                and request.num_computed_tokens + 2 - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
-            ):
-                # Async scheduling: Avoid scheduling an extra step when we are sure that
-                # the previous step has reached request.max_tokens. We don't schedule
-                # partial draft tokens since this prevents uniform decode optimizations.
-                req_index += 1
-                continue
+            if request.num_output_placeholders > 0:
+                if (
+                    # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
+                    # Since output placeholders are also included in the computed tokens
+                    # count, we subtract (num_output_placeholders - 1) to remove any
+                    # draft tokens, so that we can be sure no further steps are needed
+                    # even if they are all rejected.
+                    request.num_computed_tokens + 2 - request.num_output_placeholders
+                    >= request.num_prompt_tokens + request.max_tokens
+                ):
+                    # Async scheduling: Avoid scheduling an extra step when we are sure
+                    # that the previous step has reached request.max_tokens. We don't
+                    # schedule partial draft tokens since this prevents uniform decode
+                    # optimizations.
+                    req_index += 1
+                    continue
+
+                if (
+                    self.use_pp
+                    and self.use_v2_model_runner
+                    and request.num_computed_tokens >= request.num_tokens
+                ):
+                    # PP+async: the sampled token from a decode step isn't available
+                    # to feed back as input until pp_size steps later, so throttle
+                    # decode scheduling for a request to once per cycle. Prefill
+                    # chunks are exempt because they don't depend on previous output.
+                    req_index += 1
+                    continue
 
             num_new_tokens = (
                 request.num_tokens_with_spec

@@ -464,14 +464,18 @@ def _post_update_kernel(
             count = tl.load(token_ptr)
             tl.store(token_ptr, count + 1)
 
-    query_start = tl.load(query_start_loc_ptr + req_id)
-    query_end = tl.load(query_start_loc_ptr + req_id + 1)
-    query_len = query_end - query_start
+    if query_start_loc_ptr is None:
+        query_len = 0
+    else:
+        query_start = tl.load(query_start_loc_ptr + req_id)
+        query_end = tl.load(query_start_loc_ptr + req_id + 1)
+        query_len = query_end - query_start
     num_rejected = tl.load(num_rejected_ptr + req_id)
 
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    num_computed += query_len - num_rejected
-    tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
+    computed_delta = query_len - num_rejected
+    if computed_delta != 0:
+        num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+        tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + computed_delta)
 
 
 def post_update(
@@ -490,7 +494,7 @@ def post_update(
     # [num_reqs]
     num_rejected: torch.Tensor,
     # [num_reqs + 1]
-    query_start_loc: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
     # [max_num_reqs, max_model_len]
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
@@ -516,7 +520,7 @@ def post_update(
 
 
 @triton.jit
-def _post_update_pool_kernel(
+def _post_update_num_computed_tokens_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
     query_start_loc_ptr,
@@ -531,7 +535,7 @@ def _post_update_pool_kernel(
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
 
 
-def post_update_pool(
+def post_update_num_computed_tokens(
     # [num_reqs]
     idx_mapping: torch.Tensor,
     # [max_num_reqs]
@@ -540,7 +544,7 @@ def post_update_pool(
     query_start_loc: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _post_update_pool_kernel[(num_reqs,)](
+    _post_update_num_computed_tokens_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
         query_start_loc,

@@ -65,6 +65,9 @@ class RequestState:
             self.max_num_reqs, 1, dtype=torch.int64, device=device
         )
 
+        # Max total seq length (prompt_len + max_tokens).
+        self.max_seq_len = np.zeros(self.max_num_reqs, dtype=np.int32)
+
         # Draft tokens.
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
@@ -87,12 +90,14 @@ class RequestState:
         prompt_len: int,
         all_token_ids: list[int],
         num_computed_tokens: int,
+        max_tokens: int = 0,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
 
+        self.max_seq_len[req_idx] = prompt_len + max_tokens
         self.prompt_len.np[req_idx] = prompt_len
         prefill_len = len(all_token_ids)
         assert prefill_len >= prompt_len, (
