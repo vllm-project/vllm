@@ -153,15 +153,19 @@ class EplbManager:
             "w2_input_scale",
         }
 
+        # Parameters of non-expert submodules that live inside runner (MoERunner).
+        # These must be excluded from EPLB weight rearrangement.
+        NON_EXPERT_PREFIXES = (
+            "runner._shared_experts.",
+            "runner.gate.",
+            "runner.routed_input_transform.",
+            "runner.routed_output_transform.",
+        )
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not (
-                name.startswith("_shared_experts.")
-                or name.startswith("_gate.")
-                or name.startswith("_routed_input_transform.")
-                or name.startswith("_routed_output_transform.")
-            )
+            if not name.startswith(NON_EXPERT_PREFIXES)
             and name not in NON_EXPERT_WEIGHTS
         )
 
@@ -170,10 +174,5 @@ class EplbManager:
             for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
-            and not name.startswith("_shared_experts.")
-            # exclude parameters from non-expert submodules,
-            # e.g. gate/shared/transforms.
-            and not name.startswith("_gate.")
-            and not name.startswith("_routed_input_transform.")
-            and not name.startswith("_routed_output_transform.")
+            and not name.startswith(NON_EXPERT_PREFIXES)
         ]
