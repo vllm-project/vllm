@@ -15,9 +15,6 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-
 
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
@@ -99,7 +96,8 @@ def indexer_k_quant_and_cache_triton(
     # In real layout, we store the first portion as kv cache value
     # and second portion as kv cache scale
     kv_cache = kv_cache.view(num_blocks, -1)
-    kv_cache_value = kv_cache[:, : block_size * head_dim]
+    fp8_dtype = current_platform.fp8_dtype()
+    kv_cache_value = kv_cache[:, : block_size * head_dim].view(fp8_dtype)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
     grid = (num_tokens,)
@@ -113,7 +111,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
-        "NHD",
+        "SHUFFLE",
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -214,7 +212,7 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
-        "NHD",
+        "SHUFFLE",
         head_dim,
         block_tile_size,
         head_tile_size,
@@ -327,32 +325,35 @@ def rocm_fp8_paged_mqa_logits(
     from vllm._aiter_ops import rocm_aiter_ops
 
     aiter_paged_mqa_logits_module = None
+    # if rocm_aiter_ops.is_enabled():
+    batch_size, next_n = q_fp8.shape[:2]
+    block_size = kv_cache_fp8.shape[1]
+
     if rocm_aiter_ops.is_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        deepgemm_fp8_paged_mqa_logits_stage1 = (
-            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
+        deepgemm_fp8_paged_mqa_logits = (
+            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
         )
-        batch_size, next_n, heads, _ = q_fp8.shape
-        actual_batch = batch_size * next_n
-        (out_qk,) = current_workspace_manager().get_simultaneous(
-            ((heads, actual_batch, max_model_len), torch.float32),
+        (out_logits,) = current_workspace_manager().get_simultaneous(
+            ((batch_size * next_n, max_model_len), torch.float32),
         )
-        # TODO: 1. Replace _stage1 and out_qk.sum with another fused variant;
-        #       2. Remove ChunkQ when AITER PR #2891 merged
-        out_qk.fill_(float("-inf"))
-        deepgemm_fp8_paged_mqa_logits_stage1(
+        out_logits.fill_(float("-inf"))
+        deepgemm_fp8_paged_mqa_logits(
             q_fp8,
             kv_cache_fp8,
             weights,
-            out_qk,
+            out_logits,
             context_lens,
             block_tables,
             max_model_len,
-            ChunkQ=heads,
+            ChunkK=256,
+            Preshuffle=block_size == 64,
+            KVBlockSize=block_size,
+            WavePerEU=2,
         )
-        return out_qk.sum(dim=0)
+        return out_logits
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -517,13 +518,11 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, 4), torch.uint8),
         )
 
-        # Decode out_qk buffer, used by rocm_fp8_paged_mqa_logits.
-        # actual_batch <= hidden_states.shape[0] == max_num_batched_tokens
-        heads = q_fp8.shape[1]
+        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
         workspace_manager.get_simultaneous(
-            ((heads, hidden_states.shape[0], max_model_len), torch.float32),
+            ((hidden_states.shape[0], max_model_len), torch.float32),
         )
-
         # Transient logits tensor peak memory, produced by
         # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
         # (decode). Prefill logits are bounded by
@@ -563,7 +562,7 @@ def rocm_aiter_sparse_attn_indexer(
     num_tokens = slot_mapping.shape[0]
     k = k[:num_tokens]
 
-    ops.indexer_k_quant_and_cache(
+    indexer_k_quant_and_cache_triton(
         k,
         kv_cache,
         slot_mapping,
@@ -584,13 +583,13 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-
-            ops.cp_gather_indexer_k_quant_cache(
+            cp_gather_indexer_k_quant_cache_triton(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
+                chunk.token_to_seq,
             )
 
             logits = rocm_fp8_mqa_logits(
