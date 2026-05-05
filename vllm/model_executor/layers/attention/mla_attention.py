@@ -259,7 +259,10 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     SparseMLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill import (
+    MLAPrefillBackend,
+    get_mla_prefill_backend,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -457,24 +460,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.prefill_backend = None
-        try:
-            from vllm.v1.attention.backends.mla.prefill import (
-                get_mla_prefill_backend,
-            )
-
-            prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-            self.prefill_backend = prefill_backend_cls(
-                num_heads=self.num_heads,
-                scale=self.scale,
-                kv_lora_rank=self.kv_lora_rank,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                vllm_config=vllm_config,
-            )
-        except ImportError:
-            pass
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        self.prefill_backend = prefill_backend_cls(
+            num_heads=self.num_heads,
+            scale=self.scale,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            vllm_config=vllm_config,
+        )
 
         self.kv_cache = torch.tensor([])
 
