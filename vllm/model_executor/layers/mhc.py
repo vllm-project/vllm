@@ -639,9 +639,9 @@ def mhc_fused_post_pre(
 
     fma_token_threshold = 16
     if num_tokens <= fma_token_threshold:
-        # TODO(gnovack): investigate tuning these heuristics
-        tile_n = 2 if num_tokens <= 8 else 3
-        n_splits = 4
+        # TODO(gnovack): investigate autotuning these heuristics
+        tile_n = 2 if num_tokens < 8 else 3
+        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
     else:
         # these number are from deepgemm kernel impl
         block_k = 64
