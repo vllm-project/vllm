@@ -77,8 +77,8 @@ class DbrxRouter(nn.Module):
 class DbrxExperts(RoutedExperts):
     def __init__(
         self,
-        config: DbrxConfig,
         *args,
+        config: DbrxConfig,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
