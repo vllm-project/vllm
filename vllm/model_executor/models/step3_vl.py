@@ -45,6 +45,11 @@ from vllm.transformers_utils.processors.step3_vl import (
     Step3VLProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
+)
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -478,13 +483,8 @@ class Step3VisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ):
         hidden_states = self.embeddings(pixel_values)
-        # TODO(Soya):
-        if encoder_metadata is None:
-            encoder_metadata = self.prepare_encoder_metadata(pixel_values)
-
         if self.use_data_parallel:
             hidden_states = run_dp_sharded_vision_model(hidden_states, self.transformer)
         else:
@@ -507,20 +507,6 @@ class Step3VLForConditionalGeneration(
         }
     )
 
-    # TODO(Soya): need to implement these func
-    # get_encoder_cudagraph_config
-    # get_input_modality
-    # get_max_frames_per_video
-    # get_encoder_cudagraph_budget_range
-    # get_encoder_cudagraph_num_items
-    # get_encoder_cudagraph_per_item_output_tokens
-    # get_encoder_cudagraph_per_item_input_sizes
-    # select_encoder_cudagraph_items
-    # prepare_encoder_cudagraph_capture_inputs
-    # prepare_encoder_cudagraph_replay_buffers
-    # encoder_cudagraph_forward
-    # encoder_eager_forward
-
     supports_encoder_tp_data = True
 
     @classmethod
@@ -537,6 +523,7 @@ class Step3VLForConditionalGeneration(
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.vllm_config = vllm_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         # NOTE: This behavior is consistent with the previous OOV handling,
@@ -737,3 +724,412 @@ class Step3VLForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    # =========================================================================
+    # CUDA Graph 支持 — 实现 SupportsEncoderCudaGraph Protocol
+    # =========================================================================
+
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        """
+        返回 Step3-VL encoder CUDA Graph 的配置。
+
+        Step3-VL 的 encoder 由 ViT + downsampler + projector 组成，输出为
+        未合并的 raw features，merge 在 graph replay 之后由
+        ``merge_encoder_cudagraph_output`` 完成。
+        """
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key_by_modality={
+                "image": "pixel_values",
+            },
+            # 只保留输入 pixtel 相关的 buffer_key。
+            # merge 所需的 indices 不在 graph 内完成，
+            # 而是在 replay 后的 merge_encoder_cudagraph_output 中使用
+            # 真实的 num_patches 按 item 逐项拼接。
+            buffer_keys=[
+                "pixel_values",
+                "patch_pixel_values",
+            ],
+            # Encoder 输出 hidden dim，等于 LLM 的 hidden_size
+            out_hidden_size=self.config.hidden_size,
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        """
+        根据 mm_kwargs 中的 key 判断当前输入的 modality。
+
+        Step3-VL 只支持 "image"，但保持此接口一致以便未来扩展。
+        """
+        # Step3-VL 只有 image modality，没有 video
+        if "pixel_values" in mm_kwargs or "image_grid_thw" in mm_kwargs:
+            return "image"
+        return "image"
+
+    def get_max_frames_per_video(self) -> int:
+        """
+        Step3-VL 暂不支持视频，此方法返回 0 占位。
+        """
+        return 0
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        """
+        返回 token budget 的有效范围。
+
+        - min_budget: Step3-VL 能处理的最小输出 token 数。
+          对于一张不切 patch 的小图（short < 728）：
+          只产生 1 个 image_feature (num_image_feature_size=169)，加上
+          patch_feature (num_patch_feature_size=81) 最多约 250。
+          取 256 作为保守下界。
+        - max_budget: 受调度器 max_num_batched_tokens 和 max_model_len 限制。
+        """
+        # 最小 budget：一张不切 patch 的小图产生的最少 token 数。
+        # num_image_feature_size=169 是 ViT 输出的图像特征 token 数，
+        # num_patch_feature_size=81 是每个 patch 的输出 token 数。
+        # 即使是最小的 patch count，总输出也在 169+81=250 以上。
+        # 但如果 num_patches=0（图像小于 728x728），就只有 169 个 image token。
+        min_budget = 169  # 最小图像的 image_feature token 数
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_num_patches_as_tensor(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """
+        从 mm_kwargs 中提取 num_patches，并确保为 torch.Tensor。
+
+        mm_kwargs 中的 num_patches 可能是 list[int]（由 image processor 产生），
+        也可能在 CUDA Graph replay 时以其他形式传入。
+        此方法统一转换为 int64 Tensor。
+        """
+        num_patches = mm_kwargs.get("num_patches")
+        if num_patches is None:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        if not isinstance(num_patches, torch.Tensor):
+            num_patches = torch.tensor(
+                num_patches, dtype=torch.long, device=self.device
+            )
+        return num_patches
+
+    def _compute_per_item_output_tokens(
+        self,
+        num_patches_list: list[int],
+    ) -> list[int]:
+        """
+        根据每个图像的 patch 数，计算该图像的输出 token 数。
+
+        计算公式：
+            output_tokens[i] = num_patches[i] * patch_feature_size + image_feature_size
+        """
+        vision_config = self.config.vision_config
+        num_patch_feature_size = getattr(vision_config, "num_patch_feature_size", 81)
+        num_image_feature_size = getattr(vision_config, "num_image_feature_size", 169)
+        return [
+            np * num_patch_feature_size + num_image_feature_size
+            for np in num_patches_list
+        ]
+
+    def get_encoder_cudagraph_num_items(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        """
+        返回当前 batch 中图像（item）的数量。
+
+        等于 num_patches 列表的长度。
+        """
+        num_patches = mm_kwargs.get("num_patches")
+        if num_patches is None:
+            return 0
+        if isinstance(num_patches, torch.Tensor):
+            return num_patches.shape[0]
+        return len(num_patches)
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        """
+        返回每个图像的输出 token 数列表，用于贪心打包（greedy packing）。
+        """
+        num_patches = mm_kwargs.get("num_patches", [])
+        if isinstance(num_patches, torch.Tensor):
+            num_patches = num_patches.tolist()
+        return self._compute_per_item_output_tokens(num_patches)
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        """
+        返回每个图像的输入 patch 数量列表。
+
+        用于 EncoderCudaGraphManager 计算 patch_pixel_values 的切分偏移。
+        这里每个图像的输入 size 即为 num_patches[i]。
+        """
+        num_patches = mm_kwargs.get("num_patches", [])
+        if isinstance(num_patches, torch.Tensor):
+            num_patches = num_patches.tolist()
+        return list(num_patches)
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        num_patches = mm_kwargs.get("num_patches", [])
+        if isinstance(num_patches, torch.Tensor):
+            num_patches = num_patches.tolist()
+
+        pixel_values = mm_kwargs.get("pixel_values")
+        patch_pixel_values = mm_kwargs.get("patch_pixel_values")
+        if len(indices) == 0:
+            return {
+                "pixel_values": (
+                    pixel_values[:0]
+                    if pixel_values is not None
+                    else torch.empty(0, dtype=torch.float32, device=self.device)
+                ),
+                "patch_pixel_values": (
+                    patch_pixel_values[:0]
+                    if patch_pixel_values is not None
+                    else torch.empty(0, dtype=torch.float32, device=self.device)
+                ),
+                "num_patches": [],
+            }
+        cum_patches = [0]
+        for np in num_patches:
+            cum_patches.append(cum_patches[-1] + np)
+
+        selected_pv = (
+            torch.cat([pixel_values[i].unsqueeze(0) for i in indices])
+            if pixel_values is not None
+            else torch.empty(0, dtype=torch.float32, device=self.device)
+        )
+
+        selected_patch_pv_list = []
+        for i in indices:
+            start = cum_patches[i]
+            end = cum_patches[i + 1]
+            if patch_pixel_values is not None and end > start:
+                selected_patch_pv_list.append(patch_pixel_values[start:end])
+        selected_patch_pv = (
+            torch.cat(selected_patch_pv_list)
+            if selected_patch_pv_list
+            else torch.empty(0, dtype=torch.float32, device=self.device)
+        )
+
+        selected_num_patches = [num_patches[i] for i in indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "patch_pixel_values": selected_patch_pv,
+            "num_patches": selected_num_patches,
+        }
+
+    def _get_capture_patch_config(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+    ) -> tuple[int, int, int]:
+        vision_config = self.config.vision_config
+        num_patch_feature_size = getattr(vision_config, "num_patch_feature_size", 81)
+        num_image_feature_size = getattr(vision_config, "num_image_feature_size", 169)
+
+        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+
+        max_num_patches_per_item = max(
+            1,
+            int(
+                math.ceil(
+                    (per_item_output - num_image_feature_size) / num_patch_feature_size
+                )
+            ),
+        )
+
+        max_total_patch_count = max_num_patches_per_item * max_batch_size
+
+        return per_item_output, max_num_patches_per_item, max_total_patch_count
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "EncoderCudaGraphCaptureInputs":
+        vision_config = self.config.vision_config
+
+        _, max_num_patches_per_item, max_total_patch_count = (
+            self._get_capture_patch_config(token_budget, max_batch_size)
+        )
+        dummy_pixel_values = torch.randn(
+            max_batch_size,
+            3,
+            vision_config.image_size,
+            vision_config.image_size,
+            device=device,
+            dtype=dtype,
+        )
+        dummy_patch_pixel_values = torch.randn(
+            max_total_patch_count,
+            3,
+            vision_config.patch_size,
+            vision_config.patch_size,
+            device=device,
+            dtype=dtype,
+        )
+
+        mm_kwargs = {
+            "pixel_values": dummy_pixel_values,
+            "patch_pixel_values": dummy_patch_pixel_values,
+        }
+        buffers = {
+            "pixel_values": dummy_pixel_values,
+            "patch_pixel_values": dummy_patch_pixel_values,
+        }
+
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs=mm_kwargs,
+            buffers=buffers,
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ) -> "EncoderCudaGraphReplayBuffers":
+        pixel_values = mm_kwargs.get("pixel_values")
+        patch_pixel_values = mm_kwargs.get("patch_pixel_values")
+
+        return EncoderCudaGraphReplayBuffers(
+            buffers={
+                "pixel_values": pixel_values,
+                "patch_pixel_values": patch_pixel_values,
+            }
+        )
+
+    def _encoder_forward_internal(
+        self,
+        pixel_values: torch.Tensor,
+        patch_pixel_values: torch.Tensor,
+        num_patches: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        image_features = self._get_vision_model_output(pixel_values)
+        image_features = self._process_image_features(image_features)
+        if patch_pixel_values.shape[0] > 0:
+            patch_image_features = self._get_vision_model_output(patch_pixel_values)
+            patch_image_features = self._process_image_features(patch_image_features)
+        else:
+            patch_image_features = None
+
+        merged_image_features: list[torch.Tensor] = []
+        cur_patch_idx = 0
+        for i in range(num_patches.shape[0]):
+            num_patch = int(num_patches[i].item())
+            cur_feature: list[torch.Tensor] = []
+            if num_patch > 0 and patch_image_features is not None:
+                patch_slice = patch_image_features[
+                    cur_patch_idx : cur_patch_idx + num_patch
+                ]
+                cur_feature.append(patch_slice.view(-1, patch_slice.shape[-1]))
+            cur_feature.append(image_features[i].view(-1, image_features.shape[-1]))
+            cur_patch_idx += num_patch
+            merged_image_features.append(
+                torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
+            )
+        return merged_image_features
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = buffers["pixel_values"]
+        patch_pixel_values = buffers["patch_pixel_values"]
+        image_features = self._get_vision_model_output(pixel_values)
+        image_features = self._process_image_features(image_features)
+
+        patch_features = self._get_vision_model_output(patch_pixel_values)
+        patch_features = self._process_image_features(patch_features)
+        H = image_features.shape[-1]
+        patch_flat = patch_features.view(-1, H)  # (P_total * NPFS, H)
+        image_flat = image_features.view(-1, H)  # (B * IMFS, H)
+
+        return torch.cat([patch_flat, image_flat], dim=0)
+
+    def merge_encoder_cudagraph_output(
+        self,
+        output: torch.Tensor,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        token_budget: int,
+    ) -> torch.Tensor:
+        vision_config = self.config.vision_config
+        NPFS = getattr(vision_config, "num_patch_feature_size", 81)
+        IMFS = getattr(vision_config, "num_image_feature_size", 169)
+        H = self.config.hidden_size
+        _, max_np_per_item, max_total_patches = self._get_capture_patch_config(
+            token_budget, max_batch_size
+        )
+        B = max_batch_size
+        split_point = max_total_patches * NPFS
+        patch_features = output[:split_point].view(max_total_patches, NPFS, H)
+        image_features = output[split_point : split_point + B * IMFS].view(B, IMFS, H)
+
+        num_patches = mm_kwargs.get("num_patches", [])
+        if isinstance(num_patches, torch.Tensor):
+            num_patches = num_patches.tolist()
+        merged: list[torch.Tensor] = []
+        cur_patch = 0
+        for i in range(len(num_patches)):
+            np = num_patches[i]
+            cur_feature: list[torch.Tensor] = []
+            if np > 0:
+                patch_slice = patch_features[cur_patch : cur_patch + np].view(-1, H)
+                cur_feature.append(patch_slice)
+            cur_feature.append(image_features[i].view(-1, H))
+            merged.append(torch.cat(cur_feature))
+            # Advance by actual patch count — patches are contiguous in the
+            # graph output (not strided by max_np_per_item).
+            cur_patch += np
+
+        return torch.cat(merged, dim=0) if merged else output.new_empty(0, H)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """
+        当输入超出所有 token budget 时使用的 fallback forward（eager 模式）。
+
+        不经过 CUDA Graph，直接执行完整的 vision encoder forward + merge。
+        """
+        image_input = self._parse_and_validate_image_input(**mm_kwargs)
+        if image_input is None:
+            return torch.empty(0, dtype=self.dtype, device=self.device)
+
+        num_patches = self._get_num_patches_as_tensor(mm_kwargs)
+
+        if image_input["type"] == "image_embeds":
+            return image_input["image_embeds"]
+
+        pixel_values = image_input["pixel_values"]
+        patch_pixel_values = image_input["patch_pixel_values"]
+
+        merged = self._encoder_forward_internal(
+            pixel_values, patch_pixel_values, num_patches
+        )
+
+        return torch.cat(merged)

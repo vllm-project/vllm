@@ -34,6 +34,13 @@ class Step3VisionEncoderConfig(PretrainedConfig):
         self.patch_image_size = patch_image_size
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
+        # Encoder output token dimensions per image / per patch.
+        # These are architectural constants matching Step3VLImageProcessor defaults.
+        # num_image_feature_size: ViT output tokens for full resized image (728x728)
+        # num_patch_feature_size: ViT output tokens for each patch (504x504)
+        # If present in HuggingFace config JSON, use that value; otherwise default.
+        self.num_image_feature_size = kwargs.pop("num_image_feature_size", 169)
+        self.num_patch_feature_size = kwargs.pop("num_patch_feature_size", 81)
         super().__init__(**kwargs)
 
 

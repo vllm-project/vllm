@@ -400,6 +400,17 @@ class EncoderCudaGraphManager:
                     batch_mm_kwargs, token_budget, replay.buffers
                 )
                 assert output is not None
+
+                # Optional: post-process CUDA graph output for models that
+                # output raw features (e.g. Step3-VL) and need merge outside graph.
+                if hasattr(self.model, "merge_encoder_cudagraph_output"):
+                    output = self.model.merge_encoder_cudagraph_output(
+                        output,
+                        batch_mm_kwargs,
+                        self.max_batch_size,
+                        token_budget,
+                    )
+
                 self._scatter_output_slices(
                     output,
                     batch_orig_indices,
