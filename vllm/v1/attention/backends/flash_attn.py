@@ -638,14 +638,6 @@ class FlashAttentionImpl(AttentionImpl):
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
         )
-        # head_size > 256 requires FA4 on SM90+; force upgrade from FA3
-        if (
-            head_size > 256
-            and self.vllm_flash_attn_version == 3
-            and current_platform.is_cuda()
-            and current_platform.is_device_capability_family(90)
-        ):
-            self.vllm_flash_attn_version = 4
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
