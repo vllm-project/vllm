@@ -204,7 +204,7 @@ def rocm_aiter_fused_experts(
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
-    elif activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUSTEP):
+    elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
@@ -364,7 +364,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
         ]
 
     @staticmethod

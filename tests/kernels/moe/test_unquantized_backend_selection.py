@@ -5,9 +5,13 @@ from unittest.mock import patch
 import pytest
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     select_unquantized_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    AiterExperts,
 )
 from vllm.platforms import current_platform
 
@@ -114,6 +118,42 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 
         assert selected_backend == UnquantizedMoeBackend.AITER
         assert expert_cls is not None
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_fused_moe_enabled",
+    return_value=True,
+)
+def test_select_rocm_swiglustep_falls_back_from_explicit_aiter(
+    mock_aiter_enabled,
+    monkeypatch,
+):
+    """AITER has no native SWIGLUSTEP activation, so ROCm should use Triton."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+
+    with (
+        patch.object(current_platform, "is_cuda", return_value=False),
+        patch.object(current_platform, "is_rocm", return_value=True),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "is_cuda_alike", return_value=True),
+    ):
+        moe_config = make_dummy_moe_config()
+        moe_config.activation = MoEActivation.SWIGLUSTEP
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config,
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.TRITON
+        assert experts_cls is not None
+
+
+def test_aiter_does_not_claim_swiglustep_support():
+    assert not AiterExperts._supports_activation(MoEActivation.SWIGLUSTEP)
 
 
 @patch(
