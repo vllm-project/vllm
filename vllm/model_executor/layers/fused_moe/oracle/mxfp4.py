@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
     mxfp4_mxfp8_moe_quant_config,
+    mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
@@ -26,9 +27,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_m
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8StaticTensorSym,
     kMxfp4Static,
     kMxfp8Dynamic,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
@@ -59,8 +62,9 @@ class Mxfp4MoeBackend(Enum):
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
-    # ROCm AITER
-    AITER = "AITER"
+    # ROCm AITER backends
+    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
+    AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -70,6 +74,13 @@ class Mxfp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     # Humming
     HUMMING = "HUMMING"
+
+
+# AITER backends group
+AITER_BACKENDS = (
+    Mxfp4MoeBackend.AITER_MXFP4_BF16,
+    Mxfp4MoeBackend.AITER_MXFP4_FP8,
+)
 
 
 # Backends that share the same TRTLLM weight format
@@ -159,12 +170,19 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
-    elif backend == Mxfp4MoeBackend.AITER:
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             AiterExperts,
         )
 
         return [AiterExperts]
+
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+            AiterW4A8ExpertsMonolithic,
+        )
+
+        return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
@@ -194,7 +212,8 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         "triton_unfused": Mxfp4MoeBackend.TRITON_UNFUSED,
         "humming": Mxfp4MoeBackend.HUMMING,
         "marlin": Mxfp4MoeBackend.MARLIN,
-        "aiter": Mxfp4MoeBackend.AITER,
+        "aiter": Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        "aiter_mxfp4_fp8": Mxfp4MoeBackend.AITER_MXFP4_FP8,
         "xpu": Mxfp4MoeBackend.XPU,
         "emulation": Mxfp4MoeBackend.EMULATION,
     }
@@ -213,7 +232,8 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER,
+        Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         # TRITON_UNFUSED has bug with MTP support
@@ -254,16 +274,28 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
         return kMxfp8Dynamic
-    return None
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
+        return kFp8StaticTensorSym
+    return None  # BF16 activation
 
 
-def select_gpt_oss_mxfp4_moe_backend(
+def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
+    activation_key: QuantKey | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary MXFP4 MoE backend.
+
+    Args:
+        config: MoE configuration
+        activation_key: Optional activation quantization key. If provided,
+            overrides the default activation key for backend selection.
+            Use kFp8StaticTensorSym for W4A8 scheme.
+
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    # If activation_key is explicitly provided (e.g., W4A8), use it
+    requested_activation_key = activation_key
     device_capability = current_platform.get_device_capability()
     triton_kernels_supported = (
         has_triton_kernels()
@@ -332,11 +364,17 @@ def select_gpt_oss_mxfp4_moe_backend(
             and requested_backend == Mxfp4MoeBackend.MARLIN
         ):
             requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
+        # Use requested_activation_key if provided, otherwise use backend default
+        act_key = (
+            requested_activation_key
+            if requested_activation_key is not None
+            else _backend_activation_key(requested_backend)
+        )
         return _return_or_raise(
             requested_backend,
             config,
             kMxfp4Static,
-            _backend_activation_key(requested_backend),
+            act_key,
             activation_format,
         )
 
@@ -408,10 +446,15 @@ def select_gpt_oss_mxfp4_moe_backend(
         )
 
     for backend in AVAILABLE_BACKENDS:
-        activation_key = _backend_activation_key(backend)
+        # Use requested_activation_key if provided, otherwise use backend default
+        act_key = (
+            requested_activation_key
+            if requested_activation_key is not None
+            else _backend_activation_key(backend)
+        )
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
+                k_cls, config, kMxfp4Static, act_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -438,7 +481,7 @@ def select_gpt_oss_mxfp4_moe_backend(
     return Mxfp4MoeBackend.NONE, None
 
 
-def select_mxfp4_moe_backend(
+def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
@@ -836,7 +879,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 w2_bias,
             )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
         if w13_bias is not None:
@@ -894,6 +937,63 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_weight,
             shuffled_w13_scale,
             shuffled_w2_scale,
+            w13_bias,
+            w2_bias,
+        )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
+        # W4A8: MXFP4 weights + static FP8 activations (triton kernel)
+        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+        from triton_kernels.numerics import InFlexData
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.to(torch.float32)
+
+        # Process static FP8 input scales (reduce to scalar, warn if not uniform)
+        w13_input_scale = layer.w13_input_scale
+        w2_input_scale = layer.w2_input_scale
+        if w13_input_scale is None or w2_input_scale is None:
+            raise ValueError(
+                "W4A8 (AITER_MXFP4_FP8) requires static input scales, but found "
+                "w13_input_scale or w2_input_scale is None."
+            )
+        if not all_close_1d(w13_input_scale) or not all_close_1d(w2_input_scale):
+            logger.warning_once(
+                "Found input_scales that are not equal for "
+                "fp8 MoE layer. Using the maximum across experts "
+                "for each layer."
+            )
+        w13_input_scale = w13_input_scale.max().to(torch.float32)
+        w2_input_scale = w2_input_scale.max().to(torch.float32)
+
+        # Swizzle weights for GFX950
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(w13_weight, w13_weight_scale)
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(w2_weight, w2_weight_scale)
+
+        # Create InFlexData for activation scales
+        lhs_data13 = InFlexData(scale=w13_input_scale)
+        lhs_data2 = InFlexData(scale=w2_input_scale)
+
+        # Create PrecisionConfig with both weight and activation info
+        w13_precision_config = PrecisionConfig(
+            weight_scale=w13_scale,
+            flex_ctx=FlexCtx(rhs_data=w13_flex, lhs_data=lhs_data13),
+        )
+        w2_precision_config = PrecisionConfig(
+            weight_scale=w2_scale,
+            flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
+        )
+
+        del layer.w13_weight
+        del layer.w2_weight
+
+        return (
+            w13_weight,
+            w2_weight,
+            w13_precision_config,
+            w2_precision_config,
             w13_bias,
             w2_bias,
         )
@@ -1220,6 +1320,8 @@ def make_mxfp4_moe_quant_config(
     swiglu_limit: float | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
@@ -1262,6 +1364,17 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
+        # W4A8: MXFP4 weights + static FP8 activations
+        return mxfp4_w4a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            block_shape=None,
+        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
@@ -1269,7 +1382,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER,
+        Mxfp4MoeBackend.AITER_MXFP4_BF16,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
