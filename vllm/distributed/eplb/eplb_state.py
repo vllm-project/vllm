@@ -210,6 +210,14 @@ class EplbModelState:
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
+    pending_initial_mapping_rearrange: bool = False
+    """
+    True iff this model's physical expert weights still need to be moved to
+    match `physical_to_logical_map` (set when an `initial_mapping_path` was
+    loaded). Cleared by `apply_pending_initial_mapping_rearrange`, which the
+    runner invokes once at startup, after `profile_run` and before warmup
+    / cudagraph capture.
+    """
 
 
 class EplbState:
@@ -286,10 +294,6 @@ class EplbState:
         self._expert_load_stats_file: io.TextIOWrapper | None = None
         """
         Open JSONL file handle for expert-load stats, if enabled.
-        """
-        self._pending_initial_mapping_rearrange: bool = False
-        """
-        Whether initial_mapping_path needs one startup weight rearrangement.
         """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
@@ -539,6 +543,7 @@ class EplbState:
         max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
 
         mapping_path = self.parallel_config.eplb_config.initial_mapping_path
+        pending_initial_mapping_rearrange = mapping_path is not None
         if mapping_path is not None:
             (
                 physical_to_logical_map,
@@ -554,13 +559,13 @@ class EplbState:
             )
             # CORRECTNESS: the model has just been loaded with weights in
             # identity order (phys slot i holds logical expert i, plus
-            # redundant copies of the first few experts). The JSONL mapping above
-            # swapped the maps but did NOT move the physical weights, so
-            # the router would end up dispatching tokens for logical X to
-            # the slot of some other logical Y. Defer the physical
-            # rearrangement to the first profile step, where NCCL is
-            # ready and the kernel already exists.
-            self._pending_initial_mapping_rearrange = True
+            # redundant copies of the first few experts). The JSONL mapping
+            # above swapped the maps but did NOT move the physical weights,
+            # so the router would dispatch tokens for logical X to the slot
+            # of some other logical Y. The runner calls
+            # `apply_pending_initial_mapping_rearrange` once at startup,
+            # AFTER profile_run completes, so this all_gather doesn't bloat
+            # the peak-memory measurement and shrink the KV cache budget.
         else:
             physical_to_logical_map_list = (
                 EplbState.build_initial_global_physical_to_logical_map(
@@ -671,15 +676,27 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            pending_initial_mapping_rearrange=pending_initial_mapping_rearrange,
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
-    def _apply_initial_mapping_rearrange(self, ep_group: ProcessGroup) -> None:
-        """Move startup weights from default layout to initial_mapping_path."""
+    def apply_pending_initial_mapping_rearrange(self, ep_group: ProcessGroup) -> None:
+        """Move startup weights for any model whose initial_mapping_path was
+        loaded but not yet applied. Per-model flag is cleared on completion.
+
+        Must be called once after `profile_run` and before warmup /
+        cudagraph capture, so the all_gather buffer doesn't inflate the
+        peak-memory profiling result and the captured graphs see the
+        rearranged weights. Iteration order over `model_states` is the
+        dict insertion order, identical across ranks, so collective entry
+        is symmetric and cannot deadlock.
+        """
         ep_size = ep_group.size()
         ep_rank = ep_group.rank()
         for state in self.model_states.values():
+            if not state.pending_initial_mapping_rearrange:
+                continue
             num_physical = state.model.num_physical_experts
             num_local = num_physical // ep_size
             local_start = ep_rank * num_local
@@ -705,6 +722,8 @@ class EplbState:
                     gathered = torch.cat(gather_list, dim=0)
                     weight.copy_(gathered[src_indices])
                     del gather_list, gathered
+
+            state.pending_initial_mapping_rearrange = False
 
     def _write_expert_load_stats(
         self,
@@ -784,13 +803,6 @@ class EplbState:
         ep_group = get_ep_group().device_group
         if is_profile:
             self.rearrange(is_profile=True)
-            # Static initial mapping: physically move expert weights to
-            # match the JSONL mapping that was loaded in add_model. Only
-            # runs once (guarded by the flag), right after the dummy
-            # rearrange set up the NCCL buffers.
-            if self._pending_initial_mapping_rearrange:
-                self._apply_initial_mapping_rearrange(ep_group)
-                self._pending_initial_mapping_rearrange = False
             return
 
         if is_dummy:

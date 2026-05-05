@@ -3106,6 +3106,23 @@ class GPUModelRunner(
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
+    def eplb_apply_pending_initial_mapping(self) -> None:
+        """One-shot startup hook: move expert weights to the offline mapping
+        layout. Must be called AFTER profile_run / KV-cache sizing and
+        BEFORE warmup / cudagraph capture, so the all_gather buffer does
+        not bloat the peak-memory profiling result and the captured graphs
+        observe the rearranged weights.
+        """
+        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
+            return
+        if self.eplb_state is None:
+            return
+        from vllm.distributed.parallel_state import get_ep_group
+
+        self.eplb_state.apply_pending_initial_mapping_rearrange(
+            get_ep_group().device_group
+        )
+
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,

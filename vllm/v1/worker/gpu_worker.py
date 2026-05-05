@@ -550,6 +550,13 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        # Move expert weights to the offline EPLB mapping layout (if any)
+        # before warmup / cudagraph capture so captured graphs see the
+        # rearranged weights, and so the all_gather doesn't bloat the
+        # peak-memory profiling result already captured by
+        # determine_available_memory().
+        self.model_runner.eplb_apply_pending_initial_mapping()
+
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
