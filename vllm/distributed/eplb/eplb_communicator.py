@@ -15,7 +15,7 @@ from torch.distributed import (
 )
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.pynccl_wrapper import (
+from vllm.distributed.device_communicators.pynccl_wrapper_legacy import (
     ncclDataTypeEnum,
 )
 from vllm.distributed.parallel_state import GroupCoordinator, is_local_first_rank

@@ -10,6 +10,8 @@ variable VLLM_DISABLE_NCCL4PY=1 to use the legacy ctypes-based implementation.
 """
 
 # ===================== import region =====================
+import contextlib
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
@@ -180,7 +182,7 @@ class PyNcclCommunicator:
         self.device = device
 
         # Initialize NCCL communicator on the specified device
-        with torch.cuda.device(device):
+        with torch.accelerator.device_index(device.index):
             self.comm = nccl.Communicator.init(
                 nranks=self.world_size,
                 rank=self.rank,
@@ -452,14 +454,12 @@ class PyNcclCommunicator:
             try:
                 self.deregister_comm_window(window)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     logger.warning(
                         "Error deregistering NCCL window during cleanup: %s",
                         window,
                         exc_info=True,
                     )
-                except Exception:
-                    pass
 
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:
@@ -555,7 +555,7 @@ if envs.VLLM_DISABLE_NCCL4PY:
             assert isinstance(device, torch.device)
             self.device = device
 
-            with torch.cuda.device(device):
+            with torch.accelerator.device_index(device.index):
                 self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                     self.world_size, self.unique_id, self.rank
                 )

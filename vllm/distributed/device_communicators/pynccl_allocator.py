@@ -51,6 +51,7 @@ def _ensure_nccl_symm_mem_backend() -> None:
 
     try:
         from torch.distributed._symmetric_memory import set_backend
+
         set_backend("NCCL")
     except Exception as e:
         _nccl_symm_mem_init_failed = True
@@ -92,7 +93,8 @@ def get_nccl_mem_pool():
         if not _nccl_symm_mem_init_failed:
             try:
                 from torch.distributed._symmetric_memory import get_mem_pool
-                device = torch.cuda.current_device()
+
+                device = torch.accelerator.current_device_index()
                 _mem_pool = get_mem_pool(device)
             except Exception as e:
                 _nccl_symm_mem_init_failed = True
@@ -174,6 +176,4 @@ class nccl_symm_mem_context:
                 )
                 _registered_base_addrs.add(segment["address"])
         if self.is_graph_capture:
-            torch._C._cuda_beginAllocateCurrentThreadToPool(
-                self.device, _graph_pool_id
-            )
+            torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)
