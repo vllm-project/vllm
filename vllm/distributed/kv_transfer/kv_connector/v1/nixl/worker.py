@@ -700,6 +700,7 @@ class NixlConnectorWorker:
         started), or ``None`` if the handshake already completed
         successfully.  Callers can attach per-request callbacks to the
         returned future.
+        Failures to handshake are logged and the request is marked as failed.
         """
         with self._handshake_lock:
             if engine_id in self._remote_agents:
@@ -1676,7 +1677,7 @@ class NixlConnectorWorker:
         to track which workers are done.
         """
         assert self.transfer_topo is not None
-        done_sending = self._get_new_notifs()  # D HAS NO NOTIFS RIGHT NOW
+        done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
         # add requests that skipped transfer to done_recving
@@ -1954,18 +1955,19 @@ class NixlConnectorWorker:
         Send heartbeat notifications to remote engines, extending lease on KV blocks.
         """
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
-            remote_agents = self._remote_agents.get(engine_id)
-            if remote_agents is None:
-                # Proactive handshake (this request may still be in waiting queue) so
-                # the next heartbeat can go through.
+            # Proactive handshake (this request may still be in waiting queue) so
+            # the **next** heartbeat for this remote can go through.
+            if (
                 self._ensure_handshake(
                     engine_id, hb_info.host, hb_info.port, hb_info.tp_size
                 )
-                continue
+                is not None
+            ):
+                continue  # handshake is still pending
 
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
-            for agent_name in remote_agents.values():
+            for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:

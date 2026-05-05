@@ -190,15 +190,14 @@ class NixlConnectorScheduler:
             v is not None
             for v in (remote_engine_id, remote_request_id, host, port, tp_size)
         ):
-            self._heartbeat_by_engine.setdefault(
-                remote_engine_id,
-                HeartbeatInfo(
+            if remote_engine_id not in self._heartbeat_by_engine:
+                self._heartbeat_by_engine[remote_engine_id] = HeartbeatInfo(
                     req_ids=set(),
                     host=host,
                     port=port,
                     tp_size=tp_size,
-                ),
-            ).req_ids.add(remote_request_id)
+                )
+            self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
             self._heartbeat_req_engine[request.request_id] = (
                 remote_engine_id,
                 remote_request_id,
