@@ -7,6 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Any
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -54,6 +55,7 @@ class StreamState:
 
     reasoning_ended: bool = False
     tool_call_text_started: bool = False
+    prompt_reasoning_checked: bool = False
     previous_text: str = ""
     previous_token_ids: list[int] = field(default_factory=list)
     history_tool_call_cnt: int = 0
@@ -645,6 +647,24 @@ class DelegatingParser(Parser):
             return True
         return state.reasoning_ended
 
+    def _expect_streamed_thinking_blocks(self) -> bool:
+        """True when chat template kwargs say the model emits thinking in outputs.
+
+        Mirrors ``DeepSeekV3ReasoningParser`` so multi-turn DeepSeek keeps streaming
+        reasoning extraction while Qwen-style ``thinking=false`` + tools can still
+        use ``is_reasoning_end(prompt)`` to skip empty prefilled think spans.
+        """
+        kwargs = getattr(self, "_chat_template_kwargs", None)
+        if kwargs is None:
+            return False
+        return bool(kwargs.get("thinking")) or bool(kwargs.get("enable_thinking"))
+
+    def _should_prefill_reasoning_ended_from_prompt(self) -> bool:
+        """Whether to apply ``is_reasoning_end`` on ``prompt_token_ids``."""
+        if self._tool_parser is None:
+            return True
+        return not self._expect_streamed_thinking_blocks()
+
     def parse_delta(
         self,
         delta_text: str,
@@ -653,6 +673,19 @@ class DelegatingParser(Parser):
         prompt_token_ids: list[int] | None = None,
     ) -> DeltaMessage | None:
         state = self._stream_state
+
+        # GitHub #40801: ``is_reasoning_end(full_prompt)`` sees prior turns'
+        # ``</think>`` and must not pre-mark reasoning ended when the
+        # model still emits thinking (merged ``thinking`` / ``enable_thinking``).
+        # When thinking is off + tools (e.g. Qwen), keep the prompt shortcut so the
+        # first tokens route to content/tool parsing instead of ``reasoning=``.
+        if not state.prompt_reasoning_checked and prompt_token_ids is not None:
+            state.prompt_reasoning_checked = True
+            if (
+                self._should_prefill_reasoning_ended_from_prompt()
+                and self.is_reasoning_end(prompt_token_ids)
+            ):
+                state.reasoning_ended = True
 
         current_text = state.previous_text + delta_text
         current_token_ids = state.previous_token_ids + delta_token_ids
@@ -733,6 +766,11 @@ class _WrappedParser(DelegatingParser):
         self, tokenizer: TokenizerLike, tools: list[Tool] | None = None, **kwargs
     ):
         super().__init__(tokenizer)
+        # Merged request + server defaults (see OpenAIServingChat); used to gate
+        # prompt-level reasoning_ended (direction-A fix for #40801 vs Qwen tools).
+        self._chat_template_kwargs: dict[str, Any] | None = kwargs.get(
+            "chat_template_kwargs"
+        )
         # Instantiate the underlying parsers from class attributes
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
