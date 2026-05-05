@@ -246,7 +246,7 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
         return torch.empty(*args, dtype=torch.int32, device="cuda", **kwargs)
 
 
-def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
+def fx_view_to_reshape(gm: fx.GraphModule) -> None:
     from torch._inductor.fx_passes.post_grad import view_to_reshape
 
     view_to_reshape(gm)
@@ -322,7 +322,7 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
     @staticmethod
     def _trace_fn(*args: Any, **kwargs: Any) -> fx.GraphModule:
         gm = pm.fwd_only(*args, **kwargs)
-        _fx_view_to_reshape(gm)
+        fx_view_to_reshape(gm)
         _remove_noop_permutes(gm)
         return gm
 
