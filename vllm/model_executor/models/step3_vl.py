@@ -583,19 +583,6 @@ class Step3VLForConditionalGeneration(
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def get_encoder_cudagraph_config(self):
-        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
-
-        return EncoderCudaGraphConfig(
-            modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
-            buffer_keys=[],
-            out_hidden_size=self.config.vision_config.output_hidden_size,
-        )
-
-    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
-        return "image"
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Step3VLImageInputs | None:
@@ -981,11 +968,12 @@ class Step3VLForConditionalGeneration(
             device=device,
             dtype=dtype,
         )
+        patch_img_size = getattr(vision_config, "patch_image_size", 504)
         dummy_patch_pixel_values = torch.randn(
             max_total_patch_count,
             3,
-            vision_config.patch_size,
-            vision_config.patch_size,
+            patch_img_size,
+            patch_img_size,
             device=device,
             dtype=dtype,
         )
