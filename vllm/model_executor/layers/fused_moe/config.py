@@ -1307,9 +1307,11 @@ class FusedMoEConfig:
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
 
-        if not self.is_act_and_mul and not current_platform.is_cuda_alike():
+        if not self.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA, XPU and ROCm for now"
             )
 
     @property
