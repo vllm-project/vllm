@@ -90,7 +90,11 @@ class RMSNorm(CustomOp):
                 x,
                 self.weight.data if self.pass_weight else None,
                 self.variance_epsilon,
-                self.variance_size_override,
+                *(
+                    (self.variance_size_override,)
+                    if self.variance_size_override is not None
+                    else ()
+                ),
             )
         else:
             return ir.ops.fused_add_rms_norm.maybe_inplace(
@@ -98,7 +102,11 @@ class RMSNorm(CustomOp):
                 residual,
                 self.weight.data if self.pass_weight_add else None,
                 self.variance_epsilon,
-                self.variance_size_override,
+                *(
+                    (self.variance_size_override,)
+                    if self.variance_size_override is not None
+                    else ()
+                ),
             )
 
     def forward_cuda(
