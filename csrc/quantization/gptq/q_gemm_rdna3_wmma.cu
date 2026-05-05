@@ -220,13 +220,10 @@ __host__ __device__ static inline int compute_wmma_k_split(int size_k) {
 //                                64×32 for v4, 64×64 for v5)
 //
 // Returns: gridDim.z divisor (1, 2, or 4), respecting K-divisibility.
-__host__ __device__ static inline int compute_wmma_k_split_mn(int size_m,
-                                                              int size_n,
-                                                              int size_k,
-                                                              int m_tile,
-                                                              int n_tile) {
-  const int blocks_xy = ((size_n + n_tile - 1) / n_tile) *
-                        ((size_m + m_tile - 1) / m_tile);
+__host__ __device__ static inline int compute_wmma_k_split_mn(
+    int size_m, int size_n, int size_k, int m_tile, int n_tile) {
+  const int blocks_xy =
+      ((size_n + n_tile - 1) / n_tile) * ((size_m + m_tile - 1) / m_tile);
   // Target: enough blocks to keep ~2× oversubscription on 96 CUs / 3072
   // wave slots at 4 waves/block ⇒ ~1500 blocks no-split.
   constexpr int kTargetBlocksXY = 1500;
@@ -851,7 +848,8 @@ __global__ void gemm_q4_wmma_kernel_v3(
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
-  const int m_tile = blockIdx.y * 64;  // 64-row stride per block (4 waves × 16M)
+  const int m_tile =
+      blockIdx.y * 64;  // 64-row stride per block (4 waves × 16M)
   const int n_tile = blockIdx.x * 16;
   if (m_tile >= size_m || n_tile >= size_n) return;
 
@@ -1117,7 +1115,7 @@ __global__ void gemm_q4_wmma_kernel_v4(
   auto dequant_into = [&](int buf, int k_tile) {
     if (wave_id >= 2) return;
 
-    const int my_n_local = lane_lo;             // 0..15 (within wave's N-half)
+    const int my_n_local = lane_lo;  // 0..15 (within wave's N-half)
     const int my_n_in_tile = wave_id * 16 + my_n_local;  // 0..31 (in 32N tile)
     const int my_k_octet = lane_hi;
     const int actual_n = n_tile + my_n_in_tile;
@@ -1351,7 +1349,7 @@ __global__ void gemm_q4_wmma_kernel_v5(
   // participate; wave w covers n_in_tile in [16w..16w+15], k_oct in {0,1}
   // — 32 slots per wave (16 N-cols × 2 K-octets), perfect 32-lane fit.
   auto dequant_into = [&](int buf, int k_tile) {
-    const int my_n_local = lane_lo;             // 0..15 within wave
+    const int my_n_local = lane_lo;                      // 0..15 within wave
     const int my_n_in_tile = wave_id * 16 + my_n_local;  // 0..63
     const int my_k_octet = lane_hi;
     const int actual_n = n_tile + my_n_in_tile;

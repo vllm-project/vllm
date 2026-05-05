@@ -587,6 +587,7 @@ def unified_attention(
     # stays an integer.
     if current_platform.is_rocm() and max_seqlen_q > 1:
         from vllm.platforms.rocm import on_gfx11
+
         if on_gfx11() and BLOCK_M == 16:
             BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
@@ -677,6 +678,7 @@ def unified_attention(
     launch_kwargs: dict[str, int] = {}
     if not use_3d and current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx11
+
         if on_gfx11():
             launch_kwargs["num_warps"] = 2
             launch_kwargs["num_stages"] = 1

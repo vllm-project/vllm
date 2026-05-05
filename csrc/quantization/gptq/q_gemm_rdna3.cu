@@ -448,8 +448,8 @@ __global__ void gemm_q4_kernel_rdna3(
 #pragma unroll
         for (int b = 0; b < 4; ++b) {
           sum_a = __builtin_amdgcn_fdot2_f32_bf16(
-              *((bf16x2_t*)(&a_pack.f[b])),
-              *((const bf16x2_t*)&BF16_ONES), sum_a, /*clamp=*/false);
+              *((bf16x2_t*)(&a_pack.f[b])), *((const bf16x2_t*)&BF16_ONES),
+              sum_a, /*clamp=*/false);
         }
 
         // unroll 1 keeps q_pack alive only one col at a time (8 fp32 VGPRs
@@ -472,8 +472,8 @@ __global__ void gemm_q4_kernel_rdna3(
 #pragma unroll
           for (int b = 0; b < 4; ++b) {
             partial = __builtin_amdgcn_fdot2_f32_bf16(
-                *((bf16x2_t*)(&a_pack.f[b])),
-                *((bf16x2_t*)(&q_pack.f[b])), partial, /*clamp=*/false);
+                *((bf16x2_t*)(&a_pack.f[b])), *((bf16x2_t*)(&q_pack.f[b])),
+                partial, /*clamp=*/false);
           }
 
           // block_c += y_b_f * partial + z_b_f * sum_a
@@ -503,9 +503,10 @@ __global__ void gemm_q4_kernel_rdna3(
         uint32_t w[4];
         __builtin_memcpy(w, &b_w[j], sizeof(int4));
 
-        // Load M_COUNT × 8 bf16 activations as 4 uint32s each into pack4 unions.
-        // Stored as uint32 to keep IR-level types opaque (defeats InstCombine
-        // fold). At M_COUNT=8 this is 32 fp32 VGPRs — within RDNA3 budget.
+        // Load M_COUNT × 8 bf16 activations as 4 uint32s each into pack4
+        // unions. Stored as uint32 to keep IR-level types opaque (defeats
+        // InstCombine fold). At M_COUNT=8 this is 32 fp32 VGPRs — within RDNA3
+        // budget.
         pack4 a_pack[M_COUNT];
 #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
@@ -524,9 +525,9 @@ __global__ void gemm_q4_kernel_rdna3(
           float s = 0.0f;
 #pragma unroll
           for (int b = 0; b < 4; ++b) {
-            s = __builtin_amdgcn_fdot2_f32_bf16(
-                *((bf16x2_t*)(&a_pack[m].f[b])),
-                *((const bf16x2_t*)&BF16_ONES), s, /*clamp=*/false);
+            s = __builtin_amdgcn_fdot2_f32_bf16(*((bf16x2_t*)(&a_pack[m].f[b])),
+                                                *((const bf16x2_t*)&BF16_ONES),
+                                                s, /*clamp=*/false);
           }
           sum_a[m] = s;
         }
@@ -549,13 +550,14 @@ __global__ void gemm_q4_kernel_rdna3(
 #pragma unroll
             for (int b = 0; b < 4; ++b) {
               partial = __builtin_amdgcn_fdot2_f32_bf16(
-                  *((bf16x2_t*)(&a_pack[m].f[b])),
-                  *((bf16x2_t*)(&q_pack.f[b])), partial, /*clamp=*/false);
+                  *((bf16x2_t*)(&a_pack[m].f[b])), *((bf16x2_t*)(&q_pack.f[b])),
+                  partial, /*clamp=*/false);
             }
-            // block_c += y_b_f * partial + z_b_f * sum_a (same correction as M=1)
-            block_c[m][col] = __fmaf_rn(
-                y_b_f[col], partial,
-                __fmaf_rn(z_b_f[col], sum_a[m], block_c[m][col]));
+            // block_c += y_b_f * partial + z_b_f * sum_a (same correction as
+            // M=1)
+            block_c[m][col] =
+                __fmaf_rn(y_b_f[col], partial,
+                          __fmaf_rn(z_b_f[col], sum_a[m], block_c[m][col]));
           }
         }
       }
