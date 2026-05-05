@@ -89,7 +89,7 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
 # include all the functionality of the MoE layer.
 def _moe_forward(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -106,7 +106,7 @@ def _moe_forward(
 
 def _moe_forward_fake(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -116,7 +116,7 @@ def _moe_forward_fake(
 
 def _moe_forward_shared(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -133,7 +133,7 @@ def _moe_forward_shared(
 
 def _moe_forward_shared_fake(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -531,14 +531,14 @@ class MoERunner(MoERunnerInterface):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
         Input:
         - hidden_states
-        - router_logits
+        - router_logits: Optional, not supplied if the runner is handling the gate.
 
         Output:
         - The new hidden_states.
@@ -681,7 +681,7 @@ class MoERunner(MoERunnerInterface):
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits: torch.Tensor | None,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -707,7 +707,9 @@ class MoERunner(MoERunnerInterface):
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
+            assert router_logits is None
             router_logits, _ = self.gate(hidden_states)
+        assert router_logits is not None
 
         with self._sequence_parallel_context():
             # TODO(bnell): parts of the dispatch/combine steps will go away once
