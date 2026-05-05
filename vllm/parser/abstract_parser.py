@@ -657,7 +657,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self.is_reasoning_end(prompt_token_ids):
+            if self._tool_parser is None and self.is_reasoning_end(prompt_token_ids):
                 state.reasoning_ended = True
 
         current_text = state.previous_text + delta_text
