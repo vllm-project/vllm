@@ -482,11 +482,6 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
-        if self._has_mamba_groups:
-            # See __init__: Mamba recurrent state is not offloaded; refuse
-            # to claim external hits to avoid scheduler livelock.
-            return 0, False
-
         is_new_request = False
         if req_status := self._req_status.get(request.request_id):
             # make sure block IDs are cleared
@@ -499,6 +494,16 @@ class OffloadingConnectorScheduler:
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
+
+        if self._has_mamba_groups:
+            # See __init__: Mamba recurrent state is not offloaded; refuse
+            # to claim external hits to avoid scheduler livelock. Request
+            # bookkeeping above is preserved so single-request offload (block
+            # store on request termination) continues to work.
+            if is_new_request:
+                req_status.update_num_hit_blocks(num_computed_tokens)
+            self._touch(req_status)
+            return 0, False
 
         num_hit_tokens = self._lookup(req_status)
         if is_new_request:
