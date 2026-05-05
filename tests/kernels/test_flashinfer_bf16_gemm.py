@@ -20,7 +20,7 @@ import flashinfer
 
 SUPPORTED_BACKENDS = tuple(
     backend
-    for backend in ("cudnn", "cutlass", "tgv")
+    for backend in ("cudnn", "cutlass", "tgv", "cublaslt")
     if flashinfer.mm_bf16.is_backend_supported(backend)
 )
 if not SUPPORTED_BACKENDS:
@@ -34,7 +34,7 @@ if not SUPPORTED_BACKENDS:
 def test_flashinfer_bf16_gemm_matches_linear() -> None:
     backend = next(
         backend
-        for backend in ("cudnn", "cutlass", "tgv")
+        for backend in ("cudnn", "cutlass", "tgv", "cublaslt")
         if backend in SUPPORTED_BACKENDS
     )
 
