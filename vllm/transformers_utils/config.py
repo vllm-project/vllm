@@ -102,6 +102,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
+    zaya="ZayaConfig",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {

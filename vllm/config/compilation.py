@@ -646,6 +646,7 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
+        "vllm::cca",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",

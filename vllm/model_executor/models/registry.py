@@ -201,6 +201,7 @@ _TEXT_GENERATION_MODELS = {
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
+    "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
