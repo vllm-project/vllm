@@ -67,6 +67,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -264,7 +265,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
         target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
         num_patches = (target_h // patch_size) * (target_w // patch_size)
-        return num_patches // (pooling_kernel_size**2)
+        # Clamp to ``max_soft_tokens``: extreme aspect ratios (e.g. 3x900)
+        # cause the floor() above to round one dim up to ``unit`` while the
+        # other scales freely, which over-shoots ``max_patches``. The HF
+        # Gemma 4 image processor caps its vision-tower output at
+        # ``max_soft_tokens``, so without this clamp the prompt-side
+        # placeholder count exceeds the encoder output and
+        # ``_merge_multimodal_embeddings`` crashes.
+        return min(num_patches // (pooling_kernel_size**2), max_soft_tokens)
 
     def get_image_repl(
         self,
@@ -848,22 +856,23 @@ class Gemma4MultimodalEmbedder(nn.Module):
             or multimodal_config.hidden_size
         )
 
+        self.embedding_pre_projection_norm = RMSNorm(
+            embedding_dim,
+            eps=self.eps,
+            has_weight=False,
+        )
+
         self.embedding_projection = ReplicatedLinear(
             embedding_dim,
             self.text_hidden_size,
             bias=False,
         )
 
-        self.embedding_post_projection_norm = RMSNorm(
-            self.text_hidden_size,
-            eps=self.eps,
-            has_weight=False,
-        )
-
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Project soft tokens from a multimodal tower into LM space."""
-        embs_proj, _ = self.embedding_projection(inputs_embeds)
-        return self.embedding_post_projection_norm(embs_proj)
+        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
+        embs_proj, _ = self.embedding_projection(embs_normed)
+        return embs_proj
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +889,7 @@ class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsEagle3,
 ):
     packed_modules_mapping = {
@@ -965,6 +975,16 @@ class Gemma4ForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+        # --- Precompute full-attention layer indices for bidi clearing ---
+        self._full_attn_layer_idxs: frozenset[int] = frozenset()
+        text_config = config.text_config
+        if getattr(text_config, "use_bidirectional_attention", None) == "vision":
+            layer_types = getattr(text_config, "layer_types", None)
+            if layer_types:
+                self._full_attn_layer_idxs = frozenset(
+                    i for i, lt in enumerate(layer_types) if lt != "sliding_attention"
+                )
 
         # --- MixtureOfExperts delegation to language_model ---
         self.expert_weights = self.language_model.expert_weights
@@ -1254,9 +1274,10 @@ class Gemma4ForConditionalGeneration(
             # computation (using token_type_ids == 0 as text_mask).
             # Replicate this: map image token positions to token 0.
             if is_multimodal is not None:
-                is_multimodal = is_multimodal.to(input_ids.device)
                 ple_input_ids = torch.where(
-                    is_multimodal, torch.zeros_like(input_ids), input_ids
+                    is_multimodal.to(input_ids.device, non_blocking=True),
+                    torch.zeros_like(input_ids),
+                    input_ids,
                 )
             else:
                 ple_input_ids = input_ids
@@ -1306,6 +1327,12 @@ class Gemma4ForConditionalGeneration(
             else None
         )
 
+        # Gemma4 bidi: clear mm_prefix_range for full_attention layers.
+        # Must run here (outside @support_torch_compile boundary) because
+        # _run_decoder_layers is inside a compiled graph where Python
+        # side effects are eliminated.
+        self._clear_mm_prefix_for_full_attn_layers()
+
         hidden_states = self.language_model.model(
             input_ids,
             positions,
@@ -1322,6 +1349,49 @@ class Gemma4ForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    # ------------------------------------------------------------------ #
+    # Bidirectional attention helpers
+    # ------------------------------------------------------------------ #
+
+    def _clear_mm_prefix_for_full_attn_layers(self) -> None:
+        """Clear mm_prefix_range for non-sliding layers.
+
+        Gemma4 with use_bidirectional_attention='vision' applies
+        bidirectional attention only to sliding_attention layers.
+        Full attention layers use plain causal masking.
+
+        Uses _full_attn_layer_idxs (precomputed in __init__) for O(1)
+        lookup instead of per-call regex parsing.
+        """
+        if not self._full_attn_layer_idxs:
+            return
+
+        from vllm.forward_context import get_forward_context
+
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is None:
+            return
+
+        def _process(metadata_dict: dict) -> None:
+            for layer_name, metadata in metadata_dict.items():
+                if ".layers." not in layer_name:
+                    continue
+                try:
+                    layer_idx = int(layer_name.split(".layers.")[1].split(".")[0])
+                except (ValueError, IndexError):
+                    continue
+                if layer_idx in self._full_attn_layer_idxs:
+                    if hasattr(metadata, "mm_prefix_range"):
+                        metadata.mm_prefix_range = None
+                    if hasattr(metadata, "mm_prefix_range_tensor"):
+                        metadata.mm_prefix_range_tensor = None
+
+        if isinstance(attn_metadata, list):
+            for ub_metadata in attn_metadata:
+                _process(ub_metadata)
+        elif isinstance(attn_metadata, dict):
+            _process(attn_metadata)
 
     # ------------------------------------------------------------------ #
     # Weight loading
@@ -1357,10 +1427,16 @@ class Gemma4ForConditionalGeneration(
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
+        connectors = ["embed_vision"]
+        tower_models = ["vision_tower"]
+        if self.audio_tower is not None:
+            connectors.append("embed_audio")
+            tower_models.append("audio_tower")
+
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector=["embed_vision", "embed_audio"],
-            tower_model=["vision_tower", "audio_tower"],
+            connector=connectors,
+            tower_model=tower_models,
         )
 
     @classmethod

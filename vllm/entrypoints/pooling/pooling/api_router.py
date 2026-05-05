@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends, Request
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
-from vllm.entrypoints.pooling.pooling.serving import ServingPooling
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
+
+from .protocol import PoolingRequest
+from .serving import ServingPooling
 
 router = APIRouter()
 
