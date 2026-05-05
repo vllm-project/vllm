@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null | sed 's/^v//')
+RELEASE_VERSION=$(buildkite-agent meta-data get release-version --default "" | sed 's/^v//')
 if [ -z "${RELEASE_VERSION}" ]; then
   echo "ERROR: release-version metadata not set"
   exit 1
@@ -132,29 +132,34 @@ docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
 
 # ---- CPU ----
 # CPU images are behind separate block steps and may not have been built.
-# Attempt to pull and publish; skip gracefully if images are not available.
+# Use `docker manifest inspect` to distinguish a missing image (skip with
+# warning) from a real pull failure (fail loudly under set -e).
 
 CPU_X86=false
 CPU_ARM=false
 
-if docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION} 2>/dev/null; then
-  docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION} vllm/vllm-openai-cpu:latest-x86_64
-  docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION} vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64
+CPU_X86_TAG=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}
+if docker manifest inspect "${CPU_X86_TAG}" >/dev/null 2>&1; then
+  docker pull "${CPU_X86_TAG}"
+  docker tag "${CPU_X86_TAG}" vllm/vllm-openai-cpu:latest-x86_64
+  docker tag "${CPU_X86_TAG}" vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64
   docker push vllm/vllm-openai-cpu:latest-x86_64
   docker push vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64
   CPU_X86=true
 else
-  echo "WARNING: x86_64 CPU image not found, skipping (ensure block-cpu-release-image-build was unblocked)"
+  echo "WARNING: x86_64 CPU image not found at ${CPU_X86_TAG}, skipping (ensure block-cpu-release-image-build was unblocked and the build finished pushing)"
 fi
 
-if docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION} 2>/dev/null; then
-  docker tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION} vllm/vllm-openai-cpu:latest-arm64
-  docker tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION} vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
+CPU_ARM_TAG=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION}
+if docker manifest inspect "${CPU_ARM_TAG}" >/dev/null 2>&1; then
+  docker pull "${CPU_ARM_TAG}"
+  docker tag "${CPU_ARM_TAG}" vllm/vllm-openai-cpu:latest-arm64
+  docker tag "${CPU_ARM_TAG}" vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
   docker push vllm/vllm-openai-cpu:latest-arm64
   docker push vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
   CPU_ARM=true
 else
-  echo "WARNING: arm64 CPU image not found, skipping (ensure block-arm64-cpu-release-image-build was unblocked)"
+  echo "WARNING: arm64 CPU image not found at ${CPU_ARM_TAG}, skipping (ensure block-arm64-cpu-release-image-build was unblocked and the build finished pushing)"
 fi
 
 if [ "$CPU_X86" = "true" ] && [ "$CPU_ARM" = "true" ]; then

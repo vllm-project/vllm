@@ -309,6 +309,7 @@ steps:
         depends_on: ~
 
       - label: "Build release image - x86_64 - CPU"
+        key: build-cpu-release-image-x86
         depends_on:
           - block-cpu-release-image-build
           - input-release-version
@@ -316,9 +317,9 @@ steps:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v$(buildkite-agent meta-data get release-version | sed 's/^v//') --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v$(buildkite-agent meta-data get release-version | sed 's/^v//')"
         env:
           DOCKER_BUILDKIT: "1"
 
@@ -327,16 +328,17 @@ steps:
         depends_on: ~
 
       - label: "Build release image - arm64 - CPU"
-        depends_on: 
+        key: build-cpu-release-image-arm64
+        depends_on:
           - block-arm64-cpu-release-image-build
           - input-release-version
         agents:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v$(buildkite-agent meta-data get release-version | sed 's/^v//') --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest"
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v$(buildkite-agent meta-data get release-version | sed 's/^v//')"
         env:
           DOCKER_BUILDKIT: "1"
 
@@ -445,6 +447,14 @@ steps:
           - create-multi-arch-manifest-cuda-12-9-ubuntu2404
           - build-rocm-release-image
           - input-release-version
+          # Wait for CPU builds if their block steps were unblocked, so publish
+          # doesn't race the in-progress CPU build. allow_failure lets publish
+          # proceed when the operator legitimately leaves the CPU block steps
+          # unblocked or the CPU build fails.
+          - step: build-cpu-release-image-x86
+            allow_failure: true
+          - step: build-cpu-release-image-arm64
+            allow_failure: true
         if: build.env("NIGHTLY") != "1"
 
       - label: "Publish release images to DockerHub"
