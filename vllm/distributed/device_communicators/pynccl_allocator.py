@@ -2,55 +2,75 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import atexit
 import contextlib
-import tempfile
 from typing import Any
 
 import torch
 from packaging import version
-from torch.cuda.memory import CUDAPluggableAllocator
-from torch.utils.cpp_extension import load_inline
 
 from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.nccl import find_nccl_include_paths
 
 logger = init_logger(__name__)
 
-nccl_allocator_source = """
-#include <nccl.h>
-extern "C" {
+# Previously this module compiled a C++ shim at runtime (load_inline) that
+# wrapped ncclMemAlloc/ncclMemFree in a CUDAPluggableAllocator. PyTorch 2.11
+# ships NCCLSymmetricMemoryAllocator natively (torch/csrc/distributed/c10d/
+# symm_mem/NCCLSymmetricMemory.cu) which does the same thing. We now use:
+#
+#   set_backend("NCCL") + get_mem_pool(device)
+#
+# This eliminates runtime C++ compilation and the NCCL header dependency.
+# Requires torch >= 2.11.0 (pytorch/pytorch#168129 fixed a dead get_group_info
+# call in alloc() that made the NCCL backend unusable in torch 2.10).
 
-void* nccl_alloc_plug(size_t size, int device, void* stream) {
-  void* ptr;
-  ncclResult_t err = ncclMemAlloc(&ptr, size);
-  return ptr;
-
-}
-
-void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
-  ncclResult_t err = ncclMemFree(ptr);
-}
-
-}
-"""
-
-_allocator = None
-_allocator_wrapper = None
 _mem_pool = None
-_registered_base_addrs = set()
+_registered_base_addrs: set = set()
 _graph_pool_id = None
-_nccl_allocator_failed_to_compile = False
+_nccl_symm_mem_init_failed = False
+_backend_initialized = False
 _cached_pool_snapshot = None
 
 
-def is_symmetric_memory_enabled():
-    global _nccl_allocator_failed_to_compile
-    return envs.VLLM_USE_NCCL_SYMM_MEM and not _nccl_allocator_failed_to_compile
+def _ensure_nccl_symm_mem_backend() -> None:
+    """Initialize PyTorch's NCCL symmetric memory backend (once).
+
+    Must be called before any torch.distributed._symmetric_memory allocations
+    so that set_backend("NCCL") takes effect before SymmMemCommunicator or
+    any other caller can lock in a different backend.
+    """
+    global _backend_initialized, _nccl_symm_mem_init_failed
+    if _backend_initialized:
+        return
+    _backend_initialized = True
+
+    if not current_platform.is_cuda():
+        _nccl_symm_mem_init_failed = True
+        return
+
+    try:
+        from torch.distributed._symmetric_memory import set_backend
+        set_backend("NCCL")
+    except Exception as e:
+        _nccl_symm_mem_init_failed = True
+        logger.warning(
+            "Failed to initialize NCCL symmetric memory backend. "
+            "Symmetric memory will be disabled. Error: %s",
+            str(e),
+        )
 
 
-def is_symmetric_memory_tensor(tensor: torch.Tensor):
+def is_symmetric_memory_enabled() -> bool:
+    if not envs.VLLM_USE_NCCL_SYMM_MEM:
+        return False
+    # Ensure set_backend("NCCL") runs before SymmMemCommunicator allocates,
+    # since is_symmetric_memory_enabled() is called first in CudaCommunicator.
+    _ensure_nccl_symm_mem_backend()
+    return not _nccl_symm_mem_init_failed
+
+
+def is_symmetric_memory_tensor(tensor: torch.Tensor) -> bool:
     if not is_symmetric_memory_enabled() or _cached_pool_snapshot is None:
         return False
     for segment in _cached_pool_snapshot:
@@ -65,65 +85,31 @@ def set_graph_pool_id(graph_pool_id: Any) -> None:
     _graph_pool_id = graph_pool_id
 
 
-def compile_nccl_allocator():
-    global _allocator, _allocator_wrapper, _nccl_allocator_failed_to_compile
-    if not current_platform.is_cuda():
-        _nccl_allocator_failed_to_compile = True
-        return
-    try:
-        out_dir = tempfile.gettempdir()
-        nccl_allocator_libname = "nccl_allocator"
-        nccl_include_paths = find_nccl_include_paths()
-        load_inline(
-            name=nccl_allocator_libname,
-            cpp_sources=nccl_allocator_source,
-            with_cuda=True,
-            extra_ldflags=["-lnccl"],
-            verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
-            is_python_module=False,
-            build_directory=out_dir,
-            extra_include_paths=nccl_include_paths,
-        )
-        _allocator_wrapper = CUDAPluggableAllocator(
-            f"{out_dir}/{nccl_allocator_libname}.so",
-            "nccl_alloc_plug",
-            "nccl_free_plug",
-        )
-        _allocator = _allocator_wrapper.allocator()
-    except Exception as e:
-        _nccl_allocator_failed_to_compile = True
-        logger.warning(
-            "Failed to compile NCCL memory allocator. "
-            "Symmetric memory will be disabled. "
-            "This is expected if NCCL headers are not available. "
-            "optionally set VLLM_NCCL_INCLUDE_PATH to point to a directory "
-            "containing the NCCL header. "
-            "Error: %s",
-            str(e),
-        )
-
-
 def get_nccl_mem_pool():
-    global _mem_pool, _nccl_allocator_failed_to_compile
-    if _mem_pool is None and not _nccl_allocator_failed_to_compile:
-        compile_nccl_allocator()
-        if _allocator is not None:
-            _mem_pool = torch.cuda.MemPool(_allocator)
+    global _mem_pool, _nccl_symm_mem_init_failed
+    if _mem_pool is None and not _nccl_symm_mem_init_failed:
+        _ensure_nccl_symm_mem_backend()
+        if not _nccl_symm_mem_init_failed:
+            try:
+                from torch.distributed._symmetric_memory import get_mem_pool
+                device = torch.cuda.current_device()
+                _mem_pool = get_mem_pool(device)
+            except Exception as e:
+                _nccl_symm_mem_init_failed = True
+                logger.warning(
+                    "Failed to get NCCL symmetric memory pool. "
+                    "Symmetric memory will be disabled. Error: %s",
+                    str(e),
+                )
     return _mem_pool
 
 
-def _cleanup_nccl_mem_pool():
+def _cleanup_nccl_mem_pool() -> None:
     global _mem_pool
     _mem_pool = None
 
 
-def _cleanup_nccl_allocator_wrapper():
-    global _allocator_wrapper
-    _allocator_wrapper = None
-
-
 atexit.register(_cleanup_nccl_mem_pool)
-atexit.register(_cleanup_nccl_allocator_wrapper)
 
 
 class nccl_symm_mem_context:
@@ -138,7 +124,7 @@ class nccl_symm_mem_context:
             or pynccl_comm.world_size == 1
             or not current_platform.is_cuda()
             or get_nccl_mem_pool() is None
-            or version.parse(torch.__version__) < version.parse("2.8.0.a0")
+            or version.parse(torch.__version__) < version.parse("2.11.0")
         )
         if self.disabled:
             self.pynccl_comm: PyNcclCommunicator | None = None
@@ -188,4 +174,6 @@ class nccl_symm_mem_context:
                 )
                 _registered_base_addrs.add(segment["address"])
         if self.is_graph_capture:
-            torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)
+            torch._C._cuda_beginAllocateCurrentThreadToPool(
+                self.device, _graph_pool_id
+            )
