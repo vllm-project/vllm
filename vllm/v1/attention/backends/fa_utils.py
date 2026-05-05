@@ -115,22 +115,29 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        # The FA3 kernel rejects s_aux (sinks) when hdim != hdim_v; upgrade to
-        # FA4 on SM90 when available.
+        # Some FA3 unsupported SM90 cases can use FA4 when available.
         if (
             fa_version == 3
-            and has_sinks
-            and head_size is not None
-            and head_size_v is not None
-            and head_size != head_size_v
             and device_capability.major == 9
             and is_fa_version_supported(4)
         ):
-            logger.info_once(
-                "Diff-KV with sinks: upgrading FlashAttention 3 -> 4",
-                scope="local",
-            )
-            fa_version = 4
+            upgrade_reason = None
+            if head_size is not None and head_size > 256:
+                upgrade_reason = f"FA3 does not support head_size={head_size} on SM90"
+            elif (
+                has_sinks
+                and head_size is not None
+                and head_size_v is not None
+                and head_size != head_size_v
+            ):
+                upgrade_reason = "Diff-KV with sinks"
+            if upgrade_reason:
+                logger.info_once(
+                    "%s: upgrading FlashAttention 3 -> 4",
+                    upgrade_reason,
+                    scope="local",
+                )
+                fa_version = 4
 
         # FA4 currently uses batch-shape-dependent scheduling
         # heuristics on SM100+, which breaks batch invariance.
