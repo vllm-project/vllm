@@ -1077,7 +1077,6 @@ class DeepseekV4Indexer(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
