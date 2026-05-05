@@ -3191,8 +3191,7 @@ class KimiK25Nvfp4TextForCausalLM(DeepseekV2ForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded = super().load_weights(weights)
-        for layer in self.model.layers:
-            layer.fuse_shared_expert_act_quant()
+        # Shared-expert activation/quant fusion currently regresses correctness.
         return loaded
 
 
