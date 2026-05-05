@@ -7,18 +7,28 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    MockOffloadingSpec,
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID, create_vllm_config
+from vllm import SamplingParams
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
@@ -27,7 +37,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     get_offload_block_hash,
 )
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -919,3 +929,110 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+def _make_offloading_scheduler(
+    block_size: int, kv_cache_groups: list[KVCacheGroupSpec]
+) -> tuple[OffloadingConnectorScheduler, MockOffloadingSpec]:
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": (
+                "tests.v1.kv_connector.unit.offloading_connector.utils"
+            ),
+        },
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=kv_cache_groups,
+    )
+    spec = MockOffloadingSpec(vllm_config, kv_cache_config)
+    return OffloadingConnectorScheduler(spec), spec
+
+
+def _attention_group(block_size: int, layer: str = "attn") -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        [layer],
+        FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        ),
+    )
+
+
+def _mamba_group(block_size: int, layer: str = "mamba") -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        [layer],
+        MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+        ),
+    )
+
+
+def _make_request(req_id: str, num_tokens: int, block_size: int) -> Request:
+    init_none_hash(sha256)
+    sampling_params = SamplingParams(max_tokens=8)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=req_id,
+        prompt_token_ids=[0] * num_tokens,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+
+
+def test_get_num_new_matched_tokens_skips_hybrid_mamba_models():
+    """For hybrid Mamba/attention models, the connector must refuse to
+    report external prefix-cache hits.
+
+    The connector currently only persists attention KV; the Mamba recurrent
+    state is not snapshot or restored across requests. Reporting a hit would
+    either fire the assertion in Scheduler._mamba_block_aligned_split or, if
+    that assertion is bypassed, cause the scheduler to livelock waiting for
+    an async KV load that is never initiated.
+    """
+    block_size = 16
+    connector_scheduler, spec = _make_offloading_scheduler(
+        block_size,
+        kv_cache_groups=[_attention_group(block_size), _mamba_group(block_size)],
+    )
+
+    assert connector_scheduler._has_mamba_groups is True
+
+    # Even if the offload manager would happily report a hit, the connector
+    # must short-circuit to (0, False) before consulting it.
+    spec.manager.lookup.return_value = 12345
+    request = _make_request(
+        "hybrid-req", num_tokens=block_size * 4, block_size=block_size
+    )
+
+    num_hit, load_async = connector_scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert num_hit == 0
+    assert load_async is False
+    spec.manager.lookup.assert_not_called()
+
+
+def test_attention_only_model_unaffected_by_mamba_guard():
+    """Sanity check: pure-attention models do not trip the hybrid-Mamba guard."""
+    block_size = 16
+    connector_scheduler, _ = _make_offloading_scheduler(
+        block_size,
+        kv_cache_groups=[_attention_group(block_size)],
+    )
+    assert connector_scheduler._has_mamba_groups is False
