@@ -16,10 +16,16 @@ HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 _T = TypeVar("_T", bound=TokenizerLike)
 
 
-def maybe_make_thread_pool(tokenizer: _T, copies: int = 1) -> _T:
+class ThreadSafeHFTokenizerMixin:
+    """Mixin class for thread-safe HF fast tokenizers."""
+
+    pass
+
+
+def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     """
     If `tokenizer` is a `PreTrainedTokenizerFast`, modify the tokenizer
-    in place to make the public interface thread-safe by routing calls
+    in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
     Note that:
@@ -28,7 +34,9 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1) -> _T:
       methods like ``add_special_tokens`` or ``add_tokens``.
     - Adjacent method calls could happen on different deep copies.
     """
-    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+    if not isinstance(tokenizer, PreTrainedTokenizerFast) or isinstance(
+        tokenizer, ThreadSafeHFTokenizerMixin
+    ):
         return tokenizer
 
     og_tokenizer = copy.copy(tokenizer)
@@ -43,12 +51,12 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1) -> _T:
             tok = tokenizer_pool.get_nowait()
             yield tok
         except queue.Empty:
-            tok = copy.deepcopy(tokenizer)
+            tok = copy.deepcopy(og_tokenizer)
             yield tok
         finally:
             tokenizer_pool.put(tok)
 
-    class TokenizerPool(tokenizer.__class__):  # type: ignore
+    class TokenizerPool(tokenizer.__class__, ThreadSafeHFTokenizerMixin):  # type: ignore
         def apply_chat_template(self, *args, **kwargs):
             with _borrow_from_pool() as tok:
                 return tok.apply_chat_template(*args, **kwargs)
@@ -88,10 +96,9 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1) -> _T:
         def __reduce__(self):
             return maybe_make_thread_pool, (og_tokenizer, copies)
 
-    TokenizerPool.__name__ = f"TokenizerPool{tokenizer.__class__.__name__}"
+    TokenizerPool.__name__ = f"TokenizerPool{og_tokenizer.__class__.__name__}"
 
     tokenizer.__class__ = TokenizerPool
-    return tokenizer
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:

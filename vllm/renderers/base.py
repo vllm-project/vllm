@@ -37,7 +37,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
-from vllm.tokenizers import TokenizerLike, maybe_make_thread_pool
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     make_async,
@@ -79,6 +79,8 @@ class BaseRenderer(ABC, Generic[_T]):
         self.model_config = config.model_config
         self.api_process_rank = config.parallel_config._api_process_rank
 
+        self.tokenizer = tokenizer
+
         # Shared thread pool executor for blocking tokenizer and
         # multimodal preprocessing operations.  The multimodal processor
         # receives a deep-copied tokenizer (see #36557) so it is safe to
@@ -108,7 +110,7 @@ class BaseRenderer(ABC, Generic[_T]):
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=tokenizer,
+                    tokenizer=self.tokenizer,
                     cache=mm_processor_cache,
                 )
 
@@ -123,7 +125,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 with set_default_torch_num_threads():
                     self._readonly_mm_processor = mm_registry.create_processor(
                         config.model_config,
-                        tokenizer=tokenizer,
+                        tokenizer=self.tokenizer,
                         cache=ro_cache,
                     )
 
@@ -133,14 +135,6 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_timing_registry = MultiModalTimingRegistry(
                 config.observability_config
             )
-
-        # Make HF fast tokenizer thread-safe by dispatching calls to tokenizer
-        # pool when a tokenizer is available.
-        self.tokenizer = (
-            None
-            if tokenizer is None
-            else maybe_make_thread_pool(tokenizer, pool_workers + 1)
-        )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
