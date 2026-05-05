@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -66,6 +67,17 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
+
+    @override
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        base = super()._create_draft_vllm_config()
+        return replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                use_non_causal=True,
+            ),
+        )
 
     @override
     def _raise_if_multimodal(self):
@@ -151,6 +163,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
+        # Skip num_rejected_tokens (GPU-only); overestimating is fine here.
+        new_seq_lens_cpu_upper_bound = (
+            cad.seq_lens_cpu_upper_bound + num_query_per_req
+            if cad.seq_lens_cpu_upper_bound is not None
+            else None
+        )
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             seq_lens=effective_seq_lens + num_query_per_req,
@@ -160,6 +178,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             ),
             _seq_lens_cpu=None,
             _num_computed_tokens_cpu=None,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu_upper_bound,
             num_reqs=cad.num_reqs,
             num_actual_tokens=num_query_total,
             max_query_len=num_query_per_req,

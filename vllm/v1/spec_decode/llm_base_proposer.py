@@ -84,6 +84,15 @@ class SpecDecodeBaseProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
+        # DeepSeek V4 MTP consumes the target's pre-hc_head residual stream,
+        # shape (T, hc_mult * hidden_size). Expand the hidden_states buffer
+        # so target_hidden_states fits; detect DeepseekV4 via draft hf_config.
+        draft_hf_config = self.draft_model_config.hf_config
+        if hasattr(draft_hf_config, "compress_ratios") and hasattr(
+            draft_hf_config, "hc_mult"
+        ):
+            self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
+
         # Unifying eagle, draft model, and parallel drafting support.
         # DFlash always uses parallel drafting (all tokens in one pass),
         # but has an additional slot for the next_token_id (does not shift like EAGLE)
@@ -593,6 +602,8 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata._seq_lens_cpu += 1
             if common_attn_metadata._num_computed_tokens_cpu is not None:
                 common_attn_metadata._num_computed_tokens_cpu += 1
+            if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
+                common_attn_metadata.seq_lens_cpu_upper_bound += 1
 
             # Rebuild attention metadata
             _, per_layer_attn_metadata = self.build_per_group_and_layer_attn_metadata(
@@ -872,16 +883,12 @@ class SpecDecodeBaseProposer:
         is not sampled and comes from `request.get_token_id()` instead. This is denoted
         the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-        # Precompute get_token_id for when there is no valid next token
+        # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
-                for i in range(num_reqs)
-            ],
-            dtype=np.int32,
-        )
+        for i in range(num_reqs):
+            self.backup_next_token_ids.np[i] = requests[
+                gpu_input_batch.req_ids[i]
+            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
         backup_tokens_gpu = self.backup_next_token_ids.gpu
 
@@ -959,6 +966,7 @@ class SpecDecodeBaseProposer:
             query_start_loc_cpu=query_start_loc_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -1183,7 +1191,11 @@ class SpecDecodeBaseProposer:
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+        # upper_bound - rejected = actual post-rejection seq_lens (no D2H sync).
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        new_seq_lens_cpu = (
+            common_attn_metadata.seq_lens_cpu_upper_bound - num_rejected_tokens
+        )
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1237,6 +1249,7 @@ class SpecDecodeBaseProposer:
             query_start_loc_cpu=new_query_start_loc_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -1259,15 +1272,29 @@ class SpecDecodeBaseProposer:
         Subclasses may override to apply additional config changes.
         """
         spec_cfg = self.speculative_config
+        base = self.vllm_config
+
         if spec_cfg.moe_backend is not None:
-            return replace(
-                self.vllm_config,
+            base = replace(
+                base,
                 kernel_config=replace(
-                    self.vllm_config.kernel_config,
+                    base.kernel_config,
                     moe_backend=spec_cfg.moe_backend,
                 ),
             )
-        return self.vllm_config
+
+        # Note (matt): Never inherit the attention backend from base, because there are
+        # many opportunities for incompatibility, so we always independently autoselect
+        # unless explicitly specified in the speculative config.
+        base = replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                backend=spec_cfg.attention_backend,
+            ),
+        )
+
+        return base
 
     def _get_model(self) -> nn.Module:
         """
@@ -1300,9 +1327,12 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        self._draft_attn_layer_names = (
-            set(all_attn_layers.keys()) - target_attn_layer_names
-        )
+        # Filter to only layers that have KV cache specs.
+        self._draft_attn_layer_names = {
+            name
+            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
+        }
 
         if self.supports_mm_inputs:
             # Even if the target model is multimodal, we can also use
@@ -1324,6 +1354,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
@@ -1505,6 +1536,17 @@ class SpecDecodeBaseProposer:
                         logger.info(
                             "Shared target model lm_head with MTP shared_head.head."
                         )
+
+        if hasattr(target_language_model.model, "topk_indices_buffer"):
+            if hasattr(self.model.model, "topk_indices_buffer"):
+                del self.model.model.topk_indices_buffer
+            self.model.model.topk_indices_buffer = (
+                target_language_model.model.topk_indices_buffer
+            )
+            logger.info(
+                "Detected MTP model with topk_indices_buffer. "
+                "Sharing target model topk_indices_buffer with the draft model."
+            )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):

@@ -97,6 +97,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 f"attention backend '{attn_backend.backend.name}'"
             )
 
+        if attn_backend.backend.name == "FLASHINFER":
+            from vllm.utils.flashinfer import supports_trtllm_attention
+
+            if not supports_trtllm_attention():
+                matches = matches._replace(attn_quant_fusion=0)
+
         # TODO: remove this after finishing migration from envs to model kwargs
         if model_name == "openai/gpt-oss-20b":
             from .common import is_blackwell
@@ -115,6 +121,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs = {**attn_backend.model_kwargs, **model_kwargs}
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
+
+        # Cap warmup memory: tests use small max_model_len (1024) but the
+        # engine default max_num_batched_tokens is 16384. Warming up large
+        # models (e.g. Llama-4-Scout-FP8) at 16384 tokens may trigger OOM.
+        model_kwargs.setdefault("max_num_batched_tokens", 8192)
 
         # Sparse MLA models (DSv3.2) hit an over-strict inductor assertion in
         # decompose_auto_functionalized when +rotary_embedding is forced into
