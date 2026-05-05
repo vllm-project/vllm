@@ -2464,6 +2464,7 @@ MODELS_NEED_VIDEO_METADATA = [
 
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
+    "internvl_chat",
     "qwen3_vl",
     "qwen3_vl_moe",
     "qwen2_5_vl",

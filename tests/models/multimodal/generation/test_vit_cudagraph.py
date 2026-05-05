@@ -41,7 +41,21 @@ def qwen_vl_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def internvl_chat_template(content: str) -> str:
+    return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "internvl": VitCudagraphTestConfig(
+        model="OpenGVLab/InternVL3-2B",
+        image_prompt=internvl_chat_template("<image>\nWhat is in this image?"),
+        video_prompt=internvl_chat_template(
+            "<video>\nDescribe this video in one sentence."
+        ),
+        needs_video_metadata=False,
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
     "qwen3_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen3-VL-2B-Instruct",
         image_prompt=qwen_vl_chat_template(
