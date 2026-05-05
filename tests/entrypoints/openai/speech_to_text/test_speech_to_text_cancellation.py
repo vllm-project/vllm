@@ -16,6 +16,12 @@ async def _never_finishes():
     yield
 
 
+async def _records_start_then_never_finishes(started_request_ids, request_id):
+    started_request_ids.append(request_id)
+    await asyncio.Event().wait()
+    yield
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("engine_inputs", "expected_request_ids"),
@@ -85,6 +91,76 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     ]
     assert generated_request_ids == expected_request_ids
     engine_client.abort.assert_awaited_once_with(expected_request_ids)
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_cancel_advances_all_chunk_generators():
+    started_request_ids: list[str] = []
+    engine_client = SimpleNamespace(
+        errored=False,
+        generate=Mock(
+            side_effect=lambda *_args, **_kwargs: (
+                _records_start_then_never_finishes(started_request_ids, _args[2])
+            )
+        ),
+        abort=AsyncMock(),
+        is_tracing_enabled=AsyncMock(return_value=False),
+    )
+
+    engine_inputs = [
+        {"prompt": "chunk-0"},
+        {"prompt": "chunk-1"},
+        {"prompt": "chunk-2"},
+    ]
+    server = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    server.engine_client = engine_client
+    server.task_type = "transcribe"
+    server.models = SimpleNamespace(model_name=lambda: "audio")
+    server.model_config = SimpleNamespace(max_model_len=1024)
+    server.model_cls = SimpleNamespace(no_space_languages=set())
+    server.default_sampling_params = {}
+    server.asr_config = SimpleNamespace(max_audio_clip_s=30)
+    server._check_model = AsyncMock(return_value=None)
+    server._maybe_get_adapters = Mock(return_value=None)
+    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 90.0))
+    server._log_inputs = Mock()
+
+    request = SimpleNamespace(
+        model="audio",
+        response_format="json",
+        stream=False,
+        use_beam_search=False,
+        max_completion_tokens=None,
+        language="en",
+        prompt="",
+        to_sampling_params=Mock(return_value=object()),
+    )
+    raw_request = SimpleNamespace(
+        headers={"X-Request-Id": "outer-request"},
+        state=SimpleNamespace(),
+    )
+
+    task = asyncio.create_task(
+        server._create_speech_to_text(
+            audio_data=b"audio",
+            request=request,
+            raw_request=raw_request,
+            response_class=TranscriptionResponse,
+            stream_generator_method=Mock(),
+        )
+    )
+    await asyncio.sleep(0.01)
+
+    expected_request_ids = [
+        "transcribe-outer-request-0",
+        "transcribe-outer-request-1",
+        "transcribe-outer-request-2",
+    ]
+    assert set(started_request_ids) == set(expected_request_ids)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

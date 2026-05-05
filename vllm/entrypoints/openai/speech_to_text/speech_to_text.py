@@ -49,6 +49,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
+from vllm.utils.async_utils import merge_async_iterators
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -529,10 +530,12 @@ class OpenAISpeechToText(OpenAIServing):
                 separator,
             )
         # Non-streaming response.
-        total_segments = []
-        text_parts = []
         try:
             assert list_result_generator is not None
+            chunk_segment_parts: list[list[SpeechToTextSegment]] = [
+                [] for _ in list_result_generator
+            ]
+            chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
@@ -543,28 +546,34 @@ class OpenAISpeechToText(OpenAIServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
-            for idx, result_generator in enumerate(list_result_generator):
+            result_generator = merge_async_iterators(*list_result_generator)
+            async for idx, op in result_generator:
                 start_time = (
                     float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 )
-                async for op in result_generator:
-                    if request.response_format == "verbose_json":
-                        assert op.outputs[0].logprobs
-                        segments: list[SpeechToTextSegment] = (
-                            self._get_verbose_segments(
-                                tokens=tuple(op.outputs[0].token_ids),
-                                segment_class=segment_class,
-                                request=request,
-                                start_time=start_time,
-                                log_probs=op.outputs[0].logprobs,
-                            )
-                        )
+                if request.response_format == "verbose_json":
+                    assert op.outputs[0].logprobs
+                    segments: list[SpeechToTextSegment] = self._get_verbose_segments(
+                        tokens=tuple(op.outputs[0].token_ids),
+                        segment_class=segment_class,
+                        request=request,
+                        start_time=start_time,
+                        log_probs=op.outputs[0].logprobs,
+                    )
 
-                        total_segments.extend(segments)
-                        text_parts.extend([seg.text for seg in segments])
-                    else:
-                        raw_text = op.outputs[0].text
-                        text_parts.append(self.model_cls.post_process_output(raw_text))
+                    chunk_segment_parts[idx].extend(segments)
+                    chunk_text_parts[idx].extend([seg.text for seg in segments])
+                else:
+                    raw_text = op.outputs[0].text
+                    chunk_text_parts[idx].append(
+                        self.model_cls.post_process_output(raw_text)
+                    )
+            total_segments = [
+                segment
+                for segment_parts in chunk_segment_parts
+                for segment in segment_parts
+            ]
+            text_parts = [text for text_part in chunk_text_parts for text in text_part]
             text = separator.join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
