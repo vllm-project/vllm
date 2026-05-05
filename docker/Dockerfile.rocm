@@ -2,6 +2,7 @@
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
+ARG UBUNTU_APT_MIRROR=http://mirrors.edge.kernel.org/ubuntu
 # AMD NIC backend
 ARG NIC_BACKEND=none
 # AMD AINIC apt repo settings
@@ -18,8 +19,36 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
+ARG UBUNTU_APT_MIRROR
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
+
+# CI apt hardening:
+# - use a less flaky Ubuntu archive mirror for inherited Ubuntu sources
+# - disable the inherited deadsnakes PPA; Python is already installed here
+RUN set -eux; \
+    printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Timeout "30";' \
+        'Acquire::https::Timeout "30";' \
+        > /etc/apt/apt.conf.d/80-ci-retries; \
+    ubuntu_apt_mirror="${UBUNTU_APT_MIRROR%/}"; \
+    if [ -n "${ubuntu_apt_mirror}" ]; then \
+        echo "Using Ubuntu apt mirror: ${ubuntu_apt_mirror}"; \
+        find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i -E \
+                -e "s#https?://([a-z]{2}\.)?archive\.ubuntu\.com/ubuntu/?#${ubuntu_apt_mirror}#g" \
+                -e "s#https?://security\.ubuntu\.com/ubuntu/?#${ubuntu_apt_mirror}#g" \
+                {} +; \
+    fi; \
+    find /etc/apt -type f -name '*.list' \
+        -exec sed -i -E '/deadsnakes|ppa\.launchpad(content)?\.net\/deadsnakes/s/^/# disabled in Dockerfile.rocm: /' {} +; \
+    find /etc/apt -type f -name '*.sources' \
+        -exec grep -El 'deadsnakes|ppa\.launchpad(content)?\.net/deadsnakes' {} + \
+        | xargs -r rm -f; \
+    rm -f /etc/apt/sources.list.d/*deadsnakes*.list \
+        /etc/apt/sources.list.d/*deadsnakes*.sources; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
