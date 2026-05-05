@@ -623,10 +623,11 @@ def run_attention_backend(
         )
 
         # Attach prefill backend (normally created by MLAAttention.__init__)
+        prefill_scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
         prefill_backend_cls = get_mla_prefill_backend(vllm_config)
         mock_layer.prefill_backend = prefill_backend_cls(
             num_heads=num_heads,
-            scale=scale,
+            scale=prefill_scale,
             kv_lora_rank=kv_lora_rank,
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
