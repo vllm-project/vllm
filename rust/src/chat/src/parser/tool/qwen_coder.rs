@@ -76,9 +76,7 @@ impl Qwen3CoderToolParser {
             QwenCoderEvent::ToolCallStart => self.mode = QwenCoderMode::ToolCall,
             QwenCoderEvent::ToolCall { name, raw_params } => {
                 self.mode = QwenCoderMode::Text;
-                let arguments = self
-                    .tool_parameters
-                    .convert_params_with_schema(&name, raw_params);
+                let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
@@ -157,9 +155,7 @@ fn parse_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEven
 
 /// Parse a Qwen Coder tool-call start marker.
 fn tool_call_start_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    literal(TOOL_CALL_START)
-        .value(QwenCoderEvent::ToolCallStart)
-        .parse_next(input)
+    literal(TOOL_CALL_START).value(QwenCoderEvent::ToolCallStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next Qwen Coder marker.
@@ -316,9 +312,7 @@ mod tests {
     #[test]
     fn qwen_coder_parse_complete_extracts_empty_arguments() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
-        let result = parser
-            .parse_complete(&build_tool_call("get_weather", &[]))
-            .unwrap();
+        let result = parser.parse_complete(&build_tool_call("get_weather", &[])).unwrap();
 
         assert_eq!(result.calls.len(), 1);
         assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));

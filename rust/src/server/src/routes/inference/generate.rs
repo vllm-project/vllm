@@ -24,7 +24,8 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::resolve_request_context;
 
-/// Validate one token-in/token-out request and proxy it into the shared `vllm-text` stack.
+/// Validate one token-in/token-out request and proxy it into the shared
+/// `vllm-text` stack.
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -62,11 +63,7 @@ pub async fn generate(
         }
     };
 
-    let collected = match raw_stream
-        .collect_output()
-        .instrument(request_span.clone())
-        .await
-    {
+    let collected = match raw_stream.collect_output().instrument(request_span.clone()).await {
         Ok(collected) => collected,
         Err(error) => {
             return server_error!(

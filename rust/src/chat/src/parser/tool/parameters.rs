@@ -12,9 +12,10 @@ pub(super) struct ToolSchemas {
 
 /// Normalized parameter schema for one tool.
 ///
-/// This is a minimal subset of JSON Schema with some normalization heuristics to support common
-/// schema patterns and upstream schema variations, focused on coercing raw string parameter values
-/// into more specific JSON types for downstream tool call execution.
+/// This is a minimal subset of JSON Schema with some normalization heuristics
+/// to support common schema patterns and upstream schema variations, focused on
+/// coercing raw string parameter values into more specific JSON types for
+/// downstream tool call execution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ToolSchema {
     params: BTreeMap<String, JsonParamType>,
@@ -46,7 +47,8 @@ impl ToolSchemas {
 
     /// Convert raw string parameter values for one named tool.
     ///
-    /// Unknown tool names use an empty schema, so all parameters fall back to strings.
+    /// Unknown tool names use an empty schema, so all parameters fall back to
+    /// strings.
     pub(super) fn convert_params_with_schema(
         &self,
         function_name: &str,
@@ -74,8 +76,8 @@ impl ToolSchemas {
 }
 
 impl ToolSchema {
-    /// Return an empty schema with no parameter information, which causes all parameters to be
-    /// treated as strings.
+    /// Return an empty schema with no parameter information, which causes all
+    /// parameters to be treated as strings.
     const fn empty() -> &'static Self {
         static EMPTY: ToolSchema = ToolSchema {
             params: BTreeMap::new(),
@@ -101,8 +103,9 @@ impl ToolSchema {
 
     /// Convert one raw parameter value using its normalized schema type.
     ///
-    /// If the parameter name is unknown, or we don't have a schema for it, or the value fails to
-    /// convert, this falls back to returning the raw string as a JSON string value.
+    /// If the parameter name is unknown, or we don't have a schema for it, or
+    /// the value fails to convert, this falls back to returning the raw
+    /// string as a JSON string value.
     fn convert(&self, name: &str, value: &str) -> Value {
         if value.eq_ignore_ascii_case("null") {
             return Value::Null;
@@ -128,12 +131,7 @@ impl JsonParamType {
         if let Some(composite) = schema.get("anyOf").or_else(|| schema.get("oneOf")) {
             let param_type = composite
                 .as_array()
-                .map(|schemas| {
-                    schemas
-                        .iter()
-                        .filter_map(Self::from_schema)
-                        .collect::<Vec<_>>()
-                })
+                .map(|schemas| schemas.iter().filter_map(Self::from_schema).collect::<Vec<_>>())
                 .filter(|types| !types.is_empty())
                 .map(Self::one_of)
                 .unwrap_or(Self::Object);
@@ -213,18 +211,14 @@ impl JsonParamType {
 fn convert_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
     match param_type {
         JsonParamType::String => Some(Value::String(value.to_string())),
-        JsonParamType::Integer => value
-            .parse::<i64>()
-            .ok()
-            .map(Number::from)
-            .map(Value::Number),
+        JsonParamType::Integer => value.parse::<i64>().ok().map(Number::from).map(Value::Number),
         JsonParamType::Number => convert_number(value),
         JsonParamType::Boolean => convert_boolean(value),
         JsonParamType::Object | JsonParamType::Array => serde_json::from_str(value).ok(),
         JsonParamType::Null => value.eq_ignore_ascii_case("null").then_some(Value::Null),
-        JsonParamType::OneOf(types) => types
-            .iter()
-            .find_map(|param_type| convert_value(param_type, value)),
+        JsonParamType::OneOf(types) => {
+            types.iter().find_map(|param_type| convert_value(param_type, value))
+        }
     }
 }
 

@@ -16,9 +16,9 @@ use crate::routes::openai::utils::types::{
 
 /// vLLM-compatible request type for the Chat Completions API.
 ///
-/// Mirrors the Python vLLM `ChatCompletionRequest` class. The local copy keeps the request type
-/// route-owned so we can add vLLM-only fields directly instead of layering wrapper deserializers
-/// on top.
+/// Mirrors the Python vLLM `ChatCompletionRequest` class. The local copy keeps
+/// the request type route-owned so we can add vLLM-only fields directly instead
+/// of layering wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 #[validate(schema(function = "validate_chat_cross_parameters"))]
@@ -32,8 +32,8 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_model")]
     pub model: String,
 
-    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing
-    /// frequency in the text so far
+    /// Number between -2.0 and 2.0. Positive values penalize new tokens based
+    /// on their existing frequency in the text so far
     #[validate(range(min = -2.0, max = 2.0))]
     pub frequency_penalty: Option<f32>,
 
@@ -54,7 +54,8 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = 1))]
     pub max_tokens: Option<u32>,
 
-    /// An upper bound for the number of tokens that can be generated for a completion
+    /// An upper bound for the number of tokens that can be generated for a
+    /// completion
     #[validate(range(min = 1))]
     pub max_completion_tokens: Option<u32>,
 
@@ -62,15 +63,16 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
-    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they
-    /// appear in the text so far
+    /// Number between -2.0 and 2.0. Positive values penalize new tokens based
+    /// on whether they appear in the text so far
     #[validate(range(min = -2.0, max = 2.0))]
     pub presence_penalty: Option<f32>,
 
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
 
-    /// If specified, our system will make a best effort to sample deterministically
+    /// If specified, our system will make a best effort to sample
+    /// deterministically
     pub seed: Option<i64>,
 
     /// Up to 4 sequences where the API will stop generating further tokens
@@ -98,7 +100,8 @@ pub struct ChatCompletionRequest {
     /// Controls which (if any) tool is called by the model
     pub tool_choice: Option<ToolChoice>,
 
-    /// Effort level for reasoning models (none, minimal, low, medium, high, xhigh, max)
+    /// Effort level for reasoning models (none, minimal, low, medium, high,
+    /// xhigh, max)
     pub reasoning_effort: Option<ReasoningEffort>,
 
     /// Whether to enable parallel function calling during tool use
@@ -169,15 +172,16 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_true")]
     pub include_reasoning: bool,
 
-    /// If true, the new message will be prepended with the last message if they belong to the same
-    /// role.
+    /// If true, the new message will be prepended with the last message if they
+    /// belong to the same role.
     #[serde(default)]
     pub echo: bool,
 
     /// Whether to add the generation prompt to the chat template.
     ///
-    /// When omitted, the request follows the API default behavior, which is equivalent to `true`
-    /// unless `continue_final_message=true` selects final assistant continuation instead.
+    /// When omitted, the request follows the API default behavior, which is
+    /// equivalent to `true` unless `continue_final_message=true` selects
+    /// final assistant continuation instead.
     pub add_generation_prompt: Option<bool>,
 
     /// Continue generating from final assistant message
@@ -212,7 +216,8 @@ pub struct ChatCompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
-    /// Tokens represented as strings of the form 'token_id:{token_id}' in logprobs
+    /// Tokens represented as strings of the form 'token_id:{token_id}' in
+    /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
 
     /// Include token IDs alongside generated text
@@ -224,7 +229,8 @@ pub struct ChatCompletionRequest {
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
-    /// Additional request parameters with string or numeric values for custom extensions
+    /// Additional request parameters with string or numeric values for custom
+    /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
@@ -349,8 +355,8 @@ pub(super) struct ChatCompletionChoice {
     pub token_ids: Option<Vec<u32>>,
 }
 
-/// A literal type for the "assistant" role, since the API only allows that specific value in
-/// responses.
+/// A literal type for the "assistant" role, since the API only allows that
+/// specific value in responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay)]
 pub(super) struct AssistantRole;
 

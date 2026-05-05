@@ -75,10 +75,8 @@ async fn main() -> Result<()> {
     println!("output_address={}", client.output_address());
     println!("engine_identities={:x?}", client.engine_identities());
 
-    let initial_is_sleeping = client
-        .is_sleeping()
-        .await
-        .context("failed to call is_sleeping utility")?;
+    let initial_is_sleeping =
+        client.is_sleeping().await.context("failed to call is_sleeping utility")?;
 
     println!("is_sleeping(initial)={initial_is_sleeping}");
 
@@ -96,10 +94,7 @@ async fn main() -> Result<()> {
         .context("failed to call reset_prefix_cache utility")?;
     println!("reset_prefix_cache={reset_prefix_cache}");
 
-    client
-        .reset_mm_cache()
-        .await
-        .context("failed to call reset_mm_cache utility")?;
+    client.reset_mm_cache().await.context("failed to call reset_mm_cache utility")?;
     println!("reset_mm_cache=ok");
 
     client
@@ -111,40 +106,30 @@ async fn main() -> Result<()> {
     if args.skip_sleep_wake {
         println!("sleep_wake=skipped");
     } else {
-        client
-            .sleep(args.sleep_level, &args.sleep_mode)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to call sleep utility with level={} mode={}",
-                    args.sleep_level, args.sleep_mode
-                )
-            })?;
+        client.sleep(args.sleep_level, &args.sleep_mode).await.with_context(|| {
+            format!(
+                "failed to call sleep utility with level={} mode={}",
+                args.sleep_level, args.sleep_mode
+            )
+        })?;
         println!(
             "sleep=ok level={} mode={}",
             args.sleep_level, args.sleep_mode
         );
 
-        let sleeping_after_sleep = client
-            .is_sleeping()
-            .await
-            .context("failed to call is_sleeping after sleep")?;
+        let sleeping_after_sleep =
+            client.is_sleeping().await.context("failed to call is_sleeping after sleep")?;
         println!("is_sleeping(after_sleep)={sleeping_after_sleep}");
 
         if !sleeping_after_sleep {
             bail!("engine should report sleeping=true after sleep()");
         }
 
-        client
-            .wake_up(None)
-            .await
-            .context("failed to call wake_up utility")?;
+        client.wake_up(None).await.context("failed to call wake_up utility")?;
         println!("wake_up=ok");
 
-        let sleeping_after_wake = client
-            .is_sleeping()
-            .await
-            .context("failed to call is_sleeping after wake_up")?;
+        let sleeping_after_wake =
+            client.is_sleeping().await.context("failed to call is_sleeping after wake_up")?;
         println!("is_sleeping(after_wake)={sleeping_after_wake}");
 
         if sleeping_after_wake {
@@ -152,10 +137,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    client
-        .shutdown()
-        .await
-        .context("failed to shut down engine-core client")?;
+    client.shutdown().await.context("failed to shut down engine-core client")?;
 
     Ok(())
 }

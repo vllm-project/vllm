@@ -34,7 +34,8 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
 
-/// Validate one completions request and proxy it into the shared `vllm-text` stack.
+/// Validate one completions request and proxy it into the shared `vllm-text`
+/// stack.
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -55,11 +56,7 @@ pub async fn completions(
     );
 
     let created = unix_timestamp();
-    let include_prompt_logprobs = prepared
-        .text_request
-        .sampling_params
-        .prompt_logprobs
-        .is_some();
+    let include_prompt_logprobs = prepared.text_request.sampling_params.prompt_logprobs.is_some();
     let log_request = state.enable_log_requests;
 
     let text_stream = match state
@@ -150,10 +147,7 @@ async fn collect_completion(
         .as_stop_reason()
         .map(|sr| serde_json::to_value(sr).expect("StopReason must serialize to JSON"));
 
-    let prompt_char_count = echo
-        .as_ref()
-        .map(|prompt| text_len(prompt))
-        .unwrap_or_default();
+    let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let prompt_logprobs = if include_prompt_logprobs {
         let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
             server_error!(
@@ -541,10 +535,7 @@ mod tests {
         .collect::<Vec<_>>()
         .await;
 
-        let chunks: Vec<_> = chunks
-            .into_iter()
-            .try_collect()
-            .expect("stream should succeed");
+        let chunks: Vec<_> = chunks.into_iter().try_collect().expect("stream should succeed");
 
         match &chunks[0] {
             CompletionSseChunk::Chunk(chunk) => {
@@ -554,11 +545,7 @@ mod tests {
                     vec!["h".to_string()]
                 );
                 assert_eq!(
-                    chunk.choices[0]
-                        .logprobs
-                        .as_ref()
-                        .expect("logprobs")
-                        .text_offset,
+                    chunk.choices[0].logprobs.as_ref().expect("logprobs").text_offset,
                     vec![0]
                 );
             }
@@ -573,11 +560,7 @@ mod tests {
                     vec!["!".to_string()]
                 );
                 assert_eq!(
-                    chunk.choices[0]
-                        .logprobs
-                        .as_ref()
-                        .expect("logprobs")
-                        .text_offset,
+                    chunk.choices[0].logprobs.as_ref().expect("logprobs").text_offset,
                     vec![1]
                 );
             }

@@ -1,7 +1,8 @@
 use super::types::GenerateRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
-/// Enforce the minimal compatibility contract for the Rust token generate route.
+/// Enforce the minimal compatibility contract for the Rust token generate
+/// route.
 pub(super) fn validate_request_compat(
     request: &GenerateRequest,
     configured_model: &str,

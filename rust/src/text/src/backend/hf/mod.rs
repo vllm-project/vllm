@@ -33,8 +33,8 @@ pub struct HfTextBackend {
     primary_eos_token_id: Option<u32>,
     /// Additional EOS ids that should flow through stop-token handling.
     extra_eos_token_ids: BTreeSet<u32>,
-    /// Generation-config for sampling defaults that may be inherited when the user does not
-    /// explicitly override them.
+    /// Generation-config for sampling defaults that may be inherited when the
+    /// user does not explicitly override them.
     generation_config: GenerationConfig,
     /// Model config (`config.json`).
     model_config: ModelConfig,
@@ -84,7 +84,8 @@ impl HfTextBackend {
         })
     }
 
-    /// Expose the resolved model files for use by the chat backend to load the chat template.
+    /// Expose the resolved model files for use by the chat backend to load the
+    /// chat template.
     pub fn resolved_model_files(&self) -> &ResolvedModelFiles {
         &self.files
     }

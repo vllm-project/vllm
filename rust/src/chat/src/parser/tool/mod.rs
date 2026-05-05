@@ -84,8 +84,9 @@ pub struct ToolParseResult {
 impl ToolParseResult {
     /// Append another parser result onto this one.
     ///
-    /// Note that this does not attempt to merge multiple deltas for the same tool call into one
-    /// complete item. Call `coalesce_calls()` after if that behavior is desired.
+    /// Note that this does not attempt to merge multiple deltas for the same
+    /// tool call into one complete item. Call `coalesce_calls()` after if
+    /// that behavior is desired.
     pub(crate) fn append(&mut self, mut other: Self) {
         self.normal_text.push_str(&other.normal_text);
         self.calls.append(&mut other.calls);
@@ -93,9 +94,10 @@ impl ToolParseResult {
 
     /// Merge multiple deltas for the same tool call into one complete item.
     ///
-    /// This is primarily used by the default `parse_complete()` implementation, which delegates
-    /// through the incremental parser lifecycle and then needs to collapse streaming-style argument
-    /// fragments into one final tool call.
+    /// This is primarily used by the default `parse_complete()` implementation,
+    /// which delegates through the incremental parser lifecycle and then
+    /// needs to collapse streaming-style argument fragments into one final
+    /// tool call.
     pub(crate) fn coalesce_calls(mut self) -> Self {
         let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
         let mut order = Vec::new();
@@ -116,10 +118,8 @@ impl ToolParseResult {
             }
         }
 
-        self.calls = order
-            .into_iter()
-            .filter_map(|tool_index| merged.remove(&tool_index))
-            .collect();
+        self.calls =
+            order.into_iter().filter_map(|tool_index| merged.remove(&tool_index)).collect();
         self
     }
 }
@@ -176,13 +176,15 @@ type ToolParserCreator = fn(&[ChatTool]) -> Result<Box<dyn ToolParser>>;
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;
 
 impl ToolParserFactory {
-    /// Get the global tool parser factory with built-in registrations and model mappings.
+    /// Get the global tool parser factory with built-in registrations and model
+    /// mappings.
     pub fn global() -> &'static Self {
         static INSTANCE: LazyLock<ToolParserFactory> = LazyLock::new(ToolParserFactory::new);
         &INSTANCE
     }
 
-    /// Create the default registry with built-in parser names and model mappings.
+    /// Create the default registry with built-in parser names and model
+    /// mappings.
     pub fn new() -> Self {
         let mut factory = Self::default();
 
@@ -254,13 +256,11 @@ impl ToolParserFactory {
 
     /// Construct a parser from an exact name.
     pub fn create(&self, name: &str, tools: &[ChatTool]) -> crate::Result<Box<dyn ToolParser>> {
-        let creator = self
-            .creator(name)
-            .ok_or_else(|| crate::Error::ParserUnavailableByName {
-                kind: "tool",
-                name: name.to_string(),
-                available_names: self.list(),
-            })?;
+        let creator = self.creator(name).ok_or_else(|| crate::Error::ParserUnavailableByName {
+            kind: "tool",
+            name: name.to_string(),
+            available_names: self.list(),
+        })?;
 
         creator(tools).map_err(|error| crate::Error::ParserInitialization {
             kind: "tool",

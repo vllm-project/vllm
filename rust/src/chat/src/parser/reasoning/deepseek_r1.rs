@@ -12,7 +12,8 @@ pub struct DeepSeekR1ReasoningParser {
 }
 
 impl DeepSeekR1ReasoningParser {
-    /// Create a DeepSeek R1 parser backed by the shared delimited state machine.
+    /// Create a DeepSeek R1 parser backed by the shared delimited state
+    /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
             inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,

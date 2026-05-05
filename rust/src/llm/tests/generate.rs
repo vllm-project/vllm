@@ -217,10 +217,7 @@ fn init_tracing() {
     TRACING.call_once(|| {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("vllm_engine_core_client=debug"));
-        let _ = tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(filter)
-            .try_init();
+        let _ = tracing_subscriber::fmt().with_test_writer().with_env_filter(filter).try_init();
     });
 }
 
@@ -274,10 +271,7 @@ async fn generate_streams_outputs() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
-    let mut stream = llm
-        .generate(sample_generate_request("req-delta", 3))
-        .await
-        .unwrap();
+    let mut stream = llm.generate(sample_generate_request("req-delta", 3)).await.unwrap();
     let internal_id = stream.request_id().to_string();
 
     let first = stream.next().await.unwrap().unwrap();
@@ -363,10 +357,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
-    let stream = llm
-        .generate(sample_generate_request("req-collect", 4))
-        .await
-        .unwrap();
+    let stream = llm.generate(sample_generate_request("req-collect", 4)).await.unwrap();
     let internal_id = stream.request_id().to_string();
     let collected = stream.collect_output().await.unwrap();
 
@@ -416,10 +407,7 @@ async fn generate_propagates_unexpected_close_errors() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
-    let mut stream = llm
-        .generate(sample_generate_request("req-close", 1))
-        .await
-        .unwrap();
+    let mut stream = llm.generate(sample_generate_request("req-close", 1)).await.unwrap();
     let internal_id = stream.request_id().to_string();
 
     let error = stream.next().await.unwrap().unwrap_err();
@@ -462,9 +450,8 @@ async fn dropping_a_live_generate_stream_triggers_abort() {
                 )
                 .await;
 
-                let abort = timeout(Duration::from_secs(1), recv_engine_message(dealer))
-                    .await
-                    .unwrap();
+                let abort =
+                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
                 assert_eq!(abort[0].as_ref(), &[0x01]);
                 let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
                 assert_eq!(aborted_ids, vec![request.request_id]);
@@ -473,10 +460,7 @@ async fn dropping_a_live_generate_stream_triggers_abort() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
-    let mut stream = llm
-        .generate(sample_generate_request("req-drop", 4))
-        .await
-        .unwrap();
+    let mut stream = llm.generate(sample_generate_request("req-drop", 4)).await.unwrap();
 
     let output = stream.next().await.unwrap().unwrap();
     assert_eq!(output.token_ids, vec![99]);
@@ -543,14 +527,8 @@ async fn duplicate_external_request_ids_are_randomized_before_reaching_engine_co
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
-    let stream_1 = llm
-        .generate(sample_generate_request("req-dup", 1))
-        .await
-        .unwrap();
-    let stream_2 = llm
-        .generate(sample_generate_request("req-dup", 1))
-        .await
-        .unwrap();
+    let stream_1 = llm.generate(sample_generate_request("req-dup", 1)).await.unwrap();
+    let stream_2 = llm.generate(sample_generate_request("req-dup", 1)).await.unwrap();
     let internal_id_1 = stream_1.request_id().to_string();
     let internal_id_2 = stream_2.request_id().to_string();
     let collected_1 = stream_1.collect_output().await.unwrap();
@@ -736,9 +714,8 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
                 )
                 .await;
 
-                let abort = timeout(Duration::from_secs(1), recv_engine_message(dealer))
-                    .await
-                    .unwrap();
+                let abort =
+                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
                 assert_eq!(abort[0].as_ref(), &[0x01]);
                 let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
                 assert_eq!(aborted_ids, vec![request.request_id]);

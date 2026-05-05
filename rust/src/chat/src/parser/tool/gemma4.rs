@@ -121,7 +121,8 @@ impl Gemma4ToolParser {
     /// This is the core of the accumulate-then-parse-then-diff strategy:
     /// 1. Parse `raw_args` with `parse_gemma4_args()`
     /// 2. Convert to JSON string
-    /// 3. Withhold trailing closing characters (`"}`) that may move as more tokens arrive
+    /// 3. Withhold trailing closing characters (`"}`) that may move as more
+    ///    tokens arrive
     /// 4. Diff against previously streamed JSON and emit only new chars
     ///
     /// Why withholding is necessary:
@@ -300,10 +301,7 @@ fn scan_tool_tail(input: &str) -> ToolTailState {
             continue;
         }
 
-        let next = input[i..]
-            .chars()
-            .next()
-            .expect("scan index must stay in bounds");
+        let next = input[i..].chars().next().expect("scan index must stay in bounds");
         match next {
             '{' => object_depth += 1,
             '[' => array_depth += 1,
@@ -538,10 +536,7 @@ fn parse_gemma4_array(array: &str, partial: bool) -> Result<Vec<Value>> {
                     i = skip_over_string_delim(array, i).unwrap_or(array.len());
                     continue;
                 }
-                let next = array[i..]
-                    .chars()
-                    .next()
-                    .expect("index must stay in bounds");
+                let next = array[i..].chars().next().expect("index must stay in bounds");
                 match next {
                     '{' => depth += 1,
                     '}' => depth -= 1,
@@ -565,10 +560,7 @@ fn parse_gemma4_array(array: &str, partial: bool) -> Result<Vec<Value>> {
                     i = skip_over_string_delim(array, i).unwrap_or(array.len());
                     continue;
                 }
-                let next = array[i..]
-                    .chars()
-                    .next()
-                    .expect("index must stay in bounds");
+                let next = array[i..].chars().next().expect("index must stay in bounds");
                 match next {
                     '[' => depth += 1,
                     ']' => depth -= 1,
@@ -586,10 +578,7 @@ fn parse_gemma4_array(array: &str, partial: bool) -> Result<Vec<Value>> {
             // Bare value
             let value_start = i;
             while i < array.len() {
-                let next = array[i..]
-                    .chars()
-                    .next()
-                    .expect("index must stay in bounds");
+                let next = array[i..].chars().next().expect("index must stay in bounds");
                 if matches!(next, ',' | ']') {
                     break;
                 }
@@ -616,10 +605,7 @@ fn skip_over_string_delim(input: &str, start: usize) -> Option<usize> {
 
 fn skip_separators(input: &str, index: &mut usize) {
     while *index < input.len() {
-        let next = input[*index..]
-            .chars()
-            .next()
-            .expect("index must stay in bounds");
+        let next = input[*index..].chars().next().expect("index must stay in bounds");
         if !matches!(next, ' ' | ',' | '\n' | '\t') {
             break;
         }
@@ -629,10 +615,7 @@ fn skip_separators(input: &str, index: &mut usize) {
 
 fn skip_value_whitespace(input: &str, index: &mut usize) {
     while *index < input.len() {
-        let next = input[*index..]
-            .chars()
-            .next()
-            .expect("index must stay in bounds");
+        let next = input[*index..].chars().next().expect("index must stay in bounds");
         if !matches!(next, ' ' | '\n' | '\t') {
             break;
         }

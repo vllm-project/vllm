@@ -84,10 +84,9 @@ fn is_attr_access(expr: &Expr, varname: &str, key: &str) -> bool {
 
 fn is_var_or_elems_access(expr: &Expr, varname: &str, key: Option<&str>) -> bool {
     match expr {
-        Expr::Filter(f) => f
-            .expr
-            .as_ref()
-            .is_some_and(|inner| is_var_or_elems_access(inner, varname, key)),
+        Expr::Filter(f) => {
+            f.expr.as_ref().is_some_and(|inner| is_var_or_elems_access(inner, varname, key))
+        }
         Expr::Test(t) => is_var_or_elems_access(&t.expr, varname, key),
         Expr::Slice(s) => is_var_or_elems_access(&s.expr, varname, key),
         _ => key.map_or_else(
@@ -240,7 +239,8 @@ fn has_content_item_loop(root: &Stmt<'_>) -> bool {
     })
 }
 
-/// Detect the content format expected by a Jinja2 chat template based on AST analysis.
+/// Detect the content format expected by a Jinja2 chat template based on AST
+/// analysis.
 pub fn detect_chat_template_content_format(template: &str) -> ChatTemplateContentFormat {
     let ast = match parse(
         template,
@@ -287,11 +287,7 @@ mod tests {
     fn iter_vllm_example_template_paths() -> impl Iterator<Item = PathBuf> {
         let mut paths = fs::read_dir(vllm_examples_dir())
             .expect("failed to read vLLM example template directory")
-            .map(|entry| {
-                entry
-                    .expect("failed to read vLLM example template dir entry")
-                    .path()
-            })
+            .map(|entry| entry.expect("failed to read vLLM example template dir entry").path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "jinja"))
             .collect::<Vec<_>>();
         paths.sort();

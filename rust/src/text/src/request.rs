@@ -10,14 +10,16 @@ use crate::output::TextDecodeOptions;
 
 /// One raw text-generation prompt.
 ///
-/// This supports either ordinary text that still needs tokenization or already-tokenized prompt
-/// IDs that should bypass tokenizer work entirely.
+/// This supports either ordinary text that still needs tokenization or
+/// already-tokenized prompt IDs that should bypass tokenizer work entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, EnumAsInner)]
 #[serde(untagged)]
 pub enum Prompt {
-    /// Untokenized prompt text that still needs tokenizer work before generation.
+    /// Untokenized prompt text that still needs tokenizer work before
+    /// generation.
     Text(String),
-    /// Pre-tokenized prompt IDs that should be forwarded southbound without re-encoding.
+    /// Pre-tokenized prompt IDs that should be forwarded southbound without
+    /// re-encoding.
     TokenIds(Vec<u32>),
 }
 
@@ -47,7 +49,8 @@ pub struct SamplingParams {
     pub top_k: Option<u32>,
     /// Random seed used by the sampler when present.
     pub seed: Option<i64>,
-    /// Maximum number of tokens to generate. `None` means no explicit user override.
+    /// Maximum number of tokens to generate. `None` means no explicit user
+    /// override.
     pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: Option<u32>,
@@ -59,15 +62,20 @@ pub struct SamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
-    /// Minimum probability threshold for token sampling. `None` means no explicit user override.
+    /// Minimum probability threshold for token sampling. `None` means no
+    /// explicit user override.
     pub min_p: Option<f32>,
-    /// Frequency penalty applied by the sampler. `None` means no explicit user override.
+    /// Frequency penalty applied by the sampler. `None` means no explicit user
+    /// override.
     pub frequency_penalty: Option<f32>,
-    /// Presence penalty applied by the sampler. `None` means no explicit user override.
+    /// Presence penalty applied by the sampler. `None` means no explicit user
+    /// override.
     pub presence_penalty: Option<f32>,
-    /// Repetition penalty applied by the sampler. `None` means no explicit user override.
+    /// Repetition penalty applied by the sampler. `None` means no explicit user
+    /// override.
     pub repetition_penalty: Option<f32>,
-    /// Explicit stop token IDs provided by the caller. `None` means no explicit user override.
+    /// Explicit stop token IDs provided by the caller. `None` means no explicit
+    /// user override.
     pub stop_token_ids: Option<Vec<u32>>,
     /// If true, do not stop on the model's primary EOS token.
     pub ignore_eos: bool,
@@ -78,16 +86,19 @@ pub struct SamplingParams {
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Words to avoid during generation (tokenized to IDs during lowering).
     pub bad_words: Option<Vec<String>>,
-    /// Specific token IDs for which log probabilities should be returned at each position.
+    /// Specific token IDs for which log probabilities should be returned at
+    /// each position.
     ///
-    /// When set, the engine returns logprobs for exactly these tokens in addition to the
-    /// sampled/scored token. Mutually exclusive with `logprobs` in practice.
+    /// When set, the engine returns logprobs for exactly these tokens in
+    /// addition to the sampled/scored token. Mutually exclusive with
+    /// `logprobs` in practice.
     pub logprob_token_ids: Option<Vec<u32>>,
     /// Parameters for configuring structured outputs (guided decoding).
     pub structured_outputs: Option<StructuredOutputsParams>,
-    /// If true, bypass reads from the prefix cache for this request (the prompt will not
-    /// reuse cached KV blocks from earlier requests, though newly computed blocks may still
-    /// populate the cache). `None` defers to engine-core defaults.
+    /// If true, bypass reads from the prefix cache for this request (the prompt
+    /// will not reuse cached KV blocks from earlier requests, though newly
+    /// computed blocks may still populate the cache). `None` defers to
+    /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
@@ -122,7 +133,8 @@ impl Default for SamplingParams {
     }
 }
 
-/// One raw text-generation request ready to be tokenized or sent directly to the engine.
+/// One raw text-generation request ready to be tokenized or sent directly to
+/// the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextRequest {
     /// Stable caller-supplied request ID.
@@ -133,10 +145,12 @@ pub struct TextRequest {
     pub sampling_params: SamplingParams,
     /// Incremental detokenization options for the response path.
     pub decode_options: TextDecodeOptions,
-    /// Whether to emit intermediate northbound deltas before the terminal result.
+    /// Whether to emit intermediate northbound deltas before the terminal
+    /// result.
     ///
-    /// If `false`, callers only observe the terminal accumulated output. If `true`, callers may
-    /// receive zero or more incremental decoded updates before the final terminal event.
+    /// If `false`, callers only observe the terminal accumulated output. If
+    /// `true`, callers may receive zero or more incremental decoded updates
+    /// before the final terminal event.
     pub intermediate: bool,
     /// Request scheduling priority (lower means earlier handling; default 0).
     pub priority: i32,

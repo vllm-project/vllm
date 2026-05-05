@@ -40,7 +40,8 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
 
-/// Validate one chat completion request and proxy it into the shared `vllm-chat` stack.
+/// Validate one chat completion request and proxy it into the shared
+/// `vllm-chat` stack.
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -62,21 +63,17 @@ pub async fn chat_completions(
     let created = unix_timestamp();
     let log_request = state.enable_log_requests;
 
-    let chat_stream = match state
-        .chat
-        .chat(prepared.chat_request)
-        .instrument(request_span.clone())
-        .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            return server_error!(
-                "failed to submit chat request: {}",
-                error.to_report_string()
-            )
-            .into_response();
-        }
-    };
+    let chat_stream =
+        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                return server_error!(
+                    "failed to submit chat request: {}",
+                    error.to_report_string()
+                )
+                .into_response();
+            }
+        };
 
     if stream {
         let chunk_stream = chat_completion_chunk_stream(
@@ -241,9 +238,9 @@ async fn chat_completion_chunk_stream(
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
 
-    // If the client requested logprobs or token_ids, we need to buffer chunks until we receive
-    // the separate `LogprobsDelta` event, so that we can emit one combined chunk with both the
-    // semantic delta and its per-update metadata.
+    // If the client requested logprobs or token_ids, we need to buffer chunks until
+    // we receive the separate `LogprobsDelta` event, so that we can emit one
+    // combined chunk with both the semantic delta and its per-update metadata.
     let mut pending_chunk =
         (requested_logprobs || return_token_ids).then(PendingChatChunk::default);
 
@@ -291,9 +288,8 @@ async fn chat_completion_chunk_stream(
                     .as_ref()
                     .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
                     .transpose()?;
-                let openai_token_ids = return_token_ids
-                    .then_some(token_ids)
-                    .filter(|t| !t.is_empty());
+                let openai_token_ids =
+                    return_token_ids.then_some(token_ids).filter(|t| !t.is_empty());
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.logprobs = openai_logprobs;
                     pending_chunk.token_ids = openai_token_ids;
@@ -457,7 +453,8 @@ struct PendingChatChunk {
 }
 
 impl PendingChatChunk {
-    /// Append one assistant text/reasoning block delta to the buffered OpenAI delta payload.
+    /// Append one assistant text/reasoning block delta to the buffered OpenAI
+    /// delta payload.
     fn push_block_delta(&mut self, kind: AssistantBlockKind, delta: String) {
         match kind {
             AssistantBlockKind::Text => append_delta_text(&mut self.delta.content, delta),
@@ -470,34 +467,28 @@ impl PendingChatChunk {
 
     /// Append the OpenAI tool-call-start representation to the buffered delta.
     fn push_tool_call_start(&mut self, index: u32, id: String, name: String) {
-        self.delta
-            .tool_calls
-            .get_or_insert_with(Vec::new)
-            .push(ToolCallDelta {
-                index,
-                id: Some(id),
-                tool_type: Some("function".to_string()),
-                function: Some(FunctionCallDelta {
-                    name: Some(name),
-                    arguments: None,
-                }),
-            });
+        self.delta.tool_calls.get_or_insert_with(Vec::new).push(ToolCallDelta {
+            index,
+            id: Some(id),
+            tool_type: Some("function".to_string()),
+            function: Some(FunctionCallDelta {
+                name: Some(name),
+                arguments: None,
+            }),
+        });
     }
 
     /// Append one incremental tool-call arguments update to the buffered delta.
     fn push_tool_call_arguments(&mut self, index: u32, delta: String) {
-        self.delta
-            .tool_calls
-            .get_or_insert_with(Vec::new)
-            .push(ToolCallDelta {
-                index,
-                id: None,
-                tool_type: None,
-                function: Some(FunctionCallDelta {
-                    name: None,
-                    arguments: Some(delta),
-                }),
-            });
+        self.delta.tool_calls.get_or_insert_with(Vec::new).push(ToolCallDelta {
+            index,
+            id: None,
+            tool_type: None,
+            function: Some(FunctionCallDelta {
+                name: None,
+                arguments: Some(delta),
+            }),
+        });
     }
 
     /// Finalize the currently buffered SSE chunk, if it contains either a
@@ -604,7 +595,8 @@ fn done_sse_event() -> Event {
     Event::default().data("[DONE]")
 }
 
-/// Build the initial assistant-role SSE chunk required by the OpenAI streaming protocol.
+/// Build the initial assistant-role SSE chunk required by the OpenAI streaming
+/// protocol.
 fn start_chunk(
     request_id: &str,
     response_model: &str,
@@ -760,7 +752,8 @@ fn chat_finish_reason_to_openai(
     }
 }
 
-/// Convert one internal stop reason into the OpenAI-compatible `stop_reason` JSON shape.
+/// Convert one internal stop reason into the OpenAI-compatible `stop_reason`
+/// JSON shape.
 fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }

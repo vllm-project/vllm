@@ -76,9 +76,8 @@ impl Gemma4ReasoningParser {
     /// Apply Gemma4-specific reasoning post-processing to one parsed delta.
     fn post_process(&mut self, mut result: ReasoningDelta) -> ReasoningDelta {
         if let Some(reasoning) = result.reasoning.take() {
-            result.reasoning = self
-                .strip_thought_prefix(&reasoning)
-                .filter(|text| !text.is_empty());
+            result.reasoning =
+                self.strip_thought_prefix(&reasoning).filter(|text| !text.is_empty());
         }
         result
     }
@@ -93,8 +92,8 @@ impl ReasoningParser for Gemma4ReasoningParser {
     }
 
     fn adjust_request(&self, request: &mut ChatRequest) -> Result<()> {
-        // Gemma4's reasoning delimiters are marked as special tokens, so we need to ensure they are
-        // not stripped during decoding.
+        // Gemma4's reasoning delimiters are marked as special tokens, so we need to
+        // ensure they are not stripped during decoding.
         request.decode_options.skip_special_tokens = false;
         Ok(())
     }

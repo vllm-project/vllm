@@ -16,10 +16,10 @@ use crate::protocol::stats::{PrefillStats, SchedulerStats};
 // TODO: This module currently mixes reusable frontend-facing semantic types
 // (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and future
 // cleaned-up frontend sampling types) with engine-core-specific wire DTOs and
-// handshake/control messages. While the Rust frontend is still evolving quickly,
-// keep them co-located here for iteration speed. Once the higher-level API
-// boundary stabilizes, move the truly reusable semantic types into a lower-level
-// common crate and keep the engine transport/wire messages here.
+// handshake/control messages. While the Rust frontend is still evolving
+// quickly, keep them co-located here for iteration speed. Once the higher-level
+// API boundary stabilizes, move the truly reusable semantic types into a
+// lower-level common crate and keep the engine transport/wire messages here.
 
 /// Dynamic msgpack value used for schema positions that are preserved but not
 /// yet strongly typed in the early-stage Rust client.
@@ -231,7 +231,8 @@ pub struct EngineCoreSamplingParams {
     /// Complete stop-token set used by engine-core for `min_tokens` masking.
     ///
     /// This mirrors Python's internal `_all_stop_token_ids` field and should
-    /// contain explicit `stop_token_ids` plus any frontend-derived EOS token IDs.
+    /// contain explicit `stop_token_ids` plus any frontend-derived EOS token
+    /// IDs.
     #[serde(rename = "_all_stop_token_ids")]
     pub all_stop_token_ids: BTreeSet<u32>,
     /// Logit biases to apply during sampling.
@@ -247,14 +248,17 @@ pub struct EngineCoreSamplingParams {
     /// Parameters for configuring structured outputs (guided decoding).
     #[serde(default)]
     pub structured_outputs: Option<StructuredOutputsParams>,
-    /// Specific token IDs for which log probabilities should be returned at each position.
+    /// Specific token IDs for which log probabilities should be returned at
+    /// each position.
     ///
-    /// When set, the engine returns logprobs for exactly these tokens in addition to the
-    /// sampled/scored token. Mutually exclusive with the `logprobs` count field in practice.
+    /// When set, the engine returns logprobs for exactly these tokens in
+    /// addition to the sampled/scored token. Mutually exclusive with the
+    /// `logprobs` count field in practice.
     #[serde(default)]
     pub logprob_token_ids: Option<Vec<u32>>,
-    /// If `Some(true)`, the request will not attempt to read from the prefix cache; newly
-    /// computed blocks may still populate the cache. `None` defers to engine-core defaults.
+    /// If `Some(true)`, the request will not attempt to read from the prefix
+    /// cache; newly computed blocks may still populate the cache. `None`
+    /// defers to engine-core defaults.
     #[serde(default)]
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
@@ -300,10 +304,12 @@ impl EngineCoreSamplingParams {
 pub struct EngineCoreRequest {
     pub request_id: String,
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Multimodal features are preserved in the schema but not yet strongly typed.
+    /// Multimodal features are preserved in the schema but not yet strongly
+    /// typed.
     pub mm_features: Option<OpaqueValue>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
-    /// Pooling parameters are preserved in the schema but not yet strongly typed.
+    /// Pooling parameters are preserved in the schema but not yet strongly
+    /// typed.
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
     #[serde(default)]
@@ -362,8 +368,8 @@ pub struct EngineCoreUtilityRequest {
 }
 
 impl EngineCoreUtilityRequest {
-    /// Create a new utility request with the given strongly typed arguments, encoding them into the
-    /// expected msgpack value format.
+    /// Create a new utility request with the given strongly typed arguments,
+    /// encoding them into the expected msgpack value format.
     pub fn new<T>(
         client_index: u32,
         call_id: i64,
@@ -402,10 +408,12 @@ impl EngineCoreUtilityRequest {
 pub struct EngineCoreOutput {
     pub request_id: String,
     pub new_token_ids: Vec<u32>,
-    /// Decoded sample logprobs for the newly generated positions in this output.
+    /// Decoded sample logprobs for the newly generated positions in this
+    /// output.
     #[serde(default)]
     pub new_logprobs: Option<MaybeWireLogprobs>,
-    /// Decoded prompt logprobs for the scored prompt positions emitted in this output.
+    /// Decoded prompt logprobs for the scored prompt positions emitted in this
+    /// output.
     #[serde(default)]
     pub new_prompt_logprobs_tensors: Option<MaybeWireLogprobs>,
     #[serde(default)]
@@ -458,8 +466,9 @@ pub struct UtilityOutput {
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/serial_utils.py#L178-L185>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct UtilityResultEnvelope {
-    /// Recursive type information encoded on Python side, serving as the hint for deserialization.
-    /// We don't care it here as in Rust frontend all utility calls are strongly-typed.
+    /// Recursive type information encoded on Python side, serving as the hint
+    /// for deserialization. We don't care it here as in Rust frontend all
+    /// utility calls are strongly-typed.
     #[serde(default)]
     type_info: Option<OpaqueValue>,
     /// The actual utility result.
@@ -520,7 +529,8 @@ pub struct EngineCoreOutputs {
     pub utility_output: Option<UtilityOutput>,
     #[serde(default)]
     pub finished_requests: Option<BTreeSet<String>>,
-    /// In DP mode, signals that the current wave finished and engines are paused.
+    /// In DP mode, signals that the current wave finished and engines are
+    /// paused.
     #[serde(default)]
     pub wave_complete: Option<u32>,
     /// In DP mode, signals that a request arrived for an old wave and the next
@@ -544,7 +554,8 @@ where
     })
 }
 
-/// Decode a msgpack payload into a strongly typed protocol value, with enhanced error reporting.
+/// Decode a msgpack payload into a strongly typed protocol value, with enhanced
+/// error reporting.
 pub fn decode_msgpack<T>(bytes: &[u8]) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,

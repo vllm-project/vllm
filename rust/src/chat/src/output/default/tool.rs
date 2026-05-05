@@ -184,9 +184,10 @@ fn push_text_delta(events: &mut Vec<AssistantEvent>, kind: AssistantBlockKind, d
 
 /// Tool parsing when `intermediate=false` (`FinalOnly` mode).
 ///
-/// We keep this separate because some adaptor-backed parsers may not correctly handle the full text
-/// passed to incremental `push` interface, but override `parse_complete()` with a dedicated
-/// one-shot implementation to ensure correctness.
+/// We keep this separate because some adaptor-backed parsers may not correctly
+/// handle the full text passed to incremental `push` interface, but override
+/// `parse_complete()` with a dedicated one-shot implementation to ensure
+/// correctness.
 #[try_stream]
 async fn final_only_tool_event_stream(
     stream: impl ContentEventStream,

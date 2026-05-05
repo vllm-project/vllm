@@ -8,8 +8,9 @@ pub(super) fn validate_request_compat(
     request: &CompletionRequest,
     configured_model: &str,
 ) -> Result<(), ApiError> {
-    // This path is intentionally scoped to the minimum surface needed by `vllm-bench` random
-    // workload compatibility, so unsupported legacy completions features fail early here.
+    // This path is intentionally scoped to the minimum surface needed by
+    // `vllm-bench` random workload compatibility, so unsupported legacy
+    // completions features fail early here.
     if request.model != configured_model {
         return Err(ApiError::model_not_found(request.model.clone()));
     }
@@ -72,7 +73,8 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    // ---- Reject parameters that are accepted for deserialization but not yet implemented ----
+    // ---- Reject parameters that are accepted for deserialization but not yet
+    // implemented ----
 
     if request.length_penalty.is_some() {
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");

@@ -44,7 +44,8 @@ impl ChatEventStream {
         &self.request_id
     }
 
-    /// Collect the stream to completion and return the final assembled assistant message.
+    /// Collect the stream to completion and return the final assembled
+    /// assistant message.
     pub async fn collect_message(mut self) -> Result<CollectedAssistantMessage> {
         use futures::StreamExt as _;
 
@@ -103,8 +104,8 @@ impl ChatEventStream {
             }
         }
 
-        // Note: this is actually unreachable, as the underlying stream always emit an error on
-        // unexpected close.
+        // Note: this is actually unreachable, as the underlying stream always emit an
+        // error on unexpected close.
         Err(Error::StreamClosedBeforeTerminalOutput {
             request_id: self.request_id,
         })

@@ -19,15 +19,18 @@ mod stream;
 
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
-/// How the frontend acquires its request/response transport with Python `EngineCoreProc`s.
+/// How the frontend acquires its request/response transport with Python
+/// `EngineCoreProc`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportMode {
-    /// The Rust process owns the startup handshake and allocates or binds the frontend transport
-    /// addresses itself before replying to engine `HELLO` messages.
+    /// The Rust process owns the startup handshake and allocates or binds the
+    /// frontend transport addresses itself before replying to engine
+    /// `HELLO` messages.
     HandshakeOwner {
         /// Shared handshake endpoint that engines dial during startup.
         handshake_address: String,
-        /// Host/IP that engines should use to connect back to the frontend transport sockets.
+        /// Host/IP that engines should use to connect back to the frontend
+        /// transport sockets.
         advertised_host: String,
         /// Total number of engines expected to join this transport.
         engine_count: usize,
@@ -39,12 +42,15 @@ pub enum TransportMode {
         local_output_address: Option<String>,
     },
 
-    /// The Python supervisor has already chosen the frontend transport addresses, and the Rust
-    /// process only needs to bind them and wait for engine registration frames.
+    /// The Python supervisor has already chosen the frontend transport
+    /// addresses, and the Rust process only needs to bind them and wait for
+    /// engine registration frames.
     Bootstrapped {
-        /// Input ROUTER socket address that engines will connect to for requests.
+        /// Input ROUTER socket address that engines will connect to for
+        /// requests.
         input_address: String,
-        /// Output PULL socket address that engines will connect to for responses.
+        /// Output PULL socket address that engines will connect to for
+        /// responses.
         output_address: String,
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
@@ -53,7 +59,8 @@ pub enum TransportMode {
     },
 }
 
-/// Which coordinator implementation should be active when one is present for a frontend client.
+/// Which coordinator implementation should be active when one is present for a
+/// frontend client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorMode {
     /// Run the Rust in-process coordinator for managed `serve` deployments.
@@ -62,14 +69,14 @@ pub enum CoordinatorMode {
     External { address: String },
 }
 
-/// Configuration for connecting a Rust frontend client to an already running Python
-/// `EngineCoreProc`.
+/// Configuration for connecting a Rust frontend client to an already running
+/// Python `EngineCoreProc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineCoreClientConfig {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
-    /// Frontend-side coordinator behavior, or `None` when requests should flow directly to engines
-    /// without any coordinator involvement.
+    /// Frontend-side coordinator behavior, or `None` when requests should flow
+    /// directly to engines without any coordinator involvement.
     pub coordinator_mode: Option<CoordinatorMode>,
     /// Model name used for frontend-side metrics labels.
     pub model_name: String,
@@ -78,8 +85,8 @@ pub struct EngineCoreClientConfig {
 }
 
 impl EngineCoreClientConfig {
-    /// Create a new client config with the given handshake address, expecting a single engine, and
-    /// default values for all other fields.
+    /// Create a new client config with the given handshake address, expecting a
+    /// single engine, and default values for all other fields.
     pub fn new_single(handshake_address: impl Into<String>) -> Self {
         Self {
             transport_mode: TransportMode::HandshakeOwner {
@@ -114,10 +121,11 @@ impl EngineCoreClientConfig {
         self
     }
 
-    /// Override the locally bound input/output addresses for handshake-owned transport mode.
+    /// Override the locally bound input/output addresses for handshake-owned
+    /// transport mode.
     ///
-    /// This is primarily used by tests that want deterministic IPC endpoints while still exercising
-    /// the handshake-owned startup path.
+    /// This is primarily used by tests that want deterministic IPC endpoints
+    /// while still exercising the handshake-owned startup path.
     pub fn with_local_input_output_addresses(
         mut self,
         local_input_address: Option<String>,
@@ -137,13 +145,16 @@ impl EngineCoreClientConfig {
     }
 }
 
-/// The reason a request stream is being aborted when its output stream is dropped.
+/// The reason a request stream is being aborted when its output stream is
+/// dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AbortCause {
-    /// The consumer dropped the stream before the request reached a terminal engine output.
+    /// The consumer dropped the stream before the request reached a terminal
+    /// engine output.
     #[default]
     DroppedStream,
-    /// The frontend matched a stop string locally and intentionally stopped consuming the stream.
+    /// The frontend matched a stop string locally and intentionally stopped
+    /// consuming the stream.
     StopStringMatched,
 }
 
@@ -152,8 +163,8 @@ task_local::task_local! {
 }
 
 impl AbortCause {
-    /// Return the abort cause currently associated with this task, or [`AbortCause::DroppedStream`]
-    /// by default.
+    /// Return the abort cause currently associated with this task, or
+    /// [`AbortCause::DroppedStream`] by default.
     pub fn current() -> Self {
         ABORT_CAUSE.try_get().unwrap_or_default()
     }
@@ -164,14 +175,16 @@ impl AbortCause {
     }
 }
 
-/// Internal auto-abort work item sent from stream `Drop` handlers to the abort worker.
+/// Internal auto-abort work item sent from stream `Drop` handlers to the abort
+/// worker.
 #[derive(Debug, Clone)]
 pub(crate) struct AbortRequest {
     request_id: String,
     cause: AbortCause,
 }
 
-/// Default ZMQ-based implementation that talks directly to a Python `EngineCoreProc`.
+/// Default ZMQ-based implementation that talks directly to a Python
+/// `EngineCoreProc`.
 pub struct EngineCoreClient {
     config: EngineCoreClientConfig,
     input_address: String,
@@ -190,11 +203,12 @@ pub struct EngineCoreClient {
 }
 
 impl EngineCoreClient {
-    /// Connect to Python `EngineCoreProc`s using the configured transport/coordinator modes.
+    /// Connect to Python `EngineCoreProc`s using the configured
+    /// transport/coordinator modes.
     ///
-    /// In handshake-owned mode this method drives the full engine startup handshake. In
-    /// bootstrapped mode it binds the provided frontend sockets and waits for the expected engine
-    /// registration frames.
+    /// In handshake-owned mode this method drives the full engine startup
+    /// handshake. In bootstrapped mode it binds the provided frontend
+    /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
@@ -248,11 +262,12 @@ impl EngineCoreClient {
         Self::from_connected(config, connected).await
     }
 
-    /// Connect using handshake-owned transport mode while overriding the frontend input/output bind
-    /// addresses.
+    /// Connect using handshake-owned transport mode while overriding the
+    /// frontend input/output bind addresses.
     ///
-    /// This helper preserves the previous test-facing API shape. It is only valid when
-    /// `config.transport_mode` is `TransportMode::HandshakeOwner`.
+    /// This helper preserves the previous test-facing API shape. It is only
+    /// valid when `config.transport_mode` is
+    /// `TransportMode::HandshakeOwner`.
     // TODO: inline this
     pub async fn connect_with_input_output_addresses(
         config: EngineCoreClientConfig,
@@ -264,8 +279,8 @@ impl EngineCoreClient {
         Self::connect(config).await
     }
 
-    /// Create a new client instance from the connected transport state after the startup handshake
-    /// completes.
+    /// Create a new client instance from the connected transport state after
+    /// the startup handshake completes.
     async fn from_connected(
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
@@ -315,12 +330,10 @@ impl EngineCoreClient {
                     Some(coordinator_task),
                 )
             } else if let Some(address) =
-                dp_stats_address
-                    .as_deref()
-                    .or(match config.coordinator_mode.as_ref() {
-                        Some(CoordinatorMode::External { address }) => Some(address.as_str()),
-                        _ => None,
-                    })
+                dp_stats_address.as_deref().or(match config.coordinator_mode.as_ref() {
+                    Some(CoordinatorMode::External { address }) => Some(address.as_str()),
+                    _ => None,
+                })
             {
                 let (handle, service) = CoordinatorHandle::connect_external(address).await?;
                 let coordinator_task =
@@ -346,12 +359,14 @@ impl EngineCoreClient {
         })
     }
 
-    /// Return the address of the input socket that the client uses to send requests to the engine.
+    /// Return the address of the input socket that the client uses to send
+    /// requests to the engine.
     pub fn input_address(&self) -> &str {
         &self.input_address
     }
 
-    /// Return the address of the output socket that the client listens on for engine responses.
+    /// Return the address of the output socket that the client listens on for
+    /// engine responses.
     pub fn output_address(&self) -> &str {
         &self.output_address
     }
@@ -363,13 +378,11 @@ impl EngineCoreClient {
 
     /// Return the engine identities of all engines connected to this client.
     pub fn engine_identities(&self) -> Vec<&[u8]> {
-        self.engines
-            .iter()
-            .map(|engine| &*engine.engine_id)
-            .collect()
+        self.engines.iter().map(|engine| &*engine.engine_id).collect()
     }
 
-    /// Return the ready responses received from all engines on the input socket.
+    /// Return the ready responses received from all engines on the input
+    /// socket.
     pub fn ready_responses(&self) -> Vec<&EngineCoreReadyResponse> {
         self.engines
             .iter()
@@ -377,7 +390,8 @@ impl EngineCoreClient {
             .collect()
     }
 
-    /// Return the total number of GPU blocks summed across all connected engines.
+    /// Return the total number of GPU blocks summed across all connected
+    /// engines.
     pub fn total_num_gpu_blocks(&self) -> u64 {
         self.engines
             .iter()
@@ -388,8 +402,8 @@ impl EngineCoreClient {
 
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
-    /// This is the auto-fitted value after KV cache profiling and may differ from
-    /// the originally configured value.
+    /// This is the auto-fitted value after KV cache profiling and may differ
+    /// from the originally configured value.
     pub fn max_model_len(&self) -> Option<u32> {
         self.engines
             .iter()
@@ -398,7 +412,8 @@ impl EngineCoreClient {
             .min()
     }
 
-    /// Get the model name associated with this client used for metrics labeling.
+    /// Get the model name associated with this client used for metrics
+    /// labeling.
     pub fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -416,7 +431,8 @@ impl EngineCoreClient {
 
 // Client API implementation.
 impl EngineCoreClient {
-    /// Add a new request to the engine and return a per-request raw output stream.
+    /// Add a new request to the engine and return a per-request raw output
+    /// stream.
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
@@ -430,9 +446,8 @@ impl EngineCoreClient {
 
         let request_id = req.request_id.clone();
         let data_parallel_rank = req.data_parallel_rank;
-        let (engine_id, rx) = self
-            .inner
-            .register_request(request_id.clone(), data_parallel_rank)?;
+        let (engine_id, rx) =
+            self.inner.register_request(request_id.clone(), data_parallel_rank)?;
 
         let result: Result<()> = async {
             if let Some(coordinator) = self.coordinator.as_ref() {
@@ -449,9 +464,7 @@ impl EngineCoreClient {
                 "registered request to engine"
             );
 
-            self.inner
-                .send_to_engine(&engine_id, EngineCoreRequestType::Add, &req)
-                .await?;
+            self.inner.send_to_engine(&engine_id, EngineCoreRequestType::Add, &req).await?;
             Ok(())
         }
         .await;
@@ -480,19 +493,18 @@ impl EngineCoreClient {
         }
 
         for (engine_id, request_ids) in abortable {
-            self.inner
-                .do_abort_requests(&engine_id, &request_ids)
-                .await?;
+            self.inner.do_abort_requests(&engine_id, &request_ids).await?;
         }
         Ok(())
     }
 
-    /// Call a typed utility method on all connected engines, returning one decoded result per
-    /// connected engine if all calls succeed or an error if any call fails.
+    /// Call a typed utility method on all connected engines, returning one
+    /// decoded result per connected engine if all calls succeed or an error
+    /// if any call fails.
     ///
-    /// Callers should pass utility arguments using Rust tuple semantics so the encoded payload
-    /// matches Python's `(client_index, call_id, method_name, args)` contract:
-    /// `()`, `(arg,)`, `(arg1, arg2)`, etc.
+    /// Callers should pass utility arguments using Rust tuple semantics so the
+    /// encoded payload matches Python's `(client_index, call_id,
+    /// method_name, args)` contract: `()`, `(arg,)`, `(arg1, arg2)`, etc.
     pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
@@ -532,7 +544,8 @@ impl EngineCoreClient {
         try_join_all(futures).await
     }
 
-    /// Execute `collective_rpc` on all engines and flatten all engine results into one list.
+    /// Execute `collective_rpc` on all engines and flatten all engine results
+    /// into one list.
     pub async fn collective_rpc<A, K>(
         &self,
         method: &str,
@@ -572,8 +585,7 @@ impl EngineCoreClient {
 
     /// Reset the encoder cache.
     pub async fn reset_encoder_cache(&self) -> Result<()> {
-        self.call_utility::<(), _>("reset_encoder_cache", ())
-            .await?;
+        self.call_utility::<(), _>("reset_encoder_cache", ()).await?;
         Ok(())
     }
 
@@ -598,7 +610,8 @@ impl EngineCoreClient {
         Ok(())
     }
 
-    /// Wake the engine from sleep, optionally limiting the wake-up to specific tags.
+    /// Wake the engine from sleep, optionally limiting the wake-up to specific
+    /// tags.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
         self.call_utility::<(), _>("wake_up", (tags,)).await?;
         Ok(())

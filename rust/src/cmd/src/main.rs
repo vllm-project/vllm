@@ -15,9 +15,10 @@ use crate::managed_engine::{ManagedEngineHandle, allocate_handshake_port};
 const TOKIO_WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
 const DEFAULT_MAX_TOKIO_WORKER_THREADS: usize = 32;
 
-/// Cap the default number of Tokio worker threads if the user did not explicitly set
-/// `TOKIO_WORKER_THREADS` to avoid spawning too many threads on machines with a large number of
-/// CPUs, which may lead to excessive context switching and degraded performance.
+/// Cap the default number of Tokio worker threads if the user did not
+/// explicitly set `TOKIO_WORKER_THREADS` to avoid spawning too many threads on
+/// machines with a large number of CPUs, which may lead to excessive context
+/// switching and degraded performance.
 fn tokio_worker_threads() -> Option<usize> {
     if env::var_os(TOKIO_WORKER_THREADS_ENV).is_some() {
         return None;
@@ -54,9 +55,7 @@ fn shutdown_signal() -> CancellationToken {
 
     tokio::spawn(async move {
         let ctrl_c = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install Ctrl-C signal handler");
+            tokio::signal::ctrl_c().await.expect("failed to install Ctrl-C signal handler");
         };
 
         let sigterm = async {
@@ -167,14 +166,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                     }
                 }
             };
-            // Regardless of the shutdown reason, broadcast shutdown signal here to ensure that all
-            // serving tasks are notified.
+            // Regardless of the shutdown reason, broadcast shutdown signal here to ensure
+            // that all serving tasks are notified.
             shutdown.cancel();
 
             // Shutdown begins. Terminate the managed engine first.
             engine.shutdown(shutdown_timeout).await?;
             info!("managed engine shut down gracefully");
-            // Wait for the API server to shut down gracefully by draining in-flight requests.
+            // Wait for the API server to shut down gracefully by draining in-flight
+            // requests.
             if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
                 serve_task.await.context("serve task join failed")??;
             }

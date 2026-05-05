@@ -91,7 +91,8 @@ pub fn collect_stream<T: ToolParser + ?Sized>(parser: &mut T, chunks: &[&str]) -
     result.coalesce_calls()
 }
 
-/// Split text into chunks containing at most `chunk_chars` Unicode scalar values.
+/// Split text into chunks containing at most `chunk_chars` Unicode scalar
+/// values.
 pub fn split_by_chars(text: &str, chunk_chars: usize) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;

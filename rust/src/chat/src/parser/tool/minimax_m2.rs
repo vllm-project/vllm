@@ -76,9 +76,7 @@ impl MinimaxM2ToolParser {
             }
             MinimaxM2Event::ToolBlockStart => self.mode = MinimaxM2Mode::ToolBlock,
             MinimaxM2Event::Invoke { name, raw_params } => {
-                let arguments = self
-                    .tool_parameters
-                    .convert_params_with_schema(&name, raw_params);
+                let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
@@ -163,9 +161,7 @@ fn parse_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Even
 
 /// Parse a MiniMax M2 tool-block start marker.
 fn tool_block_start_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    literal(TOOL_CALL_START)
-        .value(MinimaxM2Event::ToolBlockStart)
-        .parse_next(input)
+    literal(TOOL_CALL_START).value(MinimaxM2Event::ToolBlockStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next MiniMax M2 marker.
@@ -466,9 +462,7 @@ mod tests {
     #[test]
     fn minimax_m2_streaming_does_not_emit_incomplete_tool_call() {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
-        let result = parser
-            .push(r#"<minimax:tool_call><invoke name="get_weather">"#)
-            .unwrap();
+        let result = parser.push(r#"<minimax:tool_call><invoke name="get_weather">"#).unwrap();
 
         assert!(result.normal_text.is_empty());
         assert!(result.calls.is_empty());
@@ -477,9 +471,7 @@ mod tests {
     #[test]
     fn minimax_m2_finish_fails_incomplete_tool_call() {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
-        parser
-            .push(r#"<minimax:tool_call><invoke name="get_weather">"#)
-            .unwrap();
+        parser.push(r#"<minimax:tool_call><invoke name="get_weather">"#).unwrap();
 
         assert!(parser.finish().is_err());
     }
@@ -495,9 +487,7 @@ mod tests {
     #[test]
     fn minimax_m2_malformed_tool_call_fails_fast() {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
-        let error = parser
-            .push("<minimax:tool_call><bad></minimax:tool_call>")
-            .unwrap_err();
+        let error = parser.push("<minimax:tool_call><bad></minimax:tool_call>").unwrap_err();
 
         expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
     }

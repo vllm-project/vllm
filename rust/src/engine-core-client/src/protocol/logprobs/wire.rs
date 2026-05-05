@@ -8,12 +8,12 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/serial_utils.py#L42>
 const CUSTOM_TYPE_RAW_VIEW: i8 = 3;
 
-/// Python wire representation of `LogprobsLists` / `LogprobsTensors` before aux-frame
-/// references and raw-view payloads are resolved.
+/// Python wire representation of `LogprobsLists` / `LogprobsTensors` before
+/// aux-frame references and raw-view payloads are resolved.
 ///
-/// This mirrors the tuple shape emitted by Python engine-core so serde can first deserialize the
-/// raw wire payload before the Rust client converts it into semantic per-position logprobs
-/// records.
+/// This mirrors the tuple shape emitted by Python engine-core so serde can
+/// first deserialize the raw wire payload before the Rust client converts it
+/// into semantic per-position logprobs records.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/outputs.py#L23-L56>
@@ -26,20 +26,20 @@ pub struct WireLogprobs {
     /// Wire array with shape `[num_positions]`.
     ///
     /// Python uses the field name `sampled_token_ranks` for sample logprobs and
-    /// `selected_token_ranks` for prompt logprobs. Rust keeps one neutral field because both
-    /// payloads share the same wire representation.
+    /// `selected_token_ranks` for prompt logprobs. Rust keeps one neutral field
+    /// because both payloads share the same wire representation.
     pub token_ranks: WireNdArray,
-    /// Preserved only for wire compatibility with batch-level Python tensors. Scheduler-sliced
-    /// per-request outputs should emit `None` here, and the semantic Rust decoder rejects any
-    /// other value.
+    /// Preserved only for wire compatibility with batch-level Python tensors.
+    /// Scheduler-sliced per-request outputs should emit `None` here, and
+    /// the semantic Rust decoder rejects any other value.
     #[serde(default)]
     pub cu_num_generated_tokens: Option<Vec<usize>>,
 }
 
 /// Python ndarray/tensor wire tuple encoded as `(dtype, shape, data)`.
 ///
-/// This matches the custom msgpack representation built by Python `serial_utils.encode_ndarray`
-/// / `encode_tensor`.
+/// This matches the custom msgpack representation built by Python
+/// `serial_utils.encode_ndarray` / `encode_tensor`.
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct WireNdArray {
     pub dtype: String,
@@ -49,11 +49,12 @@ pub struct WireNdArray {
 
 /// Python array payload reference inside [`WireNdArray`].
 ///
-/// The data can be either an inline msgpack raw-view extension or an index into the multipart
-/// aux-frame list carried alongside the primary msgpack frame.
+/// The data can be either an inline msgpack raw-view extension or an index into
+/// the multipart aux-frame list carried alongside the primary msgpack frame.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WireArrayData {
-    /// The index of the aux frame where the raw bytes of this array/tensor are stored.
+    /// The index of the aux frame where the raw bytes of this array/tensor are
+    /// stored.
     AuxIndex(usize),
     /// The raw bytes of this array/tensor.
     RawView(Vec<u8>),
@@ -70,12 +71,11 @@ impl<'de> Deserialize<'de> for WireArrayData {
             Value::Ext(tag, _) => Err(serde::de::Error::custom(format!(
                 "unsupported extension type code {tag}"
             ))),
-            Value::Integer(index) => index
-                .as_u64()
-                .map(|index| Self::AuxIndex(index as usize))
-                .ok_or_else(|| {
+            Value::Integer(index) => {
+                index.as_u64().map(|index| Self::AuxIndex(index as usize)).ok_or_else(|| {
                     serde::de::Error::custom("aux frame index must be a non-negative integer")
-                }),
+                })
+            }
             other => Err(serde::de::Error::custom(format!(
                 "expected raw-view ext or aux frame index, got {other:?}"
             ))),

@@ -76,9 +76,9 @@ struct DsmlParameter {
 ///
 /// Arguments are emitted only after a full `invoke` block is parsed.
 ///
-/// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are represented
-/// as special tokens in the tokenizer and therefore must be preserved during
-/// decode for parsing to work.
+/// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are
+/// represented as special tokens in the tokenizer and therefore must be
+/// preserved during decode for parsing to work.
 pub struct DeepSeekV32ToolParser {
     buffer: String,
     mode: DsmlMode,
@@ -93,8 +93,8 @@ impl DeepSeekV32ToolParser {
         Self::with_tokens(tools, DsmlTokens::V32)
     }
 
-    /// Create a parser with custom DSML tokens, for reuse by DeepSeek V4 which has different
-    /// markers but mostly shared logic.
+    /// Create a parser with custom DSML tokens, for reuse by DeepSeek V4 which
+    /// has different markers but mostly shared logic.
     pub(super) fn with_tokens(tools: &[ChatTool], tokens: DsmlTokens) -> Self {
         Self {
             buffer: String::new(),
@@ -239,9 +239,7 @@ fn tool_calls_start_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> Moda
 
 /// Parse a DSML function-calls end marker.
 fn tool_calls_end_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
-    literal(tokens.tool_calls_end)
-        .value(DsmlEvent::ToolCallsEnd)
-        .parse_next(input)
+    literal(tokens.tool_calls_end).value(DsmlEvent::ToolCallsEnd).parse_next(input)
 }
 
 /// Parse a trailing rest after DSML function calls.

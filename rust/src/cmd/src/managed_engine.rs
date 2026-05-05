@@ -14,7 +14,8 @@ use tracing::info;
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const MIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Allocate one ephemeral TCP port for the managed headless-engine handshake on the given host.
+/// Allocate one ephemeral TCP port for the managed headless-engine handshake on
+/// the given host.
 pub fn allocate_handshake_port(host: &str) -> Result<u16> {
     let listener = TcpListener::bind((host, 0)).context("failed to allocate handshake port")?;
     let port = listener
@@ -78,7 +79,8 @@ pub struct ManagedEngineHandle {
 }
 
 impl ManagedEngineHandle {
-    /// Spawn one managed Python headless engine and return a handle for monitoring it.
+    /// Spawn one managed Python headless engine and return a handle for
+    /// monitoring it.
     pub async fn spawn(config: ManagedEngineConfig) -> Result<Self> {
         let command = config.to_command();
         info!(
@@ -88,10 +90,7 @@ impl ManagedEngineHandle {
         );
 
         let mut command = Command::from(command);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+        command.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
         process_group::configure(&mut command);
 
@@ -106,9 +105,7 @@ impl ManagedEngineHandle {
     /// Poll whether the managed engine has exited yet.
     pub async fn try_wait(&self) -> Option<ExitStatus> {
         let mut child = self.child.lock().await;
-        child
-            .try_wait()
-            .expect("failed to poll the status of managed engine")
+        child.try_wait().expect("failed to poll the status of managed engine")
     }
 
     /// Wait until the managed engine exits.
@@ -132,7 +129,8 @@ impl ManagedEngineHandle {
             return Ok(());
         };
 
-        // Enforce a minimum shutdown timeout to give the engine process enough time to clean up.
+        // Enforce a minimum shutdown timeout to give the engine process enough time to
+        // clean up.
         let shutdown_timeout = std::cmp::max(timeout, MIN_SHUTDOWN_TIMEOUT);
 
         // First, try to gracefully terminate.
@@ -144,10 +142,7 @@ impl ManagedEngineHandle {
         process_group::terminate(pid)?;
 
         // Wait for the process to exit on its own.
-        if tokio::time::timeout(shutdown_timeout, self.wait_for_exit())
-            .await
-            .is_ok()
-        {
+        if tokio::time::timeout(shutdown_timeout, self.wait_for_exit()).await.is_ok() {
             return Ok(());
         }
 
@@ -163,13 +158,13 @@ impl ManagedEngineHandle {
     }
 }
 
-/// Process group helper functions for managing the Python subprocess and its potential children in
-/// a platform-aware way.
+/// Process group helper functions for managing the Python subprocess and its
+/// potential children in a platform-aware way.
 mod process_group {
     use super::*;
 
-    /// Place the Python child into its own process group so `serve` can tear down
-    /// the whole subtree rather than just the immediate shell process.
+    /// Place the Python child into its own process group so `serve` can tear
+    /// down the whole subtree rather than just the immediate shell process.
     pub fn configure(command: &mut Command) {
         unsafe {
             command.pre_exec(|| {

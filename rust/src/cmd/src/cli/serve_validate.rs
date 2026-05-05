@@ -6,8 +6,8 @@ use clap::error::ErrorKind;
 
 use crate::cli::Cli;
 
-/// Python `argparse` accepts these multi-character single-dash aliases, but `clap` cannot model
-/// them directly.
+/// Python `argparse` accepts these multi-character single-dash aliases, but
+/// `clap` cannot model them directly.
 const PYTHON_MULTI_CHAR_ALIASES: &[(&str, &str)] = &[
     ("-asc", "--api-server-count"),
     ("-pp", "--pipeline-parallel-size"),
@@ -28,8 +28,8 @@ const PYTHON_MULTI_CHAR_ALIASES: &[(&str, &str)] = &[
     ("-ac", "--attention-config"),
 ];
 
-/// Repartition `serve` argv so Rust frontend-owned flags stay before `--`, while everything else
-/// is forwarded to Python.
+/// Repartition `serve` argv so Rust frontend-owned flags stay before `--`,
+/// while everything else is forwarded to Python.
 pub(super) fn repartition_serve_args(args: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
     if args.get(1).map(|arg| arg.as_os_str()) != Some("serve".as_ref()) {
         return Ok(args.to_vec());
@@ -116,11 +116,9 @@ fn normalize_python_multi_char_alias(arg: &str) -> Option<String> {
 }
 
 fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
-    PYTHON_MULTI_CHAR_ALIASES
-        .iter()
-        .find_map(|&(alias, canonical)| {
-            (arg == alias || arg.starts_with(&format!("{alias}="))).then_some(canonical)
-        })
+    PYTHON_MULTI_CHAR_ALIASES.iter().find_map(|&(alias, canonical)| {
+        (arg == alias || arg.starts_with(&format!("{alias}="))).then_some(canonical)
+    })
 }
 
 fn push_chunk(
@@ -163,9 +161,8 @@ fn chunk_head_is_frontend_owned(
 
 fn collect_frontend_option_names() -> (HashSet<String>, HashSet<char>) {
     let mut command = Cli::command();
-    let serve_command = command
-        .find_subcommand_mut("serve")
-        .expect("serve subcommand should exist");
+    let serve_command =
+        command.find_subcommand_mut("serve").expect("serve subcommand should exist");
 
     let mut long_flags = HashSet::new();
     let mut short_flags = HashSet::new();
@@ -209,9 +206,8 @@ fn is_help_flag(arg: &str) -> bool {
 
 fn build_missing_model_error() -> clap::Error {
     let mut command = Cli::command();
-    let serve_command = command
-        .find_subcommand_mut("serve")
-        .expect("serve subcommand should exist");
+    let serve_command =
+        command.find_subcommand_mut("serve").expect("serve subcommand should exist");
     serve_command.error(
         ErrorKind::MissingRequiredArgument,
         "serve requires the model to appear immediately after the subcommand",

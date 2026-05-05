@@ -37,30 +37,36 @@ impl AppState {
         self
     }
 
-    /// Return a reference to the underlying engine core client for utility calls.
+    /// Return a reference to the underlying engine core client for utility
+    /// calls.
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
         self.chat.engine_core_client()
     }
 
-    /// Return the current in-flight inference request count for the `/load` endpoint.
+    /// Return the current in-flight inference request count for the `/load`
+    /// endpoint.
     pub fn server_load(&self) -> u64 {
         self.server_load.load(Ordering::Relaxed)
     }
 
-    /// Increment the in-flight inference request count, called by the load tracking middleware.
+    /// Increment the in-flight inference request count, called by the load
+    /// tracking middleware.
     pub(crate) fn increment_server_load(&self) {
         self.server_load.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement the in-flight inference request count, called by the load tracking middleware.
+    /// Decrement the in-flight inference request count, called by the load
+    /// tracking middleware.
     pub(crate) fn decrement_server_load(&self) {
         self.server_load.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Wait until all request-owned references are dropped, then shut down the engine client.
+    /// Wait until all request-owned references are dropped, then shut down the
+    /// engine client.
     ///
-    /// If the deadline elapses while request/connection tasks still hold state references, skip the
-    /// clean engine-client shutdown and let process teardown reclaim the remaining resources.
+    /// If the deadline elapses while request/connection tasks still hold state
+    /// references, skip the clean engine-client shutdown and let process
+    /// teardown reclaim the remaining resources.
     pub async fn shutdown(mut self: Arc<Self>, deadline: Instant) -> anyhow::Result<()> {
         loop {
             match Arc::try_unwrap(self) {

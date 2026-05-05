@@ -96,10 +96,7 @@ async fn main() -> Result<()> {
     println!("request_id={request_id}");
     println!("prompt={}", args.prompt);
 
-    let mut stream = chat
-        .chat(request)
-        .await
-        .context("failed to submit chat request")?;
+    let mut stream = chat.chat(request).await.context("failed to submit chat request")?;
     let output = tokio::time::timeout(output_timeout, async {
         let mut final_reasoning = String::new();
         let mut final_text = String::new();
@@ -170,9 +167,7 @@ async fn main() -> Result<()> {
     .await
     .context("timed out waiting for chat output")??;
 
-    chat.shutdown()
-        .await
-        .context("failed to shut down chat client")?;
+    chat.shutdown().await.context("failed to shut down chat client")?;
 
     println!("final_reasoning={:?}", output.0);
     println!("final_text={:?}", output.1);

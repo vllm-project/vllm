@@ -30,7 +30,8 @@ pub struct CollectedTextOutput {
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
 #[easy_ext::ext(TextOutputStreamExt)]
 impl<T: TextOutputStream> T {
-    /// Collect the stream to completion and return the final decoded text plus terminal metadata.
+    /// Collect the stream to completion and return the final decoded text plus
+    /// terminal metadata.
     pub fn collect_output(self) -> impl Future<Output = Result<CollectedTextOutput>> + Send {
         async move {
             let stream = self;
@@ -87,8 +88,8 @@ impl<T: TextOutputStream> T {
                 }
             }
 
-            // Note: this is actually unreachable, as the underlying stream always emit an error on
-            // unexpected close.
+            // Note: this is actually unreachable, as the underlying stream always emit an
+            // error on unexpected close.
             Err(Error::StreamClosedBeforeTerminalOutput {
                 request_id: "unknown".to_string(),
             })

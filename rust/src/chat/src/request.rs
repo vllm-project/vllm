@@ -55,7 +55,8 @@ pub enum ChatContent {
 }
 
 impl ChatContent {
-    /// Flatten the text content into one plain string without adding separators.
+    /// Flatten the text content into one plain string without adding
+    /// separators.
     // TODO: this method will be truly fallible once we add non-text content parts.
     pub fn try_flatten_to_text(&self) -> Result<String> {
         Ok(match self {
@@ -64,7 +65,8 @@ impl ChatContent {
         })
     }
 
-    /// Return whether flattening this chat content would produce an empty string.
+    /// Return whether flattening this chat content would produce an empty
+    /// string.
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Text(text) => text.is_empty(),
@@ -164,7 +166,8 @@ impl ChatMessage {
         }
     }
 
-    /// Construct one chat message with assistant role and structured content blocks.
+    /// Construct one chat message with assistant role and structured content
+    /// blocks.
     pub fn assistant_blocks(content: Vec<AssistantContentBlock>) -> Self {
         Self::Assistant { content }
     }
@@ -225,16 +228,20 @@ impl From<AssistantMessage> for ChatMessage {
 pub enum GenerationPromptMode {
     /// Append a generation prompt for a new assistant turn.
     ///
-    /// Equivalent to `add_generation_prompt = true` and `continue_final_message = false`.
+    /// Equivalent to `add_generation_prompt = true` and `continue_final_message
+    /// = false`.
     #[default]
     StartNewAssistant,
     /// Leave the final assistant message open so generation continues it.
     ///
-    /// Equivalent to `add_generation_prompt = false` and `continue_final_message = true`.
+    /// Equivalent to `add_generation_prompt = false` and
+    /// `continue_final_message = true`.
     ContinueFinalAssistant,
-    /// Render the existing chat history without adding any trailing generation prompt.
+    /// Render the existing chat history without adding any trailing generation
+    /// prompt.
     ///
-    /// Equivalent to `add_generation_prompt = false` and `continue_final_message = false`.
+    /// Equivalent to `add_generation_prompt = false` and
+    /// `continue_final_message = false`.
     NoGenerationPrompt,
 }
 
@@ -267,16 +274,17 @@ impl ReasoningEffort {
 
 /// Chat-template-related request options.
 ///
-/// These are the small subset of chat controls that currently affect prompt rendering in
-/// `vllm-chat`.
+/// These are the small subset of chat controls that currently affect prompt
+/// rendering in `vllm-chat`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
-    /// Controls whether rendering starts a new assistant turn, continues the final assistant
-    /// message, or emits no trailing generation prompt at all.
+    /// Controls whether rendering starts a new assistant turn, continues the
+    /// final assistant message, or emits no trailing generation prompt at
+    /// all.
     pub generation_prompt_mode: GenerationPromptMode,
 
-    /// Per-request Jinja chat template override. When set, this template is used instead of the
-    /// model's default chat template.
+    /// Per-request Jinja chat template override. When set, this template is
+    /// used instead of the model's default chat template.
     pub chat_template: Option<String>,
 
     /// Effort level exposed to chat templates for reasoning models.
@@ -298,7 +306,8 @@ impl Default for ChatOptions {
 }
 
 impl ChatOptions {
-    /// Whether to add a generation prompt for a new assistant turn after the existing chat history.
+    /// Whether to add a generation prompt for a new assistant turn after the
+    /// existing chat history.
     pub fn add_generation_prompt(&self) -> bool {
         matches!(
             self.generation_prompt_mode,
@@ -306,7 +315,8 @@ impl ChatOptions {
         )
     }
 
-    /// Whether to leave the final assistant message open so generation continues it.
+    /// Whether to leave the final assistant message open so generation
+    /// continues it.
     pub fn continue_final_message(&self) -> bool {
         matches!(
             self.generation_prompt_mode,
@@ -325,7 +335,8 @@ pub struct ChatTool {
 }
 
 impl ChatTool {
-    /// Used internally for template rendering and passed to `tool-parser` crate.
+    /// Used internally for template rendering and passed to `tool-parser`
+    /// crate.
     pub(crate) fn to_openai_tool(&self) -> OpenAiTool {
         OpenAiTool {
             tool_type: "function".to_string(),
@@ -348,7 +359,8 @@ pub enum ChatToolChoice {
     None,
 }
 
-/// One chat request ready to be rendered into a prompt and lowered into a generate request.
+/// One chat request ready to be rendered into a prompt and lowered into a
+/// generate request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
     /// Stable caller-supplied request ID.
@@ -365,14 +377,17 @@ pub struct ChatRequest {
     pub tool_choice: ChatToolChoice,
     /// Text decode options for incremental detokenization.
     pub decode_options: TextDecodeOptions,
-    /// Whether to emit intermediate northbound content deltas before the terminal result.
+    /// Whether to emit intermediate northbound content deltas before the
+    /// terminal result.
     ///
-    /// If `false`, callers only observe the terminal accumulated assistant output. If `true`,
-    /// callers may receive zero or more incremental content events before the final terminal one.
+    /// If `false`, callers only observe the terminal accumulated assistant
+    /// output. If `true`, callers may receive zero or more incremental
+    /// content events before the final terminal one.
     pub intermediate: bool,
     /// Request scheduling priority (lower means earlier handling; default 0).
     pub priority: i32,
-    /// Documents for RAG (retrieval-augmented generation), passed to the chat template.
+    /// Documents for RAG (retrieval-augmented generation), passed to the chat
+    /// template.
     pub documents: Option<Vec<Value>>,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
@@ -422,17 +437,18 @@ impl ChatRequest {
         Ok(())
     }
 
-    /// Return true if this request should enable tool parsing based on the tool choice and tool
-    /// list.
+    /// Return true if this request should enable tool parsing based on the tool
+    /// choice and tool list.
     pub(crate) fn tool_parsing_enabled(&self) -> bool {
         matches!(self.tool_choice, ChatToolChoice::Auto) && !self.tools.is_empty()
     }
 
     /// Return the request-level thinking toggle when explicitly requested.
     ///
-    /// We currently accept the two request kwargs `thinking` and `enable_thinking`. Both must be
-    /// booleans when present. If both are present, they must have the same value. If neither key
-    /// is provided, return `None`.
+    /// We currently accept the two request kwargs `thinking` and
+    /// `enable_thinking`. Both must be booleans when present. If both are
+    /// present, they must have the same value. If neither key is provided,
+    /// return `None`.
     pub(crate) fn enable_thinking(&self) -> Result<Option<bool>> {
         let thinking = self.parse_template_bool("thinking")?;
         let enable_thinking = self.parse_template_bool("enable_thinking")?;
@@ -462,7 +478,8 @@ impl ChatRequest {
 }
 
 impl ChatRole {
-    /// Return the chat-template role string used by the current text-only chat backend.
+    /// Return the chat-template role string used by the current text-only chat
+    /// backend.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::System => "system",
@@ -564,10 +581,7 @@ mod tests {
     #[test]
     fn enable_thinking_accepts_matching_duplicate_kwargs() {
         let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("thinking".to_string(), json!(true));
+        request.chat_options.template_kwargs.insert("thinking".to_string(), json!(true));
         request
             .chat_options
             .template_kwargs

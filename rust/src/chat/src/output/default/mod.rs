@@ -28,10 +28,12 @@ trait_set! {
     trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
 }
 
-/// Default request-scoped output processor used by Hugging Face style chat backends.
+/// Default request-scoped output processor used by Hugging Face style chat
+/// backends.
 ///
-/// This implementation assumes the backend already emitted decoded text deltas, then optionally
-/// layers reasoning parsing and tool-call parsing before assembling final structured chat events.
+/// This implementation assumes the backend already emitted decoded text deltas,
+/// then optionally layers reasoning parsing and tool-call parsing before
+/// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
     intermediate: bool,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
@@ -39,10 +41,12 @@ pub struct DefaultChatOutputProcessor {
 }
 
 impl DefaultChatOutputProcessor {
-    /// Build the default output processor and apply any parser-specific request adjustments.
+    /// Build the default output processor and apply any parser-specific request
+    /// adjustments.
     ///
-    /// Parser resolution happens here so that request validation, prompt rendering, and streaming
-    /// all observe the same parser-adjusted request state.
+    /// Parser resolution happens here so that request validation, prompt
+    /// rendering, and streaming all observe the same parser-adjusted
+    /// request state.
     pub fn new(
         request: &mut ChatRequest,
         model_id: &str,
@@ -77,8 +81,9 @@ impl DefaultChatOutputProcessor {
 
     /// Build the plain-text-only default output processor.
     ///
-    /// This keeps the default structured chat-event assembly but disables both reasoning parsing
-    /// and tool-call parsing completely, so that all content is treated as opaque text.
+    /// This keeps the default structured chat-event assembly but disables both
+    /// reasoning parsing and tool-call parsing completely, so that all
+    /// content is treated as opaque text.
     pub fn plain_text_only() -> Self {
         Self {
             intermediate: false,
@@ -106,13 +111,11 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, &request.tools)?;
 
-        parser
-            .adjust_request(request)
-            .map_err(|error| Error::ParserInitialization {
-                kind: "tool",
-                name: parser_name.to_string(),
-                error: error.into(),
-            })?;
+        parser.adjust_request(request).map_err(|error| Error::ParserInitialization {
+            kind: "tool",
+            name: parser_name.to_string(),
+            error: error.into(),
+        })?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)
@@ -138,13 +141,11 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, tokenizer)?;
 
-        parser
-            .adjust_request(request)
-            .map_err(|error| Error::ParserInitialization {
-                kind: "reasoning",
-                name: parser_name.to_string(),
-                error: error.into(),
-            })?;
+        parser.adjust_request(request).map_err(|error| Error::ParserInitialization {
+            kind: "reasoning",
+            name: parser_name.to_string(),
+            error: error.into(),
+        })?;
 
         REASONING_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using reasoning parser"));
         Ok(Some(parser))
@@ -155,8 +156,9 @@ static TOOL_PARSER_LOG_ONCE: Once = Once::new();
 static REASONING_PARSER_LOG_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
-    /// Transforms a raw generate-output token stream into structured chat events
-    /// through three sequential stages once text decoding has already happened:
+    /// Transforms a raw generate-output token stream into structured chat
+    /// events through three sequential stages once text decoding has
+    /// already happened:
     ///
     /// 1. [`reasoning_event_stream`] — reasoning/content separation
     /// 2. [`tool_event_stream`] — tool-call parsing

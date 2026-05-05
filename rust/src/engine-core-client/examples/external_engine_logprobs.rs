@@ -152,10 +152,7 @@ async fn main() -> Result<()> {
     println!("requested_logprobs={}", args.logprobs);
     println!("requested_prompt_logprobs={}", args.prompt_logprobs);
 
-    let stream = client
-        .call(request)
-        .await
-        .context("failed to submit engine-core request")?;
+    let stream = client.call(request).await.context("failed to submit engine-core request")?;
     let output = timeout(output_timeout, wait_for_final_output(stream))
         .await
         .context("timed out waiting for final output")??;
@@ -178,10 +175,7 @@ async fn main() -> Result<()> {
     println!("new_logprobs={logprobs:#?}");
     println!("new_prompt_logprobs_tensors={prompt_logprobs:#?}");
 
-    client
-        .shutdown()
-        .await
-        .context("failed to shut down engine-core client")?;
+    client.shutdown().await.context("failed to shut down engine-core client")?;
 
     if finish_reason != Some(EngineCoreFinishReason::Length) {
         bail!("unexpected finish_reason: expected Length, got {finish_reason:?}");

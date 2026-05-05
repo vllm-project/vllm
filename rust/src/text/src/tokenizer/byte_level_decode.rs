@@ -106,10 +106,8 @@ mod tests {
     fn decode_multibyte_euro() {
         // € → 0xE2 0x82 0xAC, each mapped to a specific GPT-2 char.
         let byte_to_char = build_byte_to_char_ref();
-        let encoded: String = [0xE2u8, 0x82, 0xAC]
-            .iter()
-            .map(|&b| byte_to_char[b as usize])
-            .collect();
+        let encoded: String =
+            [0xE2u8, 0x82, 0xAC].iter().map(|&b| byte_to_char[b as usize]).collect();
         assert_eq!(decode_byte_level([encoded.as_str()]), "€");
     }
 

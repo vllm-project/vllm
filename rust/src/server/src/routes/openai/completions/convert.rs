@@ -6,7 +6,8 @@ use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
 
-/// Lowered completion request plus the public response metadata carried by every SSE chunk.
+/// Lowered completion request plus the public response metadata carried by
+/// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external text request ID.
@@ -17,7 +18,8 @@ pub struct PreparedRequest {
     pub include_usage: bool,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
-    /// Original text prompt that should be echoed back northbound when `echo=true`.
+    /// Original text prompt that should be echoed back northbound when
+    /// `echo=true`.
     pub echo: Option<String>,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
@@ -25,7 +27,8 @@ pub struct PreparedRequest {
     pub return_tokens_as_token_ids: bool,
 }
 
-/// Validate and lower one OpenAI completions request into the internal text-generation format.
+/// Validate and lower one OpenAI completions request into the internal
+/// text-generation format.
 pub(crate) fn prepare_completion_request(
     request: CompletionRequest,
     configured_model: &str,
@@ -44,20 +47,15 @@ pub(crate) fn prepare_completion_request(
         })?),
         None => None,
     };
-    let prompt_logprobs = request
-        .prompt_logprobs
-        .or(if request.echo && !request.stream {
-            logprobs
-        } else {
-            None
-        });
+    let prompt_logprobs = request.prompt_logprobs.or(if request.echo && !request.stream {
+        logprobs
+    } else {
+        None
+    });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
-    let echo = request
-        .echo
-        .then(|| request.prompt.as_text().cloned())
-        .flatten();
+    let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;

@@ -18,16 +18,11 @@ impl CoordinatorBootstrap {
     /// Bind the engine-facing coordinator sockets on the given host.
     pub(crate) async fn bind(local_host: &str) -> Result<Self> {
         let mut input_socket = XPubSocket::new();
-        let input_address = input_socket
-            .bind(&format!("tcp://{local_host}:0"))
-            .await?
-            .to_string();
+        let input_address = input_socket.bind(&format!("tcp://{local_host}:0")).await?.to_string();
 
         let mut output_socket = PullSocket::new();
-        let output_address = output_socket
-            .bind(&format!("tcp://{local_host}:0"))
-            .await?
-            .to_string();
+        let output_address =
+            output_socket.bind(&format!("tcp://{local_host}:0")).await?.to_string();
 
         Ok(Self {
             input_address,
@@ -37,7 +32,8 @@ impl CoordinatorBootstrap {
         })
     }
 
-    /// Complete the engine-facing startup gate before engines are allowed to send handshake READY.
+    /// Complete the engine-facing startup gate before engines are allowed to
+    /// send handshake READY.
     pub(crate) async fn wait_for_startup_gate(
         &mut self,
         engine_count: usize,
@@ -57,11 +53,12 @@ async fn wait_for_engine_subscriptions(
 ) -> Result<()> {
     let mut received = 0;
     while received < engine_count {
-        let message = tokio::time::timeout(ready_timeout, input_socket.recv())
-            .await
-            .map_err(|_| Error::HandshakeTimeout {
-                stage: "coordinator engine subscriptions",
-                timeout: ready_timeout,
+        let message =
+            tokio::time::timeout(ready_timeout, input_socket.recv()).await.map_err(|_| {
+                Error::HandshakeTimeout {
+                    stage: "coordinator engine subscriptions",
+                    timeout: ready_timeout,
+                }
             })??;
         if message.len() != 1 {
             bail_unexpected_handshake_message!(
@@ -89,8 +86,6 @@ async fn wait_for_engine_subscriptions(
 
 /// Send the coordinator READY marker to all subscribed engines.
 async fn send_ready_to_engines(input_socket: &mut XPubSocket) -> Result<()> {
-    input_socket
-        .send(ZmqMessage::from(Bytes::from_static(b"READY")))
-        .await?;
+    input_socket.send(ZmqMessage::from(Bytes::from_static(b"READY"))).await?;
     Ok(())
 }

@@ -14,7 +14,8 @@ use crate::routes::openai::utils::types::{
 };
 use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
 
-/// Lowered chat request plus the public response metadata carried by every SSE chunk.
+/// Lowered chat request plus the public response metadata carried by every SSE
+/// chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external chat request ID.
@@ -37,7 +38,8 @@ pub struct PreparedRequest {
     pub return_tokens_as_token_ids: bool,
 }
 
-/// Validate and lower one OpenAI chat completion request into the internal chat format.
+/// Validate and lower one OpenAI chat completion request into the internal chat
+/// format.
 pub(crate) fn prepare_chat_request(
     request: ChatCompletionRequest,
     configured_model: &str,
@@ -50,11 +52,7 @@ pub(crate) fn prepare_chat_request(
         .echo
         .then(|| extract_last_assistant_content(&request.messages))
         .flatten();
-    let messages: Vec<_> = request
-        .messages
-        .into_iter()
-        .map(convert_message)
-        .try_collect()?;
+    let messages: Vec<_> = request.messages.into_iter().map(convert_message).try_collect()?;
     let generation_prompt_mode = normalize_generation_prompt_mode(
         request.add_generation_prompt,
         request.continue_final_message,
@@ -68,7 +66,8 @@ pub(crate) fn prepare_chat_request(
         .unwrap_or(false);
     let requested_logprobs = request.logprobs;
 
-    // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's behavior.
+    // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
+    // behavior.
     let top_logprobs = request.top_logprobs.unwrap_or(0);
     let prompt_logprobs = request
         .prompt_logprobs
@@ -244,7 +243,8 @@ fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
     }
 }
 
-/// Convert the given OpenAI message content value into the internal format in `vllm-chat`.
+/// Convert the given OpenAI message content value into the internal format in
+/// `vllm-chat`.
 fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
     match content {
         MessageContent::Text(text) => Ok(ChatContent::Text(text)),
@@ -259,7 +259,8 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
     }
 }
 
-/// Convert the given OpenAI assistant message content into the internal format in `vllm-chat`.
+/// Convert the given OpenAI assistant message content into the internal format
+/// in `vllm-chat`.
 fn convert_assistant_text_blocks(
     content: MessageContent,
 ) -> Result<Vec<AssistantContentBlock>, ApiError> {
@@ -288,10 +289,7 @@ fn convert_assistant_tool_calls(
             Ok(AssistantContentBlock::ToolCall(AssistantToolCall {
                 id: tool_call.id,
                 name: tool_call.function.name,
-                arguments: tool_call
-                    .function
-                    .arguments
-                    .unwrap_or_else(|| "{}".to_string()),
+                arguments: tool_call.function.arguments.unwrap_or_else(|| "{}".to_string()),
             }))
         })
         .collect()

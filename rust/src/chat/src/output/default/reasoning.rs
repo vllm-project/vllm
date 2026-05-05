@@ -35,7 +35,8 @@ impl ReasoningState {
         }
     }
 
-    /// Convert one decoded text delta into zero or more semantic assistant deltas.
+    /// Convert one decoded text delta into zero or more semantic assistant
+    /// deltas.
     fn process_delta(&mut self, delta: String) -> Vec<ContentEvent> {
         // If the parser has already failed, skip parsing and return plain text deltas.
         if self.parser_failed {

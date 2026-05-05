@@ -5,7 +5,8 @@ use crate::protocol::stats::SchedulerStats;
 const WAITING_REASON_CAPACITY: &str = "capacity";
 const WAITING_REASON_DEFERRED: &str = "deferred";
 
-/// Record the scheduler-stats-backed metrics for one engine at one point in time.
+/// Record the scheduler-stats-backed metrics for one engine at one point in
+/// time.
 pub(crate) fn record_scheduler_stats(
     metrics: &SchedulerMetrics,
     model_name: impl Into<String>,
@@ -19,10 +20,7 @@ pub(crate) fn record_scheduler_stats(
     };
 
     // Scheduler state gauges.
-    metrics
-        .scheduler_running
-        .get_or_create(&labels)
-        .set(stats.num_running_reqs);
+    metrics.scheduler_running.get_or_create(&labels).set(stats.num_running_reqs);
     metrics
         .scheduler_waiting
         .get_or_create(&labels)
@@ -43,10 +41,7 @@ pub(crate) fn record_scheduler_stats(
             reason: WAITING_REASON_DEFERRED,
         })
         .set(stats.num_skipped_waiting_reqs);
-    metrics
-        .kv_cache_usage
-        .get_or_create(&labels)
-        .set(stats.kv_cache_usage);
+    metrics.kv_cache_usage.get_or_create(&labels).set(stats.kv_cache_usage);
 
     // Prefix-cache counters, including the connector-backed external cache path.
     metrics
@@ -84,11 +79,8 @@ pub(crate) fn record_scheduler_stats(
             .get_or_create(&labels)
             .inc_by(spec_decoding_stats.num_accepted_tokens);
 
-        for (position, accepted_tokens) in spec_decoding_stats
-            .num_accepted_tokens_per_pos
-            .iter()
-            .copied()
-            .enumerate()
+        for (position, accepted_tokens) in
+            spec_decoding_stats.num_accepted_tokens_per_pos.iter().copied().enumerate()
         {
             metrics
                 .spec_decode_num_accepted_tokens_per_pos
@@ -124,9 +116,8 @@ pub(crate) fn record_scheduler_stats(
     // Sampled KV-cache residency histograms.
     if !stats.kv_cache_eviction_events.is_empty() {
         let kv_block_lifetime_seconds = metrics.kv_block_lifetime_seconds.get_or_create(&labels);
-        let kv_block_idle_before_evict_seconds = metrics
-            .kv_block_idle_before_evict_seconds
-            .get_or_create(&labels);
+        let kv_block_idle_before_evict_seconds =
+            metrics.kv_block_idle_before_evict_seconds.get_or_create(&labels);
         let kv_block_reuse_gap_seconds = metrics.kv_block_reuse_gap_seconds.get_or_create(&labels);
 
         for event in &stats.kv_cache_eviction_events {

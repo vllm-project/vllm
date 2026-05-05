@@ -75,7 +75,8 @@ impl Cli {
 pub enum Command {
     /// Run the Rust OpenAI frontend as a Python-supervised worker.
     Frontend(FrontendArgs),
-    /// Launch a managed Python headless engine, then run the Rust OpenAI frontend.
+    /// Launch a managed Python headless engine, then run the Rust OpenAI
+    /// frontend.
     Serve(ServeArgs),
 }
 
@@ -84,10 +85,12 @@ pub enum Command {
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
     #[serde(rename = "model_tag")]
-    /// Model identifier or local model directory used for backend loading and public model ID.
+    /// Model identifier or local model directory used for backend loading and
+    /// public model ID.
     pub model: String,
 
-    /// Maximum time to wait for the expected engines to register on the frontend transport.
+    /// Maximum time to wait for the expected engines to register on the
+    /// frontend transport.
     #[arg(
         long = "engine-ready-timeout-secs",
         env = "VLLM_ENGINE_READY_TIMEOUT_S",
@@ -110,11 +113,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
     pub renderer: RendererSelection,
-    /// Override the maximum model context length. When set, the frontend uses this value
-    /// instead of the model's `max_position_embeddings` from `config.json`.
+    /// Override the maximum model context length. When set, the frontend uses
+    /// this value instead of the model's `max_position_embeddings` from
+    /// `config.json`.
     #[arg(long)]
     pub max_model_len: Option<u32>,
-    /// TCP port for the gRPC Generate service. When not set, no gRPC server is started.
+    /// TCP port for the gRPC Generate service. When not set, no gRPC server is
+    /// started.
     #[arg(long)]
     #[serde(default)]
     pub grpc_port: Option<u16>,
@@ -123,19 +128,20 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub shutdown_timeout: u64,
 
-    /// The file path to the chat template, or the template in single-line form for the specified
-    /// model.
+    /// The file path to the chat template, or the template in single-line form
+    /// for the specified model.
     #[arg(long)]
     #[serde(default)]
     pub chat_template: Option<String>,
 
     /// Default keyword arguments to pass to the chat template renderer.
     ///
-    /// These will be merged with request-level chat_template_kwargs, with request values taking
-    /// precedence. Useful for setting default behavior for reasoning models.
+    /// These will be merged with request-level chat_template_kwargs, with
+    /// request values taking precedence. Useful for setting default
+    /// behavior for reasoning models.
     ///
-    /// Example: `{"enable_thinking": false}` to disable thinking mode by default for
-    /// Qwen3/DeepSeek models.
+    /// Example: `{"enable_thinking": false}` to disable thinking mode by
+    /// default for Qwen3/DeepSeek models.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
@@ -144,24 +150,26 @@ pub struct SharedRuntimeArgs {
     ///
     /// * "auto" detects the format from the template
     /// * "string" renders content as a string. Example: `"Hello World"`
-    /// * "openai" renders content as a list of dictionaries, similar to OpenAI schema. Example:
-    ///   `[{"type": "text", "text": "Hello world!"}]`
+    /// * "openai" renders content as a list of dictionaries, similar to OpenAI
+    ///   schema. Example: `[{"type": "text", "text": "Hello world!"}]`
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub chat_template_content_format: ChatTemplateContentFormatOption,
 
-    /// Log a summary line for each completed request, including prompt/output token counts
-    /// and finish reason.
+    /// Log a summary line for each completed request, including prompt/output
+    /// token counts and finish reason.
     #[arg(long)]
     #[serde(default)]
     pub enable_log_requests: bool,
 
-    /// Disable periodic logging of engine statistics (throughput, queue depth, cache usage).
+    /// Disable periodic logging of engine statistics (throughput, queue depth,
+    /// cache usage).
     #[arg(long)]
     #[serde(default)]
     pub disable_log_stats: bool,
 
-    /// Unsupported Python vLLM frontend arguments recognized but not yet implemented in Rust.
+    /// Unsupported Python vLLM frontend arguments recognized but not yet
+    /// implemented in Rust.
     #[educe(Debug(ignore))]
     #[command(flatten)]
     #[serde(default, flatten)]
@@ -169,7 +177,8 @@ pub struct SharedRuntimeArgs {
 }
 
 impl SharedRuntimeArgs {
-    /// Maximum time to wait for the expected engines to register on the frontend transport.
+    /// Maximum time to wait for the expected engines to register on the
+    /// frontend transport.
     pub fn ready_timeout(&self) -> Duration {
         Duration::from_secs(self.engine_ready_timeout_secs)
     }
@@ -181,8 +190,8 @@ impl SharedRuntimeArgs {
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
     ///
-    /// The resulting config binds the Python-supplied transport addresses and inherits an already
-    /// open HTTP listener from the supervisor process.
+    /// The resulting config binds the Python-supplied transport addresses and
+    /// inherits an already open HTTP listener from the supervisor process.
     fn into_bootstrapped_config(
         self,
         listen_fd: i32,
@@ -220,8 +229,8 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Build the OpenAI-server config for the managed `serve` path that still owns the startup
-    /// handshake and binds its own HTTP listener.
+    /// Build the OpenAI-server config for the managed `serve` path that still
+    /// owns the startup handshake and binds its own HTTP listener.
     fn into_managed_config(
         self,
         listener_mode: HttpListenerMode,
@@ -279,17 +288,21 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
 pub struct FrontendArgs {
-    /// Inherited listening socket file descriptor passed by the Python supervisor.
+    /// Inherited listening socket file descriptor passed by the Python
+    /// supervisor.
     #[arg(long)]
     pub listen_fd: i32,
-    /// Frontend input ROUTER socket address that the Python engines will connect to.
+    /// Frontend input ROUTER socket address that the Python engines will
+    /// connect to.
     #[arg(long)]
     pub input_address: String,
-    /// Frontend output PULL socket address that the Python engines will push responses to.
+    /// Frontend output PULL socket address that the Python engines will push
+    /// responses to.
     #[arg(long)]
     pub output_address: String,
-    /// Optional Python-owned frontend-side DP coordinator socket address for external coordinator
-    /// mode in the bootstrapped frontend path, i.e., `stats_update_address`.
+    /// Optional Python-owned frontend-side DP coordinator socket address for
+    /// external coordinator mode in the bootstrapped frontend path, i.e.,
+    /// `stats_update_address`.
     #[arg(long)]
     pub coordinator_address: Option<String>,
     /// Total number of data-parallel engines expected for this frontend.
@@ -314,12 +327,14 @@ impl FrontendArgs {
     }
 }
 
-/// Arguments for the managed-engine mode that spawns Python on behalf of the user.
+/// Arguments for the managed-engine mode that spawns Python on behalf of the
+/// user.
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
 pub struct ServeArgs {
-    /// Only launch the managed Python headless engine and do not start the Rust frontend.
+    /// Only launch the managed Python headless engine and do not start the Rust
+    /// frontend.
     #[arg(long)]
     pub headless: bool,
     /// Python executable used to launch the managed headless vLLM engine.
@@ -334,15 +349,16 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// Host/IP used both for the managed-engine handshake endpoint and the frontend-advertised
-    /// input/output ZMQ socket addresses.
+    /// Host/IP used both for the managed-engine handshake endpoint and the
+    /// frontend-advertised input/output ZMQ socket addresses.
     #[arg(
         long = "data-parallel-address",
         visible_alias = "handshake-host",
         default_value = "127.0.0.1"
     )]
     pub handshake_host: String,
-    /// Optional TCP port for the managed-engine handshake / data-parallel RPC endpoint.
+    /// Optional TCP port for the managed-engine handshake / data-parallel RPC
+    /// endpoint.
     ///
     /// When omitted, the CLI allocates an ephemeral port automatically.
     #[arg(
@@ -367,11 +383,12 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub runtime: SharedRuntimeArgs,
 
-    /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
+    /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main
+    /// serve ...`.
     ///
-    /// Arguments after an explicit `--` are forwarded verbatim. Before `--`, `vllm-rs serve`
-    /// automatically keeps recognized frontend options on the Rust side and forwards everything
-    /// else to Python.
+    /// Arguments after an explicit `--` are forwarded verbatim. Before `--`,
+    /// `vllm-rs serve` automatically keeps recognized frontend options on
+    /// the Rust side and forwards everything else to Python.
     #[arg(
         last = true,
         allow_hyphen_values = true,
@@ -381,18 +398,18 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the handshake address shared by the Rust frontend and managed Python engine.
+    /// Build the handshake address shared by the Rust frontend and managed
+    /// Python engine.
     pub fn handshake_address(&self, handshake_port: u16) -> String {
         format!("tcp://{}:{}", self.handshake_host, handshake_port)
     }
 
-    /// Build the OpenAI-server runtime config used after the managed Python engine starts.
+    /// Build the OpenAI-server runtime config used after the managed Python
+    /// engine starts.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
         // Prefer IPC sockets for local engine input/output.
-        let (local_input_address, local_output_address) = self
-            .frontend_local_only()
-            .then(frontend_ipc_addresses)
-            .unzip();
+        let (local_input_address, local_output_address) =
+            self.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -411,7 +428,8 @@ impl ServeArgs {
         )
     }
 
-    /// Build the managed Python-engine spawn configuration for one resolved handshake port.
+    /// Build the managed Python-engine spawn configuration for one resolved
+    /// handshake port.
     pub fn into_managed_engine_config(self, handshake_port: u16) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
@@ -435,11 +453,11 @@ impl ServeArgs {
     }
 
     fn local_engine_count(&self) -> usize {
-        self.data_parallel_size_local
-            .unwrap_or(self.data_parallel_size)
+        self.data_parallel_size_local.unwrap_or(self.data_parallel_size)
     }
 
-    /// Return whether the managed Rust frontend only needs to communicate with colocated engines.
+    /// Return whether the managed Rust frontend only needs to communicate with
+    /// colocated engines.
     fn frontend_local_only(&self) -> bool {
         self.data_parallel_size_local != Some(0)
             && self.local_engine_count() == self.data_parallel_size

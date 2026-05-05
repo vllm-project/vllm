@@ -12,8 +12,8 @@ use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
 use crate::protocol::{OpaqueValue, decode_msgpack, encode_msgpack};
 
-/// Frontend-to-coordinator wakeup message sent when the first request arrives while
-/// all engines are paused.
+/// Frontend-to-coordinator wakeup message sent when the first request arrives
+/// while all engines are paused.
 ///
 /// This matches the frontend-side msgpack tuple sent by Python
 /// `DPAsyncMPClient._ensure_stats_update_task` to the coordinator front socket.
@@ -29,7 +29,8 @@ struct CoordinatorWakeupMessage {
     wave: u32,
 }
 
-/// Coordinator-to-frontend state publish received on the front-side coordinator socket.
+/// Coordinator-to-frontend state publish received on the front-side coordinator
+/// socket.
 ///
 /// This matches the msgpack tuple periodically published by Python
 /// `DPCoordinatorProc.run_coordinator` to all connected frontends.
@@ -52,11 +53,11 @@ struct CoordinatorStateUpdate {
 
 /// Background half of an external Python-owned coordinator connection.
 ///
-/// This owns the command receiver and one frontend-facing XSUB socket. It mirrors
-/// the subset of Python's coordinator protocol needed by the Rust bootstrapped
-/// frontend: receive `(counts, wave, running)` publishes, ignore `counts`, and
-/// send `(exclude_engine_index, wave)` wakeup messages when the first request
-/// arrives while engines are paused.
+/// This owns the command receiver and one frontend-facing XSUB socket. It
+/// mirrors the subset of Python's coordinator protocol needed by the Rust
+/// bootstrapped frontend: receive `(counts, wave, running)` publishes, ignore
+/// `counts`, and send `(exclude_engine_index, wave)` wakeup messages when the
+/// first request arrives while engines are paused.
 pub(crate) struct ExternalCoordinatorService {
     state: Arc<CoordinatorState>,
     command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
@@ -76,7 +77,8 @@ impl ExternalCoordinatorService {
         }
     }
 
-    /// Apply one frontend-originated command to the external coordinator state machine.
+    /// Apply one frontend-originated command to the external coordinator state
+    /// machine.
     async fn handle_command(&mut self, command: CoordinatorCommand) -> Result<()> {
         match command {
             CoordinatorCommand::FirstRequest {
@@ -103,7 +105,8 @@ impl ExternalCoordinatorService {
         Ok(())
     }
 
-    /// Apply one publish received from the xsub socket containing a coordinator state update.
+    /// Apply one publish received from the xsub socket containing a coordinator
+    /// state update.
     async fn handle_publish(&mut self, message: ZmqMessage) -> Result<()> {
         let frames = message.into_vec();
         if frames.len() != 1 {

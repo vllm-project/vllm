@@ -21,8 +21,10 @@ pub(crate) use harmony::validate_harmony_parser_overrides;
 
 /// Internal assistant event before final assembly.
 ///
-/// - [`ContentEvent`]: subenum after reasoning parsing, carries only text content.
-/// - [`AssistantEvent`]: full event after tool parsing, adds tool-call variants.
+/// - [`ContentEvent`]: subenum after reasoning parsing, carries only text
+///   content.
+/// - [`AssistantEvent`]: full event after tool parsing, adds tool-call
+///   variants.
 #[subenum(ContentEvent)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssistantEvent {
@@ -44,7 +46,8 @@ pub(crate) enum AssistantEvent {
     },
     /// The start of a new tool call, with its declared name and generated ID.
     ToolCallStart { id: String, name: String },
-    /// A delta for the arguments of the currently open tool call. Must follow a `ToolCallStart`.
+    /// A delta for the arguments of the currently open tool call. Must follow a
+    /// `ToolCallStart`.
     ToolCallArgumentsDelta { delta: String },
     #[subenum(ContentEvent)]
     Done {
@@ -57,8 +60,8 @@ pub(crate) enum AssistantEvent {
 }
 
 impl ContentEvent {
-    /// Convert a [`DecodedTextEvent`] into one or more [`ContentEvent`] values by treating all text
-    /// as plain (non-reasoning) content.
+    /// Convert a [`DecodedTextEvent`] into one or more [`ContentEvent`] values
+    /// by treating all text as plain (non-reasoning) content.
     fn from_decoded_plain_text(event: DecodedTextEvent) -> Vec<Self> {
         match event {
             DecodedTextEvent::Start {
@@ -106,7 +109,8 @@ pub type DynDecodedTextEventStream = Pin<Box<dyn Stream<Item = Result<DecodedTex
 /// Boxed stream of structured chat events exposed by [`crate::ChatLlm`].
 pub type DynChatEventStream = Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>;
 
-/// Request-scoped output processor from decoded text events into structured chat events.
+/// Request-scoped output processor from decoded text events into structured
+/// chat events.
 pub trait ChatOutputProcessor: Send {
     /// Consume decoded text stream and return the structured chat-event stream.
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream>;
@@ -124,8 +128,10 @@ trait_set! {
     pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
 }
 
-/// Generate the northbound tool-call ID using the OpenAI-style `call_<id>` format.
-// TODO: support other ID scheme like Kimi-K2's `functions.{name}:{global_index}`.
+/// Generate the northbound tool-call ID using the OpenAI-style `call_<id>`
+/// format.
+// TODO: support other ID scheme like Kimi-K2's
+// `functions.{name}:{global_index}`.
 pub(crate) fn generate_tool_call_id() -> String {
     format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
 }

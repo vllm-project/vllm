@@ -18,9 +18,7 @@ pub(super) fn hf_tojson_filter(
 ) -> std::result::Result<Value, MinijinjaError> {
     let ensure_ascii = kwargs.get::<Option<bool>>("ensure_ascii")?.unwrap_or(false);
     let indent = parse_indent(
-        kwargs
-            .get::<Option<ViaDeserialize<IndentArg>>>("indent")?
-            .map(|value| value.0),
+        kwargs.get::<Option<ViaDeserialize<IndentArg>>>("indent")?.map(|value| value.0),
     );
     let separators = parse_separators(
         kwargs
@@ -157,15 +155,13 @@ mod tests {
     fn render(template: &str, payload: serde_json::Value) -> String {
         let mut env = Environment::new();
         env.add_filter("tojson", hf_tojson_filter);
-        env.render_str(template, json!({ "payload": payload }))
-            .unwrap()
+        env.render_str(template, json!({ "payload": payload })).unwrap()
     }
 
     fn render_error(template: &str, payload: serde_json::Value) -> minijinja::Error {
         let mut env = Environment::new();
         env.add_filter("tojson", hf_tojson_filter);
-        env.render_str(template, json!({ "payload": payload }))
-            .unwrap_err()
+        env.render_str(template, json!({ "payload": payload })).unwrap_err()
     }
 
     #[test]

@@ -21,8 +21,8 @@ use crate::request::ChatTool;
 ///
 /// Arguments are emitted only after a full `invoke` block is parsed.
 ///
-/// V4 reuses the V3.2 DSML invoke/parameter grammar but wraps calls in `<｜DSML｜tool_calls>`
-/// instead of `<｜DSML｜function_calls>`.
+/// V4 reuses the V3.2 DSML invoke/parameter grammar but wraps calls in
+/// `<｜DSML｜tool_calls>` instead of `<｜DSML｜function_calls>`.
 pub struct DeepSeekV4ToolParser(DeepSeekV32ToolParser);
 
 impl DsmlTokens {

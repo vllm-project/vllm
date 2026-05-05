@@ -21,8 +21,9 @@ pub struct TextDecodeOptions {
     pub skip_special_tokens: bool,
     pub include_stop_str_in_output: bool,
     pub stop_strings: Option<Vec<String>>,
-    /// Minimum number of tokens to generate before stop-string checking kicks in.
-    /// Stop strings found within the first `min_tokens` tokens are ignored.
+    /// Minimum number of tokens to generate before stop-string checking kicks
+    /// in. Stop strings found within the first `min_tokens` tokens are
+    /// ignored.
     pub min_tokens: u32,
 }
 
@@ -47,26 +48,31 @@ pub struct Finished {
     pub kv_transfer_params: Option<serde_json::Value>,
 }
 
-/// Internal decoded-text event emitted before higher-level assistant adaptation.
+/// Internal decoded-text event emitted before higher-level assistant
+/// adaptation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedTextEvent {
-    /// The request has reached the point where prompt-scoped decoding metadata is ready.
+    /// The request has reached the point where prompt-scoped decoding metadata
+    /// is ready.
     Start {
         /// The actual prompt token IDs for this request.
         prompt_token_ids: Arc<[u32]>,
         /// Once-only prompt logprobs metadata, when requested.
         ///
-        /// The first prompt token is carried separately because it has no left context to score
-        /// against; `scored_positions` covers the remaining prompt positions.
+        /// The first prompt token is carried separately because it has no left
+        /// context to score against; `scored_positions` covers the
+        /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
-    /// A delta of text has been decoded, optionally alongside token-position logprobs.
+    /// A delta of text has been decoded, optionally alongside token-position
+    /// logprobs.
     ///
     /// `delta` is the newly visible decoded text fragment for this update.
     ///
-    /// `logprobs` covers the newly generated token positions from the same update, but is not
-    /// guaranteed to align with `delta` by character span. One update may carry token logprobs
-    /// but no newly visible text yet, and one visible text fragment may reflect multiple token
+    /// `logprobs` covers the newly generated token positions from the same
+    /// update, but is not guaranteed to align with `delta` by character
+    /// span. One update may carry token logprobs but no newly visible text
+    /// yet, and one visible text fragment may reflect multiple token
     /// positions becoming decodable together.
     ///
     /// Upper-level may further parse `delta` as reasoning or tool calls.
@@ -80,7 +86,8 @@ pub enum DecodedTextEvent {
     },
 }
 
-/// Convert the output token stream from the `vllm_llm` layer into incrementally decoded text.
+/// Convert the output token stream from the `vllm_llm` layer into incrementally
+/// decoded text.
 #[try_stream]
 pub async fn decoded_text_event_stream(
     request_id: String,
@@ -101,9 +108,8 @@ pub async fn decoded_text_event_stream(
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
-            let prompt_token_ids = output
-                .prompt_token_ids()
-                .expect("first llm output must carry prompt token ids");
+            let prompt_token_ids =
+                output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
 
             let dec = tokenizer.create_decode_stream(
@@ -152,11 +158,7 @@ pub async fn decoded_text_event_stream(
         let decodable_token_ids = if suppress_terminal_stop_token {
             // Match Python V1 token-stop detokenization by keeping the stop token
             // in metadata while excluding it from user-visible text.
-            output
-                .token_ids
-                .split_last()
-                .map(|(_, rest)| rest)
-                .unwrap_or(&[])
+            output.token_ids.split_last().map(|(_, rest)| rest).unwrap_or(&[])
         } else {
             &output.token_ids
         };
@@ -254,8 +256,9 @@ pub async fn decoded_text_event_stream(
                 trace!(full_text, "request finished with terminal decoded text");
             }
 
-            // Intentionally drop the stream with explicit cause, so that the engine core can
-            // distinguish between such normal completion vs an unexpected early drop.
+            // Intentionally drop the stream with explicit cause, so that the engine core
+            // can distinguish between such normal completion vs an unexpected
+            // early drop.
             if stop_str_matched {
                 AbortCause::StopStringMatched.drop_as(raw_stream);
             }
@@ -290,7 +293,8 @@ pub async fn decoded_text_event_stream(
 }
 
 /// If stop string matches, returns tuple
-/// (index into stop string vec, byte index of first byte of stop string in output)
+/// (index into stop string vec, byte index of first byte of stop string in
+/// output)
 fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Option<(usize, usize)> {
     // We compare byte subslices to avoid utf8 boundary problem
     let output = output.as_bytes();
@@ -343,7 +347,8 @@ mod tests {
         }
     }
 
-    /// Helper: run `decoded_text_event_stream` to completion and return the collected output.
+    /// Helper: run `decoded_text_event_stream` to completion and return the
+    /// collected output.
     async fn run_to_completion(
         token_ids: Vec<u32>,
         decode_options: TextDecodeOptions,

@@ -16,7 +16,8 @@ pub(crate) struct ResetPrefixCacheParams {
     reset_external: bool,
 }
 
-/// Reset the local prefix cache and optionally the connector-managed external cache.
+/// Reset the local prefix cache and optionally the connector-managed external
+/// cache.
 pub async fn reset_prefix_cache(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ResetPrefixCacheParams>,

@@ -20,8 +20,9 @@ use crate::request_metrics::RequestMetricsTracker;
 
 /// Thin generate-only facade over [`EngineCoreClient`].
 ///
-/// This mirrors the narrow public shape of Python `AsyncLLM.generate()` and `abort()`, but
-/// keeps the boundary close to raw engine-core requests and outputs.
+/// This mirrors the narrow public shape of Python `AsyncLLM.generate()` and
+/// `abort()`, but keeps the boundary close to raw engine-core requests and
+/// outputs.
 pub struct Llm {
     client: EngineCoreClient,
     randomize_request_id: bool,
@@ -29,7 +30,8 @@ pub struct Llm {
 }
 
 impl Llm {
-    /// Create a new minimal LLM facade from an already connected engine-core client.
+    /// Create a new minimal LLM facade from an already connected engine-core
+    /// client.
     pub fn new(client: EngineCoreClient) -> Self {
         Self {
             client,
@@ -52,18 +54,21 @@ impl Llm {
         self
     }
 
-    /// Control whether external request ids are randomized before reaching engine-core.
+    /// Control whether external request ids are randomized before reaching
+    /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
         self
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin calls.
+    /// Expose the underlying engine-core client for low-level utility/admin
+    /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
         &self.client
     }
 
-    /// Submit one tokenized generate request and return a per-request output stream.
+    /// Submit one tokenized generate request and return a per-request output
+    /// stream.
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
         let prepared = req.prepare(self.randomize_request_id)?;
         let prompt_token_ids = prepared.prompt_token_ids().into();

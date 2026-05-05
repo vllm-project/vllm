@@ -18,8 +18,9 @@ const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
 ///
-/// This is the Rust-side counterpart of the Python frontend's request-lifecycle bookkeeping,
-/// centered on `RequestStateStats` and the per-output/per-finished update flow.
+/// This is the Rust-side counterpart of the Python frontend's request-lifecycle
+/// bookkeeping, centered on `RequestStateStats` and the per-output/per-finished
+/// update flow.
 ///
 /// Original Python definitions:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L200-L237>
@@ -45,7 +46,8 @@ pub(crate) struct RequestMetricsTracker {
 }
 
 impl RequestMetricsTracker {
-    /// Create the per-request tracker from the normalized `llm`-layer request context.
+    /// Create the per-request tracker from the normalized `llm`-layer request
+    /// context.
     pub(crate) fn new(
         model_name: String,
         arrival_time: f64,
@@ -119,15 +121,15 @@ impl RequestMetricsTracker {
         self.last_token_ts = batch_timestamp;
     }
 
-    /// Emit the terminal request metrics once a finished output has been observed.
+    /// Emit the terminal request metrics once a finished output has been
+    /// observed.
     ///
     /// Original Python finished-request stats:
     /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L222-L237>
     pub(crate) fn record_finished(&self, received_at: f64, finish_reason: FinishReason) {
         let labels = engine_labels(&self.model_name, self.last_seen_engine_index);
-        let prefill_kv_computed_tokens = self
-            .prompt_len
-            .saturating_sub(self.latest_num_cached_tokens);
+        let prefill_kv_computed_tokens =
+            self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
         let e2e_latency_seconds = received_at - self.arrival_time;
         let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
         let prefill_time_seconds = diff_or_zero(self.first_token_ts, self.scheduled_ts);
@@ -159,10 +161,7 @@ impl RequestMetricsTracker {
                 .get_or_create(&labels)
                 .observe(max_tokens_param as f64);
         }
-        metrics()
-            .request_params_n
-            .get_or_create(&labels)
-            .observe(self.n_param as f64);
+        metrics().request_params_n.get_or_create(&labels).observe(self.n_param as f64);
         metrics()
             .request_prefill_kv_computed_tokens
             .get_or_create(&labels)
@@ -308,9 +307,9 @@ fn diff_or_zero(end: f64, start: f64) -> f64 {
 
 /// Return the current wall-clock time in seconds since the Unix epoch.
 ///
-/// This is used for frontend-side latency measurements such as TTFT and E2E, matching the Python
-/// frontend's use of wall-clock request arrival/iteration timestamps rather than engine-core's
-/// monotonic scheduler timestamps.
+/// This is used for frontend-side latency measurements such as TTFT and E2E,
+/// matching the Python frontend's use of wall-clock request arrival/iteration
+/// timestamps rather than engine-core's monotonic scheduler timestamps.
 ///
 /// Original Python request timestamp source:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L206-L216>

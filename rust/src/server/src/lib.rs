@@ -31,7 +31,8 @@ use crate::listener::Listener;
 use crate::routes::build_router;
 use crate::state::AppState;
 
-/// Build the shared application state for one configured model and one engine client.
+/// Build the shared application state for one configured model and one engine
+/// client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     // Load both backends from the same model metadata so they stay in sync.
     let loaded = load_model_backends(
@@ -80,14 +81,13 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     ))
 }
 
-/// Run the OpenAI-compatible HTTP server until the supplied shutdown token is cancelled.
+/// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
+/// cancelled.
 ///
-/// The server owns one `vllm-chat` facade, which in turn owns the lower `vllm-text` and
-/// `vllm-llm` layers, and shuts them down before returning.
+/// The server owns one `vllm-chat` facade, which in turn owns the lower
+/// `vllm-text` and `vllm-llm` layers, and shuts them down before returning.
 pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
-    config
-        .validate()
-        .context("invalid OpenAI frontend configuration")?;
+    config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
@@ -101,11 +101,12 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
     let model = state.model_id.clone();
     let app = build_router(state.clone());
 
-    // Optionally bind the gRPC Generate server on a separate port. Bind synchronously
-    // here so bind errors (port in use, permission denied, ...) surface before we start
-    // serving, rather than being deferred until shutdown. The gRPC listener follows the
-    // same host as the HTTP listener so that enabling --grpc-port does not accidentally
-    // expose the service on all interfaces when HTTP is intentionally local-only.
+    // Optionally bind the gRPC Generate server on a separate port. Bind
+    // synchronously here so bind errors (port in use, permission denied, ...)
+    // surface before we start serving, rather than being deferred until
+    // shutdown. The gRPC listener follows the same host as the HTTP listener so
+    // that enabling --grpc-port does not accidentally expose the service on all
+    // interfaces when HTTP is intentionally local-only.
     let grpc_setup = if let Some(grpc_port) = config.grpc_port {
         let grpc_host = match &config.listener_mode {
             HttpListenerMode::BindTcp { host, .. } => host.as_str(),
@@ -134,9 +135,10 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         }
     });
 
-    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown token.
-    // Caller cancellation propagates into both protocols; if either protocol exits first,
-    // we cancel this child token so its sibling also begins a graceful drain.
+    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
+    // token. Caller cancellation propagates into both protocols; if either
+    // protocol exits first, we cancel this child token so its sibling also
+    // begins a graceful drain.
     let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
@@ -196,12 +198,10 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let server = TonicServer::builder()
-                .add_service(svc)
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(grpc_listener),
-                    shutdown.cancelled_owned(),
-                );
+            let server = TonicServer::builder().add_service(svc).serve_with_incoming_shutdown(
+                TcpListenerStream::new(grpc_listener),
+                shutdown.cancelled_owned(),
+            );
 
             let result = tokio::select! {
                 result = server => {

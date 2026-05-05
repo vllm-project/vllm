@@ -78,9 +78,7 @@ async fn wait_for_request_completion(mut stream: GenerateOutputStream) -> Result
         "expected final-only stream to end after the final output"
     );
 
-    let finish_reason = output
-        .finish_reason
-        .expect("final-only output must have a finish reason");
+    let finish_reason = output.finish_reason.expect("final-only output must have a finish reason");
     let token_ids = output.token_ids;
 
     Ok(CompletedRequest {
@@ -133,15 +131,10 @@ async fn main() -> Result<()> {
     println!("request_id={request_id}");
     println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
 
-    let stream = llm
-        .generate(request)
-        .await
-        .context("failed to submit generate request")?;
+    let stream = llm.generate(request).await.context("failed to submit generate request")?;
     let output = wait_for_timeout(stream, output_timeout).await?;
 
-    llm.shutdown()
-        .await
-        .context("failed to shut down llm client")?;
+    llm.shutdown().await.context("failed to shut down llm client")?;
 
     println!("token_ids={:?}", output.token_ids);
     println!("finish_reason={:?}", output.finish_reason);

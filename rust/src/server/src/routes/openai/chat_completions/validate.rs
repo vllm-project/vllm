@@ -89,7 +89,8 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    // ---- Reject parameters that are accepted for deserialization but not yet implemented ----
+    // ---- Reject parameters that are accepted for deserialization but not yet
+    // implemented ----
 
     if request.parallel_tool_calls.is_some() {
         bail_invalid_request!(

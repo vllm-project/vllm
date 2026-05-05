@@ -80,7 +80,8 @@ impl [AssistantContentBlock] {
         .filter(|s: &String| !s.is_empty())
     }
 
-    /// Return whether this assistant message contains any non-empty reasoning text blocks.
+    /// Return whether this assistant message contains any non-empty reasoning
+    /// text blocks.
     pub fn has_reasoning(&self) -> bool {
         self.iter().any(|block| match block {
             AssistantContentBlock::Reasoning { text } => !text.is_empty(),
@@ -95,8 +96,7 @@ impl [AssistantContentBlock] {
 
     /// Return whether this assistant message contains any tool-call blocks.
     pub fn has_tool_calls(&self) -> bool {
-        self.iter()
-            .any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
+        self.iter().any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
     }
 }
 
@@ -124,7 +124,8 @@ impl AssistantMessage {
 /// Streamed chat event emitted by [`crate::ChatEventStream`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
-    /// The request was accepted, streaming has started, and prompt metadata is ready.
+    /// The request was accepted, streaming has started, and prompt metadata is
+    /// ready.
     Start {
         /// The actual prompt token IDs for this request.
         prompt_token_ids: Arc<[u32]>,
@@ -158,14 +159,16 @@ pub enum ChatEvent {
         id: String,
         name: String,
     },
-    /// One incremental tool-call arguments delta for the currently open tool call.
+    /// One incremental tool-call arguments delta for the currently open tool
+    /// call.
     ToolCallArgumentsDelta { index: usize, delta: String },
     /// One tool call has ended.
     ToolCallEnd {
         index: usize,
         call: AssistantToolCall,
     },
-    /// Terminal event carrying the final assembled assistant message and finish metadata.
+    /// Terminal event carrying the final assembled assistant message and finish
+    /// metadata.
     Done {
         message: AssistantMessage,
         /// Number of prompt tokens actually sent to the engine after chat

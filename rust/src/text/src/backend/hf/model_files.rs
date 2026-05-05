@@ -18,9 +18,10 @@ pub enum TokenizerSource {
     Tiktoken(PathBuf),
     /// Path to `tekken.json` when present (Mistral native tokenizer format).
     ///
-    /// When set, the Tekken tokenizer should be preferred over the Hugging Face tokenizer
-    /// because the HuggingFace `tokenizer.json` for Mistral models has a known regex bug that
-    /// produces incorrect token IDs for some inputs.
+    /// When set, the Tekken tokenizer should be preferred over the Hugging Face
+    /// tokenizer because the HuggingFace `tokenizer.json` for Mistral
+    /// models has a known regex bug that produces incorrect token IDs for
+    /// some inputs.
     Tekken(PathBuf),
 }
 
@@ -44,8 +45,9 @@ pub struct ResolvedModelFiles {
 }
 
 impl ResolvedModelFiles {
-    /// Resolve tokenizer/config files from a local model directory first when `model_id`
-    /// points to one, otherwise consult the local HF cache and finally the Hub.
+    /// Resolve tokenizer/config files from a local model directory first when
+    /// `model_id` points to one, otherwise consult the local HF cache and
+    /// finally the Hub.
     pub async fn new(model_id: &str) -> Result<Self> {
         if Path::new(model_id).is_dir() {
             return resolve_local_model_files(Path::new(model_id));
@@ -104,17 +106,8 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
     let chat_template_name = siblings
         .contains("chat_template.json")
         .then_some("chat_template.json")
-        .or_else(|| {
-            siblings
-                .contains("chat_template.jinja")
-                .then_some("chat_template.jinja")
-        })
-        .or_else(|| {
-            siblings
-                .iter()
-                .copied()
-                .find(|name| name.ends_with(".jinja"))
-        });
+        .or_else(|| siblings.contains("chat_template.jinja").then_some("chat_template.jinja"))
+        .or_else(|| siblings.iter().copied().find(|name| name.ends_with(".jinja")));
     let chat_template_path = match chat_template_name {
         Some(name) => Some(download_known_file(&repo, model_id, name).await?),
         None => None,
@@ -242,11 +235,14 @@ fn resolve_local_tokenizer_source(
 /// Choose the tokenizer.
 ///
 /// Selection order:
-/// 1. `tekken.json` — Mistral native tokenizer (preferred over HF `tokenizer.json` because the HF
-///    version has a known regex bug for Mistral models).
-/// 2. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from BPE data.
-/// 3. `tokenizer_class` in `tokenizer_config.json` — classes containing "Tiktoken" (case-
-///    insensitive) trigger tiktoken loading from a sibling BPE file.
+/// 1. `tekken.json` — Mistral native tokenizer (preferred over HF
+///    `tokenizer.json` because the HF version has a known regex bug for Mistral
+///    models).
+/// 2. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from
+///    BPE data.
+/// 3. `tokenizer_class` in `tokenizer_config.json` — classes containing
+///    "Tiktoken" (case- insensitive) trigger tiktoken loading from a sibling
+///    BPE file.
 /// 4. Default — `tokenizer.json` in HuggingFace format.
 fn resolve_tokenizer_source(
     tokenizer_path: PathBuf,
@@ -279,9 +275,7 @@ async fn download_if_present(
     filename: &str,
 ) -> Result<Option<PathBuf>> {
     match siblings.contains(filename) {
-        true => download_known_file(repo, model_id, filename)
-            .await
-            .map(Some),
+        true => download_known_file(repo, model_id, filename).await.map(Some),
         false => Ok(None),
     }
 }
@@ -315,10 +309,7 @@ fn find_tiktoken_sibling<'a>(siblings: &std::collections::BTreeSet<&'a str>) -> 
     if siblings.contains("tiktoken.model") {
         return Some("tiktoken.model");
     }
-    siblings
-        .iter()
-        .copied()
-        .find(|name| name.ends_with(".tiktoken"))
+    siblings.iter().copied().find(|name| name.ends_with(".tiktoken"))
 }
 
 /// Discover a tiktoken model file in a local directory.
@@ -348,8 +339,8 @@ pub(super) fn is_tiktoken_file(path: &std::path::Path) -> bool {
         .is_some_and(|name| name == "tiktoken.model" || name.ends_with(".tiktoken"))
 }
 
-/// Chat templates are sometimes stored as dedicated .jinja files rather than as a fixed-name config
-/// entry, so we scan the cached model dir.
+/// Chat templates are sometimes stored as dedicated .jinja files rather than as
+/// a fixed-name config entry, so we scan the cached model dir.
 fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
     let json_template_path = dir.join("chat_template.json");
     if json_template_path.exists() {
@@ -361,15 +352,11 @@ fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
         return Some(jinja_path);
     }
 
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".jinja"))
-        })
+    std::fs::read_dir(dir).ok()?.flatten().map(|entry| entry.path()).find(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".jinja"))
+    })
 }
 
 #[cfg(test)]

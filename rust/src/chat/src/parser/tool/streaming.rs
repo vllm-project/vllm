@@ -22,7 +22,8 @@ struct ActiveToolState {
 }
 
 impl StreamingToolState {
-    /// Start tracking a new active tool call and return its stable stream index.
+    /// Start tracking a new active tool call and return its stable stream
+    /// index.
     pub(crate) fn begin_tool_call(&mut self) -> usize {
         let tool_index = self.next_tool_index;
         self.next_tool_index += 1;
@@ -52,9 +53,7 @@ impl StreamingToolState {
 
     /// Return the streamed argument prefix for the active tool.
     pub(crate) fn active_streamed_arguments(&self) -> Option<&str> {
-        self.active_tool
-            .as_ref()
-            .map(|tool| tool.streamed_arguments.as_str())
+        self.active_tool.as_ref().map(|tool| tool.streamed_arguments.as_str())
     }
 
     /// Replace the streamed argument prefix tracked for the active tool.

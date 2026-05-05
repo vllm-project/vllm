@@ -9,9 +9,9 @@ use vllm_metrics::{
 
 const LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Cached, cloned metric handles for one engine. Each clone shares the same underlying
-/// `Arc<Atomic*>` as the prometheus `Family` entry, so reads go straight to the atomic with
-/// no lock.
+/// Cached, cloned metric handles for one engine. Each clone shares the same
+/// underlying `Arc<Atomic*>` as the prometheus `Family` entry, so reads go
+/// straight to the atomic with no lock.
 struct EngineMetrics {
     // Counters for throughput deltas.
     prompt_tokens_computed: U64Counter,
@@ -25,7 +25,8 @@ struct EngineMetrics {
     kv_cache_usage: F64Gauge,
 }
 
-/// Accumulated snapshot values from the last logging interval, used to compute deltas.
+/// Accumulated snapshot values from the last logging interval, used to compute
+/// deltas.
 struct CounterSnapshot {
     prompt_tokens: u64,
     generation_tokens: u64,
@@ -35,9 +36,10 @@ struct CounterSnapshot {
 
 /// Periodic stats logger that mirrors Python vLLM's `LoggingStatLogger`.
 ///
-/// Spawns a background task that logs throughput and scheduler state at a fixed interval.
-/// When idle (both current and previous throughputs are zero), logs at DEBUG level.
-/// When load drops to zero, emits one final INFO-level line before going quiet.
+/// Spawns a background task that logs throughput and scheduler state at a fixed
+/// interval. When idle (both current and previous throughputs are zero), logs
+/// at DEBUG level. When load drops to zero, emits one final INFO-level line
+/// before going quiet.
 pub(crate) struct StatsLogger {
     _task: AbortOnDropHandle<()>,
 }
@@ -87,7 +89,8 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
 
     let mut interval = tokio::time::interval(LOG_STATS_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The first tick fires immediately; skip it so the first log is after one full interval.
+    // The first tick fires immediately; skip it so the first log is after one full
+    // interval.
     interval.tick().await;
 
     let mut prev = read_counters(&engines);
@@ -122,9 +125,7 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
         let (num_running, num_waiting, kv_cache_usage) = read_scheduler_gauges(&engines);
 
         // Compute prefix cache hit rate over this interval.
-        let delta_queries = curr
-            .prefix_cache_queries
-            .wrapping_sub(prev.prefix_cache_queries);
+        let delta_queries = curr.prefix_cache_queries.wrapping_sub(prev.prefix_cache_queries);
         let prefix_cache_hit_rate = if delta_queries > 0 {
             let delta_hits = curr.prefix_cache_hits.wrapping_sub(prev.prefix_cache_hits);
             delta_hits as f64 / delta_queries as f64 * 100.0

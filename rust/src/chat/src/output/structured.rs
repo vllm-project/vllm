@@ -16,7 +16,8 @@ use crate::event::{
 };
 use crate::{FinishReason, Result};
 
-/// One currently open assistant text-like block being assembled from streamed deltas.
+/// One currently open assistant text-like block being assembled from streamed
+/// deltas.
 struct OpenTextBlock {
     /// Stable position of this block in the final assistant message.
     index: usize,
@@ -144,8 +145,8 @@ impl StructuredEventState {
         Ok(events)
     }
 
-    /// Append one semantic text delta to the current block, or open a new block when the semantic
-    /// kind changes.
+    /// Append one semantic text delta to the current block, or open a new block
+    /// when the semantic kind changes.
     fn push_text_delta(
         &mut self,
         kind: AssistantBlockKind,
@@ -217,8 +218,7 @@ impl StructuredEventState {
             name: open_tool_call.name,
             arguments: open_tool_call.arguments,
         };
-        self.message
-            .push_block(AssistantContentBlock::ToolCall(call.clone()));
+        self.message.push_block(AssistantContentBlock::ToolCall(call.clone()));
         events.push(ChatEvent::ToolCallEnd {
             index: open_tool_call.index,
             call,
@@ -226,7 +226,8 @@ impl StructuredEventState {
     }
 }
 
-/// Wrap one parsed assistant stream into the public structured chat event stream.
+/// Wrap one parsed assistant stream into the public structured chat event
+/// stream.
 #[try_stream]
 pub(crate) async fn structured_chat_event_stream(
     stream: impl AssistantEventStream,

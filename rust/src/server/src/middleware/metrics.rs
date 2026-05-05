@@ -26,8 +26,8 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/is_sleeping",
 ];
 
-/// Record API-server HTTP metrics with Python-compatible (`PrometheusFastApiInstrumentator` style)
-/// family names and labels.
+/// Record API-server HTTP metrics with Python-compatible
+/// (`PrometheusFastApiInstrumentator` style) family names and labels.
 pub async fn track_http_metrics(req: Request, next: Next) -> Response {
     let method = req.method().as_str().to_string();
     let handler = req

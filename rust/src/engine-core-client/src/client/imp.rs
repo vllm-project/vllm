@@ -32,7 +32,8 @@ pub(crate) struct ClientInner {
 }
 
 impl ClientInner {
-    /// Create a new instance with the given input send half after the startup handshake completes.
+    /// Create a new instance with the given input send half after the startup
+    /// handshake completes.
     pub fn new(
         input_send: RouterSendHalf,
         model_name: String,
@@ -47,16 +48,17 @@ impl ClientInner {
         }
     }
 
-    /// Get the model name associated with this client used for metrics labeling.
+    /// Get the model name associated with this client used for metrics
+    /// labeling.
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
 
-    /// Register a newly added request. Return the selected engine id and the per-request
-    /// output channel bound to its `request_id`.
+    /// Register a newly added request. Return the selected engine id and the
+    /// per-request output channel bound to its `request_id`.
     ///
-    /// When `data_parallel_rank` is provided, the request is routed to that specific engine
-    /// rank, bypassing load balancing.
+    /// When `data_parallel_rank` is provided, the request is routed to that
+    /// specific engine rank, bypassing load balancing.
     pub fn register_request(
         &self,
         request_id: String,
@@ -83,8 +85,9 @@ impl ClientInner {
         let _ = self.request_reg.lock().remove(request_id);
     }
 
-    /// Filter the given request IDs to the subset that are still tracked as active and can be
-    /// aborted, grouped by the engine that originally accepted them.
+    /// Filter the given request IDs to the subset that are still tracked as
+    /// active and can be aborted, grouped by the engine that originally
+    /// accepted them.
     pub fn abortable_request_ids(
         &self,
         request_ids: &[String],
@@ -96,8 +99,8 @@ impl ClientInner {
         Ok(registry.abortable_request_ids(request_ids))
     }
 
-    /// Obtain the stream sender for one output. If it indicates the request is finished, it will be
-    /// removed from the registry.
+    /// Obtain the stream sender for one output. If it indicates the request is
+    /// finished, it will be removed from the registry.
     pub fn take_sender_for_output(
         &self,
         output: &EngineCoreOutput,
@@ -105,7 +108,8 @@ impl ClientInner {
         self.request_reg.lock().sender_for_output(output)
     }
 
-    /// Remove a batch of requests that have finished or aborted, returning their stream senders.
+    /// Remove a batch of requests that have finished or aborted, returning
+    /// their stream senders.
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
@@ -113,15 +117,15 @@ impl ClientInner {
         self.request_reg.lock().finish_many(request_ids)
     }
 
-    /// Apply one scheduler stats update for the given engine to the local routing state.
-    /// Returns `false` if the engine is unknown to the client.
+    /// Apply one scheduler stats update for the given engine to the local
+    /// routing state. Returns `false` if the engine is unknown to the
+    /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
-        self.request_reg
-            .lock()
-            .apply_scheduler_stats(engine_index, stats)
+        self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
     }
 
-    /// Close all active request streams and utility calls with the first persistent health error.
+    /// Close all active request streams and utility calls with the first
+    /// persistent health error.
     pub fn close_registries(&self, error: Arc<Error>) {
         let persistent_error = self.record_health_error(error);
         let request_senders = self.request_reg.lock().close();
@@ -146,8 +150,8 @@ impl ClientInner {
         self.health_error.load().is_none()
     }
 
-    /// Resolve one utility output to the waiting caller. Returns `true` if a waiting caller
-    /// existed.
+    /// Resolve one utility output to the waiting caller. Returns `true` if a
+    /// waiting caller existed.
     pub fn resolve_utility_output(&self, output: UtilityOutput) -> bool {
         match self.utility_reg.lock().resolve(&output.call_id) {
             Some(sender) => {
@@ -158,8 +162,9 @@ impl ClientInner {
         }
     }
 
-    /// Send the given message to the engine. The request should be first registered via
-    /// `register_request()` to ensure the request stream is tracked.
+    /// Send the given message to the engine. The request should be first
+    /// registered via `register_request()` to ensure the request stream is
+    /// tracked.
     pub async fn send_to_engine<T>(
         &self,
         engine_id: &EngineId,
@@ -182,18 +187,18 @@ impl ClientInner {
         engine_id: &EngineId,
         request_ids: &[String],
     ) -> Result<()> {
-        self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids)
-            .await
+        self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids).await
     }
 
-    /// Shut down by closing all active request streams and utility calls with a sticky client
-    /// closed error.
+    /// Shut down by closing all active request streams and utility calls with a
+    /// sticky client closed error.
     pub fn shutdown(&self) {
         self.close_registries(Arc::new(client_closed!("engine-core client shut down")));
     }
 
-    /// Remove the request from the active registry for auto-abort and return the engine that the
-    /// request was originally routed to, if it is still active.
+    /// Remove the request from the active registry for auto-abort and return
+    /// the engine that the request was originally routed to, if it is still
+    /// active.
     pub fn take_auto_abort_target(&self, request_id: &str) -> Option<EngineId> {
         let mut registry = self.request_reg.lock();
         let (_, engine_id) = registry.remove(request_id)?;
@@ -203,9 +208,9 @@ impl ClientInner {
         Some(engine_id)
     }
 
-    /// Publish the first persistent health error and return the sticky error recorded for this
-    /// client. Later failures do not overwrite the first one so `/health` and post-close callers
-    /// observe a stable cause.
+    /// Publish the first persistent health error and return the sticky error
+    /// recorded for this client. Later failures do not overwrite the first
+    /// one so `/health` and post-close callers observe a stable cause.
     fn record_health_error(&self, error: Arc<Error>) -> Arc<Error> {
         if let Some(existing) = self.health_error.load_full() {
             return existing;
@@ -217,8 +222,8 @@ impl ClientInner {
             .expect("health error must be recorded before registries close")
     }
 
-    /// Assert there is a recorded health error and return a `Shared` variant wrapping it for error
-    /// returns when the client is already closed.
+    /// Assert there is a recorded health error and return a `Shared` variant
+    /// wrapping it for error returns when the client is already closed.
     fn closed_error(&self) -> Error {
         Error::Shared(self.health_error.load_full().expect(
             "closed registry must have a recorded health error before rejecting new operations",
@@ -226,9 +231,9 @@ impl ClientInner {
     }
 }
 
-/// Background loop that listens for request IDs to abort and sends abort messages to the engine.
-/// This is used to implement the auto-abort behavior when a request stream is dropped without being
-/// properly terminated.
+/// Background loop that listens for request IDs to abort and sends abort
+/// messages to the engine. This is used to implement the auto-abort behavior
+/// when a request stream is dropped without being properly terminated.
 pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
     mut abort_rx: mpsc::UnboundedReceiver<AbortRequest>,
@@ -252,9 +257,7 @@ pub(crate) async fn run_abort_loop(
             }
         }
 
-        if let Err(error) = inner
-            .do_abort_requests(&engine_id, slice::from_ref(&request_id))
-            .await
+        if let Err(error) = inner.do_abort_requests(&engine_id, slice::from_ref(&request_id)).await
         {
             warn!(
                 request_id,
@@ -266,8 +269,8 @@ pub(crate) async fn run_abort_loop(
     }
 }
 
-/// Background loop that listens for engine-core outputs and dispatches them to the corresponding
-/// request streams based on their `request_id`.
+/// Background loop that listens for engine-core outputs and dispatches them to
+/// the corresponding request streams based on their `request_id`.
 pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,

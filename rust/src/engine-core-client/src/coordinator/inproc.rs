@@ -15,10 +15,11 @@ use crate::protocol::{
     encode_msgpack,
 };
 
-/// Coordinator-to-engine `START_DP_WAVE` control payload encoded on the engine-facing
-/// coordinator socket.
+/// Coordinator-to-engine `START_DP_WAVE` control payload encoded on the
+/// engine-facing coordinator socket.
 ///
-/// This matches the msgpack tuple broadcast by Python `DPCoordinatorProc._send_start_wave`.
+/// This matches the msgpack tuple broadcast by Python
+/// `DPCoordinatorProc._send_start_wave`.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/694449050f8dac3d9853e97e518b4a43ec52106a/vllm/v1/engine/coordinator.py#L453-L459>
@@ -33,9 +34,9 @@ struct StartDpWaveMessage {
 
 /// Background half of the in-process coordinator.
 ///
-/// This owns the command receiver and the engine-facing coordinator input socket.
-/// It is the single place where wave transitions are serialized and where
-/// `START_DP_WAVE` broadcasts are emitted.
+/// This owns the command receiver and the engine-facing coordinator input
+/// socket. It is the single place where wave transitions are serialized and
+/// where `START_DP_WAVE` broadcasts are emitted.
 pub(crate) struct InProcCoordinatorRunner {
     state: Arc<CoordinatorState>,
     command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
@@ -97,14 +98,16 @@ impl InProcCoordinatorRunner {
         Ok(())
     }
 
-    /// Apply one engine-originated control output to the coordinator state machine.
+    /// Apply one engine-originated control output to the coordinator state
+    /// machine.
     async fn handle_outputs(&mut self, outputs: EngineCoreOutputs) -> Result<()> {
         match outputs.classify() {
             ClassifiedEngineCoreOutputs::RequestBatch(batch)
                 if batch.outputs.is_empty() && batch.finished_requests.is_none() =>
             {
                 // Stats-only output for coordinator.
-                // Ignore since the Rust coordinator doesn't track stats for routing decisions.
+                // Ignore since the Rust coordinator doesn't track stats for
+                // routing decisions.
             }
             ClassifiedEngineCoreOutputs::DpControl {
                 engine_index,

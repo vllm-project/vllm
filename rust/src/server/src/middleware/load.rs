@@ -12,8 +12,9 @@ use crate::state::AppState;
 
 /// Endpoints that will be tracked for server load.
 ///
-/// Derived from the Python frontend's actual `@load_aware_call` coverage. This includes alias
-/// paths that delegate into decorated handlers, such as `/v1/rerank` and `/v2/rerank`.
+/// Derived from the Python frontend's actual `@load_aware_call` coverage. This
+/// includes alias paths that delegate into decorated handlers, such as
+/// `/v1/rerank` and `/v2/rerank`.
 const TRACKED_HANDLERS: &[&str] = &[
     "/v1/responses",
     "/v1/responses/{response_id}",
@@ -79,8 +80,9 @@ impl Drop for ServerLoadGuard {
     }
 }
 
-/// A wrapper around response bodies that tracks server load by holding a `ServerLoadGuard`, which
-/// will decrement the load when the body is fully consumed and dropped.
+/// A wrapper around response bodies that tracks server load by holding a
+/// `ServerLoadGuard`, which will decrement the load when the body is fully
+/// consumed and dropped.
 struct LoadTrackedBody {
     inner: Body,
     _guard: ServerLoadGuard,

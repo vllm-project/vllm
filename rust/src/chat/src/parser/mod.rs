@@ -74,8 +74,7 @@ impl<C> ParserFactory<C> {
 
     /// Add a case-insensitive substring match from model ID to parser name.
     pub fn register_pattern(&mut self, pattern: &str, parser_name: &str) -> &mut Self {
-        self.patterns
-            .push((pattern.to_lowercase(), parser_name.to_string()));
+        self.patterns.push((pattern.to_lowercase(), parser_name.to_string()));
         self
     }
 
@@ -100,7 +99,8 @@ impl<C> ParserFactory<C> {
         names
     }
 
-    /// Get the constructor for a parser by its exact registered name, or return None if not found.
+    /// Get the constructor for a parser by its exact registered name, or return
+    /// None if not found.
     pub fn creator(&self, name: &str) -> Option<&C> {
         self.creators.get(name)
     }

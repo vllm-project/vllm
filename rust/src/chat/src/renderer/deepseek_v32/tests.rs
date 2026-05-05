@@ -85,14 +85,12 @@ fn render_request(request: &ChatRequest) -> String {
 }
 
 fn render_result(request: &ChatRequest) -> Result<String, Error> {
-    DeepSeekV32ChatRenderer::new()
-        .render(request)
-        .map(|rendered| {
-            rendered
-                .prompt
-                .into_text()
-                .expect("deepseek renderer should return text prompt")
-        })
+    DeepSeekV32ChatRenderer::new().render(request).map(|rendered| {
+        rendered
+            .prompt
+            .into_text()
+            .expect("deepseek renderer should return text prompt")
+    })
 }
 
 fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {

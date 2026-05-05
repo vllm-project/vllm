@@ -10,11 +10,13 @@ use validator::Validate;
 use super::types::Normalizable;
 use crate::error::{ApiError, invalid_request};
 
-/// A JSON extractor that automatically validates and normalizes the request body.
+/// A JSON extractor that automatically validates and normalizes the request
+/// body.
 ///
-/// This extractor deserializes the request body and automatically calls `.validate()`
-/// on types that implement the `Validate` trait. If validation fails, it returns
-/// [`ApiError::InvalidRequest`] with details about the validation errors.
+/// This extractor deserializes the request body and automatically calls
+/// `.validate()` on types that implement the `Validate` trait. If validation
+/// fails, it returns [`ApiError::InvalidRequest`] with details about the
+/// validation errors.
 pub struct ValidatedJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for ValidatedJson<T>

@@ -97,7 +97,8 @@ pub fn resolve_chat_template(chat_template: &str) -> Result<String> {
     Err(TemplateError::MissingTemplatePath)
 }
 
-/// One compiled chat template with its Jinja environment and detected content format.
+/// One compiled chat template with its Jinja environment and detected content
+/// format.
 pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
     env: Environment<'static>,
@@ -119,7 +120,8 @@ impl CompiledChatTemplate {
         })
     }
 
-    /// Apply the compiled template to the given context and return the rendered prompt.
+    /// Apply the compiled template to the given context and return the rendered
+    /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
         let tmpl = self.env.get_template("chat")?;
         tmpl.render(ctx).map_err(TemplateError::from)

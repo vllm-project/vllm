@@ -19,8 +19,8 @@ pub trait Tokenizer: Send + Sync {
     /// Decode one token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
 
-    /// Convert one token string into a token ID, returning `None` if the token is not in the
-    /// tokenizer vocabulary.
+    /// Convert one token string into a token ID, returning `None` if the token
+    /// is not in the tokenizer vocabulary.
     fn token_to_id(&self, token: &str) -> Option<u32>;
 
     /// Return whether the given token ID is special.
@@ -28,10 +28,11 @@ pub trait Tokenizer: Send + Sync {
         false
     }
 
-    /// Create a stateful incremental decoder primed with the given prompt tokens.
+    /// Create a stateful incremental decoder primed with the given prompt
+    /// tokens.
     ///
-    /// The prompt tokens provide left context for the first generated token; the decoder does not
-    /// re-emit prompt text.
+    /// The prompt tokens provide left context for the first generated token;
+    /// the decoder does not re-emit prompt text.
     fn create_decode_stream(
         &self,
         prompt_token_ids: &[u32],

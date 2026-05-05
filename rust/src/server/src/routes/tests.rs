@@ -138,9 +138,7 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
 }
 
 fn sse_data_payloads(text: &str) -> Vec<&str> {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .collect()
+    text.lines().filter_map(|line| line.strip_prefix("data: ")).collect()
 }
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -729,9 +727,7 @@ async fn server_load(app: &axum::Router) -> u64 {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     value["server_load"].as_u64().expect("server_load")
 }
@@ -750,9 +746,7 @@ async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {
         .expect("call app");
 
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     (status, body)
 }
 
@@ -767,18 +761,13 @@ fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f6
                     return None;
                 }
                 let expected_parts = labels.split(',');
-                if expected_parts
-                    .into_iter()
-                    .all(|part| encoded_labels.contains(part))
-                {
+                if expected_parts.into_iter().all(|part| encoded_labels.contains(part)) {
                     value.parse::<f64>().ok()
                 } else {
                     None
                 }
             }
-            None => rest
-                .strip_prefix(' ')
-                .and_then(|value| value.parse::<f64>().ok()),
+            None => rest.strip_prefix(' ').and_then(|value| value.parse::<f64>().ok()),
         }
     })
 }
@@ -798,19 +787,12 @@ fn metric_delta(
 async fn list_models_returns_configured_model() {
     let mut app = test_app().await;
     let response = app
-        .call(
-            Request::builder()
-                .uri("/v1/models")
-                .body(Body::empty())
-                .expect("build request"),
-        )
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
         .await
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["data"][0]["id"], "Qwen/Qwen1.5-0.5B-Chat");
 }
@@ -915,9 +897,7 @@ async fn invalid_request_returns_openai_error() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["type"], "invalid_request_error");
 }
@@ -955,9 +935,7 @@ async fn non_stream_chat_returns_json_response() {
             .is_some_and(|value| value.starts_with("application/json"))
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -1044,9 +1022,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -1089,16 +1065,11 @@ async fn happy_path_returns_sse_stream() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let after = METRICS.render().unwrap();
@@ -1251,9 +1222,7 @@ async fn load_endpoint_tracks_chat_stream_lifecycle() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(server_load(&app).await, 1);
 
-    let _body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let _body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
 
     assert_eq!(server_load(&app).await, 0);
@@ -1369,9 +1338,7 @@ async fn stream_error_is_returned_as_openai_error_sse() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -1414,9 +1381,7 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -1454,9 +1419,7 @@ async fn include_usage_adds_final_usage_chunk_before_done() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -1469,10 +1432,8 @@ async fn include_usage_adds_final_usage_chunk_before_done() {
         .iter()
         .position(|payload| payload.contains("\"usage\":"))
         .expect("usage chunk");
-    let done_index = payloads
-        .iter()
-        .position(|payload| *payload == "[DONE]")
-        .expect("done sentinel");
+    let done_index =
+        payloads.iter().position(|payload| *payload == "[DONE]").expect("done sentinel");
 
     assert!(finish_index < usage_index, "{text}");
     assert!(usage_index < done_index, "{text}");
@@ -1511,9 +1472,7 @@ async fn stream_without_include_usage_keeps_existing_shape() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -1547,9 +1506,7 @@ async fn completions_invalid_request_returns_openai_error() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["type"], "invalid_request_error");
 }
@@ -1587,9 +1544,7 @@ async fn non_stream_completions_return_json_response() {
             .is_some_and(|value| value.starts_with("application/json"))
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -1626,9 +1581,7 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -1718,9 +1671,7 @@ async fn non_stream_completions_include_logprobs() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -1820,9 +1771,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -2025,9 +1974,7 @@ async fn chat_completions_header_request_id_takes_precedence() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -2126,9 +2073,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -2178,9 +2123,7 @@ async fn raw_generate_rejects_streaming() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["param"], "stream");
 }
@@ -2210,9 +2153,7 @@ async fn raw_generate_rejects_empty_token_ids() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["param"], "token_ids");
 }
@@ -2271,16 +2212,11 @@ async fn completions_happy_path_returns_sse_stream() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
@@ -2288,21 +2224,15 @@ async fn completions_happy_path_returns_sse_stream() {
         .iter()
         .position(|payload| payload.contains("\"usage\":"))
         .expect("usage chunk");
-    let done_index = payloads
-        .iter()
-        .position(|payload| *payload == "[DONE]")
-        .expect("done sentinel");
+    let done_index =
+        payloads.iter().position(|payload| *payload == "[DONE]").expect("done sentinel");
 
     assert!(
-        payloads
-            .iter()
-            .any(|payload| payload.contains("\"text\":\"h\"")),
+        payloads.iter().any(|payload| payload.contains("\"text\":\"h\"")),
         "{text}"
     );
     assert!(
-        payloads
-            .iter()
-            .any(|payload| payload.contains("\"finish_reason\":\"stop\"")),
+        payloads.iter().any(|payload| payload.contains("\"finish_reason\":\"stop\"")),
         "{text}"
     );
     assert!(usage_index < done_index, "{text}");
@@ -2341,9 +2271,7 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
@@ -2358,9 +2286,7 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
 
     assert!(hello_index < h_index, "{text}");
     assert!(
-        payloads
-            .iter()
-            .any(|payload| payload.contains("\"text\":\"i\"")),
+        payloads.iter().any(|payload| payload.contains("\"text\":\"i\"")),
         "{text}"
     );
 
@@ -2432,10 +2358,7 @@ async fn prepared_openai_request_streams_text_events() {
     )
     .expect("prepare request");
 
-    let mut stream = chat
-        .chat(prepared.chat_request)
-        .await
-        .expect("submit chat request");
+    let mut stream = chat.chat(prepared.chat_request).await.expect("submit chat request");
 
     let mut saw_text = false;
     let mut saw_done = false;
@@ -2499,9 +2422,7 @@ async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -2561,9 +2482,7 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -2713,9 +2632,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.finish().await;
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
@@ -2788,9 +2705,7 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
         .expect("call app");
 
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(body.is_empty());
     engine_task.await.expect("mock engine task");
@@ -2829,9 +2744,7 @@ async fn reset_mm_cache_route_sends_expected_utility_call() {
         .expect("call app");
 
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(body.is_empty());
     engine_task.await.expect("mock engine task");
@@ -2870,9 +2783,7 @@ async fn reset_encoder_cache_route_sends_expected_utility_call() {
         .expect("call app");
 
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(body.is_empty());
     engine_task.await.expect("mock engine task");
@@ -2945,9 +2856,7 @@ async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() 
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
 
     assert_eq!(
@@ -3001,9 +2910,7 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
         .expect("call app");
 
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(body.is_empty());
     engine_task.await.expect("mock engine task");
@@ -3042,9 +2949,7 @@ async fn wake_up_route_without_tags_sends_none() {
         .expect("call app");
 
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(body.is_empty());
     engine_task.await.expect("mock engine task");
@@ -3083,9 +2988,7 @@ async fn is_sleeping_route_returns_json_payload() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
 
     assert_eq!(
@@ -3135,7 +3038,8 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_stop_string_excluded_from_output() {
-    // Engine generates "say world" but stop string "wor" truncates output to "say ".
+    // Engine generates "say world" but stop string "wor" truncates output to "say
+    // ".
     let output_specs = vec![
         (bytes_to_token_ids(b"say"), None),
         (
@@ -3168,9 +3072,7 @@ async fn non_stream_completions_stop_string_excluded_from_output() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -3182,7 +3084,8 @@ async fn non_stream_completions_stop_string_excluded_from_output() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_stop_string_included_in_output() {
-    // Same tokens but include_stop_str_in_output=true includes the stop string in the output.
+    // Same tokens but include_stop_str_in_output=true includes the stop string in
+    // the output.
     let output_specs = vec![
         (bytes_to_token_ids(b"say"), None),
         (
@@ -3216,9 +3119,7 @@ async fn non_stream_completions_stop_string_included_in_output() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
@@ -3262,9 +3163,7 @@ async fn stream_completions_stop_string_excluded_from_output() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
@@ -3286,9 +3185,7 @@ async fn stream_completions_stop_string_excluded_from_output() {
 
     // The final chunk should have finish_reason "stop".
     assert!(
-        payloads
-            .iter()
-            .any(|p| p.contains("\"finish_reason\":\"stop\"")),
+        payloads.iter().any(|p| p.contains("\"finish_reason\":\"stop\"")),
         "{text}"
     );
 }
@@ -3329,9 +3226,7 @@ async fn stream_completions_stop_string_included_in_output() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
@@ -3351,9 +3246,7 @@ async fn stream_completions_stop_string_included_in_output() {
     assert_eq!(full_text, "say wor", "full streamed text: {text}");
 
     assert!(
-        payloads
-            .iter()
-            .any(|p| p.contains("\"finish_reason\":\"stop\"")),
+        payloads.iter().any(|p| p.contains("\"finish_reason\":\"stop\"")),
         "{text}"
     );
 }
@@ -3361,7 +3254,8 @@ async fn stream_completions_stop_string_included_in_output() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_no_stop_string_match_preserves_original_finish_reason() {
-    // Stop string "xyz" does not appear in "hi!" so the original finish reason is preserved.
+    // Stop string "xyz" does not appear in "hi!" so the original finish reason is
+    // preserved.
     let (app, engine_task) = test_app_with_engine_handle().await;
 
     let response = app
@@ -3387,13 +3281,12 @@ async fn non_stream_completions_no_stop_string_match_preserves_original_finish_r
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
-    // Default output is "hi" (stop token '!' suppressed), finish_reason remains "stop" from EOS.
+    // Default output is "hi" (stop token '!' suppressed), finish_reason remains
+    // "stop" from EOS.
     assert_eq!(json["choices"][0]["text"], "hi");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
     // No text stop string matched — stop_reason should be absent.
@@ -3433,9 +3326,7 @@ async fn non_stream_completions_stop_string_array_matches_first_occurrence() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 

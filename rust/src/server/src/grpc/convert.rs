@@ -1,4 +1,5 @@
-//! Conversion between gRPC protobuf types and internal `vllm-text` request/response types.
+//! Conversion between gRPC protobuf types and internal `vllm-text`
+//! request/response types.
 
 use tonic::Status;
 use uuid::Uuid;
@@ -16,8 +17,9 @@ use super::pb;
 
 /// Convert a gRPC `GenerateRequest` into the internal `TextRequest`.
 ///
-/// If `req.model` is non-empty, it must match `configured_model`; otherwise the request is
-/// rejected with `NotFound`. An empty string is treated as "unset" (proto3 default) and accepted.
+/// If `req.model` is non-empty, it must match `configured_model`; otherwise the
+/// request is rejected with `NotFound`. An empty string is treated as "unset"
+/// (proto3 default) and accepted.
 pub fn to_text_request(
     req: pb::GenerateRequest,
     stream: bool,
@@ -59,12 +61,11 @@ pub fn to_text_request(
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
-        // Thread kv_transfer_params through vllm_xargs, matching the HTTP route convention.
+        // Thread kv_transfer_params through vllm_xargs, matching the HTTP route
+        // convention.
         if let Some(kv_struct) = kv.kv_transfer_params.as_ref() {
             let kv_json = proto_struct_to_json(kv_struct);
-            let map = sampling_params
-                .vllm_xargs
-                .get_or_insert_with(Default::default);
+            let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("kv_transfer_params".to_string(), kv_json);
         }
         if kv.bypass_prefix_cache {
@@ -75,10 +76,7 @@ pub fn to_text_request(
     let decode_options = TextDecodeOptions {
         skip_special_tokens: true,
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
-        stop_strings: stopping
-            .map(|s| &s.stop_strings)
-            .filter(|ss| !ss.is_empty())
-            .cloned(),
+        stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
     };
 
@@ -102,18 +100,20 @@ fn build_sampling_params(
     stopping: Option<&pb::StoppingCriteria>,
     response: Option<&pb::ResponseOptions>,
 ) -> Result<SamplingParams, Status> {
-    // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for the gRPC
-    // API when the caller does not specify a value. This differs from the HTTP/OpenAI API
-    // (which defaults to 1.0) and matches the convention of programmatic generation APIs.
+    // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for
+    // the gRPC API when the caller does not specify a value. This differs from
+    // the HTTP/OpenAI API (which defaults to 1.0) and matches the convention of
+    // programmatic generation APIs.
     let temperature = temperature.or(Some(0.0));
     let mut params = SamplingParams {
         temperature,
         ..SamplingParams::default()
     };
 
-    // RandomSampling: for every remaining sampling field the protobuf default (`0`) is
-    // treated as "unset" and leaves the resolved value to the lowering stage, which falls
-    // back to the model-provided default or a neutral/disabled value otherwise.
+    // RandomSampling: for every remaining sampling field the protobuf default (`0`)
+    // is treated as "unset" and leaves the resolved value to the lowering
+    // stage, which falls back to the model-provided default or a
+    // neutral/disabled value otherwise.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -197,13 +197,15 @@ fn build_sampling_params(
     Ok(params)
 }
 
-/// Map the proto `CandidateTokens` selector to a `(logprobs_count, logprob_token_ids)` pair.
+/// Map the proto `CandidateTokens` selector to a `(logprobs_count,
+/// logprob_token_ids)` pair.
 ///
 /// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
 /// - `all` → `(-1, None)` — return the full vocabulary
-/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
-///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
-///   are carried via `logprob_token_ids` on `SamplingParams`)
+/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for
+///   specific tokens (the count `n` is stored in the proto as the number of
+///   token IDs that follow, but the actual IDs are carried via
+///   `logprob_token_ids` on `SamplingParams`)
 /// - absent → `(1, None)` — just the sampled/scored token
 fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
     match candidates.and_then(|c| c.select.as_ref()) {
@@ -260,7 +262,8 @@ fn convert_structured_output(
 // Response conversion
 // ========================================================================================
 
-/// Convert a `DecodedTextEvent::Start` into the prompt info portion of a gRPC response.
+/// Convert a `DecodedTextEvent::Start` into the prompt info portion of a gRPC
+/// response.
 pub fn to_prompt_info(
     prompt_token_ids: &[u32],
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
@@ -335,10 +338,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
                 // echo it back as a `stop_reason`. The matched token is, by construction, the
                 // last token of the terminal output batch (see vllm's `check_stop` in
                 // vllm/v1/core/sched/utils.py), so we recover it from there.
-                None => token_ids
-                    .last()
-                    .copied()
-                    .map(pb::finish_info::StopReason::EosTokenId),
+                None => token_ids.last().copied().map(pb::finish_info::StopReason::EosTokenId),
             };
             (PbFinishReason::Stop as i32, sr)
         }
@@ -352,10 +352,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
         num_output_tokens: finished.output_token_count as u32,
         finish_reason,
         stop_reason,
-        kv_transfer_params: finished
-            .kv_transfer_params
-            .as_ref()
-            .and_then(json_to_proto_struct),
+        kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
     }
 }
 
@@ -365,7 +362,8 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
 
 /// Convert output logprobs to the flat proto representation.
 ///
-/// Returns (logprob_values, ranks, candidate_tokens) — all parallel arrays indexed by position.
+/// Returns (logprob_values, ranks, candidate_tokens) — all parallel arrays
+/// indexed by position.
 fn output_logprobs_to_proto(
     lp: &DecodedLogprobs,
 ) -> (Vec<f32>, Vec<u32>, Vec<pb::CandidateTokenInfo>) {
@@ -377,8 +375,8 @@ fn prompt_logprobs_to_proto(
     plp: &DecodedPromptLogprobs,
 ) -> (Vec<f32>, Vec<u32>, Vec<pb::CandidateTokenInfo>) {
     // The proto PromptInfo has flat parallel arrays covering all prompt positions.
-    // DecodedPromptLogprobs has first_token separately + scored_positions for the rest.
-    // The first prompt position has no scores, so we emit zeros for it.
+    // DecodedPromptLogprobs has first_token separately + scored_positions for the
+    // rest. The first prompt position has no scores, so we emit zeros for it.
     let (mut logprobs, mut ranks, mut candidates) = positions_to_proto(&plp.scored_positions);
     logprobs.insert(0, 0.0);
     ranks.insert(0, 0);
@@ -386,7 +384,8 @@ fn prompt_logprobs_to_proto(
     (logprobs, ranks, candidates)
 }
 
-/// Shared helper: convert a slice of decoded position logprobs to flat proto arrays.
+/// Shared helper: convert a slice of decoded position logprobs to flat proto
+/// arrays.
 fn positions_to_proto(
     positions: &[vllm_text::DecodedPositionLogprobs],
 ) -> (Vec<f32>, Vec<u32>, Vec<pb::CandidateTokenInfo>) {
@@ -423,10 +422,7 @@ fn positions_to_proto(
 
 fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
-        s.fields
-            .iter()
-            .map(|(k, v)| (k.clone(), proto_value_to_json(v)))
-            .collect(),
+        s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
     )
 }
 
@@ -447,10 +443,7 @@ fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
 fn json_to_proto_struct(value: &serde_json::Value) -> Option<prost_types::Struct> {
     match value {
         serde_json::Value::Object(map) => Some(prost_types::Struct {
-            fields: map
-                .iter()
-                .map(|(k, v)| (k.clone(), json_to_proto_value(v)))
-                .collect(),
+            fields: map.iter().map(|(k, v)| (k.clone(), json_to_proto_value(v))).collect(),
         }),
         _ => None,
     }
@@ -467,10 +460,7 @@ fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
             values: arr.iter().map(json_to_proto_value).collect(),
         }),
         serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
-            fields: map
-                .iter()
-                .map(|(k, v)| (k.clone(), json_to_proto_value(v)))
-                .collect(),
+            fields: map.iter().map(|(k, v)| (k.clone(), json_to_proto_value(v))).collect(),
         }),
     };
     prost_types::Value { kind: Some(kind) }
@@ -629,7 +619,8 @@ mod tests {
     #[test]
     fn explicit_stop_token_id_is_preserved() {
         let fin = finished(FinishReason::Stop(Some(StopReason::TokenId(42))));
-        // Terminal token list should be ignored when an explicit stop reason is present.
+        // Terminal token list should be ignored when an explicit stop reason is
+        // present.
         let info = to_finish_info(&fin, &[7, 42]);
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);

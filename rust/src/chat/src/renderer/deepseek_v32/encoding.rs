@@ -289,10 +289,7 @@ fn render_tool_message(
             )));
         }
 
-        if tool_results_by_id
-            .insert(tool_call_id.as_str(), content)
-            .is_some()
-        {
+        if tool_results_by_id.insert(tool_call_id.as_str(), content).is_some() {
             return Err(Error::ChatTemplate(format!(
                 "invalid DeepSeek V3.2 tool message: duplicate tool_call_id `{tool_call_id}`"
             )));

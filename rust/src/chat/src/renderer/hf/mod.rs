@@ -30,7 +30,8 @@ pub use template::{load_chat_template, resolve_chat_template};
 
 pub use self::format::ChatTemplateContentFormatOption;
 
-/// Hugging Face chat-template renderer backed by the local Jinja chat-template state.
+/// Hugging Face chat-template renderer backed by the local Jinja chat-template
+/// state.
 pub struct HfChatRenderer {
     default_template: Option<CompiledChatTemplate>,
     default_template_kwargs: HashMap<String, Value>,
@@ -76,8 +77,8 @@ impl HfChatRenderer {
             );
             info!("using configured chat template override");
         } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
-            // If independent chat template file(s) exist and contain non-empty content, they take
-            // priority over template entries in the tokenizer config
+            // If independent chat template file(s) exist and contain non-empty content,
+            // they take priority over template entries in the tokenizer config
             let file_template = load_chat_template(chat_template_path)
                 .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
@@ -103,11 +104,12 @@ impl HfChatRenderer {
         )
     }
 
-    /// Apply the chat template to one chat request, rendering the prompt string to be tokenized
-    /// and submitted to the model.
+    /// Apply the chat template to one chat request, rendering the prompt string
+    /// to be tokenized and submitted to the model.
     ///
-    /// If the request carries a per-request `chat_template` override, a temporary template is
-    /// compiled from that string and used instead of the model's default.
+    /// If the request carries a per-request `chat_template` override, a
+    /// temporary template is compiled from that string and used instead of
+    /// the model's default.
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         let override_template = request
             .chat_options
@@ -133,9 +135,7 @@ impl HfChatRenderer {
     ) -> Result<RenderedPrompt> {
         let messages =
             to_template_messages(&request.messages, effective_template.content_format())?;
-        let tools = request
-            .tool_parsing_enabled()
-            .then(|| to_template_tools(&request.tools));
+        let tools = request.tool_parsing_enabled().then(|| to_template_tools(&request.tools));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -334,10 +334,7 @@ fn to_template_content(
 }
 
 fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
-    tools
-        .iter()
-        .map(|tool| TemplateTool(tool.to_openai_tool()))
-        .collect()
+    tools.iter().map(|tool| TemplateTool(tool.to_openai_tool())).collect()
 }
 
 #[cfg(test)]

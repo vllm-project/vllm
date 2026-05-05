@@ -61,7 +61,8 @@ fn ready_message(status: &str) -> ReadyMessage {
     }
 }
 
-/// Construct a default ready response payload for mock engine input registration.
+/// Construct a default ready response payload for mock engine input
+/// registration.
 fn ready_response_payload() -> Vec<u8> {
     rmp_serde::to_vec_named(&EngineCoreReadyResponse {
         max_model_len: 4096,
@@ -71,11 +72,14 @@ fn ready_response_payload() -> Vec<u8> {
     .expect("encode ready response payload")
 }
 
-/// Coordinator-side sockets connected by one mock engine when coordinator mode is enabled.
+/// Coordinator-side sockets connected by one mock engine when coordinator mode
+/// is enabled.
 pub struct MockCoordinatorConnections {
-    /// Subscription socket that receives coordinator broadcasts such as `START_DP_WAVE`.
+    /// Subscription socket that receives coordinator broadcasts such as
+    /// `START_DP_WAVE`.
     pub input_sub: SubSocket,
-    /// Push socket used to send coordinator-only `EngineCoreOutputs` back to the frontend.
+    /// Push socket used to send coordinator-only `EngineCoreOutputs` back to
+    /// the frontend.
     pub output_push: PushSocket,
 }
 
@@ -87,12 +91,13 @@ pub struct MockEngineConnections {
     pub dealer: DealerSocket,
     /// Socket used to publish normal request outputs back to the frontend.
     pub push: PushSocket,
-    /// Optional coordinator sockets when the client enabled the in-process coordinator.
+    /// Optional coordinator sockets when the client enabled the in-process
+    /// coordinator.
     pub coordinator: Option<MockCoordinatorConnections>,
 }
 
-/// Complete the engine-core handshake and connect mock input/output sockets plus optional
-/// coordinator sockets.
+/// Complete the engine-core handshake and connect mock input/output sockets
+/// plus optional coordinator sockets.
 pub async fn setup_mock_engine_connections(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,
@@ -125,11 +130,7 @@ pub async fn setup_mock_engine_connections(
         .await
         .expect("send HELLO ready message");
 
-    let init_frames = handshake
-        .recv()
-        .await
-        .expect("receive handshake init message")
-        .into_vec();
+    let init_frames = handshake.recv().await.expect("receive handshake init message").into_vec();
     assert_eq!(init_frames.len(), 1);
     let init: HandshakeInitMessage =
         rmp_serde::from_slice(init_frames[0].as_ref()).expect("decode handshake init message");
@@ -172,11 +173,8 @@ pub async fn setup_mock_engine_connections(
                 .await
                 .expect("connect mock engine coordinator output socket");
 
-            let ready = input_sub
-                .recv()
-                .await
-                .expect("receive coordinator READY marker")
-                .into_vec();
+            let ready =
+                input_sub.recv().await.expect("receive coordinator READY marker").into_vec();
             assert_eq!(ready.len(), 1);
             assert_eq!(ready[0].as_ref(), b"READY");
 
@@ -204,7 +202,8 @@ pub async fn setup_mock_engine_connections(
     }
 }
 
-/// Connect one mock engine directly to already-bootstrapped frontend input/output sockets.
+/// Connect one mock engine directly to already-bootstrapped frontend
+/// input/output sockets.
 pub async fn setup_bootstrapped_mock_engine(
     input_address: String,
     output_address: String,
@@ -225,27 +224,23 @@ pub async fn setup_bootstrapped_mock_engine(
     let mut input_options = SocketOptions::default();
     input_options.peer_identity(peer_identity);
     let mut dealer = DealerSocket::with_options(input_options);
-    dealer
-        .connect(&input_address)
-        .await
-        .expect("connect mock engine input socket");
+    dealer.connect(&input_address).await.expect("connect mock engine input socket");
     dealer
         .send(ZmqMessage::from(ready_response_payload()))
         .await
         .expect("send mock engine input ready frame");
 
     let mut push = PushSocket::new();
-    push.connect(&output_address)
-        .await
-        .expect("connect mock engine output socket");
+    push.connect(&output_address).await.expect("connect mock engine output socket");
 
     (dealer, push)
 }
 
 /// Complete the engine-core handshake and connect mock input/output sockets.
 ///
-/// This returns the decoded handshake init message plus the `DealerSocket` used to receive client
-/// requests and the `PushSocket` used to send engine outputs back to the client.
+/// This returns the decoded handshake init message plus the `DealerSocket` used
+/// to receive client requests and the `PushSocket` used to send engine outputs
+/// back to the client.
 pub async fn setup_mock_engine_with_init(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,

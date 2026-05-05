@@ -9,16 +9,18 @@ use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
 };
 
-/// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM / OpenAI default.
+/// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
+/// / OpenAI default.
 fn default_completion_max_tokens() -> Option<u32> {
     Some(16)
 }
 
 /// vLLM-compatible request type for the Completions API.
 ///
-/// Mirrors the Python vLLM `CompletionRequest` class. The local copy keeps the request type
-/// route-owned so we can accept token-id prompts via [`vllm_text::Prompt`] and add vLLM-only
-/// fields directly instead of layering wrapper deserializers on top.
+/// Mirrors the Python vLLM `CompletionRequest` class. The local copy keeps the
+/// request type route-owned so we can accept token-id prompts via
+/// [`vllm_text::Prompt`] and add vLLM-only fields directly instead of layering
+/// wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct CompletionRequest {
@@ -35,8 +37,8 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub echo: bool,
 
-    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing
-    /// frequency in the text so far
+    /// Number between -2.0 and 2.0. Positive values penalize new tokens based
+    /// on their existing frequency in the text so far
     pub frequency_penalty: Option<f32>,
 
     /// Modify the likelihood of specified tokens appearing in the completion
@@ -45,19 +47,20 @@ pub struct CompletionRequest {
     /// Include the log probabilities on the logprobs most likely tokens
     pub logprobs: Option<u32>,
 
-    /// The maximum number of tokens to generate (defaults to 16 when absent, matching the
-    /// Python vLLM / OpenAI API convention)
+    /// The maximum number of tokens to generate (defaults to 16 when absent,
+    /// matching the Python vLLM / OpenAI API convention)
     #[serde(default = "default_completion_max_tokens")]
     pub max_tokens: Option<u32>,
 
     /// How many completions to generate for each prompt
     pub n: Option<u32>,
 
-    /// Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they
-    /// appear in the text so far
+    /// Number between -2.0 and 2.0. Positive values penalize new tokens based
+    /// on whether they appear in the text so far
     pub presence_penalty: Option<f32>,
 
-    /// If specified, our system will make a best effort to sample deterministically
+    /// If specified, our system will make a best effort to sample
+    /// deterministically
     pub seed: Option<i64>,
 
     /// Up to 4 sequences where the API will stop generating further tokens
@@ -136,7 +139,8 @@ pub struct CompletionRequest {
     #[serde(default = "default_true")]
     pub add_special_tokens: bool,
 
-    /// Format specification for structured output (JSON mode, JSON schema, etc.)
+    /// Format specification for structured output (JSON mode, JSON schema,
+    /// etc.)
     pub response_format: Option<Value>,
 
     /// Additional kwargs for structured outputs
@@ -148,7 +152,8 @@ pub struct CompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
-    /// Tokens represented as strings of the form 'token_id:{token_id}' in logprobs
+    /// Tokens represented as strings of the form 'token_id:{token_id}' in
+    /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
 
     /// Include token IDs alongside generated text
@@ -160,7 +165,8 @@ pub struct CompletionRequest {
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
-    /// Additional request parameters with string or numeric values for custom extensions
+    /// Additional request parameters with string or numeric values for custom
+    /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
     /// Additional fields

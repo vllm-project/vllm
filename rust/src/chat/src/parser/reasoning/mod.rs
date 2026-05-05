@@ -58,8 +58,8 @@ pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
 /// GLM45 currently shares the standard `<think>...</think>` parser.
 pub type Glm45ReasoningParser = Qwen3ReasoningParser;
 /// Kimi K2 currently shares the standard `<think>...</think>` parser.
-// TODO: kimi k2 may implicitly end reasoning by starting a tool call section using
-// <|tool_calls_section_begin|>, we should support that.
+// TODO: kimi k2 may implicitly end reasoning by starting a tool call section
+// using <|tool_calls_section_begin|>, we should support that.
 pub type KimiK2ReasoningParser = Qwen3ReasoningParser;
 /// MiniMax M2 currently shares the standard `<think>...</think>` parser.
 pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
@@ -107,14 +107,16 @@ impl ReasoningDelta {
     }
 }
 
-/// Incremental parser that splits decoded text deltas into reasoning and content.
+/// Incremental parser that splits decoded text deltas into reasoning and
+/// content.
 pub trait ReasoningParser: Send {
     /// Construct a boxed parser instance for one request stream.
     fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static;
 
-    /// Initialize parser state from prompt token IDs before output deltas arrive.
+    /// Initialize parser state from prompt token IDs before output deltas
+    /// arrive.
     fn initialize(&mut self, _prompt_token_ids: &[u32]) -> Result<()> {
         Ok(())
     }
@@ -150,14 +152,16 @@ type ReasoningParserCreator = fn(DynTokenizer) -> Result<Box<dyn ReasoningParser
 pub type ReasoningParserFactory = ParserFactory<ReasoningParserCreator>;
 
 impl ReasoningParserFactory {
-    /// Get the global reasoning parser factory with built-in registrations and model mappings.
+    /// Get the global reasoning parser factory with built-in registrations and
+    /// model mappings.
     pub fn global() -> &'static Self {
         static INSTANCE: LazyLock<ReasoningParserFactory> =
             LazyLock::new(ReasoningParserFactory::new);
         &INSTANCE
     }
 
-    /// Create the default registry with built-in parser names and model mappings.
+    /// Create the default registry with built-in parser names and model
+    /// mappings.
     pub fn new() -> Self {
         let mut factory = Self::default();
 
@@ -214,13 +218,11 @@ impl ReasoningParserFactory {
         name: &str,
         tokenizer: DynTokenizer,
     ) -> crate::Result<Box<dyn ReasoningParser>> {
-        let creator = self
-            .creator(name)
-            .ok_or_else(|| crate::Error::ParserUnavailableByName {
-                kind: "reasoning",
-                name: name.to_string(),
-                available_names: self.list(),
-            })?;
+        let creator = self.creator(name).ok_or_else(|| crate::Error::ParserUnavailableByName {
+            kind: "reasoning",
+            name: name.to_string(),
+            available_names: self.list(),
+        })?;
 
         creator(tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "reasoning",

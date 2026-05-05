@@ -1,10 +1,11 @@
 //! Minimal chat facade above [`vllm_text`].
 //!
 //! This crate keeps the northbound boundary intentionally small:
-//! `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed structured
-//! assistant events`. The request side remains text-first, while the response side can emit
-//! structured reasoning and final-answer blocks. It is closer to vLLM's internal chat-rendering
-//! flow than to a full OpenAI-compatible surface.
+//! `messages -> rendered prompt -> tokenized prompt -> engine request ->
+//! streamed structured assistant events`. The request side remains text-first,
+//! while the response side can emit structured reasoning and final-answer
+//! blocks. It is closer to vLLM's internal chat-rendering flow than to a full
+//! OpenAI-compatible surface.
 
 pub use backend::hf::HfChatBackend;
 pub use backend::{
@@ -90,8 +91,9 @@ pub fn validate_parser_overrides(
 
 /// Structured chat facade above [`TextLlm`].
 ///
-/// This layer stays above raw text semantics: it takes care of chat-template rendering, exposes
-/// structured assistant events, and adds chat-specific request semantics such as tool calls.
+/// This layer stays above raw text semantics: it takes care of chat-template
+/// rendering, exposes structured assistant events, and adds chat-specific
+/// request semantics such as tool calls.
 pub struct ChatLlm {
     text: TextLlm,
     backend: DynChatBackend,
@@ -102,7 +104,8 @@ pub struct ChatLlm {
 }
 
 impl ChatLlm {
-    /// Create a new chat facade from a text-generation facade plus a chat backend.
+    /// Create a new chat facade from a text-generation facade plus a chat
+    /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         Self {
             text,
@@ -112,8 +115,8 @@ impl ChatLlm {
         }
     }
 
-    /// Convenience constructor for one shared backend object that implements both text and chat
-    /// responsibilities.
+    /// Convenience constructor for one shared backend object that implements
+    /// both text and chat responsibilities.
     pub fn from_shared_backend(llm: Llm, backend: DynChatTextBackend) -> Self {
         let text = TextLlm::new(llm, backend.clone());
         Self::new(text, backend)
@@ -131,7 +134,8 @@ impl ChatLlm {
         self
     }
 
-    /// Expose the underlying text facade for raw text-generation routes such as `/v1/completions`.
+    /// Expose the underlying text facade for raw text-generation routes such as
+    /// `/v1/completions`.
     pub fn text(&self) -> &TextLlm {
         &self.text
     }
@@ -141,7 +145,8 @@ impl ChatLlm {
         self.text.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin calls.
+    /// Expose the underlying engine-core client for low-level utility/admin
+    /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
         self.text.engine_core_client()
     }
@@ -171,12 +176,7 @@ impl ChatLlm {
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
         };
-        let decoded_stream = self
-            .text
-            .generate(text_request)
-            .await?
-            .map_err(Error::from)
-            .boxed();
+        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 

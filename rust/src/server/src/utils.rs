@@ -27,8 +27,9 @@ pub fn utility_call_error(method: &str, error: impl AsReport) -> ApiError {
     ApiError::server_error(format!("failed to call {method}: {}", error.as_report()))
 }
 
-/// Merge `kv_transfer_params` into the `vllm_xargs` map, mirroring the Python vLLM behavior
-/// where `kv_transfer_params` is injected into `extra_args` for engine-core consumption.
+/// Merge `kv_transfer_params` into the `vllm_xargs` map, mirroring the Python
+/// vLLM behavior where `kv_transfer_params` is injected into `extra_args` for
+/// engine-core consumption.
 pub fn merge_kv_transfer_params(
     mut xargs: Option<HashMap<String, Value>>,
     kv_transfer_params: Option<&HashMap<String, Value>>,
@@ -44,8 +45,9 @@ pub fn merge_kv_transfer_params(
     xargs
 }
 
-/// Convert OpenAI-style `logit_bias` with string token-ID keys into the internal
-/// `HashMap<u32, f32>` representation, validating that every key parses as a `u32`.
+/// Convert OpenAI-style `logit_bias` with string token-ID keys into the
+/// internal `HashMap<u32, f32>` representation, validating that every key
+/// parses as a `u32`.
 pub fn convert_logit_bias(
     logit_bias: Option<HashMap<String, f32>>,
 ) -> Result<Option<HashMap<u32, f32>>, ApiError> {
@@ -81,9 +83,7 @@ pub fn resolve_request_context(
         .and_then(|s| s.trim().parse().ok());
 
     // Extract request id from header.
-    let request_id_header = headers
-        .get("X-Request-Id")
-        .and_then(|value| value.to_str().ok());
+    let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
     let request_id = resolve_base_request_id(request_id_header, request_id);
 
     ResolvedRequestContext {
@@ -92,17 +92,15 @@ pub fn resolve_request_context(
     }
 }
 
-/// Resolve the base external request ID before API-specific prefixes such as `chatcmpl-`.
+/// Resolve the base external request ID before API-specific prefixes such as
+/// `chatcmpl-`.
 pub fn resolve_base_request_id(
     request_id_header: Option<&str>,
     request_id: Option<&str>,
 ) -> String {
-    request_id_header
-        .or(request_id)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            let mut id = Uuid::new_v4().simple().to_string();
-            id.truncate(8);
-            id
-        })
+    request_id_header.or(request_id).map(ToOwned::to_owned).unwrap_or_else(|| {
+        let mut id = Uuid::new_v4().simple().to_string();
+        id.truncate(8);
+        id
+    })
 }

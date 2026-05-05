@@ -8,11 +8,11 @@ use clap::builder::{TypedValueParser, ValueParserFactory};
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Marker type for frontend-owned `serve` arguments that `vllm-rs` recognizes but does not
-/// support yet.
+/// Marker type for frontend-owned `serve` arguments that `vllm-rs` recognizes
+/// but does not support yet.
 ///
-/// When passed as JSON args, it can be deserialized from any value, and serializes back to the
-/// original value.
+/// When passed as JSON args, it can be deserialized from any value, and
+/// serializes back to the original value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Unsupported(pub serde_json::Value);
@@ -31,10 +31,11 @@ This may lead to unexpected behavior as the Rust frontend will completely ignore
     }
 }
 
-/// Marker type for no-op arguments that are accepted by the Rust frontend but have no effect.
+/// Marker type for no-op arguments that are accepted by the Rust frontend but
+/// have no effect.
 ///
-/// When passed as JSON args, it can be deserialized from any value, but always serializes back to
-/// `null`.
+/// When passed as JSON args, it can be deserialized from any value, but always
+/// serializes back to `null`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Noop;
 
@@ -79,7 +80,8 @@ impl TypedValueParser for NoopValueParser {
     }
 }
 
-/// Frontend-owned Python `serve` arguments that `vllm-rs` recognizes but does not support yet.
+/// Frontend-owned Python `serve` arguments that `vllm-rs` recognizes but does
+/// not support yet.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 #[command(next_help_heading = "Options not implemented in Rust frontend yet")]
@@ -96,8 +98,9 @@ pub struct UnsupportedArgs {
 }
 
 impl UnsupportedArgs {
-    /// Check whether any unsupported arguments are set, and if so, return an error listing them.
-    /// Also warn about any no-op arguments that are set but will be ignored.
+    /// Check whether any unsupported arguments are set, and if so, return an
+    /// error listing them. Also warn about any no-op arguments that are set
+    /// but will be ignored.
     pub(crate) fn check(&self) -> Result<(), String> {
         let value = serde_json::to_value(self).unwrap();
         let map = value.as_object().unwrap();
@@ -113,10 +116,7 @@ impl UnsupportedArgs {
 
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
-            let bullets = unsupported
-                .into_iter()
-                .map(|key| format!("- {key}"))
-                .join("\n");
+            let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
             return Err(format!(
                 "
 The following arguments are not implemented in Rust frontend yet:
@@ -130,44 +130,48 @@ Remove these arguments to continue."
     }
 }
 
-/// Frontend-owned Python `vllm serve` top-level arguments that `vllm-rs` recognizes but does not
-/// support yet.
+/// Frontend-owned Python `vllm serve` top-level arguments that `vllm-rs`
+/// recognizes but does not support yet.
 ///
 /// Source of truth in Python vLLM:
 /// - `vllm.entrypoints.openai.cli_args.make_arg_parser(...)`
 /// - `vllm.entrypoints.cli.serve.ServeSubcommand.subparser_init(...)`
 ///
-/// These are not part of `EngineArgs`, `AsyncEngineArgs`, `BaseFrontendArgs`, or `FrontendArgs`.
-/// They live on the `serve` command itself and control managed-engine / multi-process orchestration
-/// rather than the shared frontend runtime config.
+/// These are not part of `EngineArgs`, `AsyncEngineArgs`, `BaseFrontendArgs`,
+/// or `FrontendArgs`. They live on the `serve` command itself and control
+/// managed-engine / multi-process orchestration rather than the shared frontend
+/// runtime config.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct TopLevelUnsupportedArgs {
-    /// How many API server processes to run. Defaults to data_parallel_size if not specified.
+    /// How many API server processes to run. Defaults to data_parallel_size if
+    /// not specified.
     #[arg(long, hide = true)]
     pub api_server_count: Option<Noop>,
 
-    /// Read CLI options from a config file. Must be a YAML with the following options:
-    /// https://docs.vllm.ai/en/latest/configuration/serve_args.html
+    /// Read CLI options from a config file. Must be a YAML with the following
+    /// options: https://docs.vllm.ai/en/latest/configuration/serve_args.html
     #[arg(long)]
     pub config: Option<Unsupported>,
 
-    /// Launch a gRPC server instead of the HTTP OpenAI-compatible server. Requires:
-    /// pip install vllm[grpc].
+    /// Launch a gRPC server instead of the HTTP OpenAI-compatible server.
+    /// Requires: pip install vllm[grpc].
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub grpc: Option<Unsupported>,
 }
 
-/// Frontend-owned Python engine arguments that `vllm-rs` recognizes but does not support yet.
+/// Frontend-owned Python engine arguments that `vllm-rs` recognizes but does
+/// not support yet.
 ///
 /// Source of truth in Python vLLM:
 /// - `vllm.engine.arg_utils.EngineArgs.add_cli_args(...)`
 /// - `vllm.engine.arg_utils.AsyncEngineArgs.add_cli_args(...)`
 ///
-/// These arguments are declared through the Python engine-args surface, but they are still
-/// frontend-owned: the API server / AsyncLLM layer reads them for tokenizer setup, request
-/// validation, routing, logging, and other frontend behavior, so Rust must recognize them rather
-/// than treating them as pure engine passthrough.
+/// These arguments are declared through the Python engine-args surface, but
+/// they are still frontend-owned: the API server / AsyncLLM layer reads them
+/// for tokenizer setup, request validation, routing, logging, and other
+/// frontend behavior, so Rust must recognize them rather than treating them as
+/// pure engine passthrough.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
@@ -182,8 +186,8 @@ pub struct EngineUnsupportedArgs {
     pub hf_config_path: Option<Unsupported>,
 
     /// Allowing API requests to read local images or videos from directories
-    /// specified by the server file system. This is a security risk. Should only
-    /// be enabled in trusted environments.
+    /// specified by the server file system. This is a security risk. Should
+    /// only be enabled in trusted environments.
     #[arg(long)]
     pub allowed_local_media_path: Option<Unsupported>,
 
@@ -193,15 +197,16 @@ pub struct EngineUnsupportedArgs {
     pub allowed_media_domains: Option<Unsupported>,
 
     /// The specific revision to use for the tokenizer on the Hugging Face Hub.
-    /// It can be a branch name, a tag name, or a commit id. If unspecified, will
-    /// use the default version.
+    /// It can be a branch name, a tag name, or a commit id. If unspecified,
+    /// will use the default version.
     #[arg(long)]
     pub tokenizer_revision: Option<Unsupported>,
 
     /// Maximum number of log probabilities to return when `logprobs` is
-    /// specified in `SamplingParams`. The default value comes the default for the
-    /// OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
-    /// vocab_size) logprobs are allowed to be returned and it may cause OOM.
+    /// specified in `SamplingParams`. The default value comes the default for
+    /// the OpenAI Chat Completions API. -1 means no cap, i.e. all
+    /// (output_length * vocab_size) logprobs are allowed to be returned and
+    /// it may cause OOM.
     #[arg(long)]
     pub max_logprobs: Option<Unsupported>,
 
@@ -219,8 +224,8 @@ pub struct EngineUnsupportedArgs {
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///
-    /// WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
-    /// Only enable this flag for trusted users!
+    /// WARNING: The vLLM engine may crash if incorrect shape of embeddings is
+    /// passed. Only enable this flag for trusted users!
     #[arg(
         long,
         visible_alias = "no-enable-prompt-embeds",
@@ -232,10 +237,10 @@ pub struct EngineUnsupportedArgs {
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
-    /// specified, the model name will be the same as the `--model` argument. Noted
-    /// that this name(s) will also be used in `model_name` tag content of
-    /// prometheus metrics, if multiple names provided, metrics tag will take the
-    /// first one.
+    /// specified, the model name will be the same as the `--model` argument.
+    /// Noted that this name(s) will also be used in `model_name` tag
+    /// content of prometheus metrics, if multiple names provided, metrics
+    /// tag will take the first one.
     #[arg(long)]
     pub served_model_name: Option<Unsupported>,
 
@@ -252,10 +257,11 @@ pub struct EngineUnsupportedArgs {
 
     /// The folder path to the generation config. Defaults to `"auto"`, the
     /// generation config will be loaded from model path. If set to `"vllm"`, no
-    /// generation config is loaded, vLLM defaults will be used. If set to a folder
-    /// path, the generation config will be loaded from the specified folder path.
-    /// If `max_new_tokens` is specified in generation config, then it sets a
-    /// server-wide limit on the number of output tokens for all requests.
+    /// generation config is loaded, vLLM defaults will be used. If set to a
+    /// folder path, the generation config will be loaded from the specified
+    /// folder path. If `max_new_tokens` is specified in generation config,
+    /// then it sets a server-wide limit on the number of output tokens for
+    /// all requests.
     #[arg(long)]
     pub generation_config: Option<Unsupported>,
 
@@ -359,21 +365,23 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub structured_outputs_config: Option<Noop>,
 
-    /// Log aggregate rather than per-engine statistics when using data parallelism.
+    /// Log aggregate rather than per-engine statistics when using data
+    /// parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub aggregate_engine_logging: Option<Unsupported>,
 }
 
-/// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but does not support
-/// yet.
+/// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but
+/// does not support yet.
 ///
 /// Source of truth in Python vLLM:
 /// - `vllm.entrypoints.openai.cli_args.BaseFrontendArgs`
 /// - `vllm.entrypoints.openai.cli_args.FrontendArgs`
 ///
-/// These are not engine args. They belong to the Python OpenAI-compatible frontend / API-server
-/// layer itself, for example chat-template configuration, tool/frontend behavior, TLS / CORS /
-/// HTTP server settings, and other northbound server knobs.
+/// These are not engine args. They belong to the Python OpenAI-compatible
+/// frontend / API-server layer itself, for example chat-template configuration,
+/// tool/frontend behavior, TLS / CORS / HTTP server settings, and other
+/// northbound server knobs.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
@@ -385,8 +393,8 @@ pub struct ServerUnsupportedArgs {
     pub lora_modules: Option<Unsupported>,
 
     /// Whether to trust the chat template provided in the request. If False,
-    /// the server will always use the chat template specified by `--chat-template`
-    /// or the ones from tokenizer.
+    /// the server will always use the chat template specified by
+    /// `--chat-template` or the ones from tokenizer.
     #[arg(
         long,
         visible_alias = "no-trust-request-chat-template",
@@ -575,8 +583,8 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub allowed_headers: Option<Unsupported>,
 
-    /// If provided, the server will require one of these keys to be presented in
-    /// the header.
+    /// If provided, the server will require one of these keys to be presented
+    /// in the header.
     #[arg(long)]
     pub api_key: Option<Unsupported>,
 
@@ -615,8 +623,8 @@ pub struct ServerUnsupportedArgs {
     pub root_path: Option<Unsupported>,
 
     /// Additional ASGI middleware to apply to the app. We accept multiple
-    /// --middleware arguments. The value should be an import path. If a function
-    /// is provided, vLLM will add it to the server using
+    /// --middleware arguments. The value should be an import path. If a
+    /// function is provided, vLLM will add it to the server using
     /// `@app.middleware('http')`. If a class is provided, vLLM will
     /// add it to the server using `app.add_middleware()`.
     #[arg(long)]

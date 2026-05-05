@@ -52,9 +52,10 @@ pub(super) fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalRes
 /// Parse one event from a buffered streaming input.
 ///
 /// Returns:
-/// - `Ok(Some((event, consumed_len)))` if an event was successfully parsed, along with the number
-///   of bytes consumed from the buffer.
-/// - `Ok(None)` if the buffer does not contain a full event yet, and more data is needed.
+/// - `Ok(Some((event, consumed_len)))` if an event was successfully parsed,
+///   along with the number of bytes consumed from the buffer.
+/// - `Ok(None)` if the buffer does not contain a full event yet, and more data
+///   is needed.
 /// - `Err` if a parsing error occurred.
 pub(super) fn parse_buffered_event<E>(
     buffer: &str,

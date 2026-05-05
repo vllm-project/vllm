@@ -23,7 +23,8 @@ impl RendererSelection {
     pub const DEEPSEEK_V4_LITERAL: &str = "deepseek_v4";
     pub const HF_LITERAL: &str = "hf";
 
-    /// Resolve the renderer selection using the given model type string, if it's `Auto`.
+    /// Resolve the renderer selection using the given model type string, if
+    /// it's `Auto`.
     pub fn resolve(self, model_type: &str) -> Self {
         match self {
             Self::Auto => match model_type {

@@ -23,8 +23,9 @@ pub struct ReadyMessage {
 /// Post-initialization configuration sent from each engine on the input socket
 /// registration message, after the handshake completes.
 ///
-/// Contains values that may differ from the original config (e.g. `max_model_len`
-/// after KV cache auto-fitting, `num_gpu_blocks` after profiling).
+/// Contains values that may differ from the original config (e.g.
+/// `max_model_len` after KV cache auto-fitting, `num_gpu_blocks` after
+/// profiling).
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/c8d98f81f6/vllm/v1/engine/__init__.py#L67-L77>

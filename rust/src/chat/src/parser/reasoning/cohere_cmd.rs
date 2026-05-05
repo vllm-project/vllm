@@ -8,7 +8,8 @@ pub struct CohereCmdReasoningParser {
 }
 
 impl CohereCmdReasoningParser {
-    /// Create a Cohere Command parser backed by the shared delimited state machine.
+    /// Create a Cohere Command parser backed by the shared delimited state
+    /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
             inner: DelimitedReasoningParser::new(

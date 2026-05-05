@@ -47,9 +47,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     let (thinking_mode, max_reasoning_effort) = resolve_thinking_options(request)?;
     let request_tools = request_tools(request);
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
-    let drop_thinking = request
-        .parse_template_bool("drop_thinking")?
-        .unwrap_or(true)
+    let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), synthetic_tool_system);
@@ -119,9 +117,10 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     Ok(out)
 }
 
-/// Resolve DeepSeek V4's thinking controls. Unlike the Python tokenizer wrapper,
-/// the Rust renderer only consumes the typed top-level `reasoning_effort`; the
-/// generic template-kwargs map is left for HF templates.
+/// Resolve DeepSeek V4's thinking controls. Unlike the Python tokenizer
+/// wrapper, the Rust renderer only consumes the typed top-level
+/// `reasoning_effort`; the generic template-kwargs map is left for HF
+/// templates.
 fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, bool)> {
     let mut thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
         true => ThinkingMode::Thinking,
@@ -207,7 +206,8 @@ fn is_user_like_entry(message: &ChatMessage) -> bool {
     )
 }
 
-/// Return whether the next rendered entry is assistant, or there is no next entry.
+/// Return whether the next rendered entry is assistant, or there is no next
+/// entry.
 fn next_rendered_entry_is_assistant_or_end(messages: &[ChatMessage], message_index: usize) -> bool {
     let mut next_index = message_index + 1;
     if matches!(messages[message_index], ChatMessage::ToolResponse { .. }) {
@@ -374,10 +374,7 @@ fn sorted_tool_response_indices(
         let ChatMessage::ToolResponse { tool_call_id, .. } = &messages[*index] else {
             unreachable!("tool response block should only contain tool messages");
         };
-        tool_call_order
-            .get(tool_call_id.as_str())
-            .copied()
-            .unwrap_or(0)
+        tool_call_order.get(tool_call_id.as_str()).copied().unwrap_or(0)
     });
     indices
 }

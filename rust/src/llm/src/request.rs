@@ -8,9 +8,10 @@ use crate::error::{Error, Result};
 
 /// Tokenized decoder-only generate request accepted by [`crate::Llm`].
 ///
-/// This is the first-stage Rust subset of the inputs that eventually flow into Python
-/// `AsyncLLM.generate()`. The boundary is intentionally above [`EngineCoreRequest`], but below
-/// higher-level text and multimodal preprocessing.
+/// This is the first-stage Rust subset of the inputs that eventually flow into
+/// Python `AsyncLLM.generate()`. The boundary is intentionally above
+/// [`EngineCoreRequest`], but below higher-level text and multimodal
+/// preprocessing.
 ///
 /// Original Python API reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/protocol.py#L67-L84>

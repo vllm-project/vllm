@@ -14,7 +14,8 @@ pub struct PreparedRequest {
     pub include_prompt_logprobs: bool,
 }
 
-/// Validate and lower one raw generate request into the internal text-generation format.
+/// Validate and lower one raw generate request into the internal
+/// text-generation format.
 pub fn prepare_generate_request(
     request: GenerateRequest,
     configured_model: &str,

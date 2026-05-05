@@ -101,21 +101,14 @@ fn init_tracing() {
 fn unique_local_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .context("failed to allocate local smoke-test port")?;
-    let port = listener
-        .local_addr()
-        .context("failed to read local smoke-test port")?
-        .port();
+    let port = listener.local_addr().context("failed to read local smoke-test port")?.port();
     drop(listener);
     Ok(port)
 }
 
 async fn print_models(client: &Client<OpenAIConfig>) -> Result<()> {
     let models = wait_for_models(client).await?;
-    let model_ids = models
-        .data
-        .into_iter()
-        .map(|model| model.id)
-        .collect::<Vec<_>>();
+    let model_ids = models.data.into_iter().map(|model| model.id).collect::<Vec<_>>();
     println!("models={model_ids:?}");
     Ok(())
 }
@@ -143,13 +136,15 @@ async fn stream_completion(
     model: &str,
     prompt: &str,
 ) -> Result<String> {
-    // Keep this smoke test on async-openai's standard `create_stream` path so it exercises
-    // the ordinary typed chat-completions client without BYOT request/response types.
+    // Keep this smoke test on async-openai's standard `create_stream` path so it
+    // exercises the ordinary typed chat-completions client without BYOT
+    // request/response types.
     //
-    // The current async-openai chat-completions stream delta type does not expose our
-    // OpenAI-compatible `reasoning_content` extension field, so this example only validates the
-    // assistant role chunk, visible `content` deltas, and terminal finish chunk. Reasoning
-    // coverage lives in our own route tests and in the `vllm-chat` smoke example.
+    // The current async-openai chat-completions stream delta type does not expose
+    // our OpenAI-compatible `reasoning_content` extension field, so this
+    // example only validates the assistant role chunk, visible `content`
+    // deltas, and terminal finish chunk. Reasoning coverage lives in our own
+    // route tests and in the `vllm-chat` smoke example.
     let request: CreateChatCompletionRequest = CreateChatCompletionRequestArgs::default()
         .model(model)
         .stream(true)

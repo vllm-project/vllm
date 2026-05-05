@@ -202,8 +202,9 @@ impl ChatRenderer for FakeTextBackend {
     }
 }
 
-/// Spin up a gRPC server backed by a mock engine that serves a single request with the
-/// given output specs. Returns the client, the gRPC server task, and the mock engine task.
+/// Spin up a gRPC server backed by a mock engine that serves a single request
+/// with the given output specs. Returns the client, the gRPC server task, and
+/// the mock engine task.
 async fn grpc_test_server(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
@@ -249,9 +250,7 @@ async fn grpc_test_server(
     let svc = GenerateServer::new(GenerateServiceImpl::new(state));
 
     // Bind to an OS-assigned port.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind grpc listener");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
@@ -451,10 +450,7 @@ async fn streaming_generate_yields_incremental_responses() {
 
     // First message should have prompt info.
     let first = &responses[0];
-    let prompt_info = first
-        .prompt_info
-        .as_ref()
-        .expect("first response has prompt_info");
+    let prompt_info = first.prompt_info.as_ref().expect("first response has prompt_info");
     assert_eq!(prompt_info.num_prompt_tokens, 5); // "hello"
 
     // Collect all text deltas.
@@ -471,10 +467,7 @@ async fn streaming_generate_yields_incremental_responses() {
         .rev()
         .find_map(|r| r.outputs.as_ref())
         .expect("at least one output");
-    let finish = last_output
-        .finish_info
-        .as_ref()
-        .expect("finish_info on last output");
+    let finish = last_output.finish_info.as_ref().expect("finish_info on last output");
     assert_eq!(
         finish.finish_reason,
         pb::finish_info::FinishReason::Stop as i32

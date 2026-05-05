@@ -74,7 +74,8 @@ pub struct SchedulerMetrics {
 }
 
 impl SchedulerMetrics {
-    /// Register the scheduler-oriented metric families into the shared registry.
+    /// Register the scheduler-oriented metric families into the shared
+    /// registry.
     pub(crate) fn register(registry: &mut Registry) -> Self {
         // Scheduler state gauges.
         let scheduler_running = Family::default();
@@ -248,21 +249,9 @@ mod tests {
             engine: 0,
         };
 
-        metrics
-            .scheduler
-            .estimated_flops_per_gpu
-            .get_or_create(&labels)
-            .inc();
-        metrics
-            .scheduler
-            .estimated_read_bytes_per_gpu
-            .get_or_create(&labels)
-            .inc();
-        metrics
-            .scheduler
-            .estimated_write_bytes_per_gpu
-            .get_or_create(&labels)
-            .inc();
+        metrics.scheduler.estimated_flops_per_gpu.get_or_create(&labels).inc();
+        metrics.scheduler.estimated_read_bytes_per_gpu.get_or_create(&labels).inc();
+        metrics.scheduler.estimated_write_bytes_per_gpu.get_or_create(&labels).inc();
 
         let rendered = metrics.render().unwrap();
         assert!(

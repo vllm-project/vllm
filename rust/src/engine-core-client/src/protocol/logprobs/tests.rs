@@ -185,12 +185,7 @@ fn decodes_inline_new_logprobs() {
     )))];
     let decoded = decode_engine_core_outputs(&frames).unwrap();
 
-    let logprobs = decoded.outputs[0]
-        .new_logprobs
-        .clone()
-        .unwrap()
-        .into_direct()
-        .unwrap();
+    let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
     assert_eq!(
         decoded.finished_requests,
@@ -221,12 +216,7 @@ fn decodes_multipart_new_logprobs() {
     ];
     let decoded = decode_engine_core_outputs(&frames).unwrap();
 
-    let logprobs = decoded.outputs[0]
-        .new_logprobs
-        .clone()
-        .unwrap()
-        .into_direct()
-        .unwrap();
+    let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
 }
 
@@ -263,12 +253,7 @@ fn decodes_big_endian_payloads() {
         None,
     )))];
     let decoded = decode_engine_core_outputs(&frames).unwrap();
-    let logprobs = decoded.outputs[0]
-        .new_logprobs
-        .clone()
-        .unwrap()
-        .into_direct()
-        .unwrap();
+    let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(
         logprobs,
         Logprobs {

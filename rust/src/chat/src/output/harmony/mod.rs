@@ -1,8 +1,8 @@
 //! Native Harmony output processing for `gpt_oss`.
 //!
-//! Unlike the default text-first pipeline, this processor consumes `DecodedTextEvent`
-//! token IDs directly and lets the official `openai-harmony` parser recover the
-//! structured assistant message shape at token granularity.
+//! Unlike the default text-first pipeline, this processor consumes
+//! `DecodedTextEvent` token IDs directly and lets the official `openai-harmony`
+//! parser recover the structured assistant message shape at token granularity.
 
 use std::sync::LazyLock;
 
@@ -28,8 +28,8 @@ use crate::request::ChatRequest;
 
 /// Request-scoped Harmony output processor used for `model_type == "gpt_oss"`.
 ///
-/// This processor keeps the existing northbound `ChatEvent` shape, but swaps the
-/// parsed-assistant backend from generic text/reasoning/tool parsers to the
+/// This processor keeps the existing northbound `ChatEvent` shape, but swaps
+/// the parsed-assistant backend from generic text/reasoning/tool parsers to the
 /// official Harmony token parser.
 #[derive(Debug)]
 pub struct HarmonyChatOutputProcessor {
@@ -80,10 +80,12 @@ impl HarmonyChatOutputProcessor {
     }
 }
 
-/// Validate that the generic parser selections are compatible with native Harmony output parsing.
+/// Validate that the generic parser selections are compatible with native
+/// Harmony output parsing.
 ///
-/// `gpt_oss` uses a model-specific token-level parser, so any generic reasoning/tool parser
-/// override is rejected instead of being silently ignored.
+/// `gpt_oss` uses a model-specific token-level parser, so any generic
+/// reasoning/tool parser override is rejected instead of being silently
+/// ignored.
 pub(crate) fn validate_harmony_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
@@ -132,9 +134,7 @@ impl HarmonyState {
 
         for &token_id in token_ids {
             let completed_before = self.parser.messages().len();
-            self.parser
-                .process(token_id)
-                .map_err(harmony_output_parsing_error)?;
+            self.parser.process(token_id).map_err(harmony_output_parsing_error)?;
             let completed_after = self.parser.messages().len();
 
             if let Some(delta) = self
@@ -186,7 +186,8 @@ impl HarmonyState {
         Ok(events)
     }
 
-    /// Flush Harmony parser state at EOS and emit any newly finalized assistant events.
+    /// Flush Harmony parser state at EOS and emit any newly finalized assistant
+    /// events.
     fn process_eos(&mut self) -> Result<Vec<AssistantEvent>> {
         let completed_before = self.parser.messages().len();
         let pending_key = HarmonyGroupKey {
@@ -194,14 +195,10 @@ impl HarmonyState {
             channel: self.parser.current_channel(),
             recipient: self.parser.current_recipient(),
         };
-        let pending_content = self
-            .parser
-            .current_content()
-            .map_err(harmony_output_parsing_error)?;
+        let pending_content =
+            self.parser.current_content().map_err(harmony_output_parsing_error)?;
 
-        self.parser
-            .process_eos()
-            .map_err(harmony_output_parsing_error)?;
+        self.parser.process_eos().map_err(harmony_output_parsing_error)?;
 
         let completed_after = self.parser.messages().len();
         let mut events = Vec::new();
@@ -212,10 +209,7 @@ impl HarmonyState {
 
         let final_message = &self.parser.messages()[completed_before];
         let final_text = harmony_message_text(final_message);
-        let tail = final_text
-            .strip_prefix(&pending_content)
-            .unwrap_or(final_text)
-            .to_string();
+        let tail = final_text.strip_prefix(&pending_content).unwrap_or(final_text).to_string();
         if !tail.is_empty() {
             self.emit_group(
                 HarmonyGroup {
@@ -241,7 +235,8 @@ impl HarmonyState {
         Ok(events)
     }
 
-    /// Flush one coalesced Harmony content group into internal assistant events.
+    /// Flush one coalesced Harmony content group into internal assistant
+    /// events.
     fn emit_group(&mut self, group: HarmonyGroup, events: &mut Vec<AssistantEvent>) {
         let channel = group.key.channel.as_deref();
         let recipient = group.key.recipient.as_deref();
@@ -282,9 +277,7 @@ impl HarmonyState {
             return;
         }
 
-        let recipient = recipient
-            .expect("tool groups always have recipient")
-            .to_string();
+        let recipient = recipient.expect("tool groups always have recipient").to_string();
         let opens_same_call = match self.open_tool_call.as_ref() {
             Some(open_call) => open_call.recipient == recipient,
             None => false,
@@ -323,7 +316,8 @@ impl HarmonyState {
     }
 }
 
-/// Convert decoded token updates into internal assistant events with Harmony parsing.
+/// Convert decoded token updates into internal assistant events with Harmony
+/// parsing.
 #[try_stream]
 async fn harmony_assistant_event_stream(
     decoded: DynDecodedTextEventStream,
@@ -392,11 +386,9 @@ fn harmony_encoding() -> Result<&'static HarmonyEncoding> {
             .context("failed to load harmony encoding for gpt-oss")
     });
 
-    ENCODING
-        .as_ref()
-        .map_err(|error| Error::HarmonyOutputParsing {
-            error: error.to_report_string().into(),
-        })
+    ENCODING.as_ref().map_err(|error| Error::HarmonyOutputParsing {
+        error: error.to_report_string().into(),
+    })
 }
 
 fn harmony_output_parsing_error(
@@ -415,7 +407,8 @@ fn harmony_message_text(message: &HarmonyMessage) -> &str {
     &text.text
 }
 
-/// Map one Harmony `(channel, recipient)` pair to a visible assistant block kind.
+/// Map one Harmony `(channel, recipient)` pair to a visible assistant block
+/// kind.
 fn text_block_kind(channel: Option<&str>, recipient: Option<&str>) -> Option<AssistantBlockKind> {
     match (channel, recipient) {
         (Some("final"), _) => Some(AssistantBlockKind::Text),

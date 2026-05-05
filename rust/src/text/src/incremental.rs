@@ -5,7 +5,8 @@ use crate::tokenizer::Tokenizer;
 
 /// Stateful incremental decoder that emits text chunks one token at a time.
 pub trait IncrementalDecoder: Send {
-    /// Push one generated token and return how many new string bytes were added.
+    /// Push one generated token and return how many new string bytes were
+    /// added.
     fn push_token(&mut self, token_id: u32) -> Result<usize>;
 
     /// Consume any text which is currently ready.
@@ -13,7 +14,8 @@ pub trait IncrementalDecoder: Send {
 
     /// Flush any remaining buffered text that has not yet been emitted.
     ///
-    /// Called after the final generated token to force out buffered/incomplete fragments.
+    /// Called after the final generated token to force out buffered/incomplete
+    /// fragments.
     fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)>;
 
     /// Return cumulative decoded text so far.
@@ -72,9 +74,8 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
             let max_try = SAFE_SUFFIX_MAX.min(prompt_len - 1);
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
-                let decoded = self
-                    .tokenizer
-                    .decode(&self.ids[start..], self.skip_special_tokens)?;
+                let decoded =
+                    self.tokenizer.decode(&self.ids[start..], self.skip_special_tokens)?;
                 if !decoded.contains('\u{FFFD}') {
                     self.prefix = decoded;
                     self.ids.drain(..start);
@@ -114,10 +115,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     }
 
     fn next_chunk(&mut self) -> Option<String> {
-        let cutoff = self
-            .cumulative_output
-            .len()
-            .saturating_sub(self.min_bytes_to_buffer);
+        let cutoff = self.cumulative_output.len().saturating_sub(self.min_bytes_to_buffer);
         (cutoff > self.output_index).then(|| {
             let chunk = self.cumulative_output[self.output_index..cutoff].to_string();
             self.output_index = cutoff;
@@ -294,8 +292,9 @@ mod tests {
     }
 
     /// Backend simulating non-monotonic decode where adding a token changes how
-    /// earlier tokens decode (context-dependent normalization), causing prefix_len
-    /// to land mid-UTF-8. Reproduces the class of bug from vllm-project/vllm#17448.
+    /// earlier tokens decode (context-dependent normalization), causing
+    /// prefix_len to land mid-UTF-8. Reproduces the class of bug from
+    /// vllm-project/vllm#17448.
     #[derive(Debug)]
     struct NonMonotonicBackend;
 

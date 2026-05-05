@@ -9,7 +9,8 @@ use vllm_text::{
 use super::types::{ChatLogProbs, ChatLogProbsContent, LogProbs, TopLogProb};
 use crate::error::{ApiError, server_error};
 
-/// Convert decoded token-position logprobs into the OpenAI completions `logprobs` shape.
+/// Convert decoded token-position logprobs into the OpenAI completions
+/// `logprobs` shape.
 pub fn decoded_logprobs_to_openai(
     logprobs: &DecodedLogprobs,
     initial_text_offset: u32,
@@ -45,10 +46,11 @@ pub fn decoded_logprobs_to_openai(
     })
 }
 
-/// Convert decoded prompt logprobs into the OpenAI completions `logprobs` shape.
+/// Convert decoded prompt logprobs into the OpenAI completions `logprobs`
+/// shape.
 ///
-/// The first prompt token is included with `None` logprob metadata, matching Python vLLM's
-/// echoed completions behavior.
+/// The first prompt token is included with `None` logprob metadata, matching
+/// Python vLLM's echoed completions behavior.
 pub fn decoded_prompt_logprobs_to_openai(
     prompt_logprobs: &DecodedPromptLogprobs,
     initial_text_offset: u32,
@@ -95,7 +97,8 @@ pub fn decoded_prompt_logprobs_to_openai(
     })
 }
 
-/// Convert decoded prompt logprobs into the vLLM-style prompt-logprobs response shape.
+/// Convert decoded prompt logprobs into the vLLM-style prompt-logprobs response
+/// shape.
 pub fn decoded_prompt_logprobs_to_maps(
     prompt_logprobs: &DecodedPromptLogprobs,
     return_tokens_as_token_ids: bool,
@@ -110,7 +113,8 @@ pub fn decoded_prompt_logprobs_to_maps(
         .collect()
 }
 
-/// Convert decoded token-position logprobs into the OpenAI chat `logprobs` shape.
+/// Convert decoded token-position logprobs into the OpenAI chat `logprobs`
+/// shape.
 pub fn decoded_logprobs_to_openai_chat(
     logprobs: &DecodedLogprobs,
     return_tokens_as_token_ids: bool,
@@ -126,7 +130,8 @@ pub fn decoded_logprobs_to_openai_chat(
     })
 }
 
-/// Count visible text positions using OpenAI completions' character-offset convention.
+/// Count visible text positions using OpenAI completions' character-offset
+/// convention.
 pub fn text_len(text: &str) -> u32 {
     u32::try_from(text.chars().count()).unwrap_or(u32::MAX)
 }
@@ -140,10 +145,12 @@ pub fn append_openai_logprobs(mut prefix: LogProbs, suffix: LogProbs) -> LogProb
     prefix
 }
 
-/// Build the non-stream completions `logprobs` payload from collected text output.
+/// Build the non-stream completions `logprobs` payload from collected text
+/// output.
 ///
-/// When `echoed_prompt` is true, the returned payload matches Python vLLM's echoed completions
-/// behavior by concatenating prompt and completion logprobs into one OpenAI `LogProbs` object.
+/// When `echoed_prompt` is true, the returned payload matches Python vLLM's
+/// echoed completions behavior by concatenating prompt and completion logprobs
+/// into one OpenAI `LogProbs` object.
 pub fn collected_logprobs_to_openai(
     collected: &CollectedTextOutput,
     echoed_prompt: bool,

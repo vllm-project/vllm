@@ -25,7 +25,8 @@ pub trait ChatBackend: Send + Sync {
     /// Return the renderer used for chat-prompt construction.
     fn chat_renderer(&self) -> DynChatRenderer;
 
-    /// Create a request-scoped output processor after request-level adjustments are applied.
+    /// Create a request-scoped output processor after request-level adjustments
+    /// are applied.
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
@@ -36,10 +37,12 @@ pub trait ChatBackend: Send + Sync {
 /// Shared trait-object form of [`ChatBackend`].
 pub type DynChatBackend = Arc<dyn ChatBackend>;
 
-/// Convenience trait for backends that can serve both raw text generation and chat templating.
+/// Convenience trait for backends that can serve both raw text generation and
+/// chat templating.
 ///
-/// This is mainly useful in tests and small examples, where one mock/backend often implements
-/// both sides and callers want `ChatLlm` to wire the shared object into `TextLlm` automatically.
+/// This is mainly useful in tests and small examples, where one mock/backend
+/// often implements both sides and callers want `ChatLlm` to wire the shared
+/// object into `TextLlm` automatically.
 pub trait ChatTextBackend: ChatBackend + TextBackend {}
 
 impl<T> ChatTextBackend for T where T: ChatBackend + TextBackend + ?Sized {}
@@ -54,11 +57,11 @@ pub struct LoadModelBackendsOptions {
     pub renderer: RendererSelection,
     /// How to serialize `message.content` when rendering the chat template.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    /// Optional server-default chat template override, provided either as an inline template or
-    /// as a path to a template file.
+    /// Optional server-default chat template override, provided either as an
+    /// inline template or as a path to a template file.
     pub chat_template: Option<String>,
-    /// Optional server-default keyword arguments merged into every chat-template render before
-    /// request-level `chat_template_kwargs`.
+    /// Optional server-default keyword arguments merged into every
+    /// chat-template render before request-level `chat_template_kwargs`.
     pub default_chat_template_kwargs: HashMap<String, Value>,
 }
 

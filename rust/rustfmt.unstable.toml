@@ -2,9 +2,13 @@
 # Apply manually with:
 #   cargo +nightly fmt -- --config-path rustfmt.unstable.toml
 
-unstable_features = true
 style_edition = "2024"
-comment_width = 100
+chain_width = 80
+use_field_init_shorthand = true
+
+# Unstable features go here.
+unstable_features = true
+
 format_code_in_doc_comments = true
 format_macro_matchers = true
 normalize_comments = true

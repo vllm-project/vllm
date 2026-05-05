@@ -51,9 +51,9 @@ fn decode_fastokens_byte_level(
 
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
 ///
-/// This tries to load with `fastokens` first for better performance, then falls back to
-/// HuggingFace's `tokenizers` if the former fails (e.g. due to unsupported tokenizer features or
-/// file formats).
+/// This tries to load with `fastokens` first for better performance, then falls
+/// back to HuggingFace's `tokenizers` if the former fails (e.g. due to
+/// unsupported tokenizer features or file formats).
 pub struct HuggingFaceTokenizer {
     backend: Backend,
     special_token_ids: Arc<[u32]>,
@@ -146,11 +146,11 @@ impl Tokenizer for HuggingFaceTokenizer {
                 })?;
                 Ok(encoding.get_ids().to_vec())
             }
-            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t
-                .encode_with_special_tokens(text, add_special_tokens)
-                .map_err(|error| {
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => {
+                t.encode_with_special_tokens(text, add_special_tokens).map_err(|error| {
                     Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
-                }),
+                })
+            }
         }
     }
 
@@ -224,9 +224,7 @@ mod tests {
         tokenizer.save(&path, false).expect("save tokenizer json");
 
         let wrapper = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
-        let special_id = wrapper
-            .token_to_id("<|im_end|>")
-            .expect("resolve added special token id");
+        let special_id = wrapper.token_to_id("<|im_end|>").expect("resolve added special token id");
         assert!(wrapper.is_special_id(special_id));
     }
 
@@ -245,9 +243,7 @@ mod tests {
             wrapper.backend,
             super::Backend::Fastokens(_) | super::Backend::FastokensByteLevel(_),
         ));
-        let special_id = wrapper
-            .token_to_id("<|im_end|>")
-            .expect("resolve added special token id");
+        let special_id = wrapper.token_to_id("<|im_end|>").expect("resolve added special token id");
         assert!(wrapper.is_special_id(special_id));
     }
 

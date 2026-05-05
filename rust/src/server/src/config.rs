@@ -13,17 +13,19 @@ pub enum HttpListenerMode {
     BindTcp { host: String, port: u16 },
     /// Bind a fresh Unix domain listener on the given filesystem path.
     BindUnix { path: String },
-    /// Adopt an already-open listening socket inherited from a supervisor process.
+    /// Adopt an already-open listening socket inherited from a supervisor
+    /// process.
     InheritedFd { fd: i32 },
 }
 
-/// Which coordinator implementation should be active when one is present for a frontend client.
+/// Which coordinator implementation should be active when one is present for a
+/// frontend client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorMode {
     /// Do not run a coordinator at all.
     None,
-    /// Run the Rust in-process coordinator for managed `serve` deployments, if there are mutliple
-    /// engines and the model is MoE.
+    /// Run the Rust in-process coordinator for managed `serve` deployments, if
+    /// there are mutliple engines and the model is MoE.
     MaybeInProc,
     /// Connect to an external coordinator owned by another process.
     External { address: String },
@@ -46,7 +48,8 @@ pub struct Config {
     pub reasoning_parser: ParserSelection,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
-    /// Server-default chat template override, as a file path or inline template.
+    /// Server-default chat template override, as a file path or inline
+    /// template.
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
@@ -54,16 +57,19 @@ pub struct Config {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
-    /// When `true`, suppress periodic stats logging (throughput, queue depth, cache usage).
+    /// When `true`, suppress periodic stats logging (throughput, queue depth,
+    /// cache usage).
     pub disable_log_stats: bool,
-    /// TCP port for the gRPC Generate service. When `None`, no gRPC server is started.
+    /// TCP port for the gRPC Generate service. When `None`, no gRPC server is
+    /// started.
     pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
 }
 
 impl Config {
-    /// Validate frontend configuration that can be checked before engine startup.
+    /// Validate frontend configuration that can be checked before engine
+    /// startup.
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
 

@@ -761,10 +761,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
         }))
     ));
 
-    match timeout(Duration::from_secs(2), stream.next())
-        .await
-        .unwrap()
-    {
+    match timeout(Duration::from_secs(2), stream.next()).await.unwrap() {
         Some(Err(vllm_chat::Error::Text(vllm_text::Error::Tokenizer(message)))) => {
             assert_eq!(message, "decode failed");
         }
@@ -1318,13 +1315,7 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
     let mut request = sample_tool_request("chat-final-only-tool");
     request.intermediate = false;
 
-    let message = chat
-        .chat(request)
-        .await
-        .unwrap()
-        .collect_message()
-        .await
-        .unwrap();
+    let message = chat.chat(request).await.unwrap().collect_message().await.unwrap();
 
     assert_eq!(
         message.finish_reason,
@@ -1480,13 +1471,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     ) {}
 
     request.request_id = "chat-logprobs-collect".to_string();
-    let collected = chat
-        .chat(request)
-        .await
-        .unwrap()
-        .collect_message()
-        .await
-        .unwrap();
+    let collected = chat.chat(request).await.unwrap().collect_message().await.unwrap();
     assert_eq!(collected.message.text(), "Hi");
     assert_eq!(
         collected.prompt_logprobs,
@@ -1565,9 +1550,7 @@ async fn chat_rejects_unknown_tool_parser_before_engine_request() {
         spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
             Box::pin(async move {
                 assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer))
-                        .await
-                        .is_err(),
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
                     "chat request should fail before any engine request is sent"
                 );
             })
@@ -1608,9 +1591,7 @@ async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
         spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
             Box::pin(async move {
                 assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer))
-                        .await
-                        .is_err(),
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
                     "chat request should fail before any engine request is sent"
                 );
             })
@@ -1651,9 +1632,7 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
         spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
             Box::pin(async move {
                 assert!(
-                    timeout(Duration::from_millis(100), recv_engine_message(dealer))
-                        .await
-                        .is_err(),
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err(),
                     "chat request should fail before any engine request is sent"
                 );
             })
@@ -1667,10 +1646,7 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
     )
     .await
     .with_tool_call_parser(ParserSelection::None);
-    let error = match chat
-        .chat(sample_tool_request("chat-tool-parser-disabled"))
-        .await
-    {
+    let error = match chat.chat(sample_tool_request("chat-tool-parser-disabled")).await {
         Ok(_) => panic!("tool requests should fail when tool parsing is disabled"),
         Err(error) => error,
     };

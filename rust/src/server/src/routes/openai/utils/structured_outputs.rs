@@ -22,8 +22,8 @@ pub struct JsonSchemaFormat {
 
 /// Supported `response_format` types for chat and completion requests.
 ///
-/// This is our own definition (rather than the `openai-protocol` crate's) so that we can support
-/// the vLLM-specific `structural_tag` variant.
+/// This is our own definition (rather than the `openai-protocol` crate's) so
+/// that we can support the vLLM-specific `structural_tag` variant.
 ///
 /// Original Python definitions:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/engine/protocol.py#L116-L157>
@@ -35,18 +35,21 @@ pub enum ResponseFormat {
     JsonSchema {
         json_schema: JsonSchemaFormat,
     },
-    /// vLLM-specific structural tag format. The entire object (including the `type` field) is
-    /// JSON-serialized and passed as `StructuredOutputsParams.structural_tag`.
+    /// vLLM-specific structural tag format. The entire object (including the
+    /// `type` field) is JSON-serialized and passed as
+    /// `StructuredOutputsParams.structural_tag`.
     ///
-    /// We capture the payload as a catch-all map so both the legacy (`structures`/`triggers`)
-    /// and current (`format`) shapes are preserved without needing typed structs.
+    /// We capture the payload as a catch-all map so both the legacy
+    /// (`structures`/`triggers`) and current (`format`) shapes are
+    /// preserved without needing typed structs.
     StructuralTag {
         #[serde(flatten)]
         extra: serde_json::Map<String, Value>,
     },
 }
 
-/// Convert an explicit `structured_outputs` JSON blob into [`StructuredOutputsParams`].
+/// Convert an explicit `structured_outputs` JSON blob into
+/// [`StructuredOutputsParams`].
 fn deserialize_structured_outputs(
     raw: &serde_json::Value,
 ) -> Result<StructuredOutputsParams, ApiError> {
@@ -58,11 +61,11 @@ fn deserialize_structured_outputs(
     })
 }
 
-/// Convert a typed [`ResponseFormat`] and/or raw `structured_outputs` blob into engine-core
-/// [`StructuredOutputsParams`].
+/// Convert a typed [`ResponseFormat`] and/or raw `structured_outputs` blob into
+/// engine-core [`StructuredOutputsParams`].
 ///
-/// Mirrors the Python vLLM conversion in `ChatCompletionRequest.to_sampling_params()`:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/chat_completion/protocol.py#L457-L487>
+/// Mirrors the Python vLLM conversion in
+/// `ChatCompletionRequest.to_sampling_params()`: <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/chat_completion/protocol.py#L457-L487>
 pub fn convert_from_response_format(
     response_format: Option<&ResponseFormat>,
     structured_outputs: &Option<serde_json::Value>,
@@ -101,10 +104,11 @@ pub fn convert_from_response_format(
     }
 }
 
-/// Convert raw `response_format` and/or `structured_outputs` JSON blobs into engine-core
-/// [`StructuredOutputsParams`].
+/// Convert raw `response_format` and/or `structured_outputs` JSON blobs into
+/// engine-core [`StructuredOutputsParams`].
 ///
-/// Used by the completions endpoint which keeps both fields as opaque `serde_json::Value`.
+/// Used by the completions endpoint which keeps both fields as opaque
+/// `serde_json::Value`.
 pub fn convert_from_response_format_value(
     response_format: &Option<serde_json::Value>,
     structured_outputs: &Option<serde_json::Value>,

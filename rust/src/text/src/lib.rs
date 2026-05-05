@@ -39,23 +39,26 @@ trait_set! {
 
 /// Raw text facade above [`Llm`].
 ///
-/// This layer stays below chat semantics: prompt text or prompt token IDs flow in, decoded text
-/// deltas and terminal metadata flow out.
+/// This layer stays below chat semantics: prompt text or prompt token IDs flow
+/// in, decoded text deltas and terminal metadata flow out.
 pub struct TextLlm {
     /// Generate-only client owned by this text facade.
     llm: Llm,
-    /// Tokenizer/model metadata backend responsible for prompt encode/decode and sampling hints.
+    /// Tokenizer/model metadata backend responsible for prompt encode/decode
+    /// and sampling hints.
     backend: DynTextBackend,
-    /// Context window size derived by the backend or from engine startup handshake, with optional
-    /// override from config.
+    /// Context window size derived by the backend or from engine startup
+    /// handshake, with optional override from config.
     max_model_len: Option<u32>,
 }
 
 impl TextLlm {
-    /// Create a new text-generation facade from a shared LLM client plus a text backend.
+    /// Create a new text-generation facade from a shared LLM client plus a text
+    /// backend.
     pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
-        // Prefer the engine-reported max_model_len because it reflects the post-profiling,
-        // auto-fitted KV cache limit rather than static frontend metadata.
+        // Prefer the engine-reported max_model_len because it reflects the
+        // post-profiling, auto-fitted KV cache limit rather than static
+        // frontend metadata.
         let max_model_len = llm.engine_core_client().max_model_len();
 
         Self {
@@ -67,8 +70,8 @@ impl TextLlm {
 
     /// Override the maximum model context length explicitly.
     ///
-    /// This takes priority over both the engine-reported default and any tokenizer/model metadata
-    /// exposed by the backend.
+    /// This takes priority over both the engine-reported default and any
+    /// tokenizer/model metadata exposed by the backend.
     pub fn with_max_model_len(mut self, max_model_len: u32) -> Self {
         self.max_model_len = Some(max_model_len);
         self
@@ -79,7 +82,8 @@ impl TextLlm {
         self.backend.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin calls.
+    /// Expose the underlying engine-core client for low-level utility/admin
+    /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
         self.llm.engine_core_client()
     }
@@ -89,13 +93,15 @@ impl TextLlm {
         self.backend.tokenizer()
     }
 
-    /// Tokenize if needed, lower to a generate request, and return the raw token stream.
+    /// Tokenize if needed, lower to a generate request, and return the raw
+    /// token stream.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
         let (_, raw_stream) = self.generate_inner(request).await?;
         Ok(raw_stream)
     }
 
-    /// Tokenize if needed, lower to a generate request, and stream incrementally decoded text.
+    /// Tokenize if needed, lower to a generate request, and stream
+    /// incrementally decoded text.
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
         let (text_request, raw_stream) = self.generate_inner(request).await?;
         let tokenizer = self.backend.tokenizer();

@@ -24,8 +24,8 @@ struct TrackedRequest {
 
 /// The latest real scheduler-side load snapshot observed from one engine.
 ///
-/// These counters come from `scheduler_stats` on the normal engine output path and are the
-/// preferred routing signal once available.
+/// These counters come from `scheduler_stats` on the normal engine output path
+/// and are the preferred routing signal once available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EngineLoadSnapshot {
     /// Requests still counted on the scheduler's waiting side.
@@ -38,9 +38,9 @@ struct EngineLoadSnapshot {
 struct EngineRoutingState {
     /// Requests admitted by this frontend that have not finished yet.
     ///
-    /// This is used both as the bootstrap fallback before real scheduler stats exist and as a
-    /// lower bound afterwards so asynchronous scheduler snapshots cannot erase frontend admission
-    /// history.
+    /// This is used both as the bootstrap fallback before real scheduler stats
+    /// exist and as a lower bound afterwards so asynchronous scheduler
+    /// snapshots cannot erase frontend admission history.
     inflight: usize,
     /// The latest real scheduler snapshot received from this engine, if any.
     last_scheduler_stats: Option<EngineLoadSnapshot>,
@@ -49,9 +49,10 @@ struct EngineRoutingState {
 impl EngineRoutingState {
     /// Compute the routing score used to pick the least-loaded engine.
     ///
-    /// Scheduler stats can raise the load estimate above the frontend-local view, but they should
-    /// not lower it below requests this frontend has already admitted. Waiting requests still get
-    /// the same extra penalty as the original `waiting * 4 + running` score.
+    /// Scheduler stats can raise the load estimate above the frontend-local
+    /// view, but they should not lower it below requests this frontend has
+    /// already admitted. Waiting requests still get the same extra penalty
+    /// as the original `waiting * 4 + running` score.
     fn routing_score(&self) -> usize {
         const WAITING_WEIGHT: usize = 4;
 
@@ -69,10 +70,12 @@ impl EngineRoutingState {
     }
 }
 
-/// Internal registry for tracking active requests and their output stream senders.
+/// Internal registry for tracking active requests and their output stream
+/// senders.
 ///
-/// This is used to route incoming outputs to the correct request stream, and to ensure proper
-/// cleanup of senders when requests finish or the client shuts down.
+/// This is used to route incoming outputs to the correct request stream, and to
+/// ensure proper cleanup of senders when requests finish or the client shuts
+/// down.
 #[derive(Debug)]
 pub struct RequestRegistry {
     closed: bool,
@@ -92,12 +95,12 @@ impl RequestRegistry {
         }
     }
 
-    /// Register a newly added request. Create the per-request output channel bound to its
-    /// `request_id` and return the selected engine id.
+    /// Register a newly added request. Create the per-request output channel
+    /// bound to its `request_id` and return the selected engine id.
     ///
-    /// When `data_parallel_rank` is provided, the request is routed directly to the engine at
-    /// that rank index, bypassing load balancing. Otherwise the engine with the fewest in-flight
-    /// requests is chosen.
+    /// When `data_parallel_rank` is provided, the request is routed directly to
+    /// the engine at that rank index, bypassing load balancing. Otherwise
+    /// the engine with the fewest in-flight requests is chosen.
     pub fn register(
         &mut self,
         request_id: String,
@@ -148,8 +151,8 @@ impl RequestRegistry {
             .expect("request registry must contain at least one engine"))
     }
 
-    /// Filter the given request IDs to the subset that are still tracked as active and can be
-    /// aborted, grouped by engine.
+    /// Filter the given request IDs to the subset that are still tracked as
+    /// active and can be aborted, grouped by engine.
     pub fn abortable_request_ids(&self, request_ids: &[String]) -> BTreeMap<EngineId, Vec<String>> {
         let mut by_engine = BTreeMap::new();
         for request_id in request_ids {
@@ -164,12 +167,11 @@ impl RequestRegistry {
         by_engine
     }
 
-    /// Obtain the stream sender for one output. If it indicates the request is finished, it will be
-    /// removed from the registry.
+    /// Obtain the stream sender for one output. If it indicates the request is
+    /// finished, it will be removed from the registry.
     pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputSender> {
         if output.finished() {
-            self.remove(output.request_id.as_str())
-                .map(|tracked| tracked.0)
+            self.remove(output.request_id.as_str()).map(|tracked| tracked.0)
         } else {
             self.requests
                 .get(output.request_id.as_str())
@@ -177,7 +179,8 @@ impl RequestRegistry {
         }
     }
 
-    /// Remove a batch of requests that have finished or aborted, returning their stream senders.
+    /// Remove a batch of requests that have finished or aborted, returning
+    /// their stream senders.
     pub fn finish_many<'a>(
         &mut self,
         request_ids: impl IntoIterator<Item = &'a String>,
@@ -188,8 +191,9 @@ impl RequestRegistry {
             .collect()
     }
 
-    /// Apply one scheduler stats update for the given engine to the local routing state.
-    /// Returns `false` if the engine is unknown to the client.
+    /// Apply one scheduler stats update for the given engine to the local
+    /// routing state. Returns `false` if the engine is unknown to the
+    /// client.
     pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.apply_scheduler_counts(
             engine_index,
@@ -213,7 +217,8 @@ impl RequestRegistry {
             .collect()
     }
 
-    /// Remove one request from the local registry. Returns the tracked entry if it exists.
+    /// Remove one request from the local registry. Returns the tracked entry if
+    /// it exists.
     #[must_use]
     pub fn remove(&mut self, request_id: &str) -> Option<(OutputSender, EngineId)> {
         let tracked = self.requests.remove(request_id)?;
@@ -256,7 +261,8 @@ impl RequestRegistry {
     }
 }
 
-/// Internal registry for tracking active utility calls and their waiting receivers.
+/// Internal registry for tracking active utility calls and their waiting
+/// receivers.
 #[derive(Debug)]
 pub struct UtilityRegistry {
     closed: bool,
@@ -275,7 +281,8 @@ impl Default for UtilityRegistry {
 }
 
 impl UtilityRegistry {
-    /// Allocate the next utility `call_id` and register a newly added utility call.
+    /// Allocate the next utility `call_id` and register a newly added utility
+    /// call.
     pub fn allocate_and_register(&mut self) -> (i64, UtilityReceiver) {
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -295,9 +302,7 @@ impl UtilityRegistry {
         }
 
         self.closed = true;
-        std::mem::take(&mut self.utility_calls)
-            .into_values()
-            .collect()
+        std::mem::take(&mut self.utility_calls).into_values().collect()
     }
 
     #[cfg(test)]
@@ -584,9 +589,7 @@ mod tests {
         let (chosen, _) = registry.register("req-ok".to_string(), Some(0)).unwrap();
         assert_eq!(chosen, engine_0);
 
-        let error = registry
-            .register("req-bad".to_string(), Some(1))
-            .unwrap_err();
+        let error = registry.register("req-bad".to_string(), Some(1)).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {

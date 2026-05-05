@@ -8,7 +8,8 @@ use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 /// Small OpenAI-style error family used by the minimal HTTP layer.
 #[derive(Debug, Construct, Macro)]
 pub enum ApiError {
-    /// The request is syntactically valid OpenAI JSON but asks for unsupported behavior.
+    /// The request is syntactically valid OpenAI JSON but asks for unsupported
+    /// behavior.
     InvalidRequest {
         message: String,
         param: Option<&'static str>,
@@ -32,7 +33,8 @@ impl ApiError {
         }
     }
 
-    /// Convert this error into the standard OpenAI-compatible JSON error payload.
+    /// Convert this error into the standard OpenAI-compatible JSON error
+    /// payload.
     pub fn to_error_response(&self) -> ErrorResponse {
         let error = match self {
             Self::InvalidRequest { message, param } => ErrorDetail {

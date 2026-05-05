@@ -26,24 +26,27 @@ pub struct CollectedGenerateOutput {
     pub kv_transfer_params: Option<serde_json::Value>,
 }
 
-/// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for one request.
+/// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
+/// one request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratePromptInfo {
     /// Original prompt token IDs for this request.
     pub prompt_token_ids: Arc<[u32]>,
-    /// Prompt logprobs returned by engine-core for scored prompt positions, when requested.
+    /// Prompt logprobs returned by engine-core for scored prompt positions,
+    /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
 }
 
 /// The reason a request finished.
 ///
-/// This is a higher-level abstraction over engine-core's finish and stop reasons.
+/// This is a higher-level abstraction over engine-core's finish and stop
+/// reasons.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, EnumAsInner)]
 pub enum FinishReason {
     /// Generation stopped for a stop string, stop token, or EOS.
     ///
-    /// The inner stop reason is present for explicit stop strings or stop tokens, and absent for
-    /// EOS-driven stops.
+    /// The inner stop reason is present for explicit stop strings or stop
+    /// tokens, and absent for EOS-driven stops.
     Stop(Option<StopReason>),
     /// `max_tokens` or `max_model_len` was reached.
     Length,
@@ -56,12 +59,14 @@ pub enum FinishReason {
 }
 
 impl FinishReason {
-    /// Construct a stop finish reason caused by EOS rather than an explicit stop string/token.
+    /// Construct a stop finish reason caused by EOS rather than an explicit
+    /// stop string/token.
     pub fn stop_eos() -> Self {
         Self::Stop(None)
     }
 
-    /// Returns a human-readable string for this finish reason, used for metrics and reporting.
+    /// Returns a human-readable string for this finish reason, used for metrics
+    /// and reporting.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Stop(_) => "stop",
@@ -72,7 +77,8 @@ impl FinishReason {
         }
     }
 
-    /// If this is a stop finish reason, returns the inner stop reason if it exists.
+    /// If this is a stop finish reason, returns the inner stop reason if it
+    /// exists.
     pub fn as_stop_reason(&self) -> Option<&StopReason> {
         match self {
             Self::Stop(stop_reason) => stop_reason.as_ref(),
@@ -80,7 +86,8 @@ impl FinishReason {
         }
     }
 
-    /// If this is a stop finish reason, returns the inner stop reason if it exists.
+    /// If this is a stop finish reason, returns the inner stop reason if it
+    /// exists.
     pub fn into_stop_reason(self) -> Option<StopReason> {
         match self {
             Self::Stop(stop_reason) => stop_reason,
@@ -110,7 +117,8 @@ fn finish_reason_from_engine(
 pub struct GenerateOutput {
     /// Unique ID of the request that produced this output.
     pub request_id: String,
-    /// One-time prompt metadata emitted only on the first output for this request.
+    /// One-time prompt metadata emitted only on the first output for this
+    /// request.
     pub prompt_info: Option<GeneratePromptInfo>,
     /// Newly produced token IDs for this step.
     pub token_ids: Vec<u32>,
@@ -123,20 +131,22 @@ pub struct GenerateOutput {
 }
 
 impl GenerateOutput {
-    /// Returns the prompt token IDs when this output carries [`GeneratePromptInfo`].
+    /// Returns the prompt token IDs when this output carries
+    /// [`GeneratePromptInfo`].
     ///
-    /// Only the first output for a request can return `Some`; all later outputs return `None`.
+    /// Only the first output for a request can return `Some`; all later outputs
+    /// return `None`.
     pub fn prompt_token_ids(&self) -> Option<&Arc<[u32]>> {
         self.prompt_info.as_ref().map(|info| &info.prompt_token_ids)
     }
 
-    /// Returns the prompt logprobs when this output carries [`GeneratePromptInfo`].
+    /// Returns the prompt logprobs when this output carries
+    /// [`GeneratePromptInfo`].
     ///
-    /// Only the first output for a request can return `Some`; all later outputs return `None`.
+    /// Only the first output for a request can return `Some`; all later outputs
+    /// return `None`.
     pub fn prompt_logprobs(&self) -> Option<&Logprobs> {
-        self.prompt_info
-            .as_ref()
-            .and_then(|info| info.prompt_logprobs.as_ref())
+        self.prompt_info.as_ref().and_then(|info| info.prompt_logprobs.as_ref())
     }
 
     /// Returns whether this output is terminal for the request.
@@ -169,8 +179,10 @@ impl GenerateOutput {
 
 /// Stream of per-request generate outputs for one request.
 ///
-/// - A normal termination of the stream represents a clean completion of the request.
-/// - For errors, unexpected closes, or explicit aborts, the stream terminates with an error.
+/// - A normal termination of the stream represents a clean completion of the
+///   request.
+/// - For errors, unexpected closes, or explicit aborts, the stream terminates
+///   with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<GeneratePromptInfo>,
     raw_stream: EngineCoreOutputStream,
@@ -178,7 +190,8 @@ pub struct GenerateOutputStream {
 }
 
 impl GenerateOutputStream {
-    /// Create a new generate output stream by adapting one raw engine-core output stream.
+    /// Create a new generate output stream by adapting one raw engine-core
+    /// output stream.
     pub(crate) fn new(
         prompt_token_ids: Arc<[u32]>,
         raw_stream: EngineCoreOutputStream,
@@ -224,17 +237,15 @@ impl Stream for GenerateOutputStream {
         if let Some(info) = &mut self.pending_prompt_info
             && info.prompt_logprobs.is_none()
         {
-            info.prompt_logprobs = raw
-                .new_prompt_logprobs_tensors
-                .map(|value| value.into_direct().unwrap());
+            info.prompt_logprobs =
+                raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
 
         let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
         if let Some(finish_reason) = finish_reason.as_ref() {
-            self.request_metrics
-                .record_finished(received_at, finish_reason.clone());
+            self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
 
         let output = GenerateOutput {
@@ -281,7 +292,8 @@ impl Drop for GenerateOutputStream {
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
 #[easy_ext::ext(GenerateOutputStreamExt)]
 impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
-    /// Collect the raw generate stream to completion and return the final token output.
+    /// Collect the raw generate stream to completion and return the final token
+    /// output.
     pub fn collect_output(self) -> impl Future<Output = Result<CollectedGenerateOutput>> + Send {
         async move {
             let stream = self;

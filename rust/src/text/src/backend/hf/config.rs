@@ -14,9 +14,10 @@ pub struct HfTokenizerConfig {
     #[serde(flatten)]
     pub special_tokens: HfSpecialTokens,
     pub chat_template: Option<String>,
-    /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some tiktoken-based models
-    /// (e.g. DeepSeek, Kimi K2) set this to a value containing "Tiktoken" which can be used as a
-    /// hint for backend selection.
+    /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some
+    /// tiktoken-based models (e.g. DeepSeek, Kimi K2) set this to a value
+    /// containing "Tiktoken" which can be used as a hint for backend
+    /// selection.
     pub tokenizer_class: Option<String>,
 }
 
@@ -79,11 +80,13 @@ impl HfSpecialTokens {
 
 /// Minimal subset of `config.json` (the model's main HF config).
 ///
-/// This intentionally supports only the two layouts we currently care about in the Rust frontend:
+/// This intentionally supports only the two layouts we currently care about in
+/// the Rust frontend:
 /// - pure text models that keep text metadata at the top level
 /// - composite models that expose a single nested `text_config`
 ///
-/// We do not support additional entry points such as `decoder`, `generator`, or `text_encoder`.
+/// We do not support additional entry points such as `decoder`, `generator`, or
+/// `text_encoder`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -166,14 +169,14 @@ impl ModelConfig {
         self.text_config.as_deref().unwrap_or(self)
     }
 
-    /// Return the effective Hugging Face `model_type` used by the Rust frontend.
+    /// Return the effective Hugging Face `model_type` used by the Rust
+    /// frontend.
     ///
-    /// This follows the same simplified text-config selection as the rest of this type: the
-    /// top-level config wins, otherwise a single nested `text_config` may provide the value.
+    /// This follows the same simplified text-config selection as the rest of
+    /// this type: the top-level config wins, otherwise a single nested
+    /// `text_config` may provide the value.
     pub fn model_type(&self) -> Option<&str> {
-        self.model_type
-            .as_deref()
-            .or_else(|| self.text_config.as_deref()?.model_type())
+        self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
     /// Reject partially nested `text_config` payloads that are unlikely to be
@@ -194,7 +197,8 @@ impl ModelConfig {
         Ok(())
     }
 
-    /// Match Python's current expert-count priority on the selected text config.
+    /// Match Python's current expert-count priority on the selected text
+    /// config.
     ///
     /// The only intentional simplification here is how we pick the text config:
     /// Rust only looks at the top level or `text_config`, not the broader
@@ -364,10 +368,6 @@ mod tests {
             serde_json::from_str(r#"{"text_config":{"max_position_embeddings":4096}}"#).unwrap();
 
         let error = config.validate_text_config_selection().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not have `num_attention_heads`"),
-        );
+        assert!(error.to_string().contains("does not have `num_attention_heads`"),);
     }
 }

@@ -11,14 +11,15 @@ use crate::tokenizer::Tokenizer;
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
 pub struct PreparedTextRequest {
-    /// The original high-level request, preserved for response-side metadata and decoding options.
+    /// The original high-level request, preserved for response-side metadata
+    /// and decoding options.
     pub text_request: TextRequest,
     /// The southbound request ready to be sent to `vllm-llm`.
     pub generate_request: GenerateRequest,
 }
 
-/// Convert a high-level [`TextRequest`] into one lower-level [`GenerateRequest`] ready for the
-/// `llm` crate.
+/// Convert a high-level [`TextRequest`] into one lower-level
+/// [`GenerateRequest`] ready for the `llm` crate.
 pub fn lower_text_request(
     request: TextRequest,
     prompt_token_ids: Vec<u32>,
@@ -51,8 +52,8 @@ pub fn lower_text_request(
     })
 }
 
-/// Convert [`SamplingParams`] into [`EngineCoreSamplingParams`], enriching omitted user values with
-/// tokenizer/model-derived hints when available.
+/// Convert [`SamplingParams`] into [`EngineCoreSamplingParams`], enriching
+/// omitted user values with tokenizer/model-derived hints when available.
 pub fn lower_sampling_params(
     sampling_params: SamplingParams,
     SamplingHints {
@@ -93,17 +94,16 @@ pub fn lower_sampling_params(
         vllm_xargs,
     } = sampling_params;
 
-    // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat path:
-    // https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
-    // If neither the caller nor the model provides a value, fall back to 1.0 — the default
-    // used by the Python vLLM OpenAI-compatible API (via `_DEFAULT_SAMPLING_PARAMS`).
+    // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
+    // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
+    // If neither the caller nor the model provides a value, fall back to 1.0 — the
+    // default used by the Python vLLM OpenAI-compatible API (via
+    // `_DEFAULT_SAMPLING_PARAMS`).
     let temperature = temperature.or(default_temperature).unwrap_or(1.0);
     let top_p = top_p.or(default_top_p).unwrap_or(1.0);
     let top_k = top_k.or(default_top_k).unwrap_or(0);
     let min_p = min_p.or(default_min_p).unwrap_or(0.0);
-    let repetition_penalty = repetition_penalty
-        .or(default_repetition_penalty)
-        .unwrap_or(1.0);
+    let repetition_penalty = repetition_penalty.or(default_repetition_penalty).unwrap_or(1.0);
     let max_tokens = resolve_max_tokens(max_tokens, default_max_tokens, max_model_len, prompt_len)?;
     let min_tokens = min_tokens.unwrap_or(0);
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
@@ -146,12 +146,13 @@ pub fn lower_sampling_params(
     })
 }
 
-/// Convert bad-word strings into token-ID sequences, following the Python vLLM logic in
-/// `SamplingParams.update_from_tokenizer()`.
+/// Convert bad-word strings into token-ID sequences, following the Python vLLM
+/// logic in `SamplingParams.update_from_tokenizer()`.
 ///
-/// Each word is encoded both with and without a leading space so that the ban applies regardless of
-/// whether the word appears at the beginning or in the middle of generated text (this accounts for
-/// tokenizers that use an `add_prefix_space` convention).
+/// Each word is encoded both with and without a leading space so that the ban
+/// applies regardless of whether the word appears at the beginning or in the
+/// middle of generated text (this accounts for tokenizers that use an
+/// `add_prefix_space` convention).
 ///
 /// Reference: <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/sampling_params.py#L555-L594>
 fn tokenize_bad_words(
@@ -184,12 +185,13 @@ fn tokenize_bad_words(
     Ok((!all_token_ids.is_empty()).then_some(all_token_ids))
 }
 
-/// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's `get_max_tokens()`
-/// in `vllm/entrypoints/utils.py`.
+/// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's
+/// `get_max_tokens()` in `vllm/entrypoints/utils.py`.
 ///
-/// Takes the minimum of all available limits (user-specified, generation-config default, and
-/// `max_model_len - prompt_len`). When nothing is known, falls back to `u32::MAX` so the
-/// engine-core can apply its own context-window limit.
+/// Takes the minimum of all available limits (user-specified, generation-config
+/// default, and `max_model_len - prompt_len`). When nothing is known, falls
+/// back to `u32::MAX` so the engine-core can apply its own context-window
+/// limit.
 pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
     default_max_tokens: Option<u32>,
@@ -219,7 +221,8 @@ fn merge_unique_token_ids(
     stop_token_ids: &mut Vec<u32>,
     extra_token_ids: impl Iterator<Item = u32>,
 ) {
-    // Keep user-provided ordering stable while still folding in backend-derived EOS aliases.
+    // Keep user-provided ordering stable while still folding in backend-derived EOS
+    // aliases.
     for token_id in extra_token_ids {
         if !stop_token_ids.contains(&token_id) {
             stop_token_ids.push(token_id);
@@ -236,8 +239,8 @@ mod tests {
     use crate::backend::{SamplingHints, TextBackend as _};
     use crate::request::{Prompt, TextRequest};
 
-    /// Stub tokenizer that returns empty token IDs — sufficient for tests that don't exercise
-    /// bad-words tokenization.
+    /// Stub tokenizer that returns empty token IDs — sufficient for tests that
+    /// don't exercise bad-words tokenization.
     struct StubTokenizer;
 
     impl Tokenizer for StubTokenizer {

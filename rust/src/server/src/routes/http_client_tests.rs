@@ -1,5 +1,6 @@
-//! Integration tests that exercise the OpenAI-compatible HTTP API through a real TCP connection
-//! using the `async-openai` client library, backed by a mock engine.
+//! Integration tests that exercise the OpenAI-compatible HTTP API through a
+//! real TCP connection using the `async-openai` client library, backed by a
+//! mock engine.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -219,7 +220,8 @@ impl ChatRenderer for FakeChatBackend {
 }
 
 /// Spin up an HTTP server on a random port backed by a mock engine.
-/// Returns the `async-openai` client, the HTTP server task, and the mock engine task.
+/// Returns the `async-openai` client, the HTTP server task, and the mock engine
+/// task.
 async fn http_test_server(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
@@ -264,9 +266,7 @@ async fn http_test_server(
     let state = Arc::new(AppState::new("test-model", chat));
     let app = build_router(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind http listener");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind http listener");
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
@@ -317,11 +317,7 @@ async fn non_streaming_chat_via_http_client() {
         .build()
         .expect("build request");
 
-    let response = client
-        .chat()
-        .create(request)
-        .await
-        .expect("chat completion");
+    let response = client.chat().create(request).await.expect("chat completion");
 
     assert_eq!(response.model, "test-model");
     assert_eq!(response.choices.len(), 1);
@@ -355,11 +351,7 @@ async fn streaming_chat_via_http_client() {
         .build()
         .expect("build request");
 
-    let mut stream = client
-        .chat()
-        .create_stream(request)
-        .await
-        .expect("streaming chat completion");
+    let mut stream = client.chat().create_stream(request).await.expect("streaming chat completion");
 
     let mut full_text = String::new();
     let mut saw_role = false;

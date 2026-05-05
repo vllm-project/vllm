@@ -37,17 +37,13 @@ impl DelimitedReasoningParser {
         default_in_reasoning: bool,
     ) -> Result<Self> {
         let start_token_id =
-            tokenizer
-                .token_to_id(start_token)
-                .ok_or_else(|| ReasoningError::MissingToken {
-                    token: start_token.to_string(),
-                })?;
+            tokenizer.token_to_id(start_token).ok_or_else(|| ReasoningError::MissingToken {
+                token: start_token.to_string(),
+            })?;
         let end_token_id =
-            tokenizer
-                .token_to_id(end_token)
-                .ok_or_else(|| ReasoningError::MissingToken {
-                    token: end_token.to_string(),
-                })?;
+            tokenizer.token_to_id(end_token).ok_or_else(|| ReasoningError::MissingToken {
+                token: end_token.to_string(),
+            })?;
 
         Ok(Self {
             tokenizer,
@@ -117,7 +113,8 @@ impl DelimitedReasoningParser {
         delta
     }
 
-    /// Return the longest trailing suffix that could still complete a delimiter.
+    /// Return the longest trailing suffix that could still complete a
+    /// delimiter.
     fn partial_suffix_len(&self, text: &str) -> usize {
         let mut best = 0;
         for idx in text.char_indices().map(|(idx, _)| idx).skip(1) {

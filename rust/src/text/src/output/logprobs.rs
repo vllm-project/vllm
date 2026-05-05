@@ -39,19 +39,21 @@ pub struct DecodedPromptLogprobs {
     pub first_token_id: u32,
     /// Best-effort decoded string for the first prompt token.
     ///
-    /// The first prompt token has no left context to score against, so it is stored separately
-    /// instead of appearing in `scored_positions`.
+    /// The first prompt token has no left context to score against, so it is
+    /// stored separately instead of appearing in `scored_positions`.
     pub first_token: String,
     /// Scored prompt positions after the first prompt token.
     ///
-    /// `scored_positions[i]` corresponds to the prompt token at position `i + 1`.
+    /// `scored_positions[i]` corresponds to the prompt token at position `i +
+    /// 1`.
     pub scored_positions: Vec<DecodedPositionLogprobs>,
 }
 
-/// Decode generated-token logprobs from the raw `llm` token-ID shape into the text-layer
-/// decoded-token representation.
+/// Decode generated-token logprobs from the raw `llm` token-ID shape into the
+/// text-layer decoded-token representation.
 ///
-/// Each returned position corresponds to one generated token position from the same `llm` update.
+/// Each returned position corresponds to one generated token position from the
+/// same `llm` update.
 pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: &T,
     logprobs: &Logprobs,
@@ -66,11 +68,12 @@ pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
     })
 }
 
-/// Decode prompt logprobs from the raw `llm` token-ID shape into the text-layer decoded-token
-/// representation.
+/// Decode prompt logprobs from the raw `llm` token-ID shape into the text-layer
+/// decoded-token representation.
 ///
-/// The returned payload stores the first prompt token separately and decodes the remaining scored
-/// prompt positions into `scored_positions`, matching vLLM's prompt-logprobs semantics.
+/// The returned payload stores the first prompt token separately and decodes
+/// the remaining scored prompt positions into `scored_positions`, matching
+/// vLLM's prompt-logprobs semantics.
 pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: &T,
     prompt_token_ids: &[u32],
@@ -95,9 +98,11 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
     })
 }
 
-/// Decode one token position's raw candidate set into decoded token strings plus logprob metadata.
+/// Decode one token position's raw candidate set into decoded token strings
+/// plus logprob metadata.
 ///
-/// This decodes every candidate token ID independently through the active text backend.
+/// This decodes every candidate token ID independently through the active text
+/// backend.
 fn decode_position_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: &T,
     position: &PositionLogprobs,
@@ -108,14 +113,14 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
             .entries
             .iter()
             .map(|entry| {
-                tokenizer
-                    .decode(&[entry.token_id], skip_special_tokens)
-                    .map(|token| DecodedTokenLogprob {
+                tokenizer.decode(&[entry.token_id], skip_special_tokens).map(|token| {
+                    DecodedTokenLogprob {
                         token_id: entry.token_id,
                         token,
                         logprob: entry.logprob,
                         rank: entry.rank,
-                    })
+                    }
+                })
             })
             .try_collect()?,
     })
@@ -137,10 +142,7 @@ mod tests {
 
         fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> crate::Result<String> {
             Ok(String::from_utf8_lossy(
-                &token_ids
-                    .iter()
-                    .map(|token_id| *token_id as u8)
-                    .collect::<Vec<_>>(),
+                &token_ids.iter().map(|token_id| *token_id as u8).collect::<Vec<_>>(),
             )
             .into_owned())
         }

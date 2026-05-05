@@ -46,8 +46,8 @@ impl Tokenizer for TekkenTokenizer {
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        // tekken-rs exposes `get_control_token` for special tokens. Try that first, then
-        // fall back to encoding.
+        // tekken-rs exposes `get_control_token` for special tokens. Try that first,
+        // then fall back to encoding.
         self.inner.get_control_token(token).ok().or_else(|| {
             let ids = self.inner.encode(token, false, false).ok()?;
             if ids.len() == 1 { Some(ids[0]) } else { None }

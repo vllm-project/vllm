@@ -15,8 +15,8 @@ use crate::transport::EngineId;
 pub(crate) struct CoordinatorStateSnapshot {
     /// The current DP wave, which will be stamped on outgoing requests.
     pub current_wave: u32,
-    /// Whether the engines are currently running or paused, which determines if the frontend
-    /// must trigger a new wave on the next request.
+    /// Whether the engines are currently running or paused, which determines if
+    /// the frontend must trigger a new wave on the next request.
     pub engines_running: bool,
 }
 
@@ -28,8 +28,8 @@ pub(crate) type CoordinatorState = Mutex<CoordinatorStateSnapshot>;
 pub(crate) enum CoordinatorCommand {
     /// The first request arrived while all engines were paused.
     ///
-    /// The coordinator should broadcast `START_DP_WAVE` with the current wave and the target engine
-    /// index as the excluded engine.
+    /// The coordinator should broadcast `START_DP_WAVE` with the current wave
+    /// and the target engine index as the excluded engine.
     FirstRequest {
         target_engine_id: EngineId,
         wave: u32,
@@ -38,9 +38,9 @@ pub(crate) enum CoordinatorCommand {
 
 /// Frontend-facing coordinator handle used by `EngineCoreClient::call()`.
 ///
-/// This side stays intentionally small: it can read the latest wave snapshot and
-/// enqueue a `FirstRequest` transition when the request path observes the system
-/// in the paused state.
+/// This side stays intentionally small: it can read the latest wave snapshot
+/// and enqueue a `FirstRequest` transition when the request path observes the
+/// system in the paused state.
 #[derive(Clone)]
 pub(crate) struct CoordinatorHandle {
     state: Arc<CoordinatorState>,
@@ -78,8 +78,8 @@ impl CoordinatorHandle {
         )
     }
 
-    /// Build the paired frontend handle and background service around an external
-    /// Python-owned frontend-side coordinator socket.
+    /// Build the paired frontend handle and background service around an
+    /// external Python-owned frontend-side coordinator socket.
     pub(crate) async fn connect_external(
         coordinator_address: &str,
     ) -> Result<(Self, ExternalCoordinatorService)> {

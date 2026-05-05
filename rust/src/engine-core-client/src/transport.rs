@@ -22,7 +22,8 @@ use crate::protocol::{
     EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
 };
 
-/// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the engine dies.
+/// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
+/// engine dies.
 pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
 
 /// Opaque routing identity of one engine on the frontend transport.
@@ -47,12 +48,13 @@ impl EngineId {
         self.0
     }
 
-    /// Parse the Python-compatible engine index encoded in the routing identity.
+    /// Parse the Python-compatible engine index encoded in the routing
+    /// identity.
     ///
-    /// Python `EngineCoreProc` currently uses a two-byte little-endian engine index
-    /// as its ROUTER/DEALER identity. Coordinator control messages such as
-    /// `START_DP_WAVE(exclude_engine_index)` need that engine-side index rather than
-    /// any frontend-local ordering.
+    /// Python `EngineCoreProc` currently uses a two-byte little-endian engine
+    /// index as its ROUTER/DEALER identity. Coordinator control messages
+    /// such as `START_DP_WAVE(exclude_engine_index)` need that engine-side
+    /// index rather than any frontend-local ordering.
     pub fn engine_index(&self) -> Option<u32> {
         if self.len() != 2 {
             return None;
@@ -60,8 +62,8 @@ impl EngineId {
         Some(u16::from_le_bytes([self[0], self[1]]) as u32)
     }
 
-    /// Construct an engine id from the Python-compatible engine index encoding (two-byte
-    /// little-endian).
+    /// Construct an engine id from the Python-compatible engine index encoding
+    /// (two-byte little-endian).
     pub fn from_engine_index(value: u32) -> Self {
         Self(Bytes::copy_from_slice(&(value as u16).to_le_bytes()))
     }
@@ -95,7 +97,8 @@ impl TryFrom<EngineId> for PeerIdentity {
     }
 }
 
-/// Per-engine handshake result collected while bootstrapping one shared transport.
+/// Per-engine handshake result collected while bootstrapping one shared
+/// transport.
 #[derive(Clone, Debug)]
 pub struct ConnectedEngine {
     /// The identity of the connected engine.
@@ -105,18 +108,19 @@ pub struct ConnectedEngine {
     pub ready_response: Option<EngineCoreReadyResponse>,
 }
 
-/// Represents the connected shared transport plus all registered engines after a successful
-/// multi-engine startup handshake.
+/// Represents the connected shared transport plus all registered engines after
+/// a successful multi-engine startup handshake.
 pub struct ConnectedTransport {
-    /// The local address of the shared input socket that all engines connect to for receiving
-    /// requests.
+    /// The local address of the shared input socket that all engines connect to
+    /// for receiving requests.
     pub input_address: String,
-    /// The local address of the shared output socket that all engines connect to for sending
-    /// responses.
+    /// The local address of the shared output socket that all engines connect
+    /// to for sending responses.
     pub output_address: String,
     /// All engines connected through the startup handshake.
     pub engines: Vec<ConnectedEngine>,
-    /// Optional engine-facing coordinator transport used for in-process wave coordination.
+    /// Optional engine-facing coordinator transport used for in-process wave
+    /// coordination.
     pub coordinator: Option<CoordinatorBootstrap>,
 
     /// The sending half of the shared input socket.
@@ -131,8 +135,8 @@ enum EngineStartupState {
     ReadyReceived,
 }
 
-/// Connect to one or more engines through the startup handshake protocol, returning the shared
-/// data-plane transport plus the registered engines.
+/// Connect to one or more engines through the startup handshake protocol,
+/// returning the shared data-plane transport plus the registered engines.
 pub async fn connect_handshake(
     handshake_address: &str,
     engine_count: usize,
@@ -151,8 +155,8 @@ pub async fn connect_handshake(
         handshake_address, "waiting for engines to connect"
     );
 
-    // 1. Bind shared local input/output sockets first so every engine receives the same data-plane
-    //    addresses during handshake.
+    // 1. Bind shared local input/output sockets first so every engine receives the
+    //    same data-plane addresses during handshake.
     debug!(
         local_host,
         ?ready_timeout,
@@ -169,15 +173,16 @@ pub async fn connect_handshake(
         None
     };
 
-    // 2. Bind the shared handshake socket once. All engines connect to this socket with their own
-    //    identities, and startup order does not matter.
+    // 2. Bind the shared handshake socket once. All engines connect to this socket
+    //    with their own identities, and startup order does not matter.
     let mut handshake_socket = RouterSocket::new();
     handshake_socket.bind(handshake_address).await?;
 
     let mut engines = BTreeMap::new();
 
-    // 3. Receive HELLO from every engine and send a matching INIT. When coordinator mode is
-    //    enabled, the engines will not emit READY until the coordinator barrier below completes.
+    // 3. Receive HELLO from every engine and send a matching INIT. When coordinator
+    //    mode is enabled, the engines will not emit READY until the coordinator
+    //    barrier below completes.
     while engines.len() < engine_count {
         debug!(
             handshake_address,
@@ -185,12 +190,12 @@ pub async fn connect_handshake(
             waiting_for = engine_count,
             "waiting for engine HELLO"
         );
-        let message = timeout(ready_timeout, handshake_socket.recv())
-            .await
-            .map_err(|_| Error::HandshakeTimeout {
+        let message = timeout(ready_timeout, handshake_socket.recv()).await.map_err(|_| {
+            Error::HandshakeTimeout {
                 stage: "HELLO",
                 timeout: ready_timeout,
-            })??;
+            }
+        })??;
         let (engine_id, handshake_message) = decode_handshake_message(message, None)?;
         match handshake_message.status.as_deref() {
             Some("HELLO") => {
@@ -241,11 +246,10 @@ pub async fn connect_handshake(
         }
     }
 
-    // 4. Optional coordinator startup gate. Without coordinator there is nothing to do.
+    // 4. Optional coordinator startup gate. Without coordinator there is nothing to
+    //    do.
     if let Some(coordinator) = coordinator.as_mut() {
-        coordinator
-            .wait_for_startup_gate(engine_count, ready_timeout)
-            .await?;
+        coordinator.wait_for_startup_gate(engine_count, ready_timeout).await?;
     }
 
     // 5. After the optional gate has opened, every engine may now send READY.
@@ -253,19 +257,16 @@ pub async fn connect_handshake(
         debug!(
             handshake_address,
             connected = engines.len(),
-            ready = engines
-                .values()
-                .filter(|state| state.is_ready_received())
-                .count(),
+            ready = engines.values().filter(|state| state.is_ready_received()).count(),
             waiting_for = engine_count,
             "waiting for engine READY"
         );
-        let message = timeout(ready_timeout, handshake_socket.recv())
-            .await
-            .map_err(|_| Error::HandshakeTimeout {
+        let message = timeout(ready_timeout, handshake_socket.recv()).await.map_err(|_| {
+            Error::HandshakeTimeout {
                 stage: "READY",
                 timeout: ready_timeout,
-            })??;
+            }
+        })??;
         let (engine_id, handshake_message) = decode_handshake_message(message, None)?;
         match handshake_message.status.as_deref() {
             Some("READY") => {
@@ -296,9 +297,9 @@ pub async fn connect_handshake(
         }
     }
 
-    // 4. Wait for every engine to connect to the shared input socket and register itself. The
-    //    `ready_response` is a placeholder; it is populated for each engine by
-    //    `wait_for_input_registrations` below.
+    // 4. Wait for every engine to connect to the shared input socket and register
+    //    itself. The `ready_response` is a placeholder; it is populated for each
+    //    engine by `wait_for_input_registrations` below.
     let mut engines: Vec<_> = engines
         .into_keys()
         .map(|engine_id| ConnectedEngine {
@@ -327,12 +328,13 @@ pub async fn connect_handshake(
     })
 }
 
-/// Bind to Python-supplied frontend transport addresses and wait for already-initialized engines
-/// to register themselves on the input socket.
+/// Bind to Python-supplied frontend transport addresses and wait for
+/// already-initialized engines to register themselves on the input socket.
 ///
-/// This path mirrors Python's externally managed `AsyncMPClient` bootstrap model: the addresses
-/// are already fixed by the supervisor, and engine identities are synthesized from contiguous
-/// rank order instead of being discovered through a Rust-owned handshake.
+/// This path mirrors Python's externally managed `AsyncMPClient` bootstrap
+/// model: the addresses are already fixed by the supervisor, and engine
+/// identities are synthesized from contiguous rank order instead of being
+/// discovered through a Rust-owned handshake.
 pub async fn connect_bootstrapped(
     input_address: &str,
     output_address: &str,
@@ -420,8 +422,8 @@ fn decode_handshake_message(
     Ok((actual_id, handshake_message))
 }
 
-/// Send an INIT message to the engine with the local socket addresses for the engine to connect to,
-/// using the handshake socket.
+/// Send an INIT message to the engine with the local socket addresses for the
+/// engine to connect to, using the handshake socket.
 async fn send_init_message(
     handshake_socket: &mut RouterSocket,
     engine_id: &EngineId,
@@ -446,33 +448,33 @@ async fn send_init_message(
     Ok(())
 }
 
-/// Receive the input registration message from each engine and validate its identity.
+/// Receive the input registration message from each engine and validate its
+/// identity.
 ///
 /// Each registration contains 2 frames: `[identity, ready-payload]`.
 ///
-/// Since vLLM commit `c8d98f81f676552c263f35bbde55e6edbe81b4e8` ("[Core] Simplify API server
-/// handshake"), the payload is a msgpack-encoded [`EngineCoreReadyResponse`] carrying
-/// post-initialization values such as `max_model_len`.
+/// Since vLLM commit `c8d98f81f676552c263f35bbde55e6edbe81b4e8` ("[Core]
+/// Simplify API server handshake"), the payload is a msgpack-encoded
+/// [`EngineCoreReadyResponse`] carrying post-initialization values such as
+/// `max_model_len`.
 ///
-/// Older engines sent an empty second frame here just to establish the ROUTER/DEALER backchannel,
-/// with no structured payload on the input socket. We continue to tolerate that legacy shape so
-/// the frontend can still connect to slightly older local engine checkouts.
+/// Older engines sent an empty second frame here just to establish the
+/// ROUTER/DEALER backchannel, with no structured payload on the input socket.
+/// We continue to tolerate that legacy shape so the frontend can still connect
+/// to slightly older local engine checkouts.
 async fn wait_for_input_registrations(
     input_socket: &mut RouterSocket,
     engines: &mut [ConnectedEngine],
     ready_timeout: Duration,
 ) -> Result<()> {
-    let mut pending = engines
-        .iter()
-        .map(|e| e.engine_id.clone())
-        .collect::<BTreeSet<_>>();
+    let mut pending = engines.iter().map(|e| e.engine_id.clone()).collect::<BTreeSet<_>>();
 
     while !pending.is_empty() {
-        let registration = timeout(ready_timeout, input_socket.recv())
-            .await
-            .map_err(|_| Error::InputRegistrationTimeout {
+        let registration = timeout(ready_timeout, input_socket.recv()).await.map_err(|_| {
+            Error::InputRegistrationTimeout {
                 timeout: ready_timeout,
-            })??;
+            }
+        })??;
 
         if registration.len() != 2 {
             bail_unexpected_handshake_message!(
@@ -537,7 +539,8 @@ pub async fn send_message(
     Ok(())
 }
 
-/// Run the output loop to receive messages from the engine and send them to the provided channel.
+/// Run the output loop to receive messages from the engine and send them to the
+/// provided channel.
 pub async fn run_output_loop(
     mut output_socket: PullSocket,
     tx: mpsc::Sender<Result<EngineCoreOutputs>>,
@@ -546,9 +549,9 @@ pub async fn run_output_loop(
         let message = match output_socket.recv().await {
             Ok(message) => message,
             Err(error) => {
-                // If we fail to receive a message from the engine, it's likely that the engine has
-                // crashed or become unreachable, so we should notify the client and shut down the
-                // output loop.
+                // If we fail to receive a message from the engine, it's likely that the engine
+                // has crashed or become unreachable, so we should notify the
+                // client and shut down the output loop.
                 error!(error = %error.as_report(), "failed to receive output message");
                 let _ = tx.send(Err(Error::Transport(error))).await;
                 return;
@@ -558,9 +561,7 @@ pub async fn run_output_loop(
         let frame_count = message.len();
         trace!(frame_count, "received output message");
         let frames = message.into_vec();
-        let frame = frames
-            .first()
-            .expect("output message must have at least one frame");
+        let frame = frames.first().expect("output message must have at least one frame");
         let frame_len = frame.len();
         if frame.as_ref() == ENGINE_CORE_DEAD_SENTINEL {
             warn!("received ENGINE_CORE_DEAD sentinel from engine");
@@ -573,16 +574,18 @@ pub async fn run_output_loop(
                 Ok(decoded)
             }
             Err(error) => {
-                // If we fail to decode the message from the engine, notify the client but keep the
-                // output loop running to continue processing future messages from the engine.
+                // If we fail to decode the message from the engine, notify the client but keep
+                // the output loop running to continue processing future
+                // messages from the engine.
                 warn!(frame_len, error = %error.as_report(), "failed to decode output message");
                 Err(error)
             }
         };
 
         if tx.send(decoded).await.is_err() {
-            // If we fail to send the decoded message to the client, it's likely that the client has
-            // shut down, so we should shut down the output loop as well.
+            // If we fail to send the decoded message to the client, it's likely that the
+            // client has shut down, so we should shut down the output loop as
+            // well.
             warn!("output loop rx dropped, shutting down output loop");
             return;
         }
@@ -596,9 +599,7 @@ mod tests {
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
         let (input_address, _input_socket, output_address, _output_socket) =
-            bind_local_sockets("127.0.0.1", None, None)
-                .await
-                .expect("bind local sockets");
+            bind_local_sockets("127.0.0.1", None, None).await.expect("bind local sockets");
 
         assert!(input_address.starts_with("tcp://127.0.0.1:"));
         assert!(output_address.starts_with("tcp://127.0.0.1:"));

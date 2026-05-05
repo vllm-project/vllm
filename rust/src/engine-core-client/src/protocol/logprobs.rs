@@ -14,29 +14,32 @@ use crate::error::{Error, Result, bail_ext_value_decode, ext_value_decode};
 
 /// One token candidate and its logprob metadata for a single sequence position.
 ///
-/// The first entry in a [`PositionLogprobs`] is always the sampled/selected token for that
-/// position. Any remaining entries follow the engine's returned top-k candidate order.
+/// The first entry in a [`PositionLogprobs`] is always the sampled/selected
+/// token for that position. Any remaining entries follow the engine's returned
+/// top-k candidate order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogprob {
     pub token_id: u32,
     pub logprob: f32,
-    /// The sampled/selected token uses its actual vocab rank. Remaining entries use 1-based top-k
-    /// ranks matching the engine's returned candidate order.
+    /// The sampled/selected token uses its actual vocab rank. Remaining entries
+    /// use 1-based top-k ranks matching the engine's returned candidate
+    /// order.
     pub rank: u32,
 }
 
 /// Logprob payload for one sequence position.
 ///
-/// This is the semantic Rust representation used by the public client API after the lower-level
-/// ndarray/tensor wire payload has been decoded.
+/// This is the semantic Rust representation used by the public client API after
+/// the lower-level ndarray/tensor wire payload has been decoded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PositionLogprobs {
     pub entries: Vec<TokenLogprob>,
 }
 
 impl PositionLogprobs {
-    /// Convert one decoded logprobs row into this per-position form by grouping each token/logprob
-    /// pair together with the sampled/selected token's actual vocab rank.
+    /// Convert one decoded logprobs row into this per-position form by grouping
+    /// each token/logprob pair together with the sampled/selected token's
+    /// actual vocab rank.
     fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], sampled_rank: u32) -> Result<Self> {
         if token_ids.len() != logprobs.len() {
             bail_ext_value_decode!(
@@ -68,15 +71,18 @@ impl PositionLogprobs {
 
 /// Decoded per-request logprobs payload for one engine-core output.
 ///
-/// Unlike the Python wire payload, this public Rust type is already fully semantic: one
-/// [`PositionLogprobs`] per scored position, each containing the sampled/selected token plus any
-/// returned top-k alternatives for that same position.
+/// Unlike the Python wire payload, this public Rust type is already fully
+/// semantic: one [`PositionLogprobs`] per scored position, each containing the
+/// sampled/selected token plus any returned top-k alternatives for that same
+/// position.
 ///
-/// The Python engine still sends logprobs as ndarray/tensor-shaped wire tuples. Rust resolves that
-/// lower-level representation during decode and exposes only this per-position form to callers.
+/// The Python engine still sends logprobs as ndarray/tensor-shaped wire tuples.
+/// Rust resolves that lower-level representation during decode and exposes only
+/// this per-position form to callers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Logprobs {
-    /// One decoded logprobs record per scored position in this engine-core output.
+    /// One decoded logprobs record per scored position in this engine-core
+    /// output.
     pub positions: Vec<PositionLogprobs>,
 }
 
@@ -92,12 +98,14 @@ impl Logprobs {
     }
 }
 
-/// Output field wrapper that is initially deserialized from the Python wire shape, then resolved
-/// into [`Logprobs`] before the decoded message is returned to callers.
+/// Output field wrapper that is initially deserialized from the Python wire
+/// shape, then resolved into [`Logprobs`] before the decoded message is
+/// returned to callers.
 #[derive(Clone, PartialEq, Debug, EnumAsInner)]
 pub enum MaybeWireLogprobs {
-    /// The logprobs are still in the wire format and need to be resolved by looking up aux frames
-    /// and decoding raw views. Should only be used internally during deserialization.
+    /// The logprobs are still in the wire format and need to be resolved by
+    /// looking up aux frames and decoding raw views. Should only be used
+    /// internally during deserialization.
     Wire(Box<WireLogprobs>),
     /// The actual decoded logprobs value,
     Direct(Logprobs),
@@ -149,8 +157,8 @@ impl Serialize for MaybeWireLogprobs {
 }
 
 impl MaybeWireLogprobs {
-    /// Resolve the wire representation into decoded logprobs by looking up aux frames and decoding
-    /// raw views as needed.
+    /// Resolve the wire representation into decoded logprobs by looking up aux
+    /// frames and decoding raw views as needed.
     fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Self>
     where
         Frame: AsRef<[u8]>,
@@ -163,8 +171,8 @@ impl MaybeWireLogprobs {
 }
 
 impl EngineCoreOutputs {
-    /// Resolve all wire-format fields in-place by looking up aux frames and decoding raw-view
-    /// payloads as needed.
+    /// Resolve all wire-format fields in-place by looking up aux frames and
+    /// decoding raw-view payloads as needed.
     fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
     where
         Frame: AsRef<[u8]>,
@@ -177,8 +185,8 @@ impl EngineCoreOutputs {
 }
 
 impl EngineCoreOutput {
-    /// Resolve all wire-format fields in-place by looking up aux frames and decoding raw-view
-    /// payloads as needed.
+    /// Resolve all wire-format fields in-place by looking up aux frames and
+    /// decoding raw-view payloads as needed.
     fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
     where
         Frame: AsRef<[u8]>,
@@ -196,15 +204,12 @@ impl EngineCoreOutput {
 impl WireLogprobs {
     /// Convert semantic per-position logprobs into the Python wire tuple shape.
     ///
-    /// This exists mainly so Rust-side tests can inject semantic logprobs into mocked engine-core
-    /// outputs without manually building ndarray raw-view tuples.
+    /// This exists mainly so Rust-side tests can inject semantic logprobs into
+    /// mocked engine-core outputs without manually building ndarray
+    /// raw-view tuples.
     fn from_direct(value: &Logprobs) -> std::result::Result<Self, String> {
         let rows = value.positions.len();
-        let cols = value
-            .positions
-            .first()
-            .map(|position| position.entries.len())
-            .unwrap_or(0);
+        let cols = value.positions.first().map(|position| position.entries.len()).unwrap_or(0);
 
         let mut token_ids = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(8));
         let mut logprobs = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(4));
@@ -248,8 +253,9 @@ impl WireLogprobs {
         })
     }
 
-    /// Resolve the wire-format logprobs into semantic [`Logprobs`] records by looking up aux
-    /// frames, decoding raw views, and grouping each row into one [`PositionLogprobs`].
+    /// Resolve the wire-format logprobs into semantic [`Logprobs`] records by
+    /// looking up aux frames, decoding raw views, and grouping each row
+    /// into one [`PositionLogprobs`].
     fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Logprobs>
     where
         Frame: AsRef<[u8]>,
@@ -309,15 +315,13 @@ impl WireLogprobs {
     }
 }
 
-/// Decode one ordinary or multipart engine-core output message into the strong typed public
-/// protocol shape.
+/// Decode one ordinary or multipart engine-core output message into the strong
+/// typed public protocol shape.
 pub fn decode_engine_core_outputs<Frame>(frames: &[Frame]) -> Result<EngineCoreOutputs>
 where
     Frame: AsRef<[u8]>,
 {
-    let first_frame = frames
-        .first()
-        .ok_or_else(|| ext_value_decode!("missing output frame"))?;
+    let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
     let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
     outputs.resolve_in_place(frames)?;
