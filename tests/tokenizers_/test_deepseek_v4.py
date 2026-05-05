@@ -183,6 +183,35 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
     assert 'parameter name="arguments"' not in prompt
 
 
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v4_renders_assistant_thinking_content_as_reasoning():
+    messages = [
+        {"role": "user", "content": "u"},
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "REASON"}],
+        },
+        {"role": "user", "content": "v"},
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tokenize=False,
+        thinking=True,
+        drop_thinking=False,
+        reasoning_effort="high",
+    )
+
+    assert "<｜User｜>u<｜Assistant｜><think>REASON</think>" in prompt
+    assert "<think></think>REASON" not in prompt
+
+
 @pytest.mark.parametrize("reasoning_effort", ["minimal", "low", "medium", "high"])
 def test_deepseek_v4_accepts_openai_reasoning_effort_values(reasoning_effort):
     prompt = _tokenizer().apply_chat_template(
