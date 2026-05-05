@@ -73,18 +73,7 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        A_2d = A.reshape(-1, A.shape[-1])
-        out = torch._scaled_mm(
-            A_2d,
-            B,
-            scale_a=As,
-            scale_b=Bs,
-            bias=bias,
-            out_dtype=out_dtype,
-        )
-        if type(out) is tuple and len(out) == 2:
-            out = out[0]
-        return out.reshape(*output_shape, out.shape[-1])
+        pass
 
 
 class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
@@ -96,6 +85,26 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "XPUFp8BlockScaledMM requires PyTorch >= 2.12"
         return True, None
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        params = self._get_layer_params(layer)
+        weight = params.weight
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        scale_attr_name = (
+            params.WEIGHT_SCALE
+            if params.weight_scale_inv is None
+            else params.WEIGHT_SCALE_INV
+        )
+
+        # Pre-transpose weight and scales to avoid per-forward-pass transpose
+        replace_parameter(layer, params.WEIGHT, weight.data.t().contiguous())
+        replace_parameter(layer, scale_attr_name, weight_scale.data.t().contiguous())
+
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -103,14 +112,6 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
+        # B and Bs are already transposed in process_weights_after_loading
         out_dtype = self.config.out_dtype
-        out = torch._scaled_mm(
-            A,
-            B.t().contiguous(),
-            scale_a=As,
-            scale_b=Bs.t().contiguous(),
-            out_dtype=out_dtype,
-        )
-        if type(out) is tuple and len(out) == 2:
-            out = out[0]
-        return out
+        return torch._scaled_mm(A, B, scale_a=As, scale_b=Bs, out_dtype=out_dtype)
