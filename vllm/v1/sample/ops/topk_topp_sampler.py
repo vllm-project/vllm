@@ -82,6 +82,11 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_native
             else:
                 self.forward = self.forward_cpu
+        elif current_platform.is_xpu():
+            if envs.VLLM_XPU_USE_SAMPLER_KERNEL:
+                self.forward = self.forward_xpu
+            else:
+                self.forward = self.forward_native
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
@@ -242,6 +247,49 @@ class TopKTopPSampler(nn.Module):
             )
             return torch.multinomial(renorm_probs, num_samples=1).view(-1)
         raise RuntimeError("aiter_sample was called with no active top-k or top-p.")
+
+    def forward_xpu(
+        self,
+        logits: torch.Tensor,
+        generators: dict[int, torch.Generator],
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if generators:
+            logger.warning_once(
+                "xpu kernel topk_topp_sampler does not support "
+                "per-request generators. Falling back to "
+                "PyTorch-native implementation."
+            )
+            return self.forward_native(logits, generators, k, p)
+        random_sampled = torch.empty(
+            logits.shape[0], dtype=torch.int64, device=logits.device
+        )
+        logits_to_return = None
+        if (
+            self.logprobs_mode == "processed_logits"
+            or self.logprobs_mode == "processed_logprobs"
+        ):
+            logits_to_return = torch.empty_like(logits)
+
+        assert len(generators) != logits.shape[0], (
+            "xpu kernel topk_topp_sampler does not support batch-wise generators."
+        )
+        generator = torch.xpu.default_generators[logits.device.index]
+
+        state = generator.get_state()
+        seed, offset = state.view(torch.int64)
+        seeds = torch.tensor(
+            [seed, offset], dtype=torch.int64, device=torch.device("cpu")
+        )
+        # The XPU kernel expects k as int64 (Long), but the input batch
+        # stores top_k as int32. Cast here to avoid dtype mismatch.
+        if k is not None:
+            k = k.to(torch.int64)
+        torch.ops.vllm.xpu_topk_topp_sampler(
+            random_sampled, logits_to_return, logits, k, p, self.logprobs_mode, seeds
+        )
+        return random_sampled, logits_to_return
 
 
 # Note: this is a workaround for
