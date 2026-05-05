@@ -759,9 +759,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ scalar_t s[max_lds_len];
   load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K, max_lds_len);
   wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
-                         GROUP_SIZE, HAS_ZERO_POINTS>(
-      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
-      s);
+                         GROUP_SIZE, HAS_ZERO_POINTS>(K, M, Bx, By, B_packed, A,
+                                                      scale, zero_points, BIAS,
+                                                      C, _WvPrGrp, CuCount, s);
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
