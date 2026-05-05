@@ -191,8 +191,9 @@ if TYPE_CHECKING:
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
-    VLLM_BF16_GEMM_BACKEND: (
-        Literal["auto", "cudnn", "cutlass", "tgv", "cublaslt", "torch"] | None
+    VLLM_USE_FLASHINFER_BF16_GEMM: bool = True
+    VLLM_FLASHINFER_BF16_GEMM_BACKEND: (
+        Literal["auto", "cudnn", "cutlass", "tgv", "cublaslt"] | None
     ) = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
@@ -1573,18 +1574,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
     ),
+    # Allow use of FlashInfer BF16 GEMM for unquantized linear layers.
+    # The default path is still gated by shape, dtype, CUDA, FlashInfer
+    # availability, and device capability checks.
+    "VLLM_USE_FLASHINFER_BF16_GEMM": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_BF16_GEMM", "1"))
+    ),
+    # FlashInfer BF16 GEMM backend for unquantized linear layers.
     # Supported options:
     # - "auto": let FlashInfer autotune/select the best BF16 GEMM backend
     # - "cudnn": force FlashInfer cuDNN BF16 GEMM
     # - "cutlass": force FlashInfer CUTLASS BF16 GEMM
     # - "tgv": force FlashInfer TGV BF16 GEMM
     # - "cublaslt": force FlashInfer cuBLASLt BF16 GEMM
-    # - "torch": bypass FlashInfer BF16 GEMM and use torch.linear
-    # - <none>: automatically use FlashInfer when available and beneficial
-    "VLLM_BF16_GEMM_BACKEND": env_with_choices(
-        "VLLM_BF16_GEMM_BACKEND",
+    # - <none>: use the default rollout policy
+    "VLLM_FLASHINFER_BF16_GEMM_BACKEND": env_with_choices(
+        "VLLM_FLASHINFER_BF16_GEMM_BACKEND",
         None,
-        ["auto", "cudnn", "cutlass", "tgv", "cublaslt", "torch"],
+        ["auto", "cudnn", "cutlass", "tgv", "cublaslt"],
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
