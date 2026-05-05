@@ -27,7 +27,6 @@ physical experts.
 """
 
 import json
-import sys
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -524,7 +523,7 @@ class EplbState:
         model_name: str,
         verbose: bool = False,
     ) -> None:
-        """Print EPLB balancedness stats to stderr."""
+        """Log EPLB balancedness stats."""
         layer_means = num_tokens_per_rank.mean(dim=1, dtype=torch.float64)
         layer_maxes = num_tokens_per_rank.max(dim=1).values.to(torch.float64)
 
@@ -585,7 +584,7 @@ class EplbState:
         num_ranks = num_tokens_per_rank.shape[1]
         if num_ranks == 0:
             lines += ["No EP ranks.", "=== end EPLB dump ==="]
-            print("\n".join(lines), file=sys.stderr, flush=True)
+            logger.info("\n%s", "\n".join(lines))
             return
 
         # Per-layer / per-rank token table
@@ -640,7 +639,7 @@ class EplbState:
             )
 
         lines.append("=== end EPLB dump ===")
-        print("\n".join(lines), file=sys.stderr, flush=True)
+        logger.info("\n%s", "\n".join(lines))
 
     def step(
         self,
