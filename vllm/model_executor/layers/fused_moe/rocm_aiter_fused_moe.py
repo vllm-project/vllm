@@ -444,6 +444,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output.dtype == result.dtype
             and output.device == result.device
             and output.is_contiguous()
+            and result.is_contiguous()
             and output._base is None
         ):
             output.data = result
